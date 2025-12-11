@@ -1,4 +1,5 @@
 mod protocol;
+mod command;
 mod dispatcher;
 mod kv;
 
