@@ -64,7 +64,8 @@ fn parse_integer(buf: &[u8]) -> Result<(RespValue, usize), String> {
     let end = find_crlf(buf, 1)?;
     let s = str::from_utf8(&buf[1..end])
         .map_err(|e| format!("Invalid UTF-8: {}", e))?;
-    let n = s.parse::<i64>()
+    let n = s
+        .parse::<i64>()
         .map_err(|e| format!("Invalid integer: {}", e))?;
     Ok((RespValue::Integer(n), end + 2))
 }
@@ -73,7 +74,8 @@ fn parse_bulk_string(buf: &[u8]) -> Result<(RespValue, usize), String> {
     let end = find_crlf(buf, 1)?;
     let len_str = str::from_utf8(&buf[1..end])
         .map_err(|e| format!("Invalid UTF-8: {}", e))?;
-    let len = len_str.parse::<i64>()
+    let len = len_str
+        .parse::<i64>()
         .map_err(|e| format!("Invalid bulk string length: {}", e))?;
 
     if len == -1 {
@@ -100,7 +102,8 @@ fn parse_array(buf: &[u8]) -> Result<(RespValue, usize), String> {
     let end = find_crlf(buf, 1)?;
     let len_str = str::from_utf8(&buf[1..end])
         .map_err(|e| format!("Invalid UTF-8: {}", e))?;
-    let len = len_str.parse::<usize>()
+    let len = len_str
+        .parse::<usize>()
         .map_err(|e| format!("Invalid array length: {}", e))?;
 
     let mut elements = Vec::with_capacity(len);
@@ -131,23 +134,19 @@ fn find_crlf(buf: &[u8], start: usize) -> Result<usize, String> {
 pub fn encode_resp(response: &Response) -> Vec<u8> {
     match response {
         Response::Ok => b"+OK\r\n".to_vec(),
-        
-        Response::Integer(n) => {
-            format!(":{}\r\n", n).into_bytes()
-        }
-        
+
+        Response::Integer(n) => format!(":{}\r\n", n).into_bytes(),
+
         Response::BulkString(data) => {
             let mut result = format!("${}\r\n", data.len()).into_bytes();
             result.extend_from_slice(data);
             result.extend_from_slice(b"\r\n");
             result
         }
-        
+
         Response::Null => b"$-1\r\n".to_vec(),
-        
-        Response::Error(msg) => {
-            format!("-ERR {}\r\n", msg).into_bytes()
-        }
+
+        Response::Error(msg) => format!("-ERR {}\r\n", msg).into_bytes(),
     }
 }
 

@@ -1,52 +1,60 @@
-//! Command parsing and validation
-//! 
-//! Centralizes all command parsing logic in one place.
-//! Validates arguments early before dispatching to managers.
+//! Routing Layer: Command parsing + dispatching to managers
+
+use crate::features::kv::KvManager;
+use crate::server::protocol::Response;
+
+// ========================================
+// COMMAND ENUM
+// ========================================
 
 /// Represents all commands supported by Nexo
 #[derive(Debug, Clone)]
 pub enum Command {
     // Meta commands
     Ping,
-    
+
     // KV commands
-    KvSet { 
-        key: String, 
-        value: Vec<u8>, 
-        ttl: Option<u64> 
+    KvSet {
+        key: String,
+        value: Vec<u8>,
+        ttl: Option<u64>,
     },
-    KvGet { 
-        key: String 
+    KvGet {
+        key: String,
     },
-    KvDel { 
-        key: String 
+    KvDel {
+        key: String,
     },
-    
+
     // Topic commands (not implemented yet)
-    TopicSubscribe { 
-        topics: Vec<String> 
+    TopicSubscribe {
+        topics: Vec<String>,
     },
-    TopicPublish { 
-        topic: String, 
-        message: Vec<u8> 
+    TopicPublish {
+        topic: String,
+        message: Vec<u8>,
     },
-    TopicUnsubscribe { 
-        topics: Vec<String> 
+    TopicUnsubscribe {
+        topics: Vec<String>,
     },
-    
+
     // Queue commands (not implemented yet)
-    QueuePush { 
-        queue: String, 
-        data: Vec<u8> 
+    QueuePush {
+        queue: String,
+        data: Vec<u8>,
     },
-    QueuePop { 
-        queue: String 
+    QueuePop {
+        queue: String,
     },
 }
 
+// ========================================
+// COMMAND PARSING
+// ========================================
+
 impl Command {
     /// Parse command from RESP args (validates arguments)
-    pub fn from_args(args: Vec<String>) -> Result<Self, String> {
+    fn from_args(args: Vec<String>) -> Result<Self, String> {
         if args.is_empty() {
             return Err("Empty command".to_string());
         }
@@ -72,7 +80,9 @@ impl Command {
             // ===== KV Commands =====
             ("KV", "SET") => {
                 if args.len() < 3 {
-                    return Err("KV.SET requires at least 2 arguments: key value [ttl]".to_string());
+                    return Err(
+                        "KV.SET requires at least 2 arguments: key value [ttl]".to_string()
+                    );
                 }
 
                 let key = args[1].clone();
@@ -132,15 +142,13 @@ impl Command {
                 })
             }
 
-            ("TOPIC", "UNSUBSCRIBE") => {
-                Ok(Command::TopicUnsubscribe {
-                    topics: if args.len() > 1 {
-                        args[1..].to_vec()
-                    } else {
-                        vec![]
-                    },
-                })
-            }
+            ("TOPIC", "UNSUBSCRIBE") => Ok(Command::TopicUnsubscribe {
+                topics: if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    vec![]
+                },
+            }),
 
             // ===== Queue Commands (not implemented) =====
             ("QUEUE", "PUSH") => {
@@ -165,6 +173,48 @@ impl Command {
             _ => Err(format!("Unknown command: {}.{}", namespace, action)),
         }
     }
+}
 
+// ========================================
+// DISPATCHER
+// ========================================
 
+/// Route parsed command to appropriate manager
+pub fn route(args: Vec<String>, kv_manager: &KvManager) -> Result<Response, String> {
+    // Parse and validate command
+    let command = Command::from_args(args)?;
+
+    // Route to appropriate handler
+    match command {
+        // ===== Meta Commands =====
+        Command::Ping => Ok(Response::Ok),
+
+        // ===== KV Commands =====
+        Command::KvSet { key, value, ttl } => {
+            kv_manager.set(key, value, ttl)?;
+            Ok(Response::Ok)
+        }
+
+        Command::KvGet { key } => match kv_manager.get(&key)? {
+            Some(value) => Ok(Response::BulkString(value)),
+            None => Ok(Response::Null),
+        },
+
+        Command::KvDel { key } => {
+            let deleted = kv_manager.del(&key)?;
+            Ok(Response::Integer(if deleted { 1 } else { 0 }))
+        }
+
+        // ===== Topic Commands =====
+        Command::TopicSubscribe { .. } => Err("TOPIC manager not implemented yet".to_string()),
+
+        Command::TopicPublish { .. } => Err("TOPIC manager not implemented yet".to_string()),
+
+        Command::TopicUnsubscribe { .. } => Err("TOPIC manager not implemented yet".to_string()),
+
+        // ===== Queue Commands  =====
+        Command::QueuePush { .. } => Err("QUEUE manager not implemented yet".to_string()),
+
+        Command::QueuePop { .. } => Err("QUEUE manager not implemented yet".to_string()),
+    }
 }

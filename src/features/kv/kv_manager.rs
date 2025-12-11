@@ -30,7 +30,6 @@ impl KvManager {
 
     /// Set key to value with optional TTL (seconds)
     pub fn set(&self, key: String, value: Vec<u8>, ttl: Option<u64>) -> Result<(), String> {
-
         let expires_at = ttl.map(|secs| Instant::now() + Duration::from_secs(secs));
 
         let entry = Entry { value, expires_at };
@@ -45,8 +44,8 @@ impl KvManager {
 
     /// Get value by key (None if not exists or expired)
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-
-        let store = self.store
+        let store = self
+            .store
             .read()
             .map_err(|e| format!("Lock error: {}", e))?;
 
@@ -65,8 +64,8 @@ impl KvManager {
 
     /// Delete key (returns true if existed)
     pub fn del(&self, key: &str) -> Result<bool, String> {
-
-        let removed = self.store
+        let removed = self
+            .store
             .write()
             .map_err(|e| format!("Lock error: {}", e))?
             .remove(key)
