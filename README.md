@@ -32,4 +32,4 @@ Questo repo vuole essere un trade off per le startupo che necessitano dei seguen
     - subscribers
     - ops/sec
     - messaggi recenti
-- polling o websocket
+    - polling o websocket

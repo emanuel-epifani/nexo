@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::features::kv::KvManager;
-use crate::server::protocol::{encode_resp, parse_resp, Response};
+use crate::server::protocol::{encode_resp, parse_resp, ParseError, Response};
 use crate::server::routing::route;
 
 // ========================================
@@ -64,60 +64,62 @@ async fn handle_connection(mut socket: TcpStream, kv: Arc<KvManager>) -> Result<
 
         println!("[Socket] Raw bytes received from client: {:?}", &buffer[..]);
 
-        // Try to parse RESP frame
-        let (resp_value, consumed) = match parse_resp(&buffer) {
-            Ok(result) => result,
-            Err(e) => {
-                // Send error response
-                let error_resp =
-                    encode_resp(&Response::Error(format!("Protocol error: {}", e)));
-                socket
-                    .write_all(&error_resp)
-                    .await
-                    .map_err(|e| format!("Failed to write error response: {}", e))?;
-                buffer.clear();
-                continue;
-            }
-        };
+        // Process as many frames as are available in the buffer (pipelining)
+        loop {
+            let (resp_value, consumed) = match parse_resp(&buffer) {
+                Ok(result) => result,
+                Err(ParseError::Incomplete) => break, // need more bytes
+                Err(ParseError::Invalid(e)) => {
+                    // Send error response for invalid protocol
+                    let error_resp =
+                        encode_resp(&Response::Error(format!("Protocol error: {}", e)));
+                    socket
+                        .write_all(&error_resp)
+                        .await
+                        .map_err(|e| format!("Failed to write error response: {}", e))?;
+                    buffer.clear();
+                    break;
+                }
+            };
 
-        // Remove consumed bytes from buffer
-        buffer.advance(consumed);
+            // Remove consumed bytes from buffer
+            buffer.advance(consumed);
 
-        // Convert RESP value to string array
-        let args = match resp_value.into_string_array() {
-            Ok(args) => args,
-            Err(e) => {
-                let error_resp =
-                    encode_resp(&Response::Error(format!("Invalid command format: {}", e)));
-                socket
-                    .write_all(&error_resp)
-                    .await
-                    .map_err(|e| format!("Failed to write error response: {}", e))?;
-                continue;
-            }
-        };
+            // Convert RESP value to binary-safe args
+            let args = match resp_value.into_args() {
+                Ok(args) => args,
+                Err(e) => {
+                    let error_resp =
+                        encode_resp(&Response::Error(format!("Invalid command format: {}", e)));
+                    socket
+                        .write_all(&error_resp)
+                        .await
+                        .map_err(|e| format!("Failed to write error response: {}", e))?;
+                    continue;
+                }
+            };
 
-        println!("[Parser] Parsed args: {:?}", args);
+            println!(
+                "[Parser] Parsed cmd: {:?}, args: {}",
+                String::from_utf8_lossy(&args.cmd),
+                args.rest.len()
+            );
 
-        // Handle PING specially to return PONG instead of OK
-        let response = if !args.is_empty() && args[0].to_uppercase() == "PING" {
-            println!("[Dispatcher] Handling PING command");
-            Response::BulkString(b"PONG".to_vec())
-        } else {
             // Route command
-            match route(args, &kv) {
+            let response = match route(args, &kv) {
                 Ok(resp) => resp,
                 Err(e) => Response::Error(e),
-            }
-        };
+            };
 
-        // Encode response
-        let resp_bytes = encode_resp(&response);
+            // Encode response
+            let resp_bytes = encode_resp(&response);
 
-        // Send response
-        socket
-            .write_all(&resp_bytes)
-            .await
-            .map_err(|e| format!("Failed to write response: {}", e))?;
+            // Send response
+            socket
+                .write_all(&resp_bytes)
+                .await
+                .map_err(|e| format!("Failed to write response: {}", e))?;
+        }
     }
 }
+

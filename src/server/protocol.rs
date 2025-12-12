@@ -7,6 +7,14 @@ use std::str;
 // ========================================
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ParseError {
+    /// Not enough bytes yet (normal on TCP streams)
+    Incomplete,
+    /// Protocol is invalid / corrupted
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
     SimpleString(String),
     Error(String),
@@ -25,13 +33,21 @@ pub enum Response {
     Error(String),
 }
 
+/// Binary-safe view of a RESP array command: first element is the command,
+/// the rest are raw bytes (no UTF-8 assumption for payloads).
+#[derive(Debug, Clone)]
+pub struct Args {
+    pub cmd: Vec<u8>,
+    pub rest: Vec<Vec<u8>>,
+}
+
 // ========================================
 // PARSER
 // ========================================
 
-pub fn parse_resp(buf: &[u8]) -> Result<(RespValue, usize), String> {
+pub fn parse_resp(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     if buf.is_empty() {
-        return Err("Empty buffer".to_string());
+        return Err(ParseError::Incomplete);
     }
 
     match buf[0] {
@@ -40,43 +56,46 @@ pub fn parse_resp(buf: &[u8]) -> Result<(RespValue, usize), String> {
         b':' => parse_integer(buf),
         b'$' => parse_bulk_string(buf),
         b'*' => parse_array(buf),
-        _ => Err(format!("Invalid RESP type: {}", buf[0] as char)),
+        _ => Err(ParseError::Invalid(format!(
+            "Invalid RESP type: {}",
+            buf[0] as char
+        ))),
     }
 }
 
-fn parse_simple_string(buf: &[u8]) -> Result<(RespValue, usize), String> {
+fn parse_simple_string(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     let end = find_crlf(buf, 1)?;
     let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| format!("Invalid UTF-8: {}", e))?
+        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?
         .to_string();
     Ok((RespValue::SimpleString(s), end + 2))
 }
 
-fn parse_error(buf: &[u8]) -> Result<(RespValue, usize), String> {
+fn parse_error(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     let end = find_crlf(buf, 1)?;
     let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| format!("Invalid UTF-8: {}", e))?
+        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?
         .to_string();
     Ok((RespValue::Error(s), end + 2))
 }
 
-fn parse_integer(buf: &[u8]) -> Result<(RespValue, usize), String> {
+fn parse_integer(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     let end = find_crlf(buf, 1)?;
     let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| format!("Invalid UTF-8: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
     let n = s
         .parse::<i64>()
-        .map_err(|e| format!("Invalid integer: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid integer: {}", e)))?;
     Ok((RespValue::Integer(n), end + 2))
 }
 
-fn parse_bulk_string(buf: &[u8]) -> Result<(RespValue, usize), String> {
+fn parse_bulk_string(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     let end = find_crlf(buf, 1)?;
     let len_str = str::from_utf8(&buf[1..end])
-        .map_err(|e| format!("Invalid UTF-8: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
     let len = len_str
         .parse::<i64>()
-        .map_err(|e| format!("Invalid bulk string length: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid bulk string length: {}", e)))?;
 
     if len == -1 {
         return Ok((RespValue::Null, end + 2));
@@ -87,29 +106,34 @@ fn parse_bulk_string(buf: &[u8]) -> Result<(RespValue, usize), String> {
     let data_end = start + len;
 
     if buf.len() < data_end + 2 {
-        return Err("Incomplete bulk string".to_string());
+        return Err(ParseError::Incomplete);
     }
 
     if &buf[data_end..data_end + 2] != b"\r\n" {
-        return Err("Missing CRLF after bulk string data".to_string());
+        return Err(ParseError::Invalid(
+            "Missing CRLF after bulk string data".to_string(),
+        ));
     }
 
     let data = buf[start..data_end].to_vec();
     Ok((RespValue::BulkString(data), data_end + 2))
 }
 
-fn parse_array(buf: &[u8]) -> Result<(RespValue, usize), String> {
+fn parse_array(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
     let end = find_crlf(buf, 1)?;
     let len_str = str::from_utf8(&buf[1..end])
-        .map_err(|e| format!("Invalid UTF-8: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
     let len = len_str
         .parse::<usize>()
-        .map_err(|e| format!("Invalid array length: {}", e))?;
+        .map_err(|e| ParseError::Invalid(format!("Invalid array length: {}", e)))?;
 
     let mut elements = Vec::with_capacity(len);
     let mut pos = end + 2;
 
     for _ in 0..len {
+        if pos >= buf.len() {
+            return Err(ParseError::Incomplete);
+        }
         let (value, consumed) = parse_resp(&buf[pos..])?;
         elements.push(value);
         pos += consumed;
@@ -118,13 +142,13 @@ fn parse_array(buf: &[u8]) -> Result<(RespValue, usize), String> {
     Ok((RespValue::Array(elements), pos))
 }
 
-fn find_crlf(buf: &[u8], start: usize) -> Result<usize, String> {
+fn find_crlf(buf: &[u8], start: usize) -> Result<usize, ParseError> {
     for i in start..buf.len().saturating_sub(1) {
         if buf[i] == b'\r' && buf[i + 1] == b'\n' {
             return Ok(i);
         }
     }
-    Err("CRLF not found".to_string())
+    Err(ParseError::Incomplete)
 }
 
 // ========================================
@@ -151,30 +175,37 @@ pub fn encode_resp(response: &Response) -> Vec<u8> {
 }
 
 // ========================================
-// HELPER: Convert RespValue to String Array
+// HELPER: Convert RespValue to binary-safe args
 // ========================================
 
 impl RespValue {
-    pub fn into_string_array(self) -> Result<Vec<String>, String> {
+    pub fn into_args(self) -> Result<Args, String> {
         match self {
             RespValue::Array(elements) => {
-                let mut result = Vec::with_capacity(elements.len());
+                if elements.is_empty() {
+                    return Err("Empty command".to_string());
+                }
+
+                let mut bytes_elems: Vec<Vec<u8>> = Vec::with_capacity(elements.len());
                 for elem in elements {
                     match elem {
-                        RespValue::BulkString(data) => {
-                            let s = String::from_utf8(data)
-                                .map_err(|e| format!("Invalid UTF-8 in bulk string: {}", e))?;
-                            result.push(s);
-                        }
-                        RespValue::SimpleString(s) => {
-                            result.push(s);
-                        }
+                        RespValue::BulkString(data) => bytes_elems.push(data),
+                        RespValue::SimpleString(s) => bytes_elems.push(s.into_bytes()),
                         _ => return Err(format!("Expected string in array, got {:?}", elem)),
                     }
                 }
-                Ok(result)
+
+                let cmd = bytes_elems.remove(0);
+                Ok(Args {
+                    cmd,
+                    rest: bytes_elems,
+                })
             }
             _ => Err(format!("Expected array, got {:?}", self)),
         }
     }
 }
+
+
+
+
