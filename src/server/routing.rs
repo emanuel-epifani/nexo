@@ -56,92 +56,96 @@ impl Command {
     /// Parse command from RESP args (validates arguments).
     /// Binary-safe: payload arguments remain raw bytes.
     fn from_args(args: Args) -> Result<Self, String> {
-        let cmd = args.cmd.as_slice();
+        // Convert command to uppercase string for efficient matching
+        // (Commands must be valid UTF-8, payloads can be arbitrary bytes)
+        let cmd_str = std::str::from_utf8(&args.cmd)
+            .map_err(|_| "Invalid command encoding")?
+            .to_uppercase();
 
-        // Handle PING (no namespace)
-        if eq_ignore_ascii_case(cmd, b"PING") {
-            return Ok(Command::Ping);
-        }
+        match cmd_str.as_str() {
+            // ===== Meta Commands =====
+            "PING" => Ok(Command::Ping),
 
-        // ===== KV Commands =====
-        if eq_ignore_ascii_case(cmd, b"KV.SET") {
-            if args.rest.len() < 2 {
-                return Err("KV.SET requires at least 2 arguments: key value [ttl]".to_string());
+            // ===== KV Commands =====
+            "KV.SET" => {
+                if args.rest.len() < 2 {
+                    return Err("KV.SET requires at least 2 arguments: key value [ttl]".to_string());
+                }
+                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
+                let value = args.rest[1].clone();
+                let ttl = if args.rest.len() >= 3 {
+                    Some(parse_u64_ascii(&args.rest[2], "ttl")?)
+                } else {
+                    None
+                };
+                Ok(Command::KvSet { key, value, ttl })
             }
-            let key = bytes_to_utf8_string(&args.rest[0], "key")?;
-            let value = args.rest[1].clone();
-            let ttl = if args.rest.len() >= 3 {
-                Some(parse_u64_ascii(&args.rest[2], "ttl")?)
-            } else {
-                None
-            };
-            return Ok(Command::KvSet { key, value, ttl });
-        }
 
-        if eq_ignore_ascii_case(cmd, b"KV.GET") {
-            if args.rest.len() != 1 {
-                return Err("KV.GET requires exactly 1 argument: key".to_string());
+            "KV.GET" => {
+                if args.rest.len() != 1 {
+                    return Err("KV.GET requires exactly 1 argument: key".to_string());
+                }
+                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
+                Ok(Command::KvGet { key })
             }
-            let key = bytes_to_utf8_string(&args.rest[0], "key")?;
-            return Ok(Command::KvGet { key });
-        }
 
-        if eq_ignore_ascii_case(cmd, b"KV.DEL") {
-            if args.rest.len() != 1 {
-                return Err("KV.DEL requires exactly 1 argument: key".to_string());
+            "KV.DEL" => {
+                if args.rest.len() != 1 {
+                    return Err("KV.DEL requires exactly 1 argument: key".to_string());
+                }
+                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
+                Ok(Command::KvDel { key })
             }
-            let key = bytes_to_utf8_string(&args.rest[0], "key")?;
-            return Ok(Command::KvDel { key });
-        }
 
-        // ===== Topic Commands (not implemented) =====
-        if eq_ignore_ascii_case(cmd, b"TOPIC.SUBSCRIBE") {
-            if args.rest.is_empty() {
-                return Err("TOPIC.SUBSCRIBE requires at least 1 topic".to_string());
+            // ===== Topic Commands (not implemented) =====
+            "TOPIC.SUBSCRIBE" => {
+                if args.rest.is_empty() {
+                    return Err("TOPIC.SUBSCRIBE requires at least 1 topic".to_string());
+                }
+                let mut topics = Vec::with_capacity(args.rest.len());
+                for t in args.rest {
+                    topics.push(bytes_to_utf8_string(&t, "topic")?);
+                }
+                Ok(Command::TopicSubscribe { topics })
             }
-            let mut topics = Vec::with_capacity(args.rest.len());
-            for t in args.rest {
-                topics.push(bytes_to_utf8_string(&t, "topic")?);
-            }
-            return Ok(Command::TopicSubscribe { topics });
-        }
 
-        if eq_ignore_ascii_case(cmd, b"TOPIC.PUBLISH") {
-            if args.rest.len() != 2 {
-                return Err("TOPIC.PUBLISH requires 2 arguments: topic message".to_string());
+            "TOPIC.PUBLISH" => {
+                if args.rest.len() != 2 {
+                    return Err("TOPIC.PUBLISH requires 2 arguments: topic message".to_string());
+                }
+                let topic = bytes_to_utf8_string(&args.rest[0], "topic")?;
+                let message = args.rest[1].clone();
+                Ok(Command::TopicPublish { topic, message })
             }
-            let topic = bytes_to_utf8_string(&args.rest[0], "topic")?;
-            let message = args.rest[1].clone();
-            return Ok(Command::TopicPublish { topic, message });
-        }
 
-        if eq_ignore_ascii_case(cmd, b"TOPIC.UNSUBSCRIBE") {
-            let mut topics = Vec::with_capacity(args.rest.len());
-            for t in args.rest {
-                topics.push(bytes_to_utf8_string(&t, "topic")?);
+            "TOPIC.UNSUBSCRIBE" => {
+                let mut topics = Vec::with_capacity(args.rest.len());
+                for t in args.rest {
+                    topics.push(bytes_to_utf8_string(&t, "topic")?);
+                }
+                Ok(Command::TopicUnsubscribe { topics })
             }
-            return Ok(Command::TopicUnsubscribe { topics });
-        }
 
-        // ===== Queue Commands (not implemented) =====
-        if eq_ignore_ascii_case(cmd, b"QUEUE.PUSH") {
-            if args.rest.len() != 2 {
-                return Err("QUEUE.PUSH requires 2 arguments: queue data".to_string());
+            // ===== Queue Commands (not implemented) =====
+            "QUEUE.PUSH" => {
+                if args.rest.len() != 2 {
+                    return Err("QUEUE.PUSH requires 2 arguments: queue data".to_string());
+                }
+                let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
+                let data = args.rest[1].clone();
+                Ok(Command::QueuePush { queue, data })
             }
-            let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
-            let data = args.rest[1].clone();
-            return Ok(Command::QueuePush { queue, data });
-        }
 
-        if eq_ignore_ascii_case(cmd, b"QUEUE.POP") {
-            if args.rest.len() != 1 {
-                return Err("QUEUE.POP requires 1 argument: queue".to_string());
+            "QUEUE.POP" => {
+                if args.rest.len() != 1 {
+                    return Err("QUEUE.POP requires 1 argument: queue".to_string());
+                }
+                let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
+                Ok(Command::QueuePop { queue })
             }
-            let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
-            return Ok(Command::QueuePop { queue });
-        }
 
-        Err(format!("Unknown command: {}", String::from_utf8_lossy(cmd)))
+            _ => Err(format!("Unknown command: {}", cmd_str)),
+        }
     }
 }
 
@@ -187,15 +191,6 @@ pub fn route(args: Args, kv_manager: &KvManager) -> Result<Response, String> {
 
         Command::QueuePop { .. } => Err("QUEUE manager not implemented yet".to_string()),
     }
-}
-
-fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(x, y)| x.to_ascii_uppercase() == y.to_ascii_uppercase())
 }
 
 fn bytes_to_utf8_string(bytes: &[u8], field: &str) -> Result<String, String> {
