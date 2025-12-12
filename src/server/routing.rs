@@ -62,65 +62,77 @@ impl Command {
             .map_err(|_| "Invalid command encoding")?
             .to_uppercase();
 
+        // Use iterator to consume arguments without cloning
+        let mut args_iter = args.rest.into_iter();
+
         match cmd_str.as_str() {
             // ===== Meta Commands =====
             "PING" => Ok(Command::Ping),
 
             // ===== KV Commands =====
             "KV.SET" => {
-                if args.rest.len() < 2 {
+                if args_iter.len() < 2 {
                     return Err("KV.SET requires at least 2 arguments: key value [ttl]".to_string());
                 }
-                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
-                let value = args.rest[1].clone();
-                let ttl = if args.rest.len() >= 3 {
-                    Some(parse_u64_ascii(&args.rest[2], "ttl")?)
+                
+                // Unwrapping is safe here because we checked len()
+                let key_bytes = args_iter.next().unwrap();
+                let value = args_iter.next().unwrap(); // Zero-copy move
+                
+                let key = bytes_to_utf8_string(&key_bytes, "key")?;
+
+                let ttl = if let Some(ttl_bytes) = args_iter.next() {
+                    Some(parse_u64_ascii(&ttl_bytes, "ttl")?)
                 } else {
                     None
                 };
+
                 Ok(Command::KvSet { key, value, ttl })
             }
 
             "KV.GET" => {
-                if args.rest.len() != 1 {
+                if args_iter.len() != 1 {
                     return Err("KV.GET requires exactly 1 argument: key".to_string());
                 }
-                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
+                let key_bytes = args_iter.next().unwrap();
+                let key = bytes_to_utf8_string(&key_bytes, "key")?;
                 Ok(Command::KvGet { key })
             }
 
             "KV.DEL" => {
-                if args.rest.len() != 1 {
+                if args_iter.len() != 1 {
                     return Err("KV.DEL requires exactly 1 argument: key".to_string());
                 }
-                let key = bytes_to_utf8_string(&args.rest[0], "key")?;
+                let key_bytes = args_iter.next().unwrap();
+                let key = bytes_to_utf8_string(&key_bytes, "key")?;
                 Ok(Command::KvDel { key })
             }
 
             // ===== Topic Commands (not implemented) =====
             "TOPIC.SUBSCRIBE" => {
-                if args.rest.is_empty() {
+                if args_iter.len() < 1 {
                     return Err("TOPIC.SUBSCRIBE requires at least 1 topic".to_string());
                 }
-                let mut topics = Vec::with_capacity(args.rest.len());
-                for t in args.rest {
+                let mut topics = Vec::with_capacity(args_iter.len());
+                for t in args_iter {
                     topics.push(bytes_to_utf8_string(&t, "topic")?);
                 }
                 Ok(Command::TopicSubscribe { topics })
             }
 
             "TOPIC.PUBLISH" => {
-                if args.rest.len() != 2 {
+                if args_iter.len() != 2 {
                     return Err("TOPIC.PUBLISH requires 2 arguments: topic message".to_string());
                 }
-                let topic = bytes_to_utf8_string(&args.rest[0], "topic")?;
-                let message = args.rest[1].clone();
+                let topic_bytes = args_iter.next().unwrap();
+                let topic = bytes_to_utf8_string(&topic_bytes, "topic")?;
+                let message = args_iter.next().unwrap();
                 Ok(Command::TopicPublish { topic, message })
             }
 
             "TOPIC.UNSUBSCRIBE" => {
-                let mut topics = Vec::with_capacity(args.rest.len());
-                for t in args.rest {
+                let mut topics = Vec::with_capacity(args_iter.len());
+                for t in args_iter {
                     topics.push(bytes_to_utf8_string(&t, "topic")?);
                 }
                 Ok(Command::TopicUnsubscribe { topics })
@@ -128,19 +140,21 @@ impl Command {
 
             // ===== Queue Commands (not implemented) =====
             "QUEUE.PUSH" => {
-                if args.rest.len() != 2 {
+                if args_iter.len() != 2 {
                     return Err("QUEUE.PUSH requires 2 arguments: queue data".to_string());
                 }
-                let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
-                let data = args.rest[1].clone();
+                let queue_bytes = args_iter.next().unwrap();
+                let queue = bytes_to_utf8_string(&queue_bytes, "queue")?;
+                let data = args_iter.next().unwrap();
                 Ok(Command::QueuePush { queue, data })
             }
 
             "QUEUE.POP" => {
-                if args.rest.len() != 1 {
+                if args_iter.len() != 1 {
                     return Err("QUEUE.POP requires 1 argument: queue".to_string());
                 }
-                let queue = bytes_to_utf8_string(&args.rest[0], "queue")?;
+                let queue_bytes = args_iter.next().unwrap();
+                let queue = bytes_to_utf8_string(&queue_bytes, "queue")?;
                 Ok(Command::QueuePop { queue })
             }
 
