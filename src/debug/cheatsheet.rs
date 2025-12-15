@@ -1,10 +1,32 @@
+use std::collections::HashMap;
+
 // ===============================
 // RUST CORE TYPES + MOVE / BORROW CHEAT SHEET (EXTENDED)
 // Target audience: coming from TypeScript / JS
 // Everything is VALID Rust unless commented otherwise
 // Focus: low-level behavior, stack vs heap, copy vs move
 // ===============================
+fn pragmatic_rules() {
+    // Structs & Traits (al posto di Classi & Interfacce)
+    // TS: class con dati e metodi insieme.
+    //     Rust:
+    // struct: Solo i dati.
+    // impl MyStruct: Qui definisci i metodi.
+    // trait: Come le interfacce (interface), definiscono comportamenti condivisi.
 
+    /*
+     Liste
+     - Vec<T> =>
+     - HashMap<K, V> =>
+     - HashSet<T> =>
+     */
+
+    /*
+    Structs & Traits (al posto di Classi & Interfacce)
+    - String: Posseduta, heap-allocated, => usala nelle Struct
+    - &str: Una "vista" in sola lettura su una stringa.  => usala per i parametri di funzione quando leggi
+     */
+}
 
 fn types() {
     // -------------------- INTEGERS (SIGNED / UNSIGNED) --------------------
@@ -80,31 +102,43 @@ fn string_clone() {
 }
 
 
+// ---------------------------------
+// OWNERSHIP
+// Rust guarantees memory safety through ownership and borrowing rules.
+// Borrowing includes references (&T, &mut T) and slices (&[T], &str),
+// which control who can access data and for how long (scope-based).
+//
+// 1) Ownership → who owns the memory
+// 2) Borrowing → who can access without owning
+// 3) Slice → a borrow of portion of the data, tied to the original lifetime
+// ---------------------------------
 
 // MOVE: ownership trasferita alla funzione
 fn takes_ownership(s: String) {
     println!("{}", s);
 } // s has been DROPPED here (end scope)
 
-// BORROW (&): reference immutabile
-fn borrows(s: &String) {
+// BORROW (&T): immutable reference
+fn borrows(s: &str) {
     println!("{}", s);
 } // s has been BORROWED immutably (read-only)
 
-// BORROW MUT (&mut): reference mutabile
+// BORROW MUT (&mut T): mutable reference
 fn borrows_mut(s: &mut String) {
     s.push_str("!");
 } // s has been BORROWED mutably (read + write)
 
 
-// SLICE [T], &[T], &str: reference on a portion of data (reference + length + link to original data) without take ownership on that
-fn slice_array() {
+// SLICE (&[T], &str): borrow a portion of data
+fn slice() {
+    let s = String::from("hello world");
+    let world = &s[6..11]; // slice into String (print: "world")
+
     let a = [1, 2, 3, 4];
-    let s: &[i32] = &a[1..3]; // slice: pointer + length
+    let s: &[i32] = &a[1..3]; // slice into array (print: [2, 3])
+
+    let v = vec![10, 20, 30, 40];
+    let vs: &[i32] = &v[0..2]; // slice into Vec (print: [10, 20])
 }
 
-fn slice_vector() {
-    let v = vec![10, 20, 30, 40];
-    let vs: &[i32] = &v[0..2]; // slice into Vec
-}
 

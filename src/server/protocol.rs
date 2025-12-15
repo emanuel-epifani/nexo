@@ -38,7 +38,7 @@ pub enum Response {
 #[derive(Debug, Clone)]
 pub struct Args {
     pub cmd: Vec<u8>,
-    pub rest: Vec<Vec<u8>>,
+    pub rest: Vec<Vec<u8>>, 
 }
 
 // ========================================

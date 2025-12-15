@@ -3,27 +3,30 @@ Questo repo vuole essere un trade off per le startupo che necessitano dei seguen
 
 
 ## **1. KV Store in memory (stile REDIS)**
-
+- cache in memory
 - get/set
 - TTL
-- snapshot semplice
-- WAL append-only semplice
 
 ## **2. TOPIC PUB/SUB (stile MQTT)**
+- 1 publisher → N consumer
+- topic gerarchici (filter in fase di subscribe subscribe to edge/registration o solo a edge/{edge_id}/oma-result)
+- WAL append-only semplice (scivo su file ad aogni messagio))
 
-- best-effort
-- subscriber multipli
-- topic gerarchici (opzionale)
-- filtri per il problema che avevamo su p3p (puoi scegliere ogni CONSUMER di sottoscriversi a EDGE/{edge_id}, e poi il PUBLISHER pubblicare solo su EDGE/{edge_id}
-
-## **3. QUEUE (stile RabbitMQ/Kafka lite)**
-
+## **3. QUEUE (stile RabbitMQ/SQS)**
+- cheduling job/dialogo tra microservizi interni a cluster k8s
 - 1 publisher → 1 consumer
-- consumer groups
 - ACK
 - retry
 - DLQ
-- ordering per queue
+- | Domanda reale                    | Coda         |
+  | -------------------------------- | ------------ |
+  | Se il worker muore?              | Retry        |
+  | Se va lento?                     | Backpressure |
+  | Se fallisce?                     | DLQ          |
+  | Se deve partire dopo?            | Delay        |
+  | Se non voglio bloccare l’utente? | Async        |
+  | Se ho 1 o N worker?              | Leasing      |
+Nexo dovrebbe avere => Queue con ack + retry + delay + DLQ
 
 ## **4. Dashboard Web**
 
@@ -33,3 +36,7 @@ Questo repo vuole essere un trade off per le startupo che necessitano dei seguen
     - ops/sec
     - messaggi recenti
     - polling o websocket
+
+## **4. Exporter prometheus/opentelemetry?**
+
+## **5. Auth**
