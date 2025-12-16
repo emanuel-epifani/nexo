@@ -1,6 +1,7 @@
-//! RESP (REdis Serialization Protocol) Parser and Encoder
+//! Binary Protocol Implementation
+//! Header: [Cmd: 1 byte] [BodyLen: 4 bytes] [Body...]
 
-use std::str;
+use bytes::{BufMut, BytesMut};
 
 // ========================================
 // TYPES
@@ -8,202 +9,112 @@ use std::str;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
-    /// Not enough bytes yet (normal on TCP streams)
     Incomplete,
-    /// Protocol is invalid / corrupted
     Invalid(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum RespValue {
-    SimpleString(String),
-    Error(String),
-    Integer(i64),
-    BulkString(Vec<u8>),
-    Array(Vec<RespValue>),
-    Null,
+/// Represents a parsed request frame (Header + Body slice)
+#[derive(Debug)]
+pub struct Request<'a> {
+    pub opcode: u8,
+    pub payload: &'a [u8],
 }
 
-#[derive(Debug, Clone)]
+/// Represents a response to be sent back
+#[derive(Debug)]
 pub enum Response {
     Ok,
-    Integer(i64),
-    BulkString(Vec<u8>),
-    Null,
+    Data(Vec<u8>),
     Error(String),
-}
-
-/// Binary-safe view of a RESP array command: first element is the command,
-/// the rest are raw bytes (no UTF-8 assumption for payloads).
-#[derive(Debug, Clone)]
-pub struct Args {
-    pub cmd: Vec<u8>,
-    pub rest: Vec<Vec<u8>>, 
+    Null, // e.g. Key not found
 }
 
 // ========================================
-// PARSER
+// CONSTANTS (Opcodes & Status)
 // ========================================
 
-pub fn parse_resp(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    if buf.is_empty() {
-        return Err(ParseError::Incomplete);
+// Request Opcodes
+pub const OP_PING: u8 = 0x01;
+pub const OP_KV_SET: u8 = 0x02;
+pub const OP_KV_GET: u8 = 0x03;
+pub const OP_KV_DEL: u8 = 0x04;
+
+// Response Status Codes
+const STATUS_OK: u8 = 0x00;
+const STATUS_ERR: u8 = 0x01;
+const STATUS_NULL: u8 = 0x02;
+const STATUS_DATA: u8 = 0x03;
+
+// ========================================
+// PARSER (Zero-Copy)
+// ========================================
+
+/// Tries to parse a complete frame from the buffer.
+/// Returns:
+/// - Ok(Some((request, consumed_bytes))) if a full frame is present.
+/// - Ok(None) if incomplete (need more bytes).
+/// - Err if invalid.
+pub fn parse_request(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ParseError> {
+    // 1. Check Header Size (1 byte Opcode + 4 bytes Len = 5 bytes)
+    if buf.len() < 5 {
+        return Ok(None);
     }
 
-    match buf[0] {
-        b'+' => parse_simple_string(buf),
-        b'-' => parse_error(buf),
-        b':' => parse_integer(buf),
-        b'$' => parse_bulk_string(buf),
-        b'*' => parse_array(buf),
-        _ => Err(ParseError::Invalid(format!(
-            "Invalid RESP type: {}",
-            buf[0] as char
-        ))),
-    }
-}
+    // 2. Read Header
+    let opcode = buf[0];
+    // Read 4 bytes for length (Big Endian)
+    let len_bytes: [u8; 4] = buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?;
+    let payload_len = u32::from_be_bytes(len_bytes) as usize;
 
-fn parse_simple_string(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    let end = find_crlf(buf, 1)?;
-    let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?
-        .to_string();
-    Ok((RespValue::SimpleString(s), end + 2))
-}
+    let total_len = 5 + payload_len;
 
-fn parse_error(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    let end = find_crlf(buf, 1)?;
-    let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?
-        .to_string();
-    Ok((RespValue::Error(s), end + 2))
-}
-
-fn parse_integer(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    let end = find_crlf(buf, 1)?;
-    let s = str::from_utf8(&buf[1..end])
-        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
-    let n = s
-        .parse::<i64>()
-        .map_err(|e| ParseError::Invalid(format!("Invalid integer: {}", e)))?;
-    Ok((RespValue::Integer(n), end + 2))
-}
-
-fn parse_bulk_string(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    let end = find_crlf(buf, 1)?;
-    let len_str = str::from_utf8(&buf[1..end])
-        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
-    let len = len_str
-        .parse::<i64>()
-        .map_err(|e| ParseError::Invalid(format!("Invalid bulk string length: {}", e)))?;
-
-    if len == -1 {
-        return Ok((RespValue::Null, end + 2));
+    // 3. Check Payload Size
+    if buf.len() < total_len {
+        return Ok(None);
     }
 
-    let len = len as usize;
-    let start = end + 2;
-    let data_end = start + len;
+    // 4. Extract Payload (Zero-Copy)
+    let payload = &buf[5..total_len];
 
-    if buf.len() < data_end + 2 {
-        return Err(ParseError::Incomplete);
-    }
-
-    if &buf[data_end..data_end + 2] != b"\r\n" {
-        return Err(ParseError::Invalid(
-            "Missing CRLF after bulk string data".to_string(),
-        ));
-    }
-
-    let data = buf[start..data_end].to_vec();
-    Ok((RespValue::BulkString(data), data_end + 2))
-}
-
-fn parse_array(buf: &[u8]) -> Result<(RespValue, usize), ParseError> {
-    let end = find_crlf(buf, 1)?;
-    let len_str = str::from_utf8(&buf[1..end])
-        .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8: {}", e)))?;
-    let len = len_str
-        .parse::<usize>()
-        .map_err(|e| ParseError::Invalid(format!("Invalid array length: {}", e)))?;
-
-    let mut elements = Vec::with_capacity(len);
-    let mut pos = end + 2;
-
-    for _ in 0..len {
-        if pos >= buf.len() {
-            return Err(ParseError::Incomplete);
-        }
-        let (value, consumed) = parse_resp(&buf[pos..])?;
-        elements.push(value);
-        pos += consumed;
-    }
-
-    Ok((RespValue::Array(elements), pos))
-}
-
-fn find_crlf(buf: &[u8], start: usize) -> Result<usize, ParseError> {
-    for i in start..buf.len().saturating_sub(1) {
-        if buf[i] == b'\r' && buf[i + 1] == b'\n' {
-            return Ok(i);
-        }
-    }
-    Err(ParseError::Incomplete)
+    Ok(Some((
+        Request {
+            opcode,
+            payload,
+        },
+        total_len,
+    )))
 }
 
 // ========================================
 // ENCODER
 // ========================================
 
-pub fn encode_resp(response: &Response) -> Vec<u8> {
+pub fn encode_response(response: &Response) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+
     match response {
-        Response::Ok => b"+OK\r\n".to_vec(),
-
-        Response::Integer(n) => format!(":{}\r\n", n).into_bytes(),
-
-        Response::BulkString(data) => {
-            let mut result = format!("${}\r\n", data.len()).into_bytes();
-            result.extend_from_slice(data);
-            result.extend_from_slice(b"\r\n");
-            result
+        Response::Ok => {
+            buf.put_u8(STATUS_OK);
+            buf.put_u32(0); // Len 0
         }
-
-        Response::Null => b"$-1\r\n".to_vec(),
-
-        Response::Error(msg) => format!("-ERR {}\r\n", msg).into_bytes(),
-    }
-}
-
-// ========================================
-// HELPER: Convert RespValue to binary-safe args
-// ========================================
-
-impl RespValue {
-    pub fn into_args(self) -> Result<Args, String> {
-        match self {
-            RespValue::Array(elements) => {
-                if elements.is_empty() {
-                    return Err("Empty command".to_string());
-                }
-
-                let mut bytes_elems: Vec<Vec<u8>> = Vec::with_capacity(elements.len());
-                for elem in elements {
-                    match elem {
-                        RespValue::BulkString(data) => bytes_elems.push(data),
-                        RespValue::SimpleString(s) => bytes_elems.push(s.into_bytes()),
-                        _ => return Err(format!("Expected string in array, got {:?}", elem)),
-                    }
-                }
-
-                let cmd = bytes_elems.remove(0);
-                Ok(Args {
-                    cmd,
-                    rest: bytes_elems,
-                })
-            }
-            _ => Err(format!("Expected array, got {:?}", self)),
+        Response::Error(msg) => {
+            buf.put_u8(STATUS_ERR);
+            let bytes = msg.as_bytes();
+            buf.put_u32(bytes.len() as u32);
+            buf.put_slice(bytes);
+        }
+        Response::Null => {
+            buf.put_u8(STATUS_NULL);
+            buf.put_u32(0);
+        }
+        Response::Data(data) => {
+            buf.put_u8(STATUS_DATA);
+            buf.put_u32(data.len() as u32);
+            buf.put_slice(data);
         }
     }
+
+    buf.to_vec()
 }
 
 

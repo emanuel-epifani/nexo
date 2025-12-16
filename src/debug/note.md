@@ -17,3 +17,6 @@ ok quindi:
 - 1 dispatcher (con coamndi prefix per namespace "KV/TOPIC/QUEUE")
 - N manager (KeyValueManger, TopicManager, QueueManager ecc)
   ti sembra corretto? a questo punto vorrei capire come il RESP protocol si sposa bene il mio custom protocol, come dovrebbe esser la legenda del mio protocollo?
+
+- per eliminare expired key on KV
+- uso una struttura sorted per expired + recente in cima (radix-tree)

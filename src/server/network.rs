@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::features::kv::KvManager;
-use crate::server::protocol::{encode_resp, parse_resp, ParseError, Response};
+use crate::server::protocol::{encode_response, parse_request, ParseError, Response};
 use crate::server::routing::route;
 
 // ========================================
@@ -66,59 +66,43 @@ async fn handle_connection(mut socket: TcpStream, kv: Arc<KvManager>) -> Result<
 
         // Process as many frames as are available in the buffer (pipelining)
         loop {
-            let (resp_value, consumed) = match parse_resp(&buffer) {
-                Ok(result) => result,
-                Err(ParseError::Incomplete) => break, // need more bytes
+            // Try to parse a frame (Zero-Copy: req borrows from buffer)
+            // We can't borrow from buffer and then advance it mutably in the same scope easily without splitting logic.
+            // But since parse_request takes a slice, we are good.
+            let (req, consumed) = match parse_request(&buffer) {
+                Ok(Some((r, c))) => (r, c),
+                Ok(None) => break, // Incomplete frame
                 Err(ParseError::Invalid(e)) => {
-                    // Send error response for invalid protocol
-                    let error_resp =
-                        encode_resp(&Response::Error(format!("Protocol error: {}", e)));
-                    socket
-                        .write_all(&error_resp)
-                        .await
-                        .map_err(|e| format!("Failed to write error response: {}", e))?;
-                    buffer.clear();
-                    break;
+                    // Send error and close
+                    eprintln!("Invalid frame: {}", e);
+                    return Err(e); 
                 }
-            };
-
-            // Remove consumed bytes from buffer
-            buffer.advance(consumed);
-
-            // Convert RESP value to binary-safe args
-            let args = match resp_value.into_args() {
-                Ok(args) => args,
-                Err(e) => {
-                    let error_resp =
-                        encode_resp(&Response::Error(format!("Invalid command format: {}", e)));
-                    socket
-                        .write_all(&error_resp)
-                        .await
-                        .map_err(|e| format!("Failed to write error response: {}", e))?;
-                    continue;
-                }
+                Err(ParseError::Incomplete) => break,
             };
 
             println!(
-                "[Parser] Parsed cmd: {:?}, args: {}",
-                String::from_utf8_lossy(&args.cmd),
-                args.rest.len()
+                "[Parser] Opcode: 0x{:02X}, PayloadLen: {}",
+                req.opcode,
+                req.payload.len()
             );
 
             // Route command
-            let response = match route(args, &kv) {
+            let response = match route(req, &kv) {
                 Ok(resp) => resp,
                 Err(e) => Response::Error(e),
             };
 
             // Encode response
-            let resp_bytes = encode_resp(&response);
+            let resp_bytes = encode_response(&response);
 
             // Send response
             socket
                 .write_all(&resp_bytes)
                 .await
                 .map_err(|e| format!("Failed to write response: {}", e))?;
+
+            // Remove consumed bytes
+            buffer.advance(consumed);
         }
     }
 }

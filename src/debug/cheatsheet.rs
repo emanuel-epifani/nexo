@@ -1,32 +1,7 @@
-use std::collections::HashMap;
 
-// ===============================
-// RUST CORE TYPES + MOVE / BORROW CHEAT SHEET (EXTENDED)
-// Target audience: coming from TypeScript / JS
-// Everything is VALID Rust unless commented otherwise
-// Focus: low-level behavior, stack vs heap, copy vs move
-// ===============================
-fn pragmatic_rules() {
-    // Structs & Traits (al posto di Classi & Interfacce)
-    // TS: class con dati e metodi insieme.
-    //     Rust:
-    // struct: Solo i dati.
-    // impl MyStruct: Qui definisci i metodi.
-    // trait: Come le interfacce (interface), definiscono comportamenti condivisi.
 
-    /*
-     Liste
-     - Vec<T> =>
-     - HashMap<K, V> =>
-     - HashSet<T> =>
-     */
 
-    /*
-    Structs & Traits (al posto di Classi & Interfacce)
-    - String: Posseduta, heap-allocated, => usala nelle Struct
-    - &str: Una "vista" in sola lettura su una stringa.  => usala per i parametri di funzione quando leggi
-     */
-}
+
 
 fn types() {
     // -------------------- INTEGERS (SIGNED / UNSIGNED) --------------------
@@ -92,48 +67,43 @@ fn types() {
     println!("{}", s2);
 }
 
-// --------- DEEP COPY (clone) ---------
-fn string_clone() {
+
+/*
+   OWNERSHIP
+   Rust guarantees memory safety through ownership and borrowing rules.
+   One owner at time can exist for every value.
+   1) CLONE clone() -> new copy new allocation
+   2) MOVE → transfer the ownership
+   3) BORROW (&T, &mut T) → who can access (read or read-write) without owning
+   4) SLICE (&[T], &str) → a borrow of portion of the data, tied to the original lifetime
+ */
+
+// CLONE: explicit deep copy (heap allocation)
+fn clone() {
     let s1 = String::from("hello");
-    let s2 = s1.clone(); // deep copy: new heap allocation
+    let s2 = s1.clone(); // allocates NEW heap memory and copies the data
 
     println!("s1: {}", s1);
     println!("s2: {}", s2);
 }
 
-
-// ---------------------------------
-// OWNERSHIP
-// Rust guarantees memory safety through ownership and borrowing rules.
-// Borrowing includes references (&T, &mut T) and slices (&[T], &str),
-// which control who can access data and for how long (scope-based).
-//
-// 1) Ownership → who owns the memory
-// 2) Borrowing → who can access without owning
-// 3) Slice → a borrow of portion of the data, tied to the original lifetime
-// ---------------------------------
-
-// MOVE: ownership trasferita alla funzione
+// MOVE: ownership transferred to the function
 fn takes_ownership(s: String) {
     println!("{}", s);
-} // s has been DROPPED here (end scope)
+} // s is DROPPED here (end of scope)
 
-// BORROW (&T): immutable reference
+// BORROW immutable (&T): read-only access
 fn borrows(s: &str) {
     println!("{}", s);
-} // s has been BORROWED immutably (read-only)
+} // immutable borrow ENDS here; the OWNER is still valid
 
-// BORROW MUT (&mut T): mutable reference
+// BORROW mutable (&mut T): read + write access
 fn borrows_mut(s: &mut String) {
     s.push_str("!");
-} // s has been BORROWED mutably (read + write)
-
+} // mutable borrow ENDS here; the OWNER is still valid
 
 // SLICE (&[T], &str): borrow a portion of data
 fn slice() {
-    let s = String::from("hello world");
-    let world = &s[6..11]; // slice into String (print: "world")
-
     let a = [1, 2, 3, 4];
     let s: &[i32] = &a[1..3]; // slice into array (print: [2, 3])
 
@@ -141,4 +111,75 @@ fn slice() {
     let vs: &[i32] = &v[0..2]; // slice into Vec (print: [10, 20])
 }
 
+/*  STRUCT + IMPL * TRAIT
+    - struct = dati
+    - impl = metodi
+    - trati = interface
+ */
+fn oop() {
 
+    /*
+    struct Queue {
+        size: usize,
+    }
+
+    impl Queue {
+        // fn push(&mut self) { … }
+    }
+
+    trait Storage {
+        // fn put(&mut self, k: Key, v: Value);
+    }
+    */
+}
+
+/*
+Option<T>, Result<T, E>
+ */
+fn errors() {
+
+}
+
+
+
+/*
+
+[Tipo comando: 1 byte] [Lunghezza Payload: 4 byte] [Payload...]
+
+Ogni Request & Response ha questa struttura:
+[  CMD/STATUS (1 byte)  ] [  LENGTH (4 byte BE)  ] [  PAYLOAD (N bytes)  ]
+Mapping Comandi (Request)
+0x01: PING (Payload vuoto)
+0x02: KV_SET -> Payload: [KeyLen 4B][Key][Value]
+0x03: KV_GET -> Payload: [Key]
+0x04: KV_DEL -> Payload: [Key]
+
+Mapping Status (Response)
+0x00: OK (Payload opzionale)
+0x01: ERROR (Payload: messaggio errore stringa)
+0x02: NULL (Es. chiave non trovata)
+
+// Protocollo Binario Custom: INFINITAMENTE più semplice
+pub fn parse_frame(buf: &mut &[u8]) -> Result<Command, Error> {
+    // 1. Controllo header (1 byte tipo + 4 byte lunghezza = 5 byte)
+    if buf.len() < 5 { return Err(Incomplete); }
+
+    // 2. Leggi header (matematica pura, niente scansioni)
+    let cmd_type = buf[0];
+    let len = u32::from_be_bytes(buf[1..5].try_into().unwrap()) as usize;
+
+    // 3. Controllo se ho tutto il payload
+    if buf.len() < 5 + len { return Err(Incomplete); }
+
+    // 4. Prendo i dati (Zero Copy)
+    let payload = &buf[5..5+len];
+    *buf = &buf[5+len..]; // Avanzo cursore
+
+    // 5. Mappo il comando
+    match cmd_type {
+        1 => Ok(Command::Pub(payload)),
+        2 => Ok(Command::Sub(payload)),
+        _ => Err(Invalid)
+    }
+}
+ */
