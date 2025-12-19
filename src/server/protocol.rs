@@ -46,7 +46,7 @@ const STATUS_NULL: u8 = 0x02;
 const STATUS_DATA: u8 = 0x03;
 
 // ========================================
-// PARSER (Zero-Copy)
+// PARSER
 // ========================================
 
 /// Tries to parse a complete frame from the buffer.

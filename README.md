@@ -1,6 +1,8 @@
 Questo repo vuole essere un trade off per le startupo che necessitano dei seguenti servizi (db in meory for cache, topics e queue) ma non a livello di peformance/affidabilità enterprise. Ma a ui farebbe comood avere tutti questi servii in un unico progetto esterno.
 
-
+All in one high performance broker single instance for all scale up need it
+QUEUE, TOPIC, IN MEMORY CACHE
+all scale up need in 1 container
 
 ## **1. KV Store in memory (stile REDIS)**
 - cache in memory

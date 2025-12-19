@@ -33,38 +33,21 @@ fn types() {
     let c: char = '🔥';   // 4 bytes (Unicode scalar value)
     let d = c;            // COPY
 
-    // --------- ARRAY (FIXED SIZE, same types, STACK) ---------
-    let a: [i32; 3] = [1, 2, 3];
-    let b = a; // COPY because i32 is Copy and size is known at compile time
-    // Arrays live on the stack if their size is known and reasonable
-    // Arrays do NOT grow and do NOT allocate heap
+    // STRING slice -> (vista su un dato) -> stack
+    let s1: &str = "hello";
+    let s2: &str = s1; //copy reference
 
-    // --------- TUPLE (FIXED SIZE, heterogeneous types, stack/heap)---------
-    // Tuple of Copy types → Copy
-    let t1: (i32, bool) = (42, true);
-    let t2 = t1; // COPY
-    // Tuple containing non-Copy types → NOT Copy
-    let t3: (String, i32) = (String::from("hello"), 5);
-    let t4 = t3; // MOVE because String is not Copy
-    // println!("{:?}", t3); // ❌ moved
-    println!("{}", (t4.0));
+    // OWNED STRING (oggetto valorizzato a runtime) -> heap
+    let s3: String = String::from("hello");
+    let s4: String = s3; //moved ownership
 
-    // --------- VECTOR (GROWABLE SIZE, same types, HEAP) ---------
-    let v1: Vec<i32> = vec![1, 2, 3]; // heap allocation
-    let v2 = v1; // MOVE (Vec owns heap)
-    // println!("{:?}", v1); // ❌ moved
-    println!("{:?}", v2);
 
-    // --------- STRING SLICE (&str) ---------
-    let s1: &str = "hello"; // string literal, static memory in binary
-    let s2: &str = s1;      // COPY (pointer + length)
-    // &str does NOT own data, does NOT allocate heap
+    // ARRAY (a dimensione fissa) -> stack
+    let mut students: [&str;2] = ["ema","luig"];
 
-    // --------- OWNED STRING (String) ---------
-    let s1: String = String::from("hello"); // heap allocation
-    let s2: String = s1; // MOVE (ptr, len, cap copied; s1 invalidated)
-    // println!("{}", s1); // ❌ ERROR: value moved
-    println!("{}", s2);
+    // VECTOR (dimensione editabile) -> heap
+    let mut teachers: Vec<&str> = vec!["Emilia", "Giovanni"];
+
 }
 
 
@@ -140,46 +123,92 @@ fn errors() {
 
 }
 
+/*
+    Enums + pattern matching
+    Rusti ti costringe a gestire ogni possibile valore dell'enum (se add un tipo, tutti gl iswitch/match daranno errore)
+ */
+fn enums_pattern_matching() {
+    enum Command {
+        Publish { topic: String, payload: Vec<u8> },
+        Subscribe { topic: String },
+        Ack { id: u64 },
+    }
+    let cmd : Command = Command::Subscribe { topic :String::from("dsds")};
+
+    match cmd {
+        Command::Publish { topic, payload } => { … }
+        Command::Subscribe { topic } => { … }
+        // Command::Ack { id } => { … },
+        _ => {} //wildcard, tutti i casi non gestiti passano da qua
+    }
+}
 
 
 /*
+    Error handling reale (Result<T, E>)
+    In Rust
+     - una funzione può riuscire → Ok(value)
+     - oppure fallire → Err(error)
 
-[Tipo comando: 1 byte] [Lunghezza Payload: 4 byte] [Payload...]
+    E il chiamante DEVE gestirlo. (scegli te dove applicarlo, si I/O, input esterni ecc, no code safatey)
 
-Ogni Request & Response ha questa struttura:
-[  CMD/STATUS (1 byte)  ] [  LENGTH (4 byte BE)  ] [  PAYLOAD (N bytes)  ]
-Mapping Comandi (Request)
-0x01: PING (Payload vuoto)
-0x02: KV_SET -> Payload: [KeyLen 4B][Key][Value]
-0x03: KV_GET -> Payload: [Key]
-0x04: KV_DEL -> Payload: [Key]
+    Devi interiorizzare
+    - Result come flusso normale
+    - ? come early return (? propaga l'errore automaticamente)
+    - errori come valori, non eccezioni
 
-Mapping Status (Response)
-0x00: OK (Payload opzionale)
-0x01: ERROR (Payload: messaggio errore stringa)
-0x02: NULL (Es. chiave non trovata)
+    ? propaga l’errore così com’è (x prototipazione o vuoi solo propagare)
+    map_err serve quando vuoi CAMBIARE l’errore (quando conosci e vuoi gestire quello specifico caso)
 
-// Protocollo Binario Custom: INFINITAMENTE più semplice
-pub fn parse_frame(buf: &mut &[u8]) -> Result<Command, Error> {
-    // 1. Controllo header (1 byte tipo + 4 byte lunghezza = 5 byte)
-    if buf.len() < 5 { return Err(Incomplete); }
+ */
+fn error_handling() {
 
-    // 2. Leggi header (matematica pura, niente scansioni)
-    let cmd_type = buf[0];
-    let len = u32::from_be_bytes(buf[1..5].try_into().unwrap()) as usize;
-
-    // 3. Controllo se ho tutto il payload
-    if buf.len() < 5 + len { return Err(Incomplete); }
-
-    // 4. Prendo i dati (Zero Copy)
-    let payload = &buf[5..5+len];
-    *buf = &buf[5+len..]; // Avanzo cursore
-
-    // 5. Mappo il comando
-    match cmd_type {
-        1 => Ok(Command::Pub(payload)),
-        2 => Ok(Command::Sub(payload)),
-        _ => Err(Invalid)
+    enum Result<T,E> {
+        Ok(T),
+        Err(E)
     }
+
+    fn handle_message(raw: &[u8]) -> Result<Message, ProtocolError> {
+        let header = parse_header(raw)?;
+        let payload = parse_payload(raw)?;
+        Ok(Message::Publish { header, payload })
+    }
+
+    /*
+         ? operatore di propagazione dell'errore (può esser usato solo dentor una funzione che ritorna Result)
+     */
+    fn read_port() -> Result<u16, String> {
+        // se il file non esiste → ritorna subito Err
+        let config = std::fs::read_to_string("config.txt")
+            .map_err(|_| "cannot read config")?;
+        // se il parse fallisce → ritorna subito Err
+        let port = config.trim().parse::<u16>()
+            .map_err(|_| "invalid port")?;
+        // se tutto ok → Ok(port)
+        Ok(port)
+    }
+
+    fn read_port() -> Result<u16, String> {
+        let config = std::fs::read_to_string("config.txt")?;
+        let port = config.trim().parse()?;
+        Ok(port)
+    }
+
+
 }
+
+
+/*
+    Concorrenza MINIIMA
+    - Arc<T>
+    - Mutex<T> / RwLock<T>
+    - thread / task
+ */
+
+
+
+/*
+    Vec<u8> come payload
+    - Vec<u8>  // bytes, non testo
+
  */
