@@ -2,6 +2,7 @@
 //! Header: [Cmd: 1 byte] [BodyLen: 4 bytes] [Body...]
 
 use bytes::{BufMut, BytesMut};
+use std::convert::TryInto;
 
 // ========================================
 // TYPES
@@ -27,6 +28,176 @@ pub enum Response {
     Data(Vec<u8>),
     Error(String),
     Null, // e.g. Key not found
+}
+
+// ========================================
+// COMMANDS (High-Level AST)
+// ========================================
+
+#[derive(Debug)]
+pub enum Command {
+    Ping,
+    Kv(KvCommand),
+    Queue(QueueCommand),
+    Topic(TopicCommand),
+    Stream(StreamCommand),
+}
+
+#[derive(Debug)]
+pub enum KvCommand {
+    Set { key: String, value: Vec<u8>, ttl: Option<u64> },
+    Get { key: String },
+    Del { key: String },
+}
+
+#[derive(Debug)]
+pub enum QueueCommand {
+    Push { queue_name: String, value: Vec<u8> },
+    Pop { queue_name: String },
+}
+
+#[derive(Debug)]
+pub enum TopicCommand {
+    Publish { topic: String, value: Vec<u8> },
+    Subscribe { topic: String },
+}
+
+#[derive(Debug)]
+pub enum StreamCommand {
+    Add { topic: String, value: Vec<u8> },
+    Read { topic: String, offset: u64 },
+}
+
+impl Command {
+    pub fn from_request(req: Request) -> Result<Self, String> {
+        match req.opcode {
+            OP_PING => Ok(Command::Ping),
+            
+            OP_KV_SET | OP_KV_GET | OP_KV_DEL => {
+                Ok(Command::Kv(KvCommand::parse(req.opcode, req.payload)?))
+            }
+            
+            OP_Q_PUSH | OP_Q_POP => {
+                Ok(Command::Queue(QueueCommand::parse(req.opcode, req.payload)?))
+            }
+            
+            OP_PUB | OP_SUB => {
+                Ok(Command::Topic(TopicCommand::parse(req.opcode, req.payload)?))
+            }
+            
+            OP_S_ADD | OP_S_READ => {
+                Ok(Command::Stream(StreamCommand::parse(req.opcode, req.payload)?))
+            }
+            
+            _ => Err(format!("Unknown Opcode: 0x{:02X}", req.opcode)),
+        }
+    }
+}
+
+// Implement parse methods for sub-commands
+impl KvCommand {
+    fn parse(opcode: u8, payload: &[u8]) -> Result<Self, String> {
+        match opcode {
+            OP_KV_SET => {
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let key_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                if payload.len() < 4 + key_len { return Err("Invalid frame format".to_string()); }
+
+                let key_bytes = &payload[4..4 + key_len];
+                let value = payload[4 + key_len..].to_vec();
+                let key = std::str::from_utf8(key_bytes).map_err(|_| "Key must be UTF-8".to_string())?.to_string();
+
+                Ok(KvCommand::Set { key, value, ttl: None })
+            },
+            OP_KV_GET => {
+                let key = std::str::from_utf8(payload).map_err(|_| "Key must be UTF-8".to_string())?.to_string();
+                Ok(KvCommand::Get { key })
+            },
+            OP_KV_DEL => {
+                let key = std::str::from_utf8(payload).map_err(|_| "Key must be UTF-8".to_string())?.to_string();
+                Ok(KvCommand::Del { key })
+            },
+            _ => Err("Invalid KV opcode".to_string()),
+        }
+    }
+}
+
+impl QueueCommand {
+    fn parse(opcode: u8, payload: &[u8]) -> Result<Self, String> {
+        match opcode {
+            OP_Q_PUSH => {
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let q_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                if payload.len() < 4 + q_len { return Err("Invalid frame format".to_string()); }
+
+                let q_name_bytes = &payload[4..4 + q_len];
+                let value = payload[4 + q_len..].to_vec();
+                let queue_name = std::str::from_utf8(q_name_bytes).map_err(|_| "Queue name must be UTF-8".to_string())?.to_string();
+
+                Ok(QueueCommand::Push { queue_name, value })
+            },
+            OP_Q_POP => {
+                let queue_name = std::str::from_utf8(payload).map_err(|_| "Queue name must be UTF-8".to_string())?.to_string();
+                Ok(QueueCommand::Pop { queue_name })
+            },
+            _ => Err("Invalid Queue opcode".to_string()),
+        }
+    }
+}
+
+impl TopicCommand {
+    fn parse(opcode: u8, payload: &[u8]) -> Result<Self, String> {
+        match opcode {
+            OP_PUB => {
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let t_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                if payload.len() < 4 + t_len { return Err("Invalid frame format".to_string()); }
+                
+                let topic_bytes = &payload[4..4 + t_len];
+                let value = payload[4 + t_len..].to_vec();
+                let topic = std::str::from_utf8(topic_bytes).map_err(|_| "Topic must be UTF-8".to_string())?.to_string();
+
+                Ok(TopicCommand::Publish { topic, value })
+            },
+            OP_SUB => {
+                let topic = std::str::from_utf8(payload).map_err(|_| "Topic must be UTF-8".to_string())?.to_string();
+                Ok(TopicCommand::Subscribe { topic })
+            },
+            _ => Err("Invalid Topic opcode".to_string()),
+        }
+    }
+}
+
+impl StreamCommand {
+    fn parse(opcode: u8, payload: &[u8]) -> Result<Self, String> {
+        match opcode {
+            OP_S_ADD => {
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let t_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                if payload.len() < 4 + t_len { return Err("Invalid frame format".to_string()); }
+                
+                let topic_bytes = &payload[4..4 + t_len];
+                let value = payload[4 + t_len..].to_vec();
+                let topic = std::str::from_utf8(topic_bytes).map_err(|_| "Topic must be UTF-8".to_string())?.to_string();
+
+                Ok(StreamCommand::Add { topic, value })
+            },
+            OP_S_READ => {
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let t_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                let offset_start = 4 + t_len;
+                if payload.len() < offset_start + 8 { return Err("Missing offset or invalid format".to_string()); }
+                
+                let topic_bytes = &payload[4..4 + t_len];
+                let offset_bytes = &payload[offset_start..offset_start+8];
+                let offset = u64::from_be_bytes(offset_bytes.try_into().unwrap());
+                let topic = std::str::from_utf8(topic_bytes).map_err(|_| "Topic must be UTF-8".to_string())?.to_string();
+
+                Ok(StreamCommand::Read { topic, offset })
+            },
+            _ => Err("Invalid Stream opcode".to_string()),
+        }
+    }
 }
 
 // ========================================

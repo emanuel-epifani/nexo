@@ -1,6 +1,7 @@
 mod kv_manager;
 
-pub use kv_manager::{KvManager, KvCommand};
+pub use kv_manager::KvManager;
+
 
 
 

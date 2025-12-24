@@ -1,57 +1,71 @@
-//! Routing Layer: Command parsing + dispatching to managers
+//! Routing Layer: Dispatching commands to managers
 
 use crate::NexoEngine;
-use crate::server::protocol::*;
-use std::convert::TryInto;
+use crate::server::protocol::{Command, KvCommand, QueueCommand, TopicCommand, StreamCommand, Response};
+use crate::features::topic::ClientId;
 
-/// Route parsed command to appropriate manager based on Opcode
-pub fn route(req: Request, engine: &NexoEngine) -> Result<Response, String> {
-    match req.opcode {
-        // =================================
-        // META (Ping)
-        // =================================
-        OP_PING => Ok(Response::Ok),
+/// Route parsed command to appropriate manager
+pub fn route(command: Command, engine: &NexoEngine) -> Result<Response, String> {
+    match command {
+        Command::Ping => Ok(Response::Ok),
 
-        // =================================
-        // KV STORE (Set/Get/Del)
-        // =================================
-        OP_KV_SET | OP_KV_GET | OP_KV_DEL => {
-            let cmd = crate::features::kv::KvCommand::parse(req.opcode, req.payload)?;
-            engine.kv.execute(cmd)
-        }
+        Command::Kv(kv_cmd) => match kv_cmd {
+            KvCommand::Set { key, value, ttl } => {
+                engine.kv.set(key, value, ttl)?;
+                Ok(Response::Ok)
+            },
+            KvCommand::Get { key } => {
+                match engine.kv.get(&key)? {
+                    Some(val) => Ok(Response::Data(val)),
+                    None => Ok(Response::Null),
+                }
+            },
+            KvCommand::Del { key } => {
+                engine.kv.del(&key)?;
+                Ok(Response::Ok)
+            }
+        },
 
-        // =================================
-        // QUEUE (Push/Pop)
-        // =================================
-        OP_Q_PUSH | OP_Q_POP => {
-            let cmd = crate::features::queue::QueueCommand::parse(req.opcode, req.payload)?;
-            engine.queue.execute(cmd)
-        }
+        Command::Queue(queue_cmd) => match queue_cmd {
+            QueueCommand::Push { queue_name, value } => {
+                engine.queue.push(queue_name, value);
+                Ok(Response::Ok)
+            },
+            QueueCommand::Pop { queue_name } => {
+                match engine.queue.pop(&queue_name) {
+                    Some(val) => Ok(Response::Data(val)),
+                    None => Ok(Response::Null),
+                }
+            }
+        },
 
-        // =================================
-        // MQTT / TOPIC (Pub/Sub)
-        // =================================
-        OP_PUB => {
-            let cmd = crate::features::topic::TopicCommand::parse(req.opcode, req.payload)?;
-            // TODO: ClientID should come from connection context
-            let dummy_sender = crate::features::topic::ClientId("sender".to_string());
-            engine.topic.execute(cmd, dummy_sender)
-        }
+        Command::Topic(topic_cmd) => match topic_cmd {
+            TopicCommand::Publish { topic, value: _ } => {
+                // TODO: ClientID should come from connection context
+                // TODO: use value to send to clients
+                let _clients = engine.topic.publish(&topic);
+                Ok(Response::Ok)
+            },
+            TopicCommand::Subscribe { topic } => {
+                let dummy_client_id = ClientId("test-client".to_string());
+                engine.topic.subscribe(&topic, dummy_client_id);
+                Ok(Response::Ok)
+            }
+        },
 
-        OP_SUB => {
-             let cmd = crate::features::topic::TopicCommand::parse(req.opcode, req.payload)?;
-             let dummy_client_id = crate::features::topic::ClientId("test-client".to_string());
-             engine.topic.execute(cmd, dummy_client_id)
-        }
-
-        // =================================
-        // STREAM (Append/Read)
-        // =================================
-        OP_S_ADD | OP_S_READ => {
-            let cmd = crate::features::stream::StreamCommand::parse(req.opcode, req.payload)?;
-            engine.stream.execute(cmd)
-        }
-
-        _ => Err(format!("Unknown Opcode: 0x{:02X}", req.opcode)),
+        Command::Stream(stream_cmd) => match stream_cmd {
+            StreamCommand::Add { topic, value } => {
+                let offset = engine.stream.append(topic, value);
+                Ok(Response::Data(offset.to_be_bytes().to_vec()))
+            },
+            StreamCommand::Read { topic, offset } => {
+                let messages = engine.stream.read(&topic, offset as usize);
+                if let Some(msg) = messages.first() {
+                    Ok(Response::Data(msg.payload.clone()))
+                } else {
+                    Ok(Response::Null)
+                }
+            }
+        },
     }
 }

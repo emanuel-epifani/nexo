@@ -1,6 +1,7 @@
 mod topic_manager;
 
-pub use topic_manager::{TopicManager, ClientId, TopicCommand};
+pub use topic_manager::{TopicManager, ClientId};
+
 
 
 
