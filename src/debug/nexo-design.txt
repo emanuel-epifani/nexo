@@ -1,0 +1,32 @@
+use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use tokio::sync::{Mutex, RwLock};
+use dashmap::DashMap; // Crate esterno consigliatissimo, o usa RwLock<HashMap>
+
+// Questa struct viene clonata e passata a ogni connessione TCP
+#[derive(Clone)]
+pub struct NexoState {
+    // 1. CACHE: Accesso ultra-parallelo.
+    // Nessun lock globale, ogni chiave è indipendente (o quasi).
+    pub kv_store: Arc<DashMap<String, String>>,
+
+    // 2. QUEUE: Accesso serializzato ma velocissimo.
+    // Usiamo Mutex perché tanto l'operazione è atomica.
+    pub queues: Arc<DashMap<String, Mutex<VecDeque<String>>>>,
+
+    // 3. MQTT: Molte letture (publish), poche scritture (subscribe).
+    // RwLock è perfetto qui.
+    pub mqtt_router: Arc<RwLock<MqttRouter>>,
+
+    // 4. KAFKA: Append only log.
+    // Ogni topic ha il suo vettore protetto.
+    pub streams: Arc<DashMap<String, RwLock<Vec<LogMessage>>>>,
+}
+
+// Strutture di supporto (esempi vuoti)
+pub struct MqttRouter { /* Trie o HashMap di sottoscrizioni */ }
+pub struct LogMessage { id: u64, payload: String }
+
+
+1- KV ->
+2- QUEUE (N publisher push - 1 consumer pop) -> Mutex<VecDeque<T>>

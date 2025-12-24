@@ -1,20 +1,21 @@
 //! KV Manager: In-memory key-value store with TTL support
-
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use dashmap::DashMap;
 use std::time::{Duration, Instant};
 
 // ========================================
 // TYPES
 // ========================================
 
+#[derive(Clone, Debug)]
 struct Entry {
     value: Vec<u8>,
     expires_at: Option<Instant>,
 }
 
 pub struct KvManager {
-    store: Arc<RwLock<HashMap<String, Entry>>>,
+    // DashMap: Concurrent HashMap. 
+    // Non serve Mutex esterno, DashMap gestisce lo sharding dei lock internamente.
+    store: DashMap<String, Entry>,
 }
 
 // ========================================
@@ -24,7 +25,7 @@ pub struct KvManager {
 impl KvManager {
     pub fn new() -> Self {
         Self {
-            store: Arc::new(RwLock::new(HashMap::new())),
+            store: DashMap::new(),
         }
     }
 
@@ -34,45 +35,36 @@ impl KvManager {
 
         let entry = Entry { value, expires_at };
 
-        self.store
-            .write()
-            .map_err(|e| format!("Lock error: {}", e))?
-            .insert(key, entry);
+        // DashMap handle locks internally per bucket
+        self.store.insert(key, entry);
 
         Ok(())
     }
 
     /// Get value by key (None if not exists or expired)
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let store = self
-            .store
-            .read()
-            .map_err(|e| format!("Lock error: {}", e))?;
-
-        if let Some(entry) = store.get(key) {
+        // DashMap::get returns a Ref which holds a read lock
+        if let Some(entry_ref) = self.store.get(key) {
+            let entry = entry_ref.value();
+            
             // Check if expired
             if let Some(expires_at) = entry.expires_at {
                 if Instant::now() > expires_at {
+                    // Lazy deletion: we could delete it here, but it requires upgrading lock or re-locking
+                    // For now, just return None. 
+                    // To do proper expiration, we would use a dedicated clearer task.
                     return Ok(None);
                 }
             }
-            Ok(Some(entry.value.clone()))
-        } else {
-            Ok(None)
+            return Ok(Some(entry.value.clone()));
         }
+        
+        Ok(None)
     }
 
     /// Delete key (returns true if existed)
     pub fn del(&self, key: &str) -> Result<bool, String> {
-        let removed = self
-            .store
-            .write()
-            .map_err(|e| format!("Lock error: {}", e))?
-            .remove(key)
-            .is_some();
-
+        let removed = self.store.remove(key).is_some();
         Ok(removed)
     }
 }
-
-

@@ -1,6 +1,7 @@
 pub mod kv;
-// pub mod topic;   // uncomment when ready
-// pub mod queue;   // uncomment when ready
+pub mod queue;
+pub mod topic;
+pub mod stream;
 
 
 

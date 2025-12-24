@@ -1,4 +1,36 @@
+/* Minimo indispensabile per padroneggiare RUST
+    Enums + pattern matching
 
+    Concorrenza MINIIMA
+    - Arc<T>
+    - Mutex<T> / RwLock<T>
+    - thread / task
+
+    Error handling reale (Result<T, E>)
+    - Result come flusso normale
+    - ? come early return
+    - errori come valori, non eccezioni
+
+    Vec<u8> come payload
+    - Vec<u8>  // bytes, non testo
+    
+    
+    Regola empirica:
+    - assenza normale (topic non trovato) → Option<T>
+    - fallimento (messaggio invalido) → Result<T, E>
+
+
+
+    
+
+
+ */
+
+
+
+/*
+
+ */
 
 
 
@@ -198,17 +230,113 @@ fn error_handling() {
 }
 
 
-/*
-    Concorrenza MINIIMA
-    - Arc<T>
-    - Mutex<T> / RwLock<T>
-    - thread / task
- */
-
-
 
 /*
-    Vec<u8> come payload
-    - Vec<u8>  // bytes, non testo
+    ( Arc<Mutex<State>> / Arc<Mutex<T>> ) x gestire concorrenza
+    abbiamo uno stato del broker
+    contiene un contatore messaggi
+    più parti del codice devono modificarlo
+    - lo condividiamo con Arc (Atomic Reference Counted - xmette a + thread di possedere stesso oggetto)
+    - lo proteggiamo con Mutex (Mutual Exclusion - garantisce che solo un thread ala volta possa modificarlo)
+
+    Avvolgi: Metti il dato in un Mutex, e il Mutex in un Arc.
+    Clona: Per ogni thread, fai un .clone() dell' Arc. Ottieni un nuovo "permesso" per lo stesso dato.
+    Accedi: Dentro il thread, chiami .lock().
+    Usa: Una volta ottenuto il lock, Rust ti permette di modificare il dato. Quando la variabile del lock esce dallo scope (fine del blocco), la chiave viene restituita automaticamente.
+
+
 
  */
+
+/*
+    // KV store (Redis-like):
+    // - accesso per chiave indipendente
+    // - molte operazioni concorrenti
+    // -> DashMap
+
+    // Queue (FIFO):
+    // - ordine globale
+    // - push/pop atomici
+    // -> Mutex<VecDeque<T>>
+
+    // MQTT router:
+    // - tantissime publish (read)
+    // - poche subscribe/unsubscribe (write)
+    // -> RwLock<Router>
+
+    // Stream (Kafka-like):
+    // - append-only
+    // - ordine per topic
+    // - writer serializzato
+    // -> Mutex<Vec<T>>
+
+ */
+fn concorrenza() {
+    use std::sync::{Mutex, RwLock};
+    use dashmap::DashMap;
+
+    // 1️⃣ Mutex<T>
+    // - 1 thread alla volta
+    // - lock globale sulla struttura
+    // - ideale per stato piccolo o ordine globale
+    fn mutex_example() {
+        let counter = Mutex::new(0);
+
+        {
+            let mut value = counter.lock().unwrap(); // unwrap OK solo per demo
+            *value += 1;
+        } // lock released here
+
+        {
+            let mut value = counter.lock().unwrap();
+            *value += 1;
+        }
+
+        println!("{}", *counter.lock().unwrap());
+    }
+
+    // 2️⃣ RwLock<T>
+    // - N reader in parallelo
+    // - 1 writer esclusivo (blocca tutti)
+    fn rwlock_example() {
+        let data = RwLock::new(vec![1, 2, 3]);
+
+        {
+            let read_guard = data.read().unwrap();
+            println!("first = {}", read_guard[0]);
+        }
+
+        {
+            let mut write_guard = data.write().unwrap();
+            write_guard.push(4);
+        }
+
+        println!("{:?}", data.read().unwrap());
+    }
+
+    // 3️⃣ DashMap<K, V>
+    // - HashMap concorrente shardata
+    // - lock automatico per shard/bucket
+    // - get/set su chiavi diverse vanno in parallelo
+    fn dashmap_example() {
+
+        let map = DashMap::new();
+
+        map.insert("a", 10);
+        map.insert("b", 20);
+
+        if let Some(v) = map.get("a") {
+            println!("{}", *v);
+        }
+
+        map.entry("a").and_modify(|v| *v += 1);
+
+        println!("{}", *map.get("a").unwrap());
+    }
+
+}
+
+
+
+
+

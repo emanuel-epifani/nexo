@@ -34,14 +34,28 @@ pub enum Response {
 // ========================================
 
 // Request Opcodes
-pub const OP_PING: u8 = 0x01;
-pub const OP_KV_SET: u8 = 0x02;
-pub const OP_KV_GET: u8 = 0x03;
-pub const OP_KV_DEL: u8 = 0x04;
+pub const OP_PING: u8    = 0x01;
+
+// KV (0x02 - 0x0F)
+pub const OP_KV_SET: u8  = 0x02;
+pub const OP_KV_GET: u8  = 0x03;
+pub const OP_KV_DEL: u8  = 0x04;
+
+// QUEUE (0x10 - 0x1F)
+pub const OP_Q_PUSH: u8  = 0x11; 
+pub const OP_Q_POP: u8   = 0x12; 
+
+// TOPIC / MQTT (0x20 - 0x2F)
+pub const OP_PUB: u8     = 0x21; 
+pub const OP_SUB: u8     = 0x22; 
+
+// STREAM (0x30 - 0x3F)
+pub const OP_S_ADD: u8   = 0x31; 
+pub const OP_S_READ: u8  = 0x32; 
 
 // Response Status Codes
-const STATUS_OK: u8 = 0x00;
-const STATUS_ERR: u8 = 0x01;
+const STATUS_OK: u8   = 0x00;
+const STATUS_ERR: u8  = 0x01;
 const STATUS_NULL: u8 = 0x02;
 const STATUS_DATA: u8 = 0x03;
 
@@ -50,10 +64,6 @@ const STATUS_DATA: u8 = 0x03;
 // ========================================
 
 /// Tries to parse a complete frame from the buffer.
-/// Returns:
-/// - Ok(Some((request, consumed_bytes))) if a full frame is present.
-/// - Ok(None) if incomplete (need more bytes).
-/// - Err if invalid.
 pub fn parse_request(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ParseError> {
     // 1. Check Header Size (1 byte Opcode + 4 bytes Len = 5 bytes)
     if buf.len() < 5 {
@@ -116,7 +126,3 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
 
     buf.to_vec()
 }
-
-
-
-

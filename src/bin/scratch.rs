@@ -1,12 +1,25 @@
-
-fn parse_age(s: &str) -> Result<u8, String> {
-    let age = s.parse::<u8>().map_err(|_| "invalid age".to_string())?;
-    Ok(age)
-}
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 fn main() {
-    match parse_age("42") {
-        Ok(a) => println!("Age: {}", a),
-        Err(e) => println!("Error: {}", e),
+    // 1. Creazione (Lucchetto dentro il Contenitore)
+    let contatore = Arc::new(Mutex::new(0));
+    let mut handles = vec![];
+
+    for _ in 0..10 {
+        // 2. Clona l'Arc (aumenta il riferimento, non copia il dato)
+        let contatore_clone = Arc::clone(&contatore);
+
+        let handle = thread::spawn(move || {
+            // 3. Chiedi la chiave (Lock)
+            let mut num = contatore_clone.lock().unwrap();
+            // 4. Modifica in sicurezza
+            *num += 1;
+        }); // <-- Qui la chiave viene restituita automaticamente!
+
+        handles.push(handle);
     }
+
+    for h in handles { h.join().unwrap(); }
+    println!("Risultato: {}", *contatore.lock().unwrap());
 }
