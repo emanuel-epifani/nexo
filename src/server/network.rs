@@ -3,9 +3,11 @@
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use crate::server::protocol::{encode_response, parse_request, ParseError, Response, Command};
-use crate::server::routing::route;
+use crate::server::protocol::{encode_response, parse_request, ParseError, Response};
 use crate::NexoEngine;
+
+// Import all command enums from centralized commands module
+use crate::server::commands::{KvCommand, QueueCommand, TopicCommand, StreamCommand};
 
 // ========================================
 // TCP LISTENER
@@ -75,25 +77,47 @@ async fn handle_connection(mut socket: TcpStream, engine: NexoEngine) -> Result<
                 Err(ParseError::Incomplete) => break,
             };
 
-            // 6. Parse Request -> Command
-            let response = match Command::from_request(req) {
-                Ok(command) => {
-                    // 7. Routing (Dispatch Command)
-                    route(command, &engine).unwrap_or_else(Response::Error)
+            // 6. Route opcode to feature handler (inline)
+            let response = match req.opcode {
+                0x01 => Ok(Response::Ok), // PING
+                
+                // KV commands (0x02-0x0F)
+                0x02..=0x0F => {
+                    KvCommand::parse(req.opcode, req.payload)?
+                        .execute(&engine.kv)
                 },
-                Err(e) => Response::Error(format!("Invalid Command: {}", e)),
-            };
+                
+                // Queue commands (0x10-0x1F)
+                0x10..=0x1F => {
+                    QueueCommand::parse(req.opcode, req.payload)?
+                        .execute(&engine.queue)
+                },
+                
+                // Topic commands (0x20-0x2F)
+                0x20..=0x2F => {
+                    TopicCommand::parse(req.opcode, req.payload)?
+                        .execute(&engine.topic)
+                },
+                
+                // Stream commands (0x30-0x3F)
+                0x30..=0x3F => {
+                    StreamCommand::parse(req.opcode, req.payload)?
+                        .execute(&engine.stream)
+                },
+                
+                _ => Err(format!("Unknown opcode: 0x{:02X}", req.opcode)),
+            }.unwrap_or_else(Response::Error);
 
-            // 8. Serialize Response.
+            // 7. Serialize Response.
             let resp_bytes = encode_response(&response);
 
-            // 9. Write to Socket.
+            // 8. Write to Socket.
             socket
                 .write_all(&resp_bytes)
                 .await
                 .map_err(|e| format!("Socket write error: {}", e))?;
 
-            // 10. Advance Buffer.
+            // 9. Advance Buffer.
             buffer.advance(consumed);
         }
     }
