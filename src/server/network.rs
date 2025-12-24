@@ -79,10 +79,7 @@ async fn handle_connection(mut socket: TcpStream, engine: NexoEngine) -> Result<
             let response = match Command::from_request(req) {
                 Ok(command) => {
                     // 7. Routing (Dispatch Command)
-                    match route(command, &engine) {
-                        Ok(resp) => resp,
-                        Err(e) => Response::Error(e),
-                    }
+                    route(command, &engine).unwrap_or_else(Response::Error)
                 },
                 Err(e) => Response::Error(format!("Invalid Command: {}", e)),
             };
