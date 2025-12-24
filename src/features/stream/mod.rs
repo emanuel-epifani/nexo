@@ -1,2 +1,2 @@
 mod stream_manager;
-pub use stream_manager::{StreamManager, LogMessage};
+pub use stream_manager::{StreamManager, LogMessage, StreamCommand};

@@ -1,6 +1,52 @@
 //! Topic Manager: MQTT-style Pub/Sub with wildcard routing
 use std::sync::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryInto;
+use crate::server::protocol::{OP_PUB, OP_SUB, Response};
+
+// ========================================
+// COMMAND PATTERN
+// ========================================
+
+#[derive(Debug)]
+pub enum TopicCommand {
+    Publish { topic: String, value: Vec<u8> },
+    Subscribe { topic: String },
+}
+
+impl TopicCommand {
+    pub fn parse(opcode: u8, payload: &[u8]) -> Result<Self, String> {
+        match opcode {
+            OP_PUB => {
+                // Payload: [TopicLen: 4 bytes] [Topic] [Value]
+                if payload.len() < 4 { return Err("Payload too short".to_string()); }
+                let t_len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+                if payload.len() < 4 + t_len { return Err("Invalid frame format".to_string()); }
+                
+                let topic_bytes = &payload[4..4 + t_len];
+                let value = payload[4 + t_len..].to_vec();
+                
+                let topic = std::str::from_utf8(topic_bytes)
+                    .map_err(|_| "Topic must be UTF-8".to_string())?
+                    .to_string();
+
+                Ok(TopicCommand::Publish { topic, value })
+            },
+            OP_SUB => {
+                // Payload: [Topic]
+                let topic = std::str::from_utf8(payload)
+                    .map_err(|_| "Topic must be UTF-8".to_string())?
+                    .to_string();
+                Ok(TopicCommand::Subscribe { topic })
+            },
+            _ => Err(format!("Unknown Topic Opcode: 0x{:02X}", opcode)),
+        }
+    }
+}
+
+// ========================================
+// TYPES
+// ========================================
 
 // ClientId semplificato per ora (una stringa)
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -25,10 +71,28 @@ pub struct TopicManager {
     root: RwLock<Node>,
 }
 
+// ========================================
+// IMPLEMENTATION
+// ========================================
+
 impl TopicManager {
     pub fn new() -> Self {
         Self {
             root: RwLock::new(Node::new()),
+        }
+    }
+
+    pub fn execute(&self, cmd: TopicCommand, client_id: ClientId) -> Result<Response, String> {
+        match cmd {
+            TopicCommand::Publish { topic, value: _ } => {
+                // TODO: use value to send to clients
+                let _clients = self.publish(&topic);
+                Ok(Response::Ok)
+            },
+            TopicCommand::Subscribe { topic } => {
+                self.subscribe(&topic, client_id);
+                Ok(Response::Ok)
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 mod queue_manager;
 
-pub use queue_manager::QueueManager;
+pub use queue_manager::{QueueManager, QueueCommand};
 
 
 
