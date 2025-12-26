@@ -10,7 +10,6 @@ export default async function setup() {
   // 🛡️ Port Sensing: If Nexo is already running (e.g. Debugging in IDE), skip build and spawn
   if (await isServerRunning(host, port)) {
     console.log(`[GlobalSetup] Nexo is already running on ${host}:${port}. Reusing instance (Debug Mode).`);
-    // No teardown function returned: existing process won't be killed
     return;
   }
 

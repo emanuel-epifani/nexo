@@ -9,7 +9,8 @@
   "dependencies": {
     "@nexo/client": "file:../../sdk/ts",
     "tsx": "^4.7.0",
-    "vitest": "^1.2.0"
+    "vitest": "^1.2.0",
+    "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.10.0"
