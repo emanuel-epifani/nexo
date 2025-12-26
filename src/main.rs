@@ -6,6 +6,7 @@ mod features;
 mod utils;
 
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use crate::features::kv::KvManager;
 use crate::features::queue::QueueManager;
 use crate::features::topic::TopicManager;
@@ -44,14 +45,38 @@ impl NexoEngine {
 
 #[tokio::main]
 async fn main() {
-    // 1. Initialize the Engine
-    // This creates all the data structures in memory.
+    dotenv::dotenv().ok();
+
     let engine = NexoEngine::new();
     
+    let host = std::env::var("NEXO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("{}:{}", host, port);
+
     println!("🚀 Nexo Server v0.1 Starting...");
     println!("📦 Managers initialized: KV, Queue, MQTT, Stream");
 
-    // 2. Start the Network Layer
-    // We pass the engine so the network handler can use it.
-    server::network::start(engine).await;
+    let listener = TcpListener::bind(&addr)
+        .await
+        .expect(&format!("Failed to bind to {}", addr));
+
+    println!("[Server] Nexo listening on {}", addr);
+
+    loop {
+        let (socket, addr) = listener
+            .accept()
+            .await
+            .expect("Failed to accept connection");
+
+        let engine_clone = engine.clone();
+
+        println!("[Server] New connection from {}", addr);
+
+        tokio::spawn(async move {
+            if let Err(e) = server::network::handle_connection(socket, engine_clone).await {
+                eprintln!("[Server] Error handling connection from {}: {}", addr, e);
+            }
+            println!("[Server] Connection closed from {}", addr);
+        });
+    }
 }

@@ -338,5 +338,76 @@ fn concorrenza() {
 
 
 
+/*
+    Struct (Dati) + Impl (Logica) + Trait (Comportamento condiviso)
+    Separazione: I dati (struct) sono separati dalla logica (impl). Puoi avere più blocchi impl per la stessa struct (es. uno per i metodi base, uno per un Trait specifico).
+        - self esplicito: A differenza di this in TS che è implicito, in Rust devi dichiarare come vuoi usare l'istanza:
+        - &self: Solo lettura.
+        - &mut self: Lettura e Scrittura.
+        - self: "Consumo" (l'oggetto viene distrutto o spostato alla fine del metodo).
+ */
+fn oop() {
+    // 1. STRUCT: Solo i Dati (lo Stato)
+    // Niente logica qui, solo la forma dei dati.
+    struct Wallet {
+        owner: String,
+        balance: f64,
+    }
+
+    // 2. TRAIT: L'Interfaccia (il Contratto)
+    // Definisce COSA si può fare, ma non COME.
+    // Equivalente a 'interface' in TS.
+    trait Reportable {
+        fn summary(&self) -> String;
+    }
+
+    // 3. IMPL: L'Implementazione dei Metodi (la Logica)
+    // Qui leghi la logica ai dati della struct.
+    impl Wallet {
+        // "Metodo statico" / Costruttore (in TS: static new() o constructor)
+        // Non prende 'self' come parametro.
+        fn new(owner: &str) -> Self {
+            Self {
+                owner: owner.to_string(),
+                balance: 0.0,
+            }
+        }
+
+        // Metodo di istanza che LEGGE lo stato (in TS: getBalance())
+        // &self = prende l'istanza in prestito sola lettura (borrowing immutabile)
+        fn get_balance(&self) -> f64 {
+            self.balance
+        }
+
+        // Metodo di istanza che MODIFICA lo stato (in TS: deposit())
+        // &mut self = prende l'istanza in prestito esclusivo per modifica (borrowing mutabile)
+        fn deposit(&mut self, amount: f64) {
+            self.balance += amount;
+            println!("Depositati {} per {}", amount, self.owner);
+        }
+    }
+
+    // 4. IMPL di un TRAIT: Adesione al contratto
+    // Implementiamo l'interfaccia 'Reportable' per 'Wallet'
+    impl Reportable for Wallet {
+        fn summary(&self) -> String {
+            format!("Wallet di {}: Totale €{}", self.owner, self.balance)
+        }
+    }
+
+    fn main() {
+        // Istanziazione
+        let mut my_wallet = Wallet::new("Emanuele");
+
+        // Chiamata metodo mutabile
+        my_wallet.deposit(100.0);
+
+        // Chiamata metodo di lettura
+        println!("Saldo attuale: {}", my_wallet.get_balance());
+
+        // Uso del Trait
+        println!("{}", my_wallet.summary());
+    }
+}
 
 

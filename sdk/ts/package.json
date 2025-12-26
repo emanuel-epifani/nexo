@@ -1,0 +1,15 @@
+{
+  "name": "@nexo/client",
+  "version": "0.1.0",
+  "description": "TypeScript Client SDK for Nexo Broker (Binary Protocol)",
+  "main": "src/client.ts",
+  "types": "src/client.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}
