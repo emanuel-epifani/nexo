@@ -1,8 +1,47 @@
 //! Binary Protocol Implementation
-//! Header: [Cmd: 1 byte] [BodyLen: 4 bytes] [Body...]
+//! Header (9 bytes): [FrameType: 1] [CorrelationID: 4] [PayloadLen: 4]
+//! Payload: [Opcode/Status: 1] [Data...]
 
 use bytes::{BufMut, BytesMut};
 use std::convert::TryInto;
+
+// ========================================
+// FRAME TYPES (The "Envelope" Type)
+// ========================================
+pub const TYPE_REQUEST: u8  = 0x01;
+pub const TYPE_RESPONSE: u8 = 0x02;
+pub const TYPE_PUSH: u8     = 0x03;
+pub const TYPE_ERROR: u8    = 0x04;
+pub const TYPE_PING: u8     = 0x05;
+pub const TYPE_PONG: u8     = 0x06;
+
+// ========================================
+// RESPONSE STATUS (Inside Response Payload)
+// ========================================
+pub const STATUS_OK: u8   = 0x00;
+pub const STATUS_ERR: u8  = 0x01;
+pub const STATUS_NULL: u8 = 0x02;
+pub const STATUS_DATA: u8 = 0x03;
+
+// ========================================
+// OPCODES (First byte of Request Payload)
+// ========================================
+// KV: 0x02 - 0x0F
+pub const OP_KV_SET: u8 = 0x02;
+pub const OP_KV_GET: u8 = 0x03;
+pub const OP_KV_DEL: u8 = 0x04;
+
+// Queue: 0x10 - 0x1F
+pub const OP_Q_PUSH: u8 = 0x11;
+pub const OP_Q_POP: u8 = 0x12;
+
+// Topic: 0x20 - 0x2F
+pub const OP_PUB: u8 = 0x21;
+pub const OP_SUB: u8 = 0x22;
+
+// Stream: 0x30 - 0x3F
+pub const OP_S_ADD: u8 = 0x31;
+pub const OP_S_READ: u8 = 0x32;
 
 // ========================================
 // TYPES
@@ -14,10 +53,11 @@ pub enum ParseError {
     Invalid(String),
 }
 
-/// Represents a parsed request frame (Header + Body slice)
+/// Represents a parsed frame (Header + Body slice)
 #[derive(Debug)]
-pub struct Request<'a> {
-    pub opcode: u8,
+pub struct Frame<'a> {
+    pub frame_type: u8,
+    pub id: u32,
     pub payload: &'a [u8],
 }
 
@@ -27,82 +67,55 @@ pub enum Response {
     Ok,
     Data(Vec<u8>),
     Error(String),
-    Null, // e.g. Key not found
+    Null,
 }
 
 // ========================================
-// CONSTANTS
+// PARSER (from socket -> to server)
 // ========================================
 
-// Response Status Codes
-const STATUS_OK: u8   = 0x00;
-const STATUS_ERR: u8  = 0x01;
-const STATUS_NULL: u8 = 0x02;
-const STATUS_DATA: u8 = 0x03;
-
-// ========================================
-// PARSER
-// ========================================
-
-pub fn parse_request(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ParseError> {
-    // 1. Check Header Size (1 byte Opcode + 4 bytes Len = 5 bytes)
-    if buf.len() < 5 {
-        return Ok(None);
-    }
-
-    // 2. Read Header
-    let opcode = buf[0];
-    // Read 4 bytes for length (Big Endian)
-    let len_bytes: [u8; 4] = buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?;
-    let payload_len = u32::from_be_bytes(len_bytes) as usize;
-
-    let total_len = 5 + payload_len;
-
-    // 3. Check Payload Size
-    if buf.len() < total_len {
-        return Ok(None);
-    }
-
-    // 4. Extract Payload (Zero-Copy)
-    let payload = &buf[5..total_len];
-
-    Ok(Some((
-        Request {
-            opcode,
-            payload,
-        },
-        total_len,
-    )))
+pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError> {
+    if buf.len() < 9 { return Ok(None); }
+    let frame_type = buf[0];
+    let id = u32::from_be_bytes(buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?);
+    let payload_len = u32::from_be_bytes(buf[5..9].try_into().map_err(|_| ParseError::Incomplete)?) as usize;
+    let total_len = 9 + payload_len;
+    if buf.len() < total_len { return Ok(None); }
+    let payload = &buf[9..total_len];
+    Ok(Some((Frame { frame_type, id, payload }, total_len)))
 }
 
 // ========================================
-// ENCODER
+// ENCODER (from server -> to socket)
 // ========================================
 
-pub fn encode_response(response: &Response) -> Vec<u8> {
+pub fn encode_response(id: u32, response: &Response) -> Vec<u8> {
     let mut buf = BytesMut::new();
-
+    buf.put_u8(TYPE_RESPONSE);
+    buf.put_u32(id);
     match response {
-        Response::Ok => {
-            buf.put_u8(STATUS_OK);
-            buf.put_u32(0); // Len 0
-        }
+        Response::Ok => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
         Response::Error(msg) => {
+            let b = msg.as_bytes();
+            buf.put_u32((1 + b.len()) as u32);
             buf.put_u8(STATUS_ERR);
-            let bytes = msg.as_bytes();
-            buf.put_u32(bytes.len() as u32);
-            buf.put_slice(bytes);
+            buf.put_slice(b);
         }
-        Response::Null => {
-            buf.put_u8(STATUS_NULL);
-            buf.put_u32(0);
-        }
+        Response::Null => { buf.put_u32(1); buf.put_u8(STATUS_NULL); }
         Response::Data(data) => {
+            buf.put_u32((1 + data.len()) as u32);
             buf.put_u8(STATUS_DATA);
-            buf.put_u32(data.len() as u32);
             buf.put_slice(data);
         }
     }
+    buf.to_vec()
+}
 
+pub fn encode_push(id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut buf = BytesMut::with_capacity(9 + payload.len());
+    buf.put_u8(TYPE_PUSH);
+    buf.put_u32(id);
+    buf.put_u32(payload.len() as u32);
+    buf.put_slice(payload);
     buf.to_vec()
 }

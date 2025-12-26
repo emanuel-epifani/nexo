@@ -5,7 +5,7 @@ import path from 'node:path';
 let serverProcess: ChildProcess | null = null;
 
 const ROOT_DIR = path.resolve(__dirname, '../../../../');
-const BINARY_PATH = path.join(ROOT_DIR, 'target/debug/nexo');
+const BINARY_PATH = path.join(ROOT_DIR, 'target/release/nexo');
 
 /**
  * Checks if the Nexo server is already running on the given host and port.

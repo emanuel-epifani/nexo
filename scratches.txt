@@ -1,63 +1,32 @@
 
+- singolo binario
+quando buildo nexo buildo anche react e comprimo file statici generati dentro un binario via create come rust-embed. in docker esponiamo solo la 8080 (broker) e 8081 (dashboard)
 
-[Opcode: 0x02] [PayloadLen: 15] [KeyLen: 3] [key: "foo"] [value: "bar123456"]
-     ↑              ↑                    ↑─────────────────────────────────↑
-  già gestito   già gestito                    QUESTO è il payload
-
-
-
-TCP Socket
-    ↓
-[0x02][0x00 0x00 0x00 0x0F][0x00 0x00 0x00 0x03]['f''o''o']['b''a''r']
-    ↓
-parse_request() ← Layer 1: Framing
-    ↓
-Request {
-    opcode: 0x02,
-    payload: [0x00 0x00 0x00 0x03]['f''o''o']['b''a''r']
-}
-    ↓
-Command::from_request() ← Layer 2: Dispatch
-    ↓
-KvCommand::parse() ← Layer 3: Deserializzazione
-    ↓
-    ├─ parse_length_prefixed_string() ← Helper (riutilizzabile)
-    │      ↓
-    │   ("foo", [b'a', b'r'])
-    ↓
-KvCommand::Set {
-    key: "foo",
-    value: vec![b'a', b'r'],
-    ttl: None
-}
-    ↓
-route() in routing.rs ← Layer 4: Business logic
-    ↓
-engine.kv.set("foo", b"bar", None)
-
-
-KV_SET: [key_len][key][value]
-Q_PUSH: [queue_len][queue][value]
-KV_GET: [key] (tutto il payload)
-S_READ: [topic_len][topic][offset:u64]
-
-
-Ora (5layers)
-network.rs
-    ↓ parse_request()
-protocol.rs (Command enum + tutti i parse)
-    ↓ Command::from_request()
-routing.rs (pattern match gigante)
-    ↓ engine.kv.method()
-kv_manager.rs
+- snapshto
+ogni broker implementa un metodo snapshot che "clona" il suo stato interno via serde e trasforma ogni stato (dashmap/vectore o altro) in un json,
 
 
 
-Dopo (3 layer)
-network.rs
-    ↓ parse_request() → (opcode, payload)
-routing.rs (range-based dispatch)
-    ↓ KvCommands::handle()
-kv/commands.rs (parse + execute)
-    ↓ manager.method()
-kv_manager.rs
+approccio Request ID
+
+- "Request ID" (più complesso ma potente)
+- "Frame Type + Order" (più semplice, stile Redis)
+
+Oggi abbiamo 5 byte:
+[Stato: 1b] [Lunghezza: 4b]
+Domani avremo 9 byte:
+[ID: 4b] [Stato/Tipo: 1b] [Lunghezza: 4b]
+
+
+
+----------------------------------------
+1. Kafka (Il più simile a quello che stiamo facendo)
+Kafka è un mostro di performance e gestisce di tutto: messaggi, log, configurazioni, offset.
+La Soluzione: Ogni singola richiesta Kafka ha un correlation_id (un numero intero).
+Come funziona: Il client invia l'ID, il server elabora e quando risponde mette lo stesso ID nell'header della risposta.
+Perché lo fa? Kafka permette il multiplexing. Puoi inviare 10 richieste di "produzione messaggi" e 5 richieste di "lettura" tutte insieme sulla stessa socket. Non devi aspettare la risposta della prima per mandare la seconda.
+
+2. MQTT (Il re dell'IoT e del Pub/Sub)
+MQTT deve gestire messaggi che arrivano dal server in qualsiasi momento (Push) e conferme di ricezione (Ack).
+La Soluzione: Usa un Fixed Header dove i primi 4 bit del primo byte indicano il Packet Type (es: 3 è un messaggio Pubblicato, 4 è un PubAck, 12 è un Ping).
+Correlation: Per i comandi che richiedono risposta (come SUBSCRIBE), usa un Packet Identifier (un ID di 2 byte) per associare la risposta (SUBACK) alla richiesta.

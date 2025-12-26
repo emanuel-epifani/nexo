@@ -1,24 +1,20 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
 mod server;
-mod features;
-// mod debug;
+mod brokers;
 mod utils;
 
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use crate::features::kv::KvManager;
-use crate::features::queue::QueueManager;
-use crate::features::topic::TopicManager;
-use crate::features::stream::StreamManager;
+use crate::brokers::kv::KvManager;
+use crate::brokers::queue::QueueManager;
+use crate::brokers::topic::TopicManager;
+use crate::brokers::stream::StreamManager;
 
 // ========================================
 // ENGINE (The Singleton)
 // ========================================
 
-/// The central brain of the server.
-/// Holds references to all state managers.
-/// This struct is cheap to clone (all fields are Arcs).
 #[derive(Clone)]
 pub struct NexoEngine {
     pub kv: Arc<KvManager>,
@@ -28,7 +24,6 @@ pub struct NexoEngine {
 }
 
 impl NexoEngine {
-    /// Initialize all managers
     pub fn new() -> Self {
         Self {
             kv: Arc::new(KvManager::new()),
@@ -53,30 +48,30 @@ async fn main() {
     let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("{}:{}", host, port);
 
-    println!("🚀 Nexo Server v0.1 Starting...");
-    println!("📦 Managers initialized: KV, Queue, MQTT, Stream");
+    println!("🚀 Nexo Server v0.2 Starting...");
+    println!("📦 Brokers initialized: KV, Queue, Topic, Stream");
 
     let listener = TcpListener::bind(&addr)
         .await
-        .expect(&format!("Failed to bind to {}", addr));
+        .expect("Failed to bind");
 
     println!("[Server] Nexo listening on {}", addr);
 
     loop {
-        let (socket, addr) = listener
+        let (socket, client_addr) = listener
             .accept()
             .await
             .expect("Failed to accept connection");
 
         let engine_clone = engine.clone();
 
-        println!("[Server] New connection from {}", addr);
+        println!("[Server] New connection from {}", client_addr);
 
         tokio::spawn(async move {
             if let Err(e) = server::network::handle_connection(socket, engine_clone).await {
-                eprintln!("[Server] Error handling connection from {}: {}", addr, e);
+                eprintln!("[Server] Error from {}: {}", client_addr, e);
             }
-            println!("[Server] Connection closed from {}", addr);
+            println!("[Server] Connection closed from {}", client_addr);
         });
     }
 }
