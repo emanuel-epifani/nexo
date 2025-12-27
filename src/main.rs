@@ -68,7 +68,7 @@ async fn main() {
         println!("[Server] New connection from {}", client_addr);
 
         tokio::spawn(async move {
-            if let Err(e) = server::network::handle_connection(socket, engine_clone).await {
+            if let Err(e) = server::socket_network::handle_connection(socket, engine_clone).await {
                 eprintln!("[Server] Error from {}: {}", client_addr, e);
             }
             println!("[Server] Connection closed from {}", client_addr);

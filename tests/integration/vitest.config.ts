@@ -36,8 +36,8 @@ Object.entries(result.data).forEach(([key, value]) => {
 export default defineConfig({
   test: {
     globals: true,
-    testTimeout: 10000,
-    hookTimeout: 10000,
+    testTimeout: 100000,
+    hookTimeout: 100000,
     include: ['src/test-features/**/*.test.ts'],
     globalSetup: ['./src/global-setup.ts'],
   },

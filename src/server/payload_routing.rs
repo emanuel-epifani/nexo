@@ -1,9 +1,29 @@
 //! Request Router: Routes opcodes to broker handlers
 //! Contains the main routing switch and all parsing helpers.
 
-use crate::server::protocol::*;
+use crate::server::header_protocol::*;
 use crate::NexoEngine;
 use bytes::Bytes;
+
+// ========================================
+// OPCODES (First byte of Request Payload)
+// ========================================
+// KV: 0x02 - 0x0F
+pub const OP_KV_SET: u8 = 0x02;
+pub const OP_KV_GET: u8 = 0x03;
+pub const OP_KV_DEL: u8 = 0x04;
+
+// Queue: 0x10 - 0x1F
+pub const OP_Q_PUSH: u8 = 0x11;
+pub const OP_Q_POP: u8 = 0x12;
+
+// Topic: 0x20 - 0x2F
+pub const OP_PUB: u8 = 0x21;
+pub const OP_SUB: u8 = 0x22;
+
+// Stream: 0x30 - 0x3F
+pub const OP_S_ADD: u8 = 0x31;
+pub const OP_S_READ: u8 = 0x32;
 
 // ========================================
 // PARSING HELPERS
@@ -40,13 +60,21 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
     match opcode {
         // KV BROKER
         OP_KV_SET => {
-            let (key, val_ptr) = match parse_string(&body) {
+            // Payload SET: [TTL: 8b][KeyLen: 4b][Key][Value]
+            if body.len() < 12 { return Response::Error("Payload too short for SET".to_string()); }
+            
+            let ttl_secs = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
+            let ttl = if ttl_secs == 0 { None } else { Some(ttl_secs) };
+            
+            let (key, val_ptr) = match parse_string(&body[8..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
+            
             let offset = body.len() - val_ptr.len();
             let val = body.slice(offset..);
-            engine.kv.set(key.to_string(), val, None)
+            
+            engine.kv.set(key.to_string(), val, ttl)
                 .map(|_| Response::Ok).unwrap_or_else(Response::Error)
         }
         OP_KV_GET => {

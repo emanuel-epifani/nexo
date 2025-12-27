@@ -7,11 +7,11 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use std::sync::Arc;
 
-use crate::server::protocol::{
+use crate::server::header_protocol::{
     encode_response, parse_frame, ParseError, Response,
     TYPE_REQUEST, TYPE_PING
 };
-use crate::server::router::route;
+use crate::server::payload_routing::route;
 use crate::NexoEngine;
 
 /// Internal message type for the write loop

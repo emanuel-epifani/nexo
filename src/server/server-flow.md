@@ -18,18 +18,52 @@ Nexo uses a fixed-header binary protocol designed for performance, multiplexing,
 
 The payload starts with a 1-byte **Opcode** (for Requests) or **Status** (for Responses), followed by the specific data.
 
-#### Request Payload
-`[Opcode: 1b] [Data: Nb]`
 
-**Opcode Ranges:**
-- **KV Store** (`0x02-0x0F`): SET, GET, DEL
-- **Queue** (`0x10-0x1F`): PUSH, POP
-- **Topic** (`0x20-0x2F`): PUB, SUB
-- **Stream** (`0x30-0x3F`): ADD, READ
+```agsl
+REQUEST (Dal Client -> Server)
+Esempio: KV_SET "key" "val" (ID=100)
++-------------------+---------------------------------------+
+|      HEADER       |                PAYLOAD                |
+|      (9 bytes)    |           (Variabile: N bytes)        |
++-------------------+---------------------------------------+
+| Type | ID | Len   | Opcode | KeyLen | Key... | Value... |
+| 0x01 | 100| 11    |  0x02  |   3    | "key"  |  "val"   |
++------+----+-------+--------+--------+--------+----------+
+  ^      ^     ^        ^        ^
+  |      |     |        |        |
+Request  |   7+1+3    KV_SET   String
+         |   = 11              Format
+         
+------------------------------------------------------------------------------------------------------------------------
 
-#### Response Payload
-`[Status: 1b] [Data: Nb]`
-- Status: `0x00` (OK), `0x01` (ERROR), `0x02` (NULL), `0x03` (DATA)
+         
+RESPONSE (Dal Server -> Client)
+Esempio: Risposta OK per l'ID 100
++-------------------+-----------------------+
+|      HEADER       |        PAYLOAD        |
++-------------------+-----------------------+
+| Type | ID | Len   | Status |     Body     |
+| 0x02 | 100|  1    |  0x00  |   (vuoto)    |
++------+----+-------+--------+--------------+
+  ^      ^     ^        ^
+  |      |     |        |
+Response |   1 byte    OK
+
+------------------------------------------------------------------------------------------------------------------------
+
+PUSH (Dal Server -> Client, es. PubSub)
+Esempio: Messaggio su topic "news"
++-------------------+----------------------------------+
+|      HEADER       |             PAYLOAD              |
++-------------------+----------------------------------+
+| Type | ID | Len   |            Body Data             |
+| 0x03 | 0  |  N    |   ...messaggio custom...         |
++------+----+-------+----------------------------------+
+  ^      ^
+  |      |
+ PUSH   ID=0 (o TopicID)
+
+```
 
 ### Data Encoding
 
