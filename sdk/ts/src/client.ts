@@ -23,7 +23,7 @@ enum Opcode {
   KV_SET = 0x02,
   KV_GET = 0x03,
   KV_DEL = 0x04,
-  
+
   // Queue commands (0x10-0x1F)
   Q_PUSH = 0x11,
   Q_POP = 0x12,
@@ -43,35 +43,50 @@ interface ResponseFrame {
   data: Buffer;
 }
 
-// --- STREAM DECODER (TCP Accumulator) ---
+// --- STREAM DECODER (Optimized TCP Accumulator) ---
 
 class StreamDecoder {
-  private buffer: Buffer = Buffer.alloc(0);
+  private chunks: Buffer[] = [];
+  private totalLength: number = 0;
 
   push(chunk: Buffer) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
+    this.chunks.push(chunk);
+    this.totalLength += chunk.length;
   }
 
   nextFrame(): { type: number, id: number, payload: Buffer } | null {
     // 1. Need at least 9 bytes for the header
-    if (this.buffer.length < 9) return null;
+    if (this.totalLength < 9) return null;
 
-    // 2. Read payload length from bytes [5..9]
-    const payloadLen = this.buffer.readUInt32BE(5);
+    // 2. Ensure contiguous buffer for header reading
+    if (this.chunks.length > 1) {
+      this.chunks = [Buffer.concat(this.chunks)];
+    }
+
+    const buffer = this.chunks[0];
+    const payloadLen = buffer.readUInt32BE(5);
     const totalLen = 9 + payloadLen;
 
     // 3. Need the full packet
-    if (this.buffer.length < totalLen) return null;
+    if (this.totalLength < totalLen) return null;
 
-    // 4. Extract
+    // 4. Extract frame data
     const frame = {
-      type: this.buffer[0],
-      id: this.buffer.readUInt32BE(1),
-      payload: this.buffer.subarray(9, totalLen)
+      type: buffer[0],
+      id: buffer.readUInt32BE(1),
+      payload: buffer.subarray(9, totalLen)
     };
 
-    // 5. Clean up buffer
-    this.buffer = this.buffer.subarray(totalLen);
+    // 5. Efficiently update state without unnecessary copies
+    const remaining = buffer.subarray(totalLen);
+    if (remaining.length > 0) {
+      this.chunks = [remaining];
+      this.totalLength = remaining.length;
+    } else {
+      this.chunks = [];
+      this.totalLength = 0;
+    }
+
     return frame;
   }
 }
@@ -88,7 +103,7 @@ export class NexoClient {
   private isConnected: boolean = false;
   private host: string;
   private port: number;
-  
+
   private decoder = new StreamDecoder();
   private nextId = 1;
   private pendingRequests = new Map<number, { resolve: Function, reject: Function }>();
@@ -152,25 +167,30 @@ export class NexoClient {
   }
 
   /**
-   * Universal sender with multiplexing support.
+   * Universal sender with single-allocation and multiplexing support.
    */
   private async send(opcode: number, payloadBody: Buffer): Promise<{ status: ResponseStatus, data: Buffer }> {
     if (!this.isConnected) throw new Error('Client not connected');
 
     const id = this.nextId++;
-    
-    // 1. Create Application Payload: [Opcode:1][Body:N]
-    const payload = Buffer.concat([Buffer.from([opcode]), payloadBody]);
+    const payloadLen = 1 + payloadBody.length; // Opcode (1) + Body
+    const totalSize = 9 + payloadLen;          // Header (9) + Payload
 
-    // 2. Create Header: [Type:1][ID:4][Len:4]
-    const header = Buffer.alloc(9);
-    header.writeUInt8(FrameType.REQUEST, 0);
-    header.writeUInt32BE(id, 1);
-    header.writeUInt32BE(payload.length, 5);
+    // SINGLE ALLOCATION: Much faster than multiple Buffer.concat calls
+    const message = Buffer.allocUnsafe(totalSize);
+
+    // 1. Write Header: [Type:1][ID:4][Len:4]
+    message.writeUInt8(FrameType.REQUEST, 0);
+    message.writeUInt32BE(id, 1);
+    message.writeUInt32BE(payloadLen, 5);
+
+    // 2. Write Application Payload: [Opcode:1][Body:N]
+    message.writeUInt8(opcode, 9);
+    payloadBody.copy(message, 10);
 
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
-      this.socket.write(Buffer.concat([header, payload]));
+      this.socket.write(message);
     });
   }
 
@@ -186,9 +206,9 @@ export class NexoClient {
     set: async (key: string, value: string | Buffer): Promise<void> => {
       const keyBuf = Buffer.from(key, 'utf8');
       const valBuf = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
-      
+
       // KV_SET Payload: [KeyLen:4][Key][Value]
-      const kvPayload = Buffer.alloc(4 + keyBuf.length + valBuf.length);
+      const kvPayload = Buffer.allocUnsafe(4 + keyBuf.length + valBuf.length);
       kvPayload.writeUInt32BE(keyBuf.length, 0);
       keyBuf.copy(kvPayload, 4);
       valBuf.copy(kvPayload, 4 + keyBuf.length);
@@ -199,12 +219,12 @@ export class NexoClient {
 
     get: async (key: string): Promise<Buffer | null> => {
       const keyBuf = Buffer.from(key, 'utf8');
-      const payload = Buffer.alloc(4 + keyBuf.length);
+      const payload = Buffer.allocUnsafe(4 + keyBuf.length);
       payload.writeUInt32BE(keyBuf.length, 0);
       keyBuf.copy(payload, 4);
 
       const res = await this.send(Opcode.KV_GET, payload);
-      
+
       if (res.status === ResponseStatus.NULL) return null;
       if (res.status === ResponseStatus.DATA) return res.data;
       if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
@@ -213,7 +233,7 @@ export class NexoClient {
 
     del: async (key: string): Promise<void> => {
       const keyBuf = Buffer.from(key, 'utf8');
-      const payload = Buffer.alloc(4 + keyBuf.length);
+      const payload = Buffer.allocUnsafe(4 + keyBuf.length);
       payload.writeUInt32BE(keyBuf.length, 0);
       keyBuf.copy(payload, 4);
 
