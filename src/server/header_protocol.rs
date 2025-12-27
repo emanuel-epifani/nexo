@@ -69,17 +69,23 @@ pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError>
 // ENCODER (from server -> to socket)
 // ========================================
 
-pub fn encode_response(id: u32, response: &Response) -> Vec<u8> {
-    let mut buf = BytesMut::new();
+pub fn encode_response(id: u32, response: &Response) -> Bytes {
+    // Pre-calculate exact size: header(9) + status(1) + data
+    let data_len = match response {
+        Response::Ok | Response::Null => 0,
+        Response::Error(msg) => msg.len(),
+        Response::Data(data) => data.len(),
+    };
+    let mut buf = BytesMut::with_capacity(10 + data_len);
+    
     buf.put_u8(TYPE_RESPONSE);
     buf.put_u32(id);
     match response {
         Response::Ok => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
         Response::Error(msg) => {
-            let b = msg.as_bytes();
-            buf.put_u32((1 + b.len()) as u32);
+            buf.put_u32((1 + msg.len()) as u32);
             buf.put_u8(STATUS_ERR);
-            buf.put_slice(b);
+            buf.put_slice(msg.as_bytes());
         }
         Response::Null => { buf.put_u32(1); buf.put_u8(STATUS_NULL); }
         Response::Data(data) => {
@@ -88,14 +94,14 @@ pub fn encode_response(id: u32, response: &Response) -> Vec<u8> {
             buf.put_slice(data);
         }
     }
-    buf.to_vec()
+    buf.freeze()
 }
 
-pub fn encode_push(id: u32, payload: &[u8]) -> Vec<u8> {
+pub fn encode_push(id: u32, payload: &[u8]) -> Bytes {
     let mut buf = BytesMut::with_capacity(9 + payload.len());
     buf.put_u8(TYPE_PUSH);
     buf.put_u32(id);
     buf.put_u32(payload.len() as u32);
     buf.put_slice(payload);
-    buf.to_vec()
+    buf.freeze()
 }
