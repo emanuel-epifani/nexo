@@ -37,62 +37,57 @@ enum Opcode {
   S_READ = 0x32,
 }
 
-interface ResponseFrame {
-  id: number;
-  status: ResponseStatus;
-  data: Buffer;
-}
+// --- RING BUFFER DECODER (Zero-Copy, Pre-allocated) ---
 
-// --- STREAM DECODER (Zero-Waste TCP Accumulator) ---
+class RingDecoder {
+  private buf: Buffer;
+  private head = 0;  // Read position
+  private tail = 0;  // Write position
 
-class StreamDecoder {
-  private chunks: Buffer[] = [];
-  private totalLength: number = 0;
-
-  push(chunk: Buffer) {
-    this.chunks.push(chunk);
-    this.totalLength += chunk.length;
+  constructor(size = 512 * 1024) {
+    this.buf = Buffer.allocUnsafe(size);
   }
 
-  nextFrame(): { type: number, id: number, payload: Buffer } | null {
-    if (this.totalLength < 9) return null;
+  push(chunk: Buffer): void {
+    const needed = chunk.length;
+    const available = this.buf.length - this.tail;
 
-    let type: number;
-    let id: number;
-    let payloadLen: number;
-
-    const first = this.chunks[0];
-    if (first.length >= 9) {
-      type = first[0];
-      id = first.readUInt32BE(1);
-      payloadLen = first.readUInt32BE(5);
-    } else {
-      const head = Buffer.concat(this.chunks, 9);
-      type = head[0];
-      id = head.readUInt32BE(1);
-      payloadLen = head.readUInt32BE(5);
+    // Compact if not enough space at end
+    if (available < needed) {
+      const used = this.tail - this.head;
+      if (used > 0) {
+        this.buf.copy(this.buf, 0, this.head, this.tail);
+      }
+      this.tail = used;
+      this.head = 0;
     }
 
+    chunk.copy(this.buf, this.tail);
+    this.tail += needed;
+  }
+
+  nextFrame(): { type: number; id: number; payload: Buffer } | null {
+    const available = this.tail - this.head;
+    if (available < 9) return null;
+
+    const type = this.buf[this.head];
+    const id = this.buf.readUInt32BE(this.head + 1);
+    const payloadLen = this.buf.readUInt32BE(this.head + 5);
     const totalLen = 9 + payloadLen;
-    if (this.totalLength < totalLen) return null;
 
-    const fullBuffer = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks);
-    const frame = {
-      type,
-      id,
-      payload: fullBuffer.subarray(9, totalLen)
-    };
+    if (available < totalLen) return null;
 
-    const remainingLen = this.totalLength - totalLen;
-    if (remainingLen > 0) {
-      this.chunks = [fullBuffer.subarray(totalLen)];
-      this.totalLength = remainingLen;
-    } else {
-      this.chunks = [];
-      this.totalLength = 0;
+    // subarray is zero-copy - shares memory with ring buffer
+    const payload = this.buf.subarray(this.head + 9, this.head + totalLen);
+    this.head += totalLen;
+
+    // Reset positions when buffer is empty (keeps memory locality)
+    if (this.head === this.tail) {
+      this.head = 0;
+      this.tail = 0;
     }
 
-    return frame;
+    return { type, id, payload };
   }
 }
 
@@ -103,21 +98,39 @@ export interface NexoOptions {
   port?: number;
 }
 
+// Pending request handler type
+type PendingHandler = { resolve: (v: { status: ResponseStatus; data: Buffer }) => void; reject: (e: Error) => void };
+
+// ID space constants
+const ID_MASK = 0xFFFF;      // 65535 max concurrent requests
+const ID_SPACE = ID_MASK + 1; // 65536
+
 export class NexoClient {
   private socket: net.Socket;
-  private isConnected: boolean = false;
+  private isConnected = false;
   private host: string;
   private port: number;
 
-  private decoder = new StreamDecoder();
+  // Optimized decoder
+  private decoder = new RingDecoder();
+
+  // ID management with wrap-around
   private nextId = 1;
-  private pendingRequests = new Map<number, { resolve: Function, reject: Function }>();
-  private isCorked = false;
+
+  // Sparse array for pending requests (faster than Map for sequential IDs)
+  private pending: (PendingHandler | undefined)[] = new Array(ID_SPACE);
+
+  // Batch write buffer
+  private writeBuf: Buffer;
+  private writeOffset = 0;
+  private flushScheduled = false;
 
   constructor(options: NexoOptions = {}) {
     this.host = options.host || '127.0.0.1';
     this.port = options.port || 8080;
     this.socket = new net.Socket();
+    this.socket.setNoDelay(true); // Disable Nagle for lower latency
+    this.writeBuf = Buffer.allocUnsafe(64 * 1024);
     this.setupSocketListeners();
   }
 
@@ -133,12 +146,13 @@ export class NexoClient {
       let frame;
       while ((frame = this.decoder.nextFrame())) {
         if (frame.type === FrameType.RESPONSE) {
-          const req = this.pendingRequests.get(frame.id);
-          if (req) {
+          const handler = this.pending[frame.id];
+          if (handler) {
             const status = frame.payload[0] as ResponseStatus;
-            const data = frame.payload.subarray(1);
-            req.resolve({ status, data });
-            this.pendingRequests.delete(frame.id);
+            // Copy data since payload references ring buffer (will be overwritten)
+            const data = Buffer.from(frame.payload.subarray(1));
+            handler.resolve({ status, data });
+            this.pending[frame.id] = undefined;
           }
         }
       }
@@ -146,9 +160,13 @@ export class NexoClient {
 
     this.socket.on('error', (err) => {
       this.isConnected = false;
-      for (const [id, req] of this.pendingRequests) {
-        req.reject(err);
-        this.pendingRequests.delete(id);
+      // Reject all pending
+      for (let i = 0; i < ID_SPACE; i++) {
+        const handler = this.pending[i];
+        if (handler) {
+          handler.reject(err as Error);
+          this.pending[i] = undefined;
+        }
       }
     });
 
@@ -170,37 +188,77 @@ export class NexoClient {
     });
   }
 
-  private async send(opcode: number, payloadBody: Buffer): Promise<{ status: ResponseStatus, data: Buffer }> {
-    if (!this.isConnected) throw new Error('Client not connected');
+  private flushBatch = (): void => {
+    this.flushScheduled = false;
+    if (this.writeOffset === 0) return;
 
-    const id = this.nextId++;
+    // Write entire batch in one syscall
+    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
+    this.writeOffset = 0;
+  };
+
+  private send(opcode: number, payloadBody: Buffer): Promise<{ status: ResponseStatus; data: Buffer }> {
+    if (!this.isConnected) return Promise.reject(new Error('Client not connected'));
+
+    // Wrap ID to stay within array bounds
+    const id = this.nextId;
+    this.nextId = (this.nextId + 1) & ID_MASK;
+    if (this.nextId === 0) this.nextId = 1; // Skip 0
+
     const payloadLen = 1 + payloadBody.length;
     const totalSize = 9 + payloadLen;
 
-    const message = Buffer.allocUnsafe(totalSize);
-    message.writeUInt8(FrameType.REQUEST, 0);
-    message.writeUInt32BE(id, 1);
-    message.writeUInt32BE(payloadLen, 5);
-    message.writeUInt8(opcode, 9);
-    payloadBody.copy(message, 10);
+    // Check if batch buffer needs flush
+    if (this.writeOffset + totalSize > this.writeBuf.length) {
+      // Sync flush for large messages
+      if (this.writeOffset > 0) {
+        this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
+        this.writeOffset = 0;
+      }
+      // If single message is too large, write directly
+      if (totalSize > this.writeBuf.length) {
+        const msg = Buffer.allocUnsafe(totalSize);
+        msg[0] = FrameType.REQUEST;
+        msg.writeUInt32BE(id, 1);
+        msg.writeUInt32BE(payloadLen, 5);
+        msg[9] = opcode;
+        payloadBody.copy(msg, 10);
+        this.socket.write(msg);
 
-    return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject });
-
-      if (!this.isCorked) {
-        this.socket.cork();
-        this.isCorked = true;
-        process.nextTick(() => {
-          this.socket.uncork();
-          this.isCorked = false;
+        return new Promise((resolve, reject) => {
+          this.pending[id] = { resolve, reject };
         });
       }
+    }
 
-      this.socket.write(message);
+    // Write to batch buffer (zero allocation path)
+    const buf = this.writeBuf;
+    let off = this.writeOffset;
+
+    buf[off] = FrameType.REQUEST;
+    buf.writeUInt32BE(id, off + 1);
+    buf.writeUInt32BE(payloadLen, off + 5);
+    buf[off + 9] = opcode;
+    payloadBody.copy(buf, off + 10);
+    this.writeOffset = off + totalSize;
+
+    // Schedule single flush per event loop tick
+    if (!this.flushScheduled) {
+      this.flushScheduled = true;
+      setImmediate(this.flushBatch);
+    }
+
+    return new Promise((resolve, reject) => {
+      this.pending[id] = { resolve, reject };
     });
   }
 
   disconnect(): void {
+    // Flush any pending writes
+    if (this.writeOffset > 0) {
+      this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
+      this.writeOffset = 0;
+    }
     this.socket.end();
     this.socket.destroy();
     this.isConnected = false;
@@ -209,51 +267,59 @@ export class NexoClient {
   // --- BROKERS ---
 
   public readonly kv = {
-    set: async (key: string, value: string | Buffer, ttlSeconds: number = 0): Promise<void> => {
-      const keyBuf = Buffer.from(key, 'utf8');
-      const valBuf = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+    set: (key: string, value: string | Buffer, ttlSeconds = 0): Promise<void> => {
+      const keyLen = Buffer.byteLength(key, 'utf8');
+      const valBuf = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
 
       // KV_SET Payload: [TTL:8][KeyLen:4][Key][Value]
-      const kvPayload = Buffer.allocUnsafe(8 + 4 + keyBuf.length + valBuf.length);
+      const payloadSize = 8 + 4 + keyLen + valBuf.length;
+      const payload = Buffer.allocUnsafe(payloadSize);
 
-      // Write TTL (uint64 Big Endian)
-      kvPayload.writeBigUInt64BE(BigInt(ttlSeconds), 0);
+      // Write TTL + KeyLen in one go
+      payload.writeBigUInt64BE(BigInt(ttlSeconds), 0);
+      payload.writeUInt32BE(keyLen, 8);
 
-      // Write Key Length (uint32 Big Endian)
-      kvPayload.writeUInt32BE(keyBuf.length, 8);
+      // Write key directly (avoids intermediate buffer)
+      payload.write(key, 12, 'utf8');
 
-      // Copy Key
-      keyBuf.copy(kvPayload, 12);
+      // Copy value
+      valBuf.copy(payload, 12 + keyLen);
 
-      // Copy Value
-      valBuf.copy(kvPayload, 12 + keyBuf.length);
-
-      const res = await this.send(Opcode.KV_SET, kvPayload);
-      if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+      return this.send(Opcode.KV_SET, payload).then((res) => {
+        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+      });
     },
 
-    get: async (key: string): Promise<Buffer | null> => {
-      const keyBuf = Buffer.from(key, 'utf8');
-      const payload = Buffer.allocUnsafe(4 + keyBuf.length);
-      payload.writeUInt32BE(keyBuf.length, 0);
-      keyBuf.copy(payload, 4);
+    get: (key: string): Promise<Buffer | null> => {
+      const keyLen = Buffer.byteLength(key, 'utf8');
+      const payload = Buffer.allocUnsafe(4 + keyLen);
+      payload.writeUInt32BE(keyLen, 0);
+      payload.write(key, 4, 'utf8');
 
-      const res = await this.send(Opcode.KV_GET, payload);
-
-      if (res.status === ResponseStatus.NULL) return null;
-      if (res.status === ResponseStatus.DATA) return res.data;
-      if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-      return null;
+      return this.send(Opcode.KV_GET, payload).then((res) => {
+        if (res.status === ResponseStatus.NULL) return null;
+        if (res.status === ResponseStatus.DATA) return res.data;
+        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+        return null;
+      });
     },
 
-    del: async (key: string): Promise<void> => {
-      const keyBuf = Buffer.from(key, 'utf8');
-      const payload = Buffer.allocUnsafe(4 + keyBuf.length);
-      payload.writeUInt32BE(keyBuf.length, 0);
-      keyBuf.copy(payload, 4);
+    del: (key: string): Promise<void> => {
+      const keyLen = Buffer.byteLength(key, 'utf8');
+      const payload = Buffer.allocUnsafe(4 + keyLen);
+      payload.writeUInt32BE(keyLen, 0);
+      payload.write(key, 4, 'utf8');
 
-      const res = await this.send(Opcode.KV_DEL, payload);
-      if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-    }
+      return this.send(Opcode.KV_DEL, payload).then((res) => {
+        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+      });
+    },
   };
 }
+
+/*
+Ring Buffer: Evita Buffer.concat() che copiava tutti i dati ad ogni frame
+Batch writes: Accumula messaggi in un buffer e li invia in una sola syscall per tick
+Array vs Map: Lookup pending[id] è O(1) senza overhead di hashing
+setImmediate vs nextTick: Migliore per I/O bound, non blocca altri callback
+ */
