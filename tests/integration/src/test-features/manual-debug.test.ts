@@ -24,7 +24,7 @@ describe('Manual Debug', () => {
     let operations = 0;
     const startTime = Date.now();
     const duration = 1000; // 1 secondo
-    const batchSize = 100; // Inviamo a gruppi per non intasare l'event loop di Node
+    const batchSize = 1000; // Inviamo a gruppi per non intasare l'event loop di Node
 
     console.log("🚀 Partenza benchmark...");
 
@@ -33,7 +33,7 @@ describe('Manual Debug', () => {
       for (let i = 0; i < batchSize; i++) {
         // Alterniamo SET e GET
         batch.push(nexo.kv.set(`bench:${operations + i}`, "payload"));
-        batch.push(nexo.kv.get(`bench:${operations + i}`));
+        // batch.push(nexo.kv.get(`bench:${operations + i}`));
       }
 
       await Promise.all(batch);

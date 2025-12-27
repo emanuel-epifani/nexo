@@ -2,7 +2,7 @@
 //! Header (9 bytes): [FrameType: 1] [CorrelationID: 4] [PayloadLen: 4]
 //! Payload: [Opcode/Status: 1] [Data...]
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, BytesMut, Bytes};
 use std::convert::TryInto;
 
 // ========================================
@@ -65,7 +65,7 @@ pub struct Frame<'a> {
 #[derive(Debug)]
 pub enum Response {
     Ok,
-    Data(Vec<u8>),
+    Data(Bytes),
     Error(String),
     Null,
 }
