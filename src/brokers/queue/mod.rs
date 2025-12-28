@@ -91,21 +91,16 @@ impl Queue {
         let mut msg = Message::new(payload, priority, delay_ms);
         let now = current_time_ms();
 
-        println!("[Queue:{}] PUSH message {} (priority: {}, delay: {:?})", self.name, msg.id, priority, delay_ms);
-
         if msg.delayed_until.is_none() {
             while let Some(consumer_tx) = inner.waiting_consumers.pop_front() {
-                println!("[Queue:{}] Found waiting consumer, attempting direct delivery of {}", self.name, msg.id);
                 if consumer_tx.send(msg.clone()).is_ok() {
                     let timeout = now + 30000;
                     msg.visible_at = timeout;
                     msg.attempts += 1;
                     inner.registry.insert(msg.id, msg.clone());
                     inner.in_flight.entry(timeout).or_default().push(msg.id);
-                    println!("[Queue:{}] Message {} delivered to waiting consumer", self.name, msg.id);
                     return;
                 }
-                println!("[Queue:{}] Waiting consumer was disconnected, trying next...", self.name);
             }
         }
 
@@ -154,10 +149,8 @@ impl Queue {
         let (tx, rx) = oneshot::channel();
         
         if let Some(msg) = self.pop_internal(&mut inner) {
-            println!("[Queue:{}] Immediate POP during consume for message {}", self.name, msg.id);
             let _ = tx.send(msg);
         } else {
-            println!("[Queue:{}] No messages ready, consumer added to waiting list", self.name);
             inner.waiting_consumers.push_back(tx);
         }
         rx
