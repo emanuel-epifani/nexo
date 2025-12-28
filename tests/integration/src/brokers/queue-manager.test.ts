@@ -120,12 +120,54 @@ describe('QUEUE broker', () => {
 
     describe('2. Priorità (Buckets)', () => {
         it('should deliver higher priority messages first', async () => {
-            // Inviando un messaggio LOW e poi uno HIGH, il consumer deve ricevere prima quello HIGH.
+            const queue = 'test_q_priority_1';
+
+            let message_high_priority = 'high-priority'
+            let message_low_priority = 'low-priority'
+
+            // Inviamo prima un messaggio LOW (0) e poi uno HIGH (255)
+            await nexo.queue.push(queue, message_low_priority, { priority: 0 });
+            await nexo.queue.push(queue, message_high_priority, { priority: 255 });
+
+            const received: string[] = [];
+            nexo.queue.consume(queue, async (msg) => {
+                received.push(msg.payload.toString());
+                await nexo.queue.ack(queue, msg.id);
+            });
+
+            // Aspettiamo la ricezione di entrambi
+            for (let i = 0; i < 20; i++) {
+                if (received.length === 2) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+
+            // Il primo deve essere quello HIGH nonostante sia stato inviato dopo
+            expect(received[0]).toBe(message_high_priority);
+            expect(received[1]).toBe(message_low_priority);
         });
 
         it('should respect FIFO within different priority buckets', async () => {
-            // Inviando 2 messaggi HIGH e 2 LOW, l'ordine di ricezione deve essere:
-            // High1, High2, Low1, Low2.
+            const queue = 'test_q_priority_fifo';
+
+            // Mix di messaggi: 2 High e 2 Low
+            await nexo.queue.push(queue, 'high-1', { priority: 10 });
+            await nexo.queue.push(queue, 'low-1', { priority: 5 });
+            await nexo.queue.push(queue, 'high-2', { priority: 10 });
+            await nexo.queue.push(queue, 'low-2', { priority: 5 });
+
+            const received: string[] = [];
+            nexo.queue.consume(queue, async (msg) => {
+                received.push(msg.payload.toString());
+                await nexo.queue.ack(queue, msg.id);
+            });
+
+            for (let i = 0; i < 20; i++) {
+                if (received.length === 4) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+
+            // L'ordine deve essere: tutti gli High (in ordine FIFO) e poi tutti i Low (in ordine FIFO)
+            expect(received).toEqual(['high-1', 'high-2', 'low-1', 'low-2']);
         });
     });
 

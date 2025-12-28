@@ -86,12 +86,15 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         
                         match response {
                             Response::AsyncConsume(rx) => {
+                                println!("[Network] ID {} suspended, waiting for queue data...", id);
                                 // Wait for the message in the background task
                                 match rx.await {
                                     Ok(msg) => {
+                                        println!("[Network] ID {} wake up! Sending QueueData for {}", id, msg.id);
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::QueueData(msg.id, msg.payload))).await;
                                     }
                                     Err(_) => {
+                                        println!("[Network] ID {} consumer channel dropped", id);
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Consumer dropped".into()))).await;
                                     }
                                 }
