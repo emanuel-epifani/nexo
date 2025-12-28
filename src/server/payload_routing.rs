@@ -4,6 +4,8 @@
 use crate::server::header_protocol::*;
 use crate::NexoEngine;
 use bytes::Bytes;
+use std::convert::TryInto;
+use uuid::Uuid;
 
 // ========================================
 // OPCODES (First byte of Request Payload)
@@ -15,7 +17,8 @@ pub const OP_KV_DEL: u8 = 0x04;
 
 // Queue: 0x10 - 0x1F
 pub const OP_Q_PUSH: u8 = 0x11;
-pub const OP_Q_POP: u8 = 0x12;
+pub const OP_Q_CONSUME: u8 = 0x12;
+pub const OP_Q_ACK: u8 = 0x13;
 
 // Topic: 0x20 - 0x2F
 pub const OP_PUB: u8 = 0x21;
@@ -29,7 +32,7 @@ pub const OP_S_READ: u8 = 0x32;
 // PARSING HELPERS
 // ========================================
 
-fn parse_string(payload: &[u8]) -> Result<(&str, &[u8]), String> {
+pub fn parse_string(payload: &[u8]) -> Result<(&str, &[u8]), String> {
     if payload.len() < 4 { 
         return Err("Payload too short for length prefix".to_string()); 
     }
@@ -41,7 +44,7 @@ fn parse_string(payload: &[u8]) -> Result<(&str, &[u8]), String> {
     Ok((s, &payload[4+len..]))
 }
 
-fn parse_string_u64(payload: &[u8]) -> Result<(&str, u64), String> {
+pub fn parse_string_u64(payload: &[u8]) -> Result<(&str, u64), String> {
     let (s, rest) = parse_string(payload)?;
     if rest.len() < 8 { return Err("Missing u64 value".to_string()); }
     let n = u64::from_be_bytes([rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6], rest[7]]);
@@ -60,21 +63,15 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
     match opcode {
         // KV BROKER
         OP_KV_SET => {
-            // Payload SET: [TTL: 8b][KeyLen: 4b][Key][Value]
             if body.len() < 12 { return Response::Error("Payload too short for SET".to_string()); }
-            
             let ttl_secs = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
             let ttl = if ttl_secs == 0 { None } else { Some(ttl_secs) };
-            
             let (key, val_ptr) = match parse_string(&body[8..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            
             let offset = body.len() - val_ptr.len();
-            let val = body.slice(offset..);
-            
-            engine.kv.set(key.to_string(), val, ttl)
+            engine.kv.set(key.to_string(), body.slice(offset..), ttl)
                 .map(|_| Response::Ok).unwrap_or_else(Response::Error)
         }
         OP_KV_GET => {
@@ -96,20 +93,41 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
 
         // QUEUE BROKER
         OP_Q_PUSH => {
-            let (q, val_ptr) = match parse_string(&body) {
+            // [Priority: 1][Delay: 8][NameLen: 4][Name][Data]
+            if body.len() < 13 { return Response::Error("Payload too short for Q_PUSH".to_string()); }
+            let priority = body[0];
+            let delay = u64::from_be_bytes(body[1..9].as_ref().try_into().unwrap());
+            let delay_opt = if delay == 0 { None } else { Some(delay) };
+            
+            let (q_name, data_ptr) = match parse_string(&body[9..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            let offset = body.len() - val_ptr.len();
-            engine.queue.push(q.to_string(), body.slice(offset..));
+            
+            let offset = body.len() - data_ptr.len();
+            engine.queue.push(q_name.to_string(), body.slice(offset..), priority, delay_opt);
             Response::Ok
         }
-        OP_Q_POP => {
-            let (q, _) = match parse_string(&body) {
+        OP_Q_CONSUME => {
+            let (q_name, _) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.queue.pop(q).map(Response::Data).unwrap_or(Response::Null)
+            Response::AsyncConsume(engine.queue.consume(q_name.to_string()))
+        }
+        OP_Q_ACK => {
+            // [UUID: 16][NameLen: 4][Name]
+            if body.len() < 20 { return Response::Error("Payload too short for Q_ACK".to_string()); }
+            let id = Uuid::from_slice(&body[0..16]).unwrap_or_default();
+            let (q_name, _) = match parse_string(&body[16..]) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            if engine.queue.ack(q_name, id) {
+                Response::Ok
+            } else {
+                Response::Error("ACK failed: Message not found".to_string())
+            }
         }
 
         // TOPIC BROKER

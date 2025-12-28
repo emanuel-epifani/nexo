@@ -83,7 +83,23 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         // Extract payload from the frozen frame_data (offset 9)
                         let payload = frame_data.slice(9..);
                         let response = route(payload, &engine_clone);
-                        let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
+                        
+                        match response {
+                            Response::AsyncConsume(rx) => {
+                                // Wait for the message in the background task
+                                match rx.await {
+                                    Ok(msg) => {
+                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::QueueData(msg.id, msg.payload))).await;
+                                    }
+                                    Err(_) => {
+                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Consumer dropped".into()))).await;
+                                    }
+                                }
+                            }
+                            _ => {
+                                let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
+                            }
+                        }
                     }
                     TYPE_PING => {
                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Ok)).await;

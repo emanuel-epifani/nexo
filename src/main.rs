@@ -25,9 +25,12 @@ pub struct NexoEngine {
 
 impl NexoEngine {
     pub fn new() -> Self {
+        let queue_manager = Arc::new(QueueManager::new());
+        queue_manager.set_self(queue_manager.clone());
+        
         Self {
             kv: Arc::new(KvManager::new()),
-            queue: Arc::new(QueueManager::new()),
+            queue: queue_manager,
             topic: Arc::new(TopicManager::new()),
             stream: Arc::new(StreamManager::new()),
         }

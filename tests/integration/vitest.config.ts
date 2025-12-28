@@ -38,7 +38,7 @@ export default defineConfig({
     globals: true,
     testTimeout: 100000,
     hookTimeout: 100000,
-    include: ['src/test-features/**/*.test.ts'],
+    include: ['src/brokers/**/*.test.ts'],
     globalSetup: ['./src/global-setup.ts'],
   },
 });

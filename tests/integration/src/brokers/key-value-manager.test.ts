@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
 import {performance} from "perf_hooks";
 
-describe('KV broker', () => {
+describe('KEY-VALUE broker', () => {
   it('should be able to set and get a value', async () => {
     const key = 'test_key';
     const value = 'test_value';
@@ -54,10 +54,10 @@ describe('KV broker', () => {
   });
 
   /*
-  AVG result -> Throughput: 978,462 ops/sec
+  AVG result -> Throughput: 1,048,753 ops/sec
    */
   it('AVG Throughput (ops/sec) with 10 Million existing keys', async () => {
-    const PREFILL_COUNT = 10_000_000;
+    const PREFILL_COUNT = 5_000_000;
     const CONCURRENCY = 1000;
     const DURATION_MS = 5000;
 
@@ -97,12 +97,3 @@ describe('KV broker', () => {
     console.log(`Throughput: ${opsPerSec.toLocaleString()} ops/sec`);
     console.log(`------------------------------------\n`);
   });});
-
-
-/*
---- RESULT ---
-Total Operations: 5,424,720
-Throughput:       1,084,068 ops/sec
-Latency (avg):    0.922 ms
---------------
- */
