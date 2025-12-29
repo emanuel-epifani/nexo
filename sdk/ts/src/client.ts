@@ -26,6 +26,7 @@ enum Opcode {
   KV_DEL = 0x04,
 
   // Queue commands (0x10-0x1F)
+  Q_DECLARE = 0x10,
   Q_PUSH = 0x11,
   Q_CONSUME = 0x12,
   Q_ACK = 0x13,
@@ -37,6 +38,97 @@ enum Opcode {
   // Stream commands (0x30-0x3F)
   S_ADD = 0x31,
   S_READ = 0x32,
+}
+
+export interface QueueConfig {
+  visibilityTimeoutMs?: number;
+  maxRetries?: number;
+  ttlMs?: number;
+  delayMs?: number;
+}
+
+export interface PushOptions {
+  priority?: number;
+  delayMs?: number;
+}
+
+export class NexoQueue {
+  constructor(private client: NexoClient, public readonly name: string) { }
+
+  async push(data: any, options: PushOptions = {}): Promise<void> {
+    let valBuf: Buffer;
+    if (Buffer.isBuffer(data)) {
+      valBuf = data;
+    } else if (typeof data === 'string') {
+      valBuf = Buffer.from(data, 'utf8');
+    } else {
+      valBuf = Buffer.from(JSON.stringify(data), 'utf8');
+    }
+
+    const qLen = Buffer.byteLength(this.name, 'utf8');
+    const priority = options.priority || 0;
+    const delay = BigInt(options.delayMs || 0);
+    const payloadSize = 1 + 8 + 4 + qLen + valBuf.length;
+    const payload = Buffer.allocUnsafe(payloadSize);
+    payload[0] = priority;
+    payload.writeBigUInt64BE(delay, 1);
+    payload.writeUInt32BE(qLen, 9);
+    payload.write(this.name, 13, 'utf8');
+    valBuf.copy(payload, 13 + qLen);
+
+    // Use internal send from client
+    const res = await (this.client as any).send(Opcode.Q_PUSH, payload);
+    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+  }
+
+  async subscribe(callback: (data: any) => Promise<void> | void): Promise<void> {
+    const qLen = Buffer.byteLength(this.name, 'utf8');
+    const payload = Buffer.allocUnsafe(4 + qLen);
+    payload.writeUInt32BE(qLen, 0);
+    payload.write(this.name, 4, 'utf8');
+
+    while (this.client.connected) {
+      try {
+        const res = await (this.client as any).send(Opcode.Q_CONSUME, payload);
+        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+        if (res.status === ResponseStatus.Q_DATA) {
+          const idHex = res.data.subarray(0, 16).toString('hex');
+          const dataBuf = res.data.subarray(16);
+          const rawStr = dataBuf.toString('utf8');
+
+          let data: any;
+          try {
+            data = JSON.parse(rawStr);
+          } catch {
+            data = rawStr;
+          }
+
+          try {
+            await callback(data);
+            await this.ack(idHex);
+          } catch (e) {
+            // Callback failed, don't ACK, server will retry after visibility timeout
+            console.error(`Error in subscribe callback for queue ${this.name}:`, e);
+          }
+        }
+      } catch (err) {
+        if (!this.client.connected) break;
+        console.error(`Subscription error for queue ${this.name}:`, err);
+        await new Promise(r => setTimeout(r, 1000)); // Retry delay
+      }
+    }
+  }
+
+  async ack(id: string): Promise<void> {
+    const qLen = Buffer.byteLength(this.name, 'utf8');
+    const idBuf = Buffer.from(id, 'hex');
+    const payload = Buffer.allocUnsafe(16 + 4 + qLen);
+    idBuf.copy(payload, 0);
+    payload.writeUInt32BE(qLen, 16);
+    payload.write(this.name, 20, 'utf8');
+    const res = await (this.client as any).send(Opcode.Q_ACK, payload);
+    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+  }
 }
 
 // --- RING BUFFER DECODER (Zero-Copy, Pre-allocated) ---
@@ -105,6 +197,7 @@ export class NexoClient {
   private host: string;
   private port: number;
   private decoder = new RingDecoder();
+  private queues = new Map<string, NexoQueue>();
 
   // ID management: u32 wrap-around
   private nextId = 1;
@@ -125,10 +218,39 @@ export class NexoClient {
     this.setupSocketListeners();
   }
 
+  public get connected(): boolean {
+    return this.isConnected;
+  }
+
   static async connect(options: NexoOptions = {}): Promise<NexoClient> {
     const client = new NexoClient(options);
     await client.connect();
     return client;
+  }
+
+  async declareQueue(name: string, config: QueueConfig = {}): Promise<NexoQueue> {
+    if (this.queues.has(name)) return this.queues.get(name)!;
+
+    const visibility = BigInt(config.visibilityTimeoutMs ?? 30000);
+    const maxRetries = config.maxRetries ?? 5;
+    const ttl = BigInt(config.ttlMs ?? 604800000);
+    const delay = BigInt(config.delayMs ?? 0);
+    const qLen = Buffer.byteLength(name, 'utf8');
+
+    const payload = Buffer.allocUnsafe(8 + 4 + 8 + 8 + 4 + qLen);
+    payload.writeBigUInt64BE(visibility, 0);
+    payload.writeUInt32BE(maxRetries, 8);
+    payload.writeBigUInt64BE(ttl, 12);
+    payload.writeBigUInt64BE(delay, 20);
+    payload.writeUInt32BE(qLen, 28);
+    payload.write(name, 32, 'utf8');
+
+    const res = await this.send(Opcode.Q_DECLARE, payload);
+    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+
+    const queue = new NexoQueue(this, name);
+    this.queues.set(name, queue);
+    return queue;
   }
 
   private setupSocketListeners() {
@@ -277,56 +399,5 @@ export class NexoClient {
         if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
       });
     },
-  };
-
-  public readonly queue = {
-    push: (queue: string, value: string | Buffer, options: { priority?: number; delayMs?: number } = {}): Promise<void> => {
-      const qLen = Buffer.byteLength(queue, 'utf8');
-      const valBuf = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
-      const priority = options.priority || 0;
-      const delay = BigInt(options.delayMs || 0);
-      const payloadSize = 1 + 8 + 4 + qLen + valBuf.length;
-      const payload = Buffer.allocUnsafe(payloadSize);
-      payload[0] = priority;
-      payload.writeBigUInt64BE(delay, 1);
-      payload.writeUInt32BE(qLen, 9);
-      payload.write(queue, 13, 'utf8');
-      valBuf.copy(payload, 13 + qLen);
-      return this.send(Opcode.Q_PUSH, payload).then((res) => {
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-      });
-    },
-
-    consume: async (queue: string, callback: (msg: { id: string; payload: Buffer }) => Promise<void> | void): Promise<void> => {
-      const qLen = Buffer.byteLength(queue, 'utf8');
-      const payload = Buffer.allocUnsafe(4 + qLen);
-      payload.writeUInt32BE(qLen, 0);
-      payload.write(queue, 4, 'utf8');
-
-      while (this.isConnected) {
-        const res = await this.send(Opcode.Q_CONSUME, payload);
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-        if (res.status === ResponseStatus.Q_DATA) {
-          const id = res.data.subarray(0, 16).toString('hex');
-          const data = res.data.subarray(16);
-          await callback({ id, payload: data });
-        } else {
-          // If we get an OK but no data (shouldn't happen with current server), just retry
-          break;
-        }
-      }
-    },
-
-    ack: (queue: string, id: string): Promise<void> => {
-      const qLen = Buffer.byteLength(queue, 'utf8');
-      const idBuf = Buffer.from(id, 'hex');
-      const payload = Buffer.allocUnsafe(16 + 4 + qLen);
-      idBuf.copy(payload, 0);
-      payload.writeUInt32BE(qLen, 16);
-      payload.write(queue, 20, 'utf8');
-      return this.send(Opcode.Q_ACK, payload).then((res) => {
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-      });
-    }
   };
 }
