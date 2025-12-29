@@ -303,20 +303,15 @@ export class NexoClient {
       payload.writeUInt32BE(qLen, 0);
       payload.write(queue, 4, 'utf8');
 
-      console.log(`[SDK] Starting consume loop for queue: ${queue}`);
       while (this.isConnected) {
-        console.log(`[SDK] Sending Q_CONSUME request for ${queue}...`);
         const res = await this.send(Opcode.Q_CONSUME, payload);
-        console.log(`[SDK] Received response for ${queue}: status ${res.status}`);
-
+        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
         if (res.status === ResponseStatus.Q_DATA) {
           const id = res.data.subarray(0, 16).toString('hex');
           const data = res.data.subarray(16);
-          console.log(`[SDK] Message received: ${id}, triggering callback`);
           await callback({ id, payload: data });
         } else {
           // If we get an OK but no data (shouldn't happen with current server), just retry
-          console.log(`[SDK] No data yet or unexpected status ${res.status}, continuing...`);
           break;
         }
       }

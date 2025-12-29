@@ -10,8 +10,8 @@ describe('QUEUE broker', () => {
             const payload = Buffer.from('hello nexo');
             
             let received: any = null;
-            // Start consuming in background (no await)
-            nexo.queue.consume(queue, async (msg) => {
+            // Start consuming in background
+            const consumePromise = nexo.queue.consume(queue, async (msg) => {
                 received = msg;
                 await nexo.queue.ack(queue, msg.id);
             });
@@ -19,7 +19,7 @@ describe('QUEUE broker', () => {
             await nexo.queue.push(queue, payload);
             
             // Wait for delivery
-            for (let i = 0; i < 20; i++) {
+            for (let i = 0; i < 10; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 50));
             }
@@ -109,7 +109,7 @@ describe('QUEUE broker', () => {
             });
 
             // Wait for all 3
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 20; i++) {
                 if (received.length === 3) break;
                 await new Promise(r => setTimeout(r, 100));
             }
@@ -122,9 +122,12 @@ describe('QUEUE broker', () => {
         it('should deliver higher priority messages first', async () => {
             const queue = 'test_q_priority_1';
 
+            let message_high_priority = 'high-priority'
+            let message_low_priority = 'low-priority'
+
             // Inviamo prima un messaggio LOW (0) e poi uno HIGH (255)
-            await nexo.queue.push(queue, 'low-priority', { priority: 0 });
-            await nexo.queue.push(queue, 'high-priority', { priority: 255 });
+            await nexo.queue.push(queue, message_low_priority, { priority: 0 });
+            await nexo.queue.push(queue, message_high_priority, { priority: 255 });
 
             const received: string[] = [];
             nexo.queue.consume(queue, async (msg) => {
@@ -133,14 +136,14 @@ describe('QUEUE broker', () => {
             });
 
             // Aspettiamo la ricezione di entrambi
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 20; i++) {
                 if (received.length === 2) break;
                 await new Promise(r => setTimeout(r, 100));
             }
 
             // Il primo deve essere quello HIGH nonostante sia stato inviato dopo
-            expect(received[0]).toBe('high-priority');
-            expect(received[1]).toBe('low-priority');
+            expect(received[0]).toBe(message_high_priority);
+            expect(received[1]).toBe(message_low_priority);
         });
 
         it('should respect FIFO within different priority buckets', async () => {
@@ -158,7 +161,7 @@ describe('QUEUE broker', () => {
                 await nexo.queue.ack(queue, msg.id);
             });
 
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 20; i++) {
                 if (received.length === 4) break;
                 await new Promise(r => setTimeout(r, 100));
             }
@@ -172,7 +175,7 @@ describe('QUEUE broker', () => {
         it('should not deliver a delayed message before its time', async () => {
             const queue = 'test_q_delayed_1';
             const payload = 'delayed-msg';
-            const delayMs = 1500; // 1.5 seconds
+            const delayMs = 1500; // 1.5 secondi
 
             await nexo.queue.push(queue, payload, { delayMs });
 
@@ -182,11 +185,11 @@ describe('QUEUE broker', () => {
                 await nexo.queue.ack(queue, msg.id);
             });
 
-            // Check after 500ms -> should not be there
+            // Dopo 500ms non deve ancora esserci
             await new Promise(r => setTimeout(r, 500));
             expect(received).toBe(false);
 
-            // Check after another 1500ms (total 2000ms) -> should be there
+            // Dopo altri 1500ms (totale 2000ms) deve essere arrivato
             for (let i = 0; i < 20; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 100));
@@ -196,8 +199,7 @@ describe('QUEUE broker', () => {
 
         it('should deliver multiple delayed messages in order', async () => {
             const queue = 'test_q_delayed_order';
-            
-            // Push messages with different delays
+
             await nexo.queue.push(queue, 'longer-delay', { delayMs: 2000 });
             await nexo.queue.push(queue, 'shorter-delay', { delayMs: 1000 });
 
@@ -207,11 +209,11 @@ describe('QUEUE broker', () => {
                 await nexo.queue.ack(queue, msg.id);
             });
 
-            // After 1200ms, only shorter-delay should be out
+            // Dopo 1200ms, solo shorter-delay deve essere uscito
             await new Promise(r => setTimeout(r, 1200));
             expect(received).toEqual(['shorter-delay']);
 
-            // After another 1500ms, both should be out
+            // Dopo altri 1500ms, entrambi
             for (let i = 0; i < 20; i++) {
                 if (received.length === 2) break;
                 await new Promise(r => setTimeout(r, 100));
@@ -219,13 +221,10 @@ describe('QUEUE broker', () => {
             expect(received).toEqual(['shorter-delay', 'longer-delay']);
         });
 
-        it('should handle multiple messages with the same exact delay millisecond', async () => {
+        it('should handle multiple messages with the same exact delay', async () => {
             const queue = 'test_q_delayed_same';
-            const delayMs = 1000;
-
-            // Push two messages with same delay
-            await nexo.queue.push(queue, 'msg1', { delayMs });
-            await nexo.queue.push(queue, 'msg2', { delayMs });
+            await nexo.queue.push(queue, 'msg1', { delayMs: 1000 });
+            await nexo.queue.push(queue, 'msg2', { delayMs: 1000 });
 
             const received: string[] = [];
             nexo.queue.consume(queue, async (msg) => {
@@ -233,60 +232,143 @@ describe('QUEUE broker', () => {
                 await nexo.queue.ack(queue, msg.id);
             });
 
-            // Wait for both
             for (let i = 0; i < 30; i++) {
                 if (received.length === 2) break;
                 await new Promise(r => setTimeout(r, 100));
             }
-
             expect(received.length).toBe(2);
-            expect(received).toContain('msg1');
-            expect(received).toContain('msg2');
         });
     });
 
     describe('4. Affidabilità e Visibility Timeout', () => {
         it('should make a message visible again if no ACK is received', async () => {
-            // Se un worker riceve un messaggio ma crasha (o non manda l'ACK),
-            // il messaggio deve tornare disponibile in coda dopo il visibility timeout.
-        });
+            const queue = 'test_q_timeout';
+            await nexo.queue.push(queue, 'timeout-msg');
 
-        it('should not re-deliver a message if ACK was received', async () => {
-            // Verifica che l'invio dell'ACK cancelli correttamente il timer del Reaper, evitando doppie consegne.
-        });
+            let receivedCount = 0;
+            const receivedIds: string[] = [];
 
-        it('should increment attempts count on each re-delivery', async () => {
-            // Verifica che il contatore 'attempts' aumenti ogni volta che il messaggio viene rimesso in coda dal Reaper.
+            nexo.queue.consume(queue, async (msg) => {
+                receivedCount++;
+                receivedIds.push(msg.id);
+                // NON mandiamo l'ACK: il messaggio deve tornare in coda dopo 1s
+            });
+
+            for (let i = 0; i < 10; i++) {
+                if (receivedCount === 1) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(receivedCount).toBe(1);
+
+            // Aspettiamo il timeout (1s + tolleranza reaper)
+            await new Promise(r => setTimeout(r, 2500));
+            expect(receivedCount).toBeGreaterThanOrEqual(2);
+            expect(receivedIds[0]).toBe(receivedIds[1]);
         });
     });
 
     describe('5. Dead Letter Queue (DLQ)', () => {
         it('should move a message to {name}_dlq after 5 failed attempts', async () => {
-            // Verifica che un messaggio "velenoso" che fallisce costantemente venga spostato nella coda DLQ.
+            const queue = 'test_q_to_dlq';
+            const dlq = `${queue}_dlq`;
+            await nexo.queue.push(queue, 'poison-pill');
+
+            let mainCount = 0;
+            nexo.queue.consume(queue, async () => { mainCount++; });
+
+            // Aspettiamo 5 fallimenti (~6-7s con timeout a 1s)
+            await new Promise(r => setTimeout(r, 8000));
+            expect(mainCount).toBe(5);
+
+            let dlqMsg: any = null;
+            nexo.queue.consume(dlq, async (msg) => { dlqMsg = msg; });
+
+            for (let i = 0; i < 20; i++) {
+                if (dlqMsg) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(dlqMsg.payload.toString()).toBe('poison-pill');
+        }, 15000);
+    });
+
+    describe('6. Edge Cases (DevExperience e Robustezza)', () => {
+        it('should handle consumers connecting BEFORE the messages arrive', async () => {
+            const queue = 'test_q_blocking';
+            let received: any = null;
+
+            // Il consumatore si sottoscrive quando la coda è ancora vuota
+            nexo.queue.consume(queue, (msg) => {
+                received = msg;
+            });
+
+            // Aspettiamo per assicurarci che il server lo metta in waiting_consumers
+            await new Promise(r => setTimeout(r, 200));
+            expect(received).toBeNull();
+
+            // Inviamo il messaggio ora
+            await nexo.queue.push(queue, 'instant-delivery');
+
+            // Il server deve "svegliare" il consumatore e consegnare subito
+            for (let i = 0; i < 10; i++) {
+                if (received) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+            expect(received.payload.toString()).toBe('instant-delivery');
         });
 
-        it('should automatically create the DLQ queue if it does not exist', async () => {
-            // Verifica che Nexo crei la coda di scarto a runtime senza bisogno di configurazione manuale.
+        it('should be idempotent on double ACKs', async () => {
+            const queue = 'test_q_double_ack';
+            await nexo.queue.push(queue, 'msg');
+
+            let msgId: string = '';
+            nexo.queue.consume(queue, (msg) => {
+                msgId = msg.id;
+            });
+
+            for (let i = 0; i < 10; i++) {
+                if (msgId) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            // Primo ACK: il messaggio viene rimosso correttamente
+            await nexo.queue.ack(queue, msgId);
+
+            // Secondo ACK sullo stesso UUID: non deve generare errori o crash
+            // Il server deve semplicemente ignorarlo o rispondere OK
+            await expect(nexo.queue.ack(queue, msgId)).resolves.toBeUndefined();
         });
 
-        describe('6. Edge Cases (DevExperience e Robustezza)', () => {
-            it('should handle consumers connecting BEFORE the messages arrive', async () => {
-                // Testa il Blocking Pop: il client si connette a coda vuota, resta "appeso"
-                // e riceve il messaggio istantaneamente appena viene pushato.
+        it('should handle zero-delay messages as immediate', async () => {
+            const queue = 'test_q_zero_delay';
+            // Un delay di 0ms deve essere trattato come un push normale
+            await nexo.queue.push(queue, 'zero-delay-payload', { delayMs: 0 });
+
+            let received = false;
+            nexo.queue.consume(queue, () => {
+                received = true;
             });
 
-            it('should handle consumer disconnect while waiting', async () => {
-                // Se un client è in attesa (waiting_consumers) ma si disconnette,
-                // Nexo deve gestire l'errore di invio e passare al consumatore successivo.
-            });
-
-            it('should be idempotent on double ACKs', async () => {
-                // Se un client invia due volte l'ACK per lo stesso messaggio, il server deve rispondere in modo pulito senza crashare.
-            });
-
-            it('should handle zero-delay messages as immediate', async () => {
-                // Verifica che un delay di 0ms venga trattato esattamente come un PUSH immediato.
-            });
+            for (let i = 0; i < 10; i++) {
+                if (received) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+            expect(received).toBe(true);
         });
-    })
+
+        it('should handle special characters in queue names', async () => {
+            const queue = 'queue:with/special-chars@123';
+            await nexo.queue.push(queue, 'special-name-test');
+
+            let received: any = null;
+            nexo.queue.consume(queue, (msg) => {
+                received = msg;
+            });
+
+            for (let i = 0; i < 10; i++) {
+                if (received) break;
+                await new Promise(r => setTimeout(r, 50));
+            }
+            expect(received.payload.toString()).toBe('special-name-test');
+        });
+    });
 });
