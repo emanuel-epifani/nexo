@@ -99,17 +99,19 @@ export interface NexoOptions {
 
 type PendingHandler = { resolve: (v: { status: ResponseStatus; data: Buffer }) => void; reject: (e: Error) => void };
 
-const ID_MASK = 0xFFFF;
-const ID_SPACE = ID_MASK + 1;
-
 export class NexoClient {
   private socket: net.Socket;
   private isConnected = false;
   private host: string;
   private port: number;
   private decoder = new RingDecoder();
+
+  // ID management: u32 wrap-around
   private nextId = 1;
-  private pending: (PendingHandler | undefined)[] = new Array(ID_SPACE);
+
+  // Map for pending requests: ID -> Handler
+  private pending = new Map<number, PendingHandler>();
+
   private writeBuf: Buffer;
   private writeOffset = 0;
   private flushScheduled = false;
@@ -135,12 +137,12 @@ export class NexoClient {
       let frame;
       while ((frame = this.decoder.nextFrame())) {
         if (frame.type === FrameType.RESPONSE) {
-          const handler = this.pending[frame.id];
+          const handler = this.pending.get(frame.id);
           if (handler) {
             const status = frame.payload[0] as ResponseStatus;
             const data = Buffer.from(frame.payload.subarray(1));
             handler.resolve({ status, data });
-            this.pending[frame.id] = undefined;
+            this.pending.delete(frame.id);
           }
         }
       }
@@ -148,13 +150,10 @@ export class NexoClient {
 
     this.socket.on('error', (err) => {
       this.isConnected = false;
-      for (let i = 0; i < ID_SPACE; i++) {
-        const handler = this.pending[i];
-        if (handler) {
-          handler.reject(err as Error);
-          this.pending[i] = undefined;
-        }
+      for (const handler of this.pending.values()) {
+        handler.reject(err as Error);
       }
+      this.pending.clear();
     });
 
     this.socket.on('close', () => {
@@ -185,8 +184,9 @@ export class NexoClient {
   private send(opcode: number, payloadBody: Buffer): Promise<{ status: ResponseStatus; data: Buffer }> {
     if (!this.isConnected) return Promise.reject(new Error('Client not connected'));
 
+    // Wrap ID as u32
     const id = this.nextId;
-    this.nextId = (this.nextId + 1) & ID_MASK;
+    this.nextId = (this.nextId + 1) >>> 0;
     if (this.nextId === 0) this.nextId = 1;
 
     const payloadLen = 1 + payloadBody.length;
@@ -206,7 +206,7 @@ export class NexoClient {
         payloadBody.copy(msg, 10);
         this.socket.write(msg);
         return new Promise((resolve, reject) => {
-          this.pending[id] = { resolve, reject };
+          this.pending.set(id, { resolve, reject });
         });
       }
     }
@@ -226,7 +226,7 @@ export class NexoClient {
     }
 
     return new Promise((resolve, reject) => {
-      this.pending[id] = { resolve, reject };
+      this.pending.set(id, { resolve, reject });
     });
   }
 
