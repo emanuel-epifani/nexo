@@ -61,23 +61,23 @@ impl Default for QueueConfig {
     }
 }
 
-// ---------- QueueState ----------
+// ---------- InternalState ----------
 
-pub struct QueueState {
+struct InternalState {
     /// L'Archivio: contiene i dati reali di tutti i messaggi presenti nella coda
-    pub registry: HashMap<Uuid, Message>,
+    registry: HashMap<Uuid, Message>,
     /// Messaggi pronti: stanno aspettando un consumatore (ordinati per Priorità)
-    pub waiting_for_dispatch: BTreeMap<u8, VecDeque<Uuid>>,
+    waiting_for_dispatch: BTreeMap<u8, VecDeque<Uuid>>,
     /// Messaggi programmati: stanno aspettando il momento giusto (ordinati per Tempo)
-    pub waiting_for_time: BTreeMap<u64, Vec<Uuid>>,
+    waiting_for_time: BTreeMap<u64, Vec<Uuid>>,
     /// Messaggi inviati: stanno aspettando un ACK o il timeout (ordinati per Scadenza)
-    pub waiting_for_ack: BTreeMap<u64, Vec<Uuid>>,
+    waiting_for_ack: BTreeMap<u64, Vec<Uuid>>,
     /// Consumatori "parcheggiati": stanno aspettando che arrivi un messaggio
-    pub waiting_consumers: VecDeque<oneshot::Sender<Message>>,
+    waiting_consumers: VecDeque<oneshot::Sender<Message>>,
 }
 
-impl QueueState {
-    pub fn new() -> Self {
+impl InternalState {
+    fn new() -> Self {
         Self {
             registry: HashMap::new(),
             waiting_for_dispatch: BTreeMap::new(),
@@ -86,10 +86,52 @@ impl QueueState {
             waiting_consumers: VecDeque::new(),
         }
     }
+}
 
-    /// Estrae il prossimo ID pronto per la consegna rispettando le priorità
-    pub fn next_available_message_id(&mut self) -> Option<Uuid> {
-        for (_priority, bucket) in self.waiting_for_dispatch.iter_mut().rev() {
+// ---------- Queue ----------
+
+pub struct Queue {
+    pub name: String,
+    pub config: QueueConfig,
+    state: Mutex<InternalState>,
+}
+
+impl Queue {
+    pub fn new(name: String, config: QueueConfig) -> Self {
+        Self {
+            name,
+            config,
+            state: Mutex::new(InternalState::new()),
+        }
+    }
+
+    /// Estrae il prossimo ID pronto per la consegna rispettando le priorità e il TTL
+    fn next_available_message_id(&self, state: &mut InternalState, now: u64) -> Option<Uuid> {
+        while let Some(id) = self.peek_next_id(state) {
+            // Se il messaggio non esiste più o è scaduto (TTL), lo scartiamo
+            let is_valid = if let Some(msg) = state.registry.get(&id) {
+                let age = now.saturating_sub(msg.created_at);
+                if age > self.config.ttl_ms {
+                    state.registry.remove(&id);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if is_valid {
+                return Some(id);
+            }
+            // L'ID non era valido (scaduto o rimosso), continuiamo il loop (Lazy Cleanup)
+        }
+        None
+    }
+
+    /// Semplice helper per fare pop dal bucket a priorità più alta
+    fn peek_next_id(&self, state: &mut InternalState) -> Option<Uuid> {
+        for (_priority, bucket) in state.waiting_for_dispatch.iter_mut().rev() {
             if let Some(id) = bucket.pop_front() {
                 return Some(id);
             }
@@ -98,46 +140,39 @@ impl QueueState {
     }
 
     /// Sposta un messaggio nello stato "In attesa di ACK" (Visibility Timeout)
-    pub fn move_to_waiting_ack(&mut self, id: Uuid, now: u64, visibility_timeout_ms: u64) -> Option<Message> {
-        let msg = self.registry.get_mut(&id)?;
-        let timeout = now + visibility_timeout_ms;
+    fn move_to_waiting_ack(&self, state: &mut InternalState, id: Uuid, now: u64) -> Option<Message> {
+        let msg = state.registry.get_mut(&id)?;
+        let timeout = now + self.config.visibility_timeout_ms;
         msg.visible_at = timeout;
         msg.attempts += 1;
         
         let msg_cloned = msg.clone();
-        self.waiting_for_ack.entry(timeout).or_default().push(id);
+        state.waiting_for_ack.entry(timeout).or_default().push(id);
         Some(msg_cloned)
     }
 
-    /// Estrae in modo efficiente gli ID scaduti da waiting_for_time o waiting_for_ack
-    pub fn extract_expired_ids(index: &mut BTreeMap<u64, Vec<Uuid>>, now: u64) -> Vec<Uuid> {
+    /// Estrae in modo efficiente gli ID scaduti da un indice temporale
+    fn extract_expired_ids(&self, index: &mut BTreeMap<u64, Vec<Uuid>>, now: u64) -> Vec<Uuid> {
         let ready_later = index.split_off(&(now + 1));
         let expired_map = std::mem::replace(index, ready_later);
         expired_map.into_values().flatten().collect()
     }
-}
-
-// ---------- Queue ----------
-
-pub struct Queue {
-    pub name: String,
-    pub config: QueueConfig,
-    state: Mutex<QueueState>,
-}
-
-impl Queue {
-    pub fn new(name: String, config: QueueConfig) -> Self {
-        Self {
-            name,
-            config,
-            state: Mutex::new(QueueState::new()),
-        }
-    }
 
     /// Logica centrale di smistamento: consegna a un consumatore in attesa o mette in coda ready.
-    fn dispatch(&self, state: &mut QueueState, id: Uuid, now: u64) {
+    fn dispatch(&self, state: &mut InternalState, id: Uuid, now: u64) {
+        // Verifica TTL prima del dispatch
+        if let Some(msg) = state.registry.get(&id) {
+            let age = now.saturating_sub(msg.created_at);
+            if age > self.config.ttl_ms {
+                state.registry.remove(&id);
+                return;
+            }
+        } else {
+            return;
+        }
+
         while let Some(consumer_tx) = state.waiting_consumers.pop_front() {
-            if let Some(msg) = state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms) {
+            if let Some(msg) = self.move_to_waiting_ack(state, id, now) {
                 if consumer_tx.send(msg).is_ok() {
                     return;
                 }
@@ -174,8 +209,8 @@ impl Queue {
     pub fn pop(&self) -> Option<Message> {
         let mut state = self.state.lock();
         let now = current_time_ms();
-        let id = state.next_available_message_id()?;
-        state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms)
+        let id = self.next_available_message_id(&mut state, now)?;
+        self.move_to_waiting_ack(&mut state, id, now)
     }
 
     pub fn ack(&self, id: Uuid) -> bool {
@@ -189,8 +224,8 @@ impl Queue {
         let (tx, rx) = oneshot::channel();
         let now = current_time_ms();
 
-        if let Some(id) = state.next_available_message_id() {
-            if let Some(msg) = state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms) {
+        if let Some(id) = self.next_available_message_id(&mut state, now) {
+            if let Some(msg) = self.move_to_waiting_ack(&mut state, id, now) {
                 let _ = tx.send(msg);
                 return rx;
             }
@@ -250,7 +285,7 @@ impl Queue {
         }
 
         // 1. Messaggi programmati -> Pronti/Dispatch
-        let expired_delayed = QueueState::extract_expired_ids(&mut state.waiting_for_time, now);
+        let expired_delayed = self.extract_expired_ids(&mut state.waiting_for_time, now);
         for id in expired_delayed {
             if state.registry.contains_key(&id) {
                 self.dispatch(&mut state, id, now);
@@ -258,7 +293,7 @@ impl Queue {
         }
 
         // 2. Messaggi in attesa di ACK -> DLQ o Pronti/Dispatch
-        let expired_in_flight = QueueState::extract_expired_ids(&mut state.waiting_for_ack, now);
+        let expired_in_flight = self.extract_expired_ids(&mut state.waiting_for_ack, now);
         for id in expired_in_flight {
             let (should_dlq, payload, priority) = match state.registry.get(&id) {
                 Some(msg) if msg.attempts >= self.config.max_retries => (true, msg.payload.clone(), msg.priority),
