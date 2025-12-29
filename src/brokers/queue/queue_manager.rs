@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
 use tokio::sync::oneshot;
-use super::{Queue, Message};
+use super::{Queue, Message, QueueConfig};
 
 use once_cell::sync::OnceCell;
 
@@ -49,10 +49,10 @@ impl QueueManager {
         queue.consume()
     }
 
-    pub fn get_or_create(&self, queue_name: String) -> Arc<Queue> {
+    pub fn declare_queue(&self, queue_name: String, config: QueueConfig) -> Arc<Queue> {
         self.queues.entry(queue_name.clone())
             .or_insert_with(|| {
-                let queue = Arc::new(Queue::new(queue_name));
+                let queue = Arc::new(Queue::new(queue_name, config));
                 if let Some(manager_arc) = self.self_ref.get() {
                     queue.clone().start_reaper(manager_arc.clone());
                 }
@@ -62,9 +62,12 @@ impl QueueManager {
             .clone()
     }
 
+    pub fn get_or_create(&self, queue_name: String) -> Arc<Queue> {
+        self.declare_queue(queue_name, QueueConfig::default())
+    }
+
     // This method should be called after QueueManager is wrapped in an Arc
     pub fn start_reapers(self: Arc<Self>) {
-        // This is a bit tricky since new queues can be created at runtime.
-        // We'll probably want the get_or_create to start the reaper.
+        // Queues created at runtime automatically start their reaper in declare_queue
     }
 }

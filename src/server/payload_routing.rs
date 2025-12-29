@@ -16,6 +16,7 @@ pub const OP_KV_GET: u8 = 0x03;
 pub const OP_KV_DEL: u8 = 0x04;
 
 // Queue: 0x10 - 0x1F
+pub const OP_Q_DECLARE: u8 = 0x10;
 pub const OP_Q_PUSH: u8 = 0x11;
 pub const OP_Q_CONSUME: u8 = 0x12;
 pub const OP_Q_ACK: u8 = 0x13;
@@ -92,6 +93,29 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
         }
 
         // QUEUE BROKER
+        OP_Q_DECLARE => {
+            // [Visibility: 8][MaxRetries: 4][TTL: 8][Delay: 8][NameLen: 4][Name]
+            if body.len() < 32 { return Response::Error("Payload too short for Q_DECLARE".to_string()); }
+            let visibility = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
+            let max_retries = u32::from_be_bytes(body[8..12].as_ref().try_into().unwrap());
+            let ttl = u64::from_be_bytes(body[12..20].as_ref().try_into().unwrap());
+            let delay = u64::from_be_bytes(body[20..28].as_ref().try_into().unwrap());
+            
+            let (q_name, _) = match parse_string(&body[28..]) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+
+            let config = crate::brokers::queue::QueueConfig {
+                visibility_timeout_ms: visibility,
+                max_retries,
+                ttl_ms: ttl,
+                default_delay_ms: delay,
+            };
+
+            engine.queue.declare_queue(q_name.to_string(), config);
+            Response::Ok
+        }
         OP_Q_PUSH => {
             // [Priority: 1][Delay: 8][NameLen: 4][Name][Data]
             if body.len() < 13 { return Response::Error("Payload too short for Q_PUSH".to_string()); }

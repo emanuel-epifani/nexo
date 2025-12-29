@@ -40,6 +40,27 @@ impl Message {
     }
 }
 
+// ---------- QueueConfig ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueConfig {
+    pub visibility_timeout_ms: u64,
+    pub max_retries: u32,
+    pub ttl_ms: u64,
+    pub default_delay_ms: u64,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            visibility_timeout_ms: 30000,
+            max_retries: 5,
+            ttl_ms: 604800000, // 7 days in ms
+            default_delay_ms: 0,
+        }
+    }
+}
+
 // ---------- QueueState ----------
 
 pub struct QueueState {
@@ -77,10 +98,9 @@ impl QueueState {
     }
 
     /// Sposta un messaggio nello stato "In attesa di ACK" (Visibility Timeout)
-    pub fn move_to_waiting_ack(&mut self, id: Uuid, now: u64) -> Option<Message> {
+    pub fn move_to_waiting_ack(&mut self, id: Uuid, now: u64, visibility_timeout_ms: u64) -> Option<Message> {
         let msg = self.registry.get_mut(&id)?;
-        // TODO: Make visibility timeout configurable (currently 1s for tests)
-        let timeout = now + 1000;
+        let timeout = now + visibility_timeout_ms;
         msg.visible_at = timeout;
         msg.attempts += 1;
         
@@ -101,13 +121,15 @@ impl QueueState {
 
 pub struct Queue {
     pub name: String,
+    pub config: QueueConfig,
     state: Mutex<QueueState>,
 }
 
 impl Queue {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, config: QueueConfig) -> Self {
         Self {
             name,
+            config,
             state: Mutex::new(QueueState::new()),
         }
     }
@@ -115,7 +137,7 @@ impl Queue {
     /// Logica centrale di smistamento: consegna a un consumatore in attesa o mette in coda ready.
     fn dispatch(&self, state: &mut QueueState, id: Uuid, now: u64) {
         while let Some(consumer_tx) = state.waiting_consumers.pop_front() {
-            if let Some(msg) = state.move_to_waiting_ack(id, now) {
+            if let Some(msg) = state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms) {
                 if consumer_tx.send(msg).is_ok() {
                     return;
                 }
@@ -135,7 +157,8 @@ impl Queue {
 
     pub fn push(&self, payload: Bytes, priority: u8, delay_ms: Option<u64>) {
         let mut state = self.state.lock();
-        let msg = Message::new(payload, priority, delay_ms);
+        let effective_delay = delay_ms.or(if self.config.default_delay_ms > 0 { Some(self.config.default_delay_ms) } else { None });
+        let msg = Message::new(payload, priority, effective_delay);
         let id = msg.id;
         let now = current_time_ms();
 
@@ -152,7 +175,7 @@ impl Queue {
         let mut state = self.state.lock();
         let now = current_time_ms();
         let id = state.next_available_message_id()?;
-        state.move_to_waiting_ack(id, now)
+        state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms)
     }
 
     pub fn ack(&self, id: Uuid) -> bool {
@@ -167,7 +190,7 @@ impl Queue {
         let now = current_time_ms();
 
         if let Some(id) = state.next_available_message_id() {
-            if let Some(msg) = state.move_to_waiting_ack(id, now) {
+            if let Some(msg) = state.move_to_waiting_ack(id, now, self.config.visibility_timeout_ms) {
                 let _ = tx.send(msg);
                 return rx;
             }
@@ -191,19 +214,38 @@ impl Queue {
         let mut state = self.state.lock();
         let now = current_time_ms();
 
+        // 0. Cleanup dei messaggi scaduti (TTL)
+        let expired_ttl_ids: Vec<Uuid> = state.registry
+            .iter()
+            .filter(|(_, msg)| {
+                let age = now.saturating_sub(msg.created_at);
+                age > self.config.ttl_ms
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in expired_ttl_ids {
+            state.registry.remove(&id);
+            // Dovremmo anche rimuoverli dagli indici, ma per semplicità ora li lasciamo lì
+            // e verranno saltati quando estratti se non presenti nel registry.
+            // In una implementazione reale andrebbe fatta una pulizia più profonda.
+        }
+
         // 1. Messaggi programmati -> Pronti/Dispatch
         let expired_delayed = QueueState::extract_expired_ids(&mut state.waiting_for_time, now);
         for id in expired_delayed {
-            self.dispatch(&mut state, id, now);
+            if state.registry.contains_key(&id) {
+                self.dispatch(&mut state, id, now);
+            }
         }
 
         // 2. Messaggi in attesa di ACK -> DLQ o Pronti/Dispatch
         let expired_in_flight = QueueState::extract_expired_ids(&mut state.waiting_for_ack, now);
         for id in expired_in_flight {
             let (should_dlq, payload, priority) = match state.registry.get(&id) {
-                Some(msg) if msg.attempts >= 5 => (true, msg.payload.clone(), msg.priority),
+                Some(msg) if msg.attempts >= self.config.max_retries => (true, msg.payload.clone(), msg.priority),
                 Some(_) => (false, Bytes::new(), 0),
-                None => continue, // Già confermato (ACK)
+                None => continue, // Già confermato (ACK) o scaduto (TTL)
             };
 
             if should_dlq {
