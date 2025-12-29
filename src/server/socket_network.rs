@@ -86,7 +86,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         
                         match response {
                             Response::AsyncConsume(rx) => {
-                                println!("[Network] ID {} suspended, waiting for queue data...", id);
+                                println!("[Network] ID {} suspended, waiting for queues data...", id);
                                 // Wait for the message in the background task
                                 match rx.await {
                                     Ok(msg) => {

@@ -1,12 +1,12 @@
-//! Queue Manager: Message queue functionality
+//! Queue Manager: Message queues functionality
 use dashmap::DashMap;
 use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
 use tokio::sync::oneshot;
-use super::{Queue, Message, QueueConfig};
 
 use once_cell::sync::OnceCell;
+use crate::brokers::queues::{Message, Queue, QueueConfig};
 
 pub struct QueueManager {
     queues: DashMap<String, Arc<Queue>>,

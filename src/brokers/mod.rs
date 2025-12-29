@@ -1,4 +1,4 @@
 pub mod kv;
-pub mod queue;
+pub mod queues;
 pub mod topic;
 pub mod stream;

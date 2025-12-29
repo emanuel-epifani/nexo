@@ -106,7 +106,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
                 Err(e) => return Response::Error(e),
             };
 
-            let config = crate::brokers::queue::QueueConfig {
+            let config = crate::brokers::queues::QueueConfig {
                 visibility_timeout_ms: visibility,
                 max_retries,
                 ttl_ms: ttl,

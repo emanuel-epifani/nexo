@@ -1,15 +1,12 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use parking_lot::Mutex;
-use uuid::Uuid;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
-use serde::{Serialize, Deserialize};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-
-mod queue_manager;
-pub use queue_manager::QueueManager;
-
+use uuid::Uuid;
+use crate::brokers::queues::QueueManager;
 // ---------- Message ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +142,7 @@ impl Queue {
         let timeout = now + self.config.visibility_timeout_ms;
         msg.visible_at = timeout;
         msg.attempts += 1;
-        
+
         let msg_cloned = msg.clone();
         state.waiting_for_ack.entry(timeout).or_default().push(id);
         Some(msg_cloned)
@@ -183,7 +180,7 @@ impl Queue {
                 }
             }
         }
-        
+
         // Nessun consumatore pronto, lo mettiamo nel bucket della priorità corrispondente
         if let Some(msg) = state.registry.get(&id) {
             state.waiting_for_dispatch.entry(msg.priority).or_default().push_back(id);
@@ -230,7 +227,7 @@ impl Queue {
                 return rx;
             }
         }
-        
+
         state.waiting_consumers.push_back(tx);
         rx
     }
@@ -318,4 +315,3 @@ impl Queue {
 pub fn current_time_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
-

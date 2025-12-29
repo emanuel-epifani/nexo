@@ -50,7 +50,7 @@ pub enum Response {
     Error(String),
     Null,
     QueueData(uuid::Uuid, Bytes),
-    AsyncConsume(tokio::sync::oneshot::Receiver<crate::brokers::queue::Message>),
+    AsyncConsume(tokio::sync::oneshot::Receiver<crate::brokers::queues::Message>),
 }
 
 // ========================================

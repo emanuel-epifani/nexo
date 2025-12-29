@@ -7,7 +7,7 @@ mod utils;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use crate::brokers::kv::KvManager;
-use crate::brokers::queue::QueueManager;
+use crate::brokers::queues::QueueManager;
 use crate::brokers::topic::TopicManager;
 use crate::brokers::stream::StreamManager;
 

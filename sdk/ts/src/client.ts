@@ -19,7 +19,7 @@ enum ResponseStatus {
   Q_DATA = 0x04,
 }
 
-enum Opcode {
+export enum Opcode {
   // KV commands (0x02-0x0F)
   KV_SET = 0x02,
   KV_GET = 0x03,
@@ -81,42 +81,52 @@ export class NexoQueue {
     if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
   }
 
-  async subscribe(callback: (data: any) => Promise<void> | void): Promise<void> {
+  subscribe(callback: (data: any) => Promise<void> | void): { stop: () => void } {
     const qLen = Buffer.byteLength(this.name, 'utf8');
     const payload = Buffer.allocUnsafe(4 + qLen);
     payload.writeUInt32BE(qLen, 0);
     payload.write(this.name, 4, 'utf8');
 
-    while (this.client.connected) {
-      try {
-        const res = await (this.client as any).send(Opcode.Q_CONSUME, payload);
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-        if (res.status === ResponseStatus.Q_DATA) {
-          const idHex = res.data.subarray(0, 16).toString('hex');
-          const dataBuf = res.data.subarray(16);
-          const rawStr = dataBuf.toString('utf8');
+    let active = true;
 
-          let data: any;
-          try {
-            data = JSON.parse(rawStr);
-          } catch {
-            data = rawStr;
-          }
+    const loop = async () => {
+      while (this.client.connected && active) {
+        try {
+          const res = await (this.client as any).send(Opcode.Q_CONSUME, payload);
+          if (!active) break;
+          if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+          if (res.status === ResponseStatus.Q_DATA) {
+            const idHex = res.data.subarray(0, 16).toString('hex');
+            const dataBuf = res.data.subarray(16);
+            const rawStr = dataBuf.toString('utf8');
 
-          try {
-            await callback(data);
-            await this.ack(idHex);
-          } catch (e) {
-            // Callback failed, don't ACK, server will retry after visibility timeout
-            console.error(`Error in subscribe callback for queue ${this.name}:`, e);
+            let data: any;
+            try {
+              data = JSON.parse(rawStr);
+            } catch {
+              data = rawStr;
+            }
+
+            try {
+              await callback(data);
+              await this.ack(idHex);
+            } catch (e) {
+              if (active) console.error(`Error in subscribe callback for queue ${this.name}:`, e);
+            }
           }
+        } catch (err) {
+          if (!this.client.connected || !active) break;
+          console.error(`Subscription error for queue ${this.name}:`, err);
+          await new Promise(r => setTimeout(r, 1000));
         }
-      } catch (err) {
-        if (!this.client.connected) break;
-        console.error(`Subscription error for queue ${this.name}:`, err);
-        await new Promise(r => setTimeout(r, 1000)); // Retry delay
       }
-    }
+    };
+
+    loop();
+
+    return {
+      stop: () => { active = false; }
+    };
   }
 
   async ack(id: string): Promise<void> {
@@ -280,6 +290,11 @@ export class NexoClient {
 
     this.socket.on('close', () => {
       this.isConnected = false;
+      // Rigetta tutte le richieste pendenti per evitare hang
+      for (const handler of this.pending.values()) {
+        handler.reject(new Error('Connection closed'));
+      }
+      this.pending.clear();
     });
   }
 
