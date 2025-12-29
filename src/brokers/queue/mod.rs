@@ -203,32 +203,50 @@ impl Queue {
     pub fn start_reaper(self: Arc<Self>, manager: Arc<QueueManager>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut ticks = 0;
             loop {
                 interval.tick().await;
-                self.reprocess_expired_messages(&manager);
+                ticks += 1;
+                let deep_cleanup = ticks >= 10;
+                if deep_cleanup {
+                    ticks = 0;
+                }
+                self.reprocess_expired_messages(&manager, deep_cleanup);
             }
         });
     }
 
-    fn reprocess_expired_messages(&self, manager: &Arc<QueueManager>) {
+    fn reprocess_expired_messages(&self, manager: &Arc<QueueManager>, deep_cleanup: bool) {
         let mut state = self.state.lock();
         let now = current_time_ms();
 
         // 0. Cleanup dei messaggi scaduti (TTL)
-        let expired_ttl_ids: Vec<Uuid> = state.registry
-            .iter()
-            .filter(|(_, msg)| {
-                let age = now.saturating_sub(msg.created_at);
-                age > self.config.ttl_ms
-            })
-            .map(|(id, _)| *id)
-            .collect();
+        if deep_cleanup {
+            let expired_ttl_ids: std::collections::HashSet<Uuid> = state.registry
+                .iter()
+                .filter(|(_, msg)| {
+                    let age = now.saturating_sub(msg.created_at);
+                    age > self.config.ttl_ms
+                })
+                .map(|(id, _)| *id)
+                .collect();
 
-        for id in expired_ttl_ids {
-            state.registry.remove(&id);
-            // Dovremmo anche rimuoverli dagli indici, ma per semplicità ora li lasciamo lì
-            // e verranno saltati quando estratti se non presenti nel registry.
-            // In una implementazione reale andrebbe fatta una pulizia più profonda.
+            if !expired_ttl_ids.is_empty() {
+                for id in &expired_ttl_ids {
+                    state.registry.remove(id);
+                }
+
+                // Pulizia Eager degli indici (O(n))
+                for bucket in state.waiting_for_dispatch.values_mut() {
+                    bucket.retain(|id| !expired_ttl_ids.contains(id));
+                }
+                for bucket in state.waiting_for_time.values_mut() {
+                    bucket.retain(|id| !expired_ttl_ids.contains(id));
+                }
+                for bucket in state.waiting_for_ack.values_mut() {
+                    bucket.retain(|id| !expired_ttl_ids.contains(id));
+                }
+            }
         }
 
         // 1. Messaggi programmati -> Pronti/Dispatch
