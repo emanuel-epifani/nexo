@@ -10,6 +10,8 @@ use uuid::Uuid;
 // ========================================
 // OPCODES (First byte of Request Payload)
 // ========================================
+pub const OP_DEBUG_ECHO: u8 = 0x00;
+
 // KV: 0x02 - 0x0F
 pub const OP_KV_SET: u8 = 0x02;
 pub const OP_KV_GET: u8 = 0x03;
@@ -62,6 +64,8 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
     let body = payload.slice(1..);
 
     match opcode {
+        OP_DEBUG_ECHO => Response::Data(body),
+
         // KV BROKER
         OP_KV_SET => {
             if body.len() < 12 { return Response::Error("Payload too short for SET".to_string()); }
