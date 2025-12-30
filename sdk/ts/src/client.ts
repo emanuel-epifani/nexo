@@ -20,6 +20,9 @@ enum ResponseStatus {
 }
 
 export enum Opcode {
+  // Debug commands
+  DEBUG_ECHO = 0x00,
+
   // KV commands (0x02-0x0F)
   KV_SET = 0x02,
   KV_GET = 0x03,
@@ -52,60 +55,198 @@ export interface PushOptions {
   delayMs?: number;
 }
 
+/**
+ * DATA CODEC: Handles all serialization/deserialization of payloads.
+ * Centralizing this allows for future optimizations like MessagePack or Protobuf.
+ */
+class DataCodec {
+  static serialize(data: any): Buffer {
+    if (Buffer.isBuffer(data)) return data;
+    if (typeof data === 'string') return Buffer.from(data, 'utf8');
+    if (data === undefined || data === null) return Buffer.alloc(0);
+    return Buffer.from(JSON.stringify(data), 'utf8');
+  }
+
+  static deserialize(buf: Buffer): any {
+    if (buf.length === 0) return null;
+    const str = buf.toString('utf8');
+    try {
+      return JSON.parse(str);
+    } catch {
+      return str;
+    }
+  }
+}
+
+/**
+ * PROTOCOL READER: Sequential reader for parsing server responses byte by byte.
+ * Avoids manual offset management in business logic.
+ */
+class ProtocolReader {
+  private offset = 0;
+  constructor(public readonly buffer: Buffer) { }
+
+  readU8(): number {
+    return this.buffer[this.offset++];
+  }
+
+  readU32(): number {
+    const v = this.buffer.readUInt32BE(this.offset);
+    this.offset += 4;
+    return v;
+  }
+
+  readU64(): bigint {
+    const v = this.buffer.readBigUInt64BE(this.offset);
+    this.offset += 8;
+    return v;
+  }
+
+  readUUID(): string {
+    const hex = this.buffer.subarray(this.offset, this.offset + 16).toString('hex');
+    this.offset += 16;
+    return hex;
+  }
+
+  readString(): string {
+    const len = this.readU32();
+    const s = this.buffer.subarray(this.offset, this.offset + len).toString('utf8');
+    this.offset += len;
+    return s;
+  }
+
+  readData(): any {
+    return DataCodec.deserialize(this.buffer.subarray(this.offset));
+  }
+
+  // Returns everything from current offset to end
+  readRemaining(): Buffer {
+    return this.buffer.subarray(this.offset);
+  }
+}
+
+/**
+ * REQUEST BUILDER: Fluid API for internal use to construct binary requests.
+ * Ensures correct protocol layout and handles single-allocation optimization.
+ */
+class RequestBuilder {
+  private _frameType: number = FrameType.REQUEST;
+  private _chunks: { type: string; value: any; size: number }[] = [];
+
+  constructor(private client: NexoClient, private opcode: Opcode) { }
+
+  header(config: { type: number }): this {
+    this._frameType = config.type;
+    return this;
+  }
+
+  writeU8(v: number): this {
+    this._chunks.push({ type: 'u8', value: v, size: 1 });
+    return this;
+  }
+
+  writeU32(v: number): this {
+    this._chunks.push({ type: 'u32', value: v, size: 4 });
+    return this;
+  }
+
+  writeU64(v: number | bigint): this {
+    this._chunks.push({ type: 'u64', value: BigInt(v), size: 8 });
+    return this;
+  }
+
+  writeUUID(id: string): this {
+    const buf = Buffer.from(id, 'hex');
+    if (buf.length !== 16) throw new Error('Invalid UUID length');
+    this._chunks.push({ type: 'raw', value: buf, size: 16 });
+    return this;
+  }
+
+  writeString(s: string): this {
+    const buf = Buffer.from(s, 'utf8');
+    this.writeU32(buf.length);
+    this._chunks.push({ type: 'raw', value: buf, size: buf.length });
+    return this;
+  }
+
+  writeData(d: any): this {
+    const buf = DataCodec.serialize(d);
+    this._chunks.push({ type: 'raw', value: buf, size: buf.length });
+    return this;
+  }
+
+  /**
+   * Performs the actual assembly and dispatch.
+   * Centralizes all performance optimizations like pre-allocation.
+   */
+  async send(): Promise<{ status: ResponseStatus; reader: ProtocolReader }> {
+    const payloadBodyLen = this._chunks.reduce((acc, c) => acc + c.size, 0);
+    const payloadLen = 1 + payloadBodyLen; // +1 for opcode
+    const totalSize = 9 + payloadLen;
+
+    // TODO OPTIMIZATION: Use a BufferPool to reuse large buffers and avoid GC pressure
+    const buf = Buffer.allocUnsafe(totalSize);
+
+    // 1. Header (9 bytes)
+    buf[0] = this._frameType;
+    const id = (this.client as any).nextId++;
+    if ((this.client as any).nextId === 0) (this.client as any).nextId = 1;
+    buf.writeUInt32BE(id, 1);
+    buf.writeUInt32BE(payloadLen, 5);
+
+    // 2. Payload starts with Opcode
+    buf[9] = this.opcode;
+
+    // 3. Chunks
+    let offset = 10;
+    for (const chunk of this._chunks) {
+      switch (chunk.type) {
+        case 'u8': buf[offset] = chunk.value; break;
+        case 'u32': buf.writeUInt32BE(chunk.value, offset); break;
+        case 'u64': buf.writeBigUInt64BE(chunk.value, offset); break;
+        case 'raw': chunk.value.copy(buf, offset); break;
+      }
+      offset += chunk.size;
+    }
+
+    const res = await (this.client as any).dispatchRaw(id, buf);
+    return {
+      status: res.status,
+      reader: new ProtocolReader(res.data)
+    };
+  }
+}
+
 export class NexoQueue {
   constructor(private client: NexoClient, public readonly name: string) { }
 
   async push(data: any, options: PushOptions = {}): Promise<void> {
-    let valBuf: Buffer;
-    if (Buffer.isBuffer(data)) {
-      valBuf = data;
-    } else if (typeof data === 'string') {
-      valBuf = Buffer.from(data, 'utf8');
-    } else {
-      valBuf = Buffer.from(JSON.stringify(data), 'utf8');
-    }
+    const res = await this.client.request(Opcode.Q_PUSH)
+      .writeU8(options.priority || 0)
+      .writeU64(options.delayMs || 0)
+      .writeString(this.name)
+      .writeData(data)
+      .send();
 
-    const qLen = Buffer.byteLength(this.name, 'utf8');
-    const priority = options.priority || 0;
-    const delay = BigInt(options.delayMs || 0);
-    const payloadSize = 1 + 8 + 4 + qLen + valBuf.length;
-    const payload = Buffer.allocUnsafe(payloadSize);
-    payload[0] = priority;
-    payload.writeBigUInt64BE(delay, 1);
-    payload.writeUInt32BE(qLen, 9);
-    payload.write(this.name, 13, 'utf8');
-    valBuf.copy(payload, 13 + qLen);
-
-    // Use internal send from client
-    const res = await (this.client as any).send(Opcode.Q_PUSH, payload);
-    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+    if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
   }
 
   subscribe(callback: (data: any) => Promise<void> | void): { stop: () => void } {
-    const qLen = Buffer.byteLength(this.name, 'utf8');
-    const payload = Buffer.allocUnsafe(4 + qLen);
-    payload.writeUInt32BE(qLen, 0);
-    payload.write(this.name, 4, 'utf8');
-
     let active = true;
 
     const loop = async () => {
       while (this.client.connected && active) {
         try {
-          const res = await (this.client as any).send(Opcode.Q_CONSUME, payload);
-          if (!active) break;
-          if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-          if (res.status === ResponseStatus.Q_DATA) {
-            const idHex = res.data.subarray(0, 16).toString('hex');
-            const dataBuf = res.data.subarray(16);
-            const rawStr = dataBuf.toString('utf8');
+          const res = await this.client.request(Opcode.Q_CONSUME)
+            .writeString(this.name)
+            .send();
 
-            let data: any;
-            try {
-              data = JSON.parse(rawStr);
-            } catch {
-              data = rawStr;
-            }
+          if (!active) break;
+          if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
+
+          if (res.status === ResponseStatus.Q_DATA) {
+            const idHex = res.reader.readUUID();
+            const data = res.reader.readData();
 
             try {
               await callback(data);
@@ -123,30 +264,25 @@ export class NexoQueue {
     };
 
     loop();
-
-    return {
-      stop: () => { active = false; }
-    };
+    return { stop: () => { active = false; } };
   }
 
   async ack(id: string): Promise<void> {
-    const qLen = Buffer.byteLength(this.name, 'utf8');
-    const idBuf = Buffer.from(id, 'hex');
-    const payload = Buffer.allocUnsafe(16 + 4 + qLen);
-    idBuf.copy(payload, 0);
-    payload.writeUInt32BE(qLen, 16);
-    payload.write(this.name, 20, 'utf8');
-    const res = await (this.client as any).send(Opcode.Q_ACK, payload);
-    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+    const res = await this.client.request(Opcode.Q_ACK)
+      .writeUUID(id)
+      .writeString(this.name)
+      .send();
+
+    if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
   }
 }
 
-// --- RING BUFFER DECODER (Zero-Copy, Pre-allocated) ---
+// --- RING BUFFER DECODER ---
 
 class RingDecoder {
   private buf: Buffer;
-  private head = 0;  // Read position
-  private tail = 0;  // Write position
+  private head = 0;
+  private tail = 0;
 
   constructor(size = 512 * 1024) {
     this.buf = Buffer.allocUnsafe(size);
@@ -158,9 +294,7 @@ class RingDecoder {
 
     if (available < needed) {
       const used = this.tail - this.head;
-      if (used > 0) {
-        this.buf.copy(this.buf, 0, this.head, this.tail);
-      }
+      if (used > 0) this.buf.copy(this.buf, 0, this.head, this.tail);
       this.tail = used;
       this.head = 0;
     }
@@ -208,23 +342,14 @@ export class NexoClient {
   private port: number;
   private decoder = new RingDecoder();
   private queues = new Map<string, NexoQueue>();
-
-  // ID management: u32 wrap-around
   private nextId = 1;
-
-  // Map for pending requests: ID -> Handler
   private pending = new Map<number, PendingHandler>();
-
-  private writeBuf: Buffer;
-  private writeOffset = 0;
-  private flushScheduled = false;
 
   constructor(options: NexoOptions = {}) {
     this.host = options.host || '127.0.0.1';
     this.port = options.port || 8080;
     this.socket = new net.Socket();
     this.socket.setNoDelay(true);
-    this.writeBuf = Buffer.allocUnsafe(64 * 1024);
     this.setupSocketListeners();
   }
 
@@ -238,30 +363,70 @@ export class NexoClient {
     return client;
   }
 
+  /**
+   * Starts a new fluid request.
+   */
+  request(opcode: Opcode): RequestBuilder {
+    return new RequestBuilder(this, opcode);
+  }
+
   async registerQueue(name: string, config: QueueConfig = {}): Promise<NexoQueue> {
     if (this.queues.has(name)) return this.queues.get(name)!;
 
-    const visibility = BigInt(config.visibilityTimeoutMs ?? 30000);
-    const maxRetries = config.maxRetries ?? 5;
-    const ttl = BigInt(config.ttlMs ?? 604800000);
-    const delay = BigInt(config.delayMs ?? 0);
-    const qLen = Buffer.byteLength(name, 'utf8');
+    const res = await this.request(Opcode.Q_DECLARE)
+      .writeU64(config.visibilityTimeoutMs ?? 30000)
+      .writeU32(config.maxRetries ?? 5)
+      .writeU64(config.ttlMs ?? 604800000)
+      .writeU64(config.delayMs ?? 0)
+      .writeString(name)
+      .send();
 
-    const payload = Buffer.allocUnsafe(8 + 4 + 8 + 8 + 4 + qLen);
-    payload.writeBigUInt64BE(visibility, 0);
-    payload.writeUInt32BE(maxRetries, 8);
-    payload.writeBigUInt64BE(ttl, 12);
-    payload.writeBigUInt64BE(delay, 20);
-    payload.writeUInt32BE(qLen, 28);
-    payload.write(name, 32, 'utf8');
-
-    const res = await this.send(Opcode.Q_DECLARE, payload);
-    if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
+    if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
 
     const queue = new NexoQueue(this, name);
     this.queues.set(name, queue);
     return queue;
   }
+
+  public readonly kv = {
+    set: async (key: string, value: any, ttlSeconds = 0): Promise<void> => {
+      const res = await this.request(Opcode.KV_SET)
+        .writeU64(ttlSeconds)
+        .writeString(key)
+        .writeData(value)
+        .send();
+      if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
+    },
+
+    get: async (key: string): Promise<any> => {
+      const res = await this.request(Opcode.KV_GET)
+        .writeString(key)
+        .send();
+      if (res.status === ResponseStatus.NULL) return null;
+      if (res.status === ResponseStatus.DATA) return res.reader.readData();
+      if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
+      return null;
+    },
+
+    del: async (key: string): Promise<void> => {
+      const res = await this.request(Opcode.KV_DEL)
+        .writeString(key)
+        .send();
+      if (res.status === ResponseStatus.ERR) throw new Error(res.reader.readString());
+    },
+  };
+
+  /**
+   * Namespace for protocol validation and debugging.
+   */
+  public readonly debug = {
+    echo: async (data: any): Promise<any> => {
+      const res = await this.request(Opcode.DEBUG_ECHO)
+        .writeData(data)
+        .send();
+      return res.reader.readData();
+    }
+  };
 
   private setupSocketListeners() {
     this.socket.on('data', (chunk) => {
@@ -282,18 +447,13 @@ export class NexoClient {
 
     this.socket.on('error', (err) => {
       this.isConnected = false;
-      for (const handler of this.pending.values()) {
-        handler.reject(err as Error);
-      }
+      this.pending.forEach(h => h.reject(err));
       this.pending.clear();
     });
 
     this.socket.on('close', () => {
       this.isConnected = false;
-      // Rigetta tutte le richieste pendenti per evitare hang
-      for (const handler of this.pending.values()) {
-        handler.reject(new Error('Connection closed'));
-      }
+      this.pending.forEach(h => h.reject(new Error('Connection closed')));
       this.pending.clear();
     });
   }
@@ -311,56 +471,15 @@ export class NexoClient {
     });
   }
 
-  private flushBatch = (): void => {
-    this.flushScheduled = false;
-    if (this.writeOffset === 0) return;
-    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
-    this.writeOffset = 0;
-  };
+  /**
+   * Internal method called by RequestBuilder to dispatch the final buffer.
+   */
+  private async dispatchRaw(id: number, buffer: Buffer): Promise<{ status: ResponseStatus; data: Buffer }> {
+    if (!this.isConnected) throw new Error('Client not connected');
 
-  private send(opcode: number, payloadBody: Buffer): Promise<{ status: ResponseStatus; data: Buffer }> {
-    if (!this.isConnected) return Promise.reject(new Error('Client not connected'));
-
-    // Wrap ID as u32
-    const id = this.nextId;
-    this.nextId = (this.nextId + 1) >>> 0;
-    if (this.nextId === 0) this.nextId = 1;
-
-    const payloadLen = 1 + payloadBody.length;
-    const totalSize = 9 + payloadLen;
-
-    if (this.writeOffset + totalSize > this.writeBuf.length) {
-      if (this.writeOffset > 0) {
-        this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
-        this.writeOffset = 0;
-      }
-      if (totalSize > this.writeBuf.length) {
-        const msg = Buffer.allocUnsafe(totalSize);
-        msg[0] = FrameType.REQUEST;
-        msg.writeUInt32BE(id, 1);
-        msg.writeUInt32BE(payloadLen, 5);
-        msg[9] = opcode;
-        payloadBody.copy(msg, 10);
-        this.socket.write(msg);
-        return new Promise((resolve, reject) => {
-          this.pending.set(id, { resolve, reject });
-        });
-      }
-    }
-
-    const buf = this.writeBuf;
-    let off = this.writeOffset;
-    buf[off] = FrameType.REQUEST;
-    buf.writeUInt32BE(id, off + 1);
-    buf.writeUInt32BE(payloadLen, off + 5);
-    buf[off + 9] = opcode;
-    payloadBody.copy(buf, off + 10);
-    this.writeOffset = off + totalSize;
-
-    if (!this.flushScheduled) {
-      this.flushScheduled = true;
-      setImmediate(this.flushBatch);
-    }
+    // TODO OPTIMIZATION: Implement OS-level batching (write merging) here
+    // Currently we write immediately for simplicity and testability.
+    this.socket.write(buffer);
 
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -368,51 +487,8 @@ export class NexoClient {
   }
 
   disconnect(): void {
-    if (this.writeOffset > 0) {
-      this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
-      this.writeOffset = 0;
-    }
     this.socket.end();
     this.socket.destroy();
     this.isConnected = false;
   }
-
-  public readonly kv = {
-    set: (key: string, value: string | Buffer, ttlSeconds = 0): Promise<void> => {
-      const keyLen = Buffer.byteLength(key, 'utf8');
-      const valBuf = typeof value === 'string' ? Buffer.from(value, 'utf8') : value;
-      const payloadSize = 8 + 4 + keyLen + valBuf.length;
-      const payload = Buffer.allocUnsafe(payloadSize);
-      payload.writeBigUInt64BE(BigInt(ttlSeconds), 0);
-      payload.writeUInt32BE(keyLen, 8);
-      payload.write(key, 12, 'utf8');
-      valBuf.copy(payload, 12 + keyLen);
-      return this.send(Opcode.KV_SET, payload).then((res) => {
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-      });
-    },
-
-    get: (key: string): Promise<Buffer | null> => {
-      const keyLen = Buffer.byteLength(key, 'utf8');
-      const payload = Buffer.allocUnsafe(4 + keyLen);
-      payload.writeUInt32BE(keyLen, 0);
-      payload.write(key, 4, 'utf8');
-      return this.send(Opcode.KV_GET, payload).then((res) => {
-        if (res.status === ResponseStatus.NULL) return null;
-        if (res.status === ResponseStatus.DATA) return res.data;
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-        return null;
-      });
-    },
-
-    del: (key: string): Promise<void> => {
-      const keyLen = Buffer.byteLength(key, 'utf8');
-      const payload = Buffer.allocUnsafe(4 + keyLen);
-      payload.writeUInt32BE(keyLen, 0);
-      payload.write(key, 4, 'utf8');
-      return this.send(Opcode.KV_DEL, payload).then((res) => {
-        if (res.status === ResponseStatus.ERR) throw new Error(res.data.toString());
-      });
-    },
-  };
 }
