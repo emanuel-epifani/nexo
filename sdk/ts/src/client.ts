@@ -238,7 +238,7 @@ export class NexoClient {
     return client;
   }
 
-  async declareQueue(name: string, config: QueueConfig = {}): Promise<NexoQueue> {
+  async registerQueue(name: string, config: QueueConfig = {}): Promise<NexoQueue> {
     if (this.queues.has(name)) return this.queues.get(name)!;
 
     const visibility = BigInt(config.visibilityTimeoutMs ?? 30000);

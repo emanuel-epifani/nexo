@@ -4,9 +4,9 @@ import {NexoClient, Opcode} from '@nexo/client';
 
 describe('QUEUE broker', () => {
 
-    describe('1. Flussi Base e Concorrenza (Handle-based)', () => {
-        it('should deliver a message to a single consumer', async () => {
-            const q = await nexo.declareQueue('test_q_base_1');
+    describe('Core API (Handle-based)', () => {
+        it('Producer PUSH message -> Consumer receives it immediately', async () => {
+            const q = await nexo.registerQueue('test_q_base_1');
             const payload = { msg: 'hello nexo' };
             
             let received: any = null;
@@ -25,14 +25,14 @@ describe('QUEUE broker', () => {
             expect(received).toEqual(payload);
         });
 
-        it('should handle competing consumers: 1 message, 2 consumers', async () => {
+        it('Producer PUSH 1 message -> only ONE of 2 competing consumers receives it', async () => {
             const qName = 'test_q_competing';
-            const q1 = await nexo.declareQueue(qName);
+            const q1 = await nexo.registerQueue(qName);
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST,
                 port: parseInt(process.env.NEXO_PORT!)
             });
-            const q2 = await client2.declareQueue(qName);
+            const q2 = await client2.registerQueue(qName);
 
             let count = 0;
             const sub1 = q1.subscribe(async () => { count++; });
@@ -49,14 +49,14 @@ describe('QUEUE broker', () => {
             client2.disconnect();
         });
 
-        it('should handle fair distribution: 2 messages, 2 consumers', async () => {
+        it('Producer PUSH 2 messages -> 2 consumers receive ONE message each (Fair Distribution)', async () => {
             const qName = 'test_q_fair';
-            const q1 = await nexo.declareQueue(qName);
+            const q1 = await nexo.registerQueue(qName);
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST,
                 port: parseInt(process.env.NEXO_PORT!)
             });
-            const q2 = await client2.declareQueue(qName);
+            const q2 = await client2.registerQueue(qName);
 
             const received1: any[] = [];
             const received2: any[] = [];
@@ -79,8 +79,8 @@ describe('QUEUE broker', () => {
             client2.disconnect();
         });
 
-        it('should deliver messages in FIFO order within the same priority', async () => {
-            const q = await nexo.declareQueue('test_q_fifo');
+        it('Producer PUSH 3 messages -> Consumer receives them in FIFO order', async () => {
+            const q = await nexo.registerQueue('test_q_fifo');
             const messages = ['first', 'second', 'third'];
 
             for (const m of messages) await q.push(m);
@@ -100,9 +100,9 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('2. Priorità (Buckets)', () => {
-        it('should deliver higher priority messages first', async () => {
-            const q = await nexo.declareQueue('test_q_priority_1');
+    describe('Message Priority', () => {
+        it('Producer PUSH high/low priority -> Consumer receives HIGH priority first', async () => {
+            const q = await nexo.registerQueue('test_q_priority_1');
 
             await q.push('low-priority', { priority: 0 });
             await q.push('high-priority', { priority: 255 });
@@ -122,8 +122,8 @@ describe('QUEUE broker', () => {
             expect(received[1]).toBe('low-priority');
         });
 
-        it('should respect FIFO within different priority buckets', async () => {
-            const q = await nexo.declareQueue('test_q_priority_fifo');
+        it('Producer PUSH mixed priorities -> Consumer receives in Priority-then-FIFO order', async () => {
+            const q = await nexo.registerQueue('test_q_priority_fifo');
 
             await q.push('high-1', { priority: 10 });
             await q.push('low-1', { priority: 5 });
@@ -145,9 +145,9 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('3. Delayed Jobs (Il tempo)', () => {
-        it('should not deliver a delayed message before its time', async () => {
-            const q = await nexo.declareQueue('test_q_delayed_1');
+    describe('Delayed Messages (Scheduling)', () => {
+        it('Producer PUSH with delay -> message remains invisible until timer expires', async () => {
+            const q = await nexo.registerQueue('test_q_delayed_1');
             const payload = 'delayed-msg';
             const delayMs = 1500;
 
@@ -167,8 +167,8 @@ describe('QUEUE broker', () => {
             expect(received).toBe(true);
         });
 
-        it('should deliver multiple delayed messages in order', async () => {
-            const q = await nexo.declareQueue('test_q_delayed_order');
+        it('Producer PUSH multiple delayed -> Consumer receives them as they expire (Order)', async () => {
+            const q = await nexo.registerQueue('test_q_delayed_order');
 
             await q.push('longer-delay', { delayMs: 2000 });
             await q.push('shorter-delay', { delayMs: 1000 });
@@ -188,9 +188,9 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('4. Affidabilità & Timeouts Custom', () => {
-        it('should make a message visible again if no ACK is received (Visibility Timeout)', async () => {
-            const q = await nexo.declareQueue('test_q_timeout_custom', { visibilityTimeoutMs: 1000 });
+    describe('Reliability & Custom Timeouts', () => {
+        it('Consumer fails callback -> Message becomes VISIBLE again after Visibility Timeout', async () => {
+            const q = await nexo.registerQueue('test_q_timeout_custom', { visibilityTimeoutMs: 1000 });
             await q.push('timeout-msg');
 
             let receivedCount = 0;
@@ -211,10 +211,10 @@ describe('QUEUE broker', () => {
             expect(receivedCount).toBeGreaterThanOrEqual(2);
         });
 
-        it('should respect custom maxRetries and move to DLQ', async () => {
+        it('Consumer repeatedly fails -> Message moves to DLQ after maxRetries', async () => {
             const qName = 'test_q_custom_dlq';
-            const q = await nexo.declareQueue(qName, { maxRetries: 2, visibilityTimeoutMs: 1000 });
-            const dlq = await nexo.declareQueue(`${qName}_dlq`);
+            const q = await nexo.registerQueue(qName, { maxRetries: 2, visibilityTimeoutMs: 1000 });
+            const dlq = await nexo.registerQueue(`${qName}_dlq`);
             
             await q.push('poison-pill');
 
@@ -242,8 +242,8 @@ describe('QUEUE broker', () => {
             expect(dlqReceived).toBe(true);
         }, 15000);
 
-        it('should respect TTL (Message Retention)', async () => {
-            const q = await nexo.declareQueue('test_q_ttl_custom', { ttlMs: 1000 });
+        it('Message age > TTL -> Message is discarded from queue (Retention)', async () => {
+            const q = await nexo.registerQueue('test_q_ttl_custom', { ttlMs: 1000 });
             await q.push("short-lived");
             
             // Wait for expiration
@@ -258,9 +258,9 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('5. JSON & DevEx', () => {
-        it('should handle auto-serialization of complex objects', async () => {
-            const q = await nexo.declareQueue('test_q_json_complex');
+    describe('JSON & DevEx', () => {
+        it('Producer PUSH object -> SDK auto-serializes/deserializes JSON data', async () => {
+            const q = await nexo.registerQueue('test_q_json_complex');
             const data = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
             
             await q.push(data);
@@ -276,18 +276,18 @@ describe('QUEUE broker', () => {
             expect(received).toEqual(data);
         });
 
-        it('should be idempotent on declareQueue', async () => {
-            const q1 = await nexo.declareQueue('test_q_idemp', { maxRetries: 10 });
-            const q2 = await nexo.declareQueue('test_q_idemp', { maxRetries: 2 });
+        it('User calls registerQueue twice -> SDK returns the SAME instance (Idempotency)', async () => {
+            const q1 = await nexo.registerQueue('test_q_idemp', { maxRetries: 10 });
+            const q2 = await nexo.registerQueue('test_q_idemp', { maxRetries: 2 });
             
             expect(q1).toBe(q2);
             expect(q1.name).toBe('test_q_idemp');
         });
     });
 
-    describe('6. Edge Cases & Robustezza', () => {
-        it('should handle consumers connecting BEFORE the messages arrive', async () => {
-            const q = await nexo.declareQueue('test_q_blocking_new');
+    describe('Robustness & Edge Cases', () => {
+        it('Consumer starts BEFORE push -> receives message as soon as it arrives', async () => {
+            const q = await nexo.registerQueue('test_q_blocking_new');
             let received: any = null;
 
             const sub = q.subscribe(async (msg) => { received = msg; });
@@ -305,8 +305,8 @@ describe('QUEUE broker', () => {
             expect(received).toBe('instant');
         });
 
-        it('should be idempotent on double ACKs', async () => {
-            const q = await nexo.declareQueue('test_q_double_ack_new');
+        it('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
+            const q = await nexo.registerQueue('test_q_double_ack_new');
             await q.push('msg');
 
             const qLen = Buffer.byteLength(q.name, 'utf8');
@@ -321,8 +321,8 @@ describe('QUEUE broker', () => {
             await expect(q.ack(msgId)).resolves.toBeUndefined();
         });
 
-        it('should handle special characters in queues names', async () => {
-            const q = await nexo.declareQueue('queues:special/chars@123');
+        it('User creates queue with special chars -> Broker handles name correctly', async () => {
+            const q = await nexo.registerQueue('queues:special/chars@123');
             await q.push('special-test');
 
             let received: any = null;

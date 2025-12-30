@@ -1,6 +1,7 @@
 
 
 PROJECT:
+- logging sdk e rust
 - dahsboard react exposed on /status with snapshot of all broker status
 - docker image & publish on dockerhub
 - publish sdk ts on npm
