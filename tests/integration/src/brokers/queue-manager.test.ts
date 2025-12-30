@@ -274,6 +274,73 @@ describe('QUEUE broker', () => {
             sub.stop();
             expect(received).toBe(false);
         });
+
+        it('TTL expires while message is waiting for Retry -> Message is discarded (TTL wins over DLQ)', async () => {
+            // 1. SETUP
+            // Creiamo una coda con:
+            // - TTL molto breve (200ms): il messaggio deve morire presto.
+            // - MaxRetries alto (5): avrebbe diritto a molti tentativi.
+            // - VisibilityTimeout (100ms): dopo un errore, aspetta 100ms prima di riprovare.
+            const qName = 'test_ttl_vs_dlq';
+            const q = nexo.queue(qName, {
+                ttlMs: 200,
+                maxRetries: 5,
+                visibilityTimeoutMs: 100
+            });
+
+            // Serve anche la DLQ per verificare che NON ci finisca dentro
+            const dlq = nexo.queue(`${qName}_dlq`);
+
+            // 2. AZIONE
+            // Inviamo il messaggio. Nasce al tempo T=0. Morirà a T=200ms.
+            await q.push('msg-destined-to-die');
+
+            // 3. CONSUMO FALLITO (T=~10ms)
+            // Consumiamo subito e lanciamo errore.
+            // Il messaggio va in "waiting_for_ack" (invisibile).
+            // Diventerà visibile di nuovo a T=110ms (10 + 100 visibility).
+            let attempts = 0;
+            const sub = q.subscribe(async () => {
+                attempts++;
+                throw new Error('fail');
+            });
+
+            // 4. ATTESA STRATEGICA
+            // Aspettiamo 400ms. Cosa succede in questo lasso di tempo?
+            // - T=110ms: Visibility scade. Il messaggio "potrebbe" essere riprovato.
+            // - T=200ms: TTL scade. Il messaggio DEVE morire.
+            // - Il reaper gira ogni 100ms.
+            //
+            // Se il codice è corretto:
+            // Il reaper (o il prossimo fetch) si accorge che T > 200ms e lo cancella.
+            await new Promise(r => setTimeout(r, 400));
+            sub.stop();
+
+            // 5. VERIFICA
+            // a. Il messaggio non deve essere stato processato troppe volte (magari 1 o 2, ma poi basta).
+            // b. SOPRATTUTTO: La DLQ deve essere VUOTA.
+            //    Se il messaggio fosse finito in DLQ, significherebbe che il Retry ha "vinto" sul TTL.
+
+            let dlqMessage: any = null;
+            const dlqSub = dlq.subscribe(async (msg) => { dlqMessage = msg; });
+
+            // Diamo tempo per un eventuale dispatch errato verso la DLQ
+            await new Promise(r => setTimeout(r, 100));
+            dlqSub.stop();
+
+            // EXPECTATIONS
+            expect(dlqMessage).toBeNull(); // Non deve essere in DLQ
+
+            // Verifichiamo anche che la coda principale sia vuota (pulizia avvenuta)
+            // Proviamo a consumare di nuovo: non deve arrivare nulla.
+            let zombieMessage: any = null;
+            const zombieSub = q.subscribe(async (msg) => { zombieMessage = msg; });
+            await new Promise(r => setTimeout(r, 100));
+            zombieSub.stop();
+
+            expect(zombieMessage).toBeNull(); // Non deve essere risorto
+        });
+
     });
 
     describe('JSON & DevEx', () => {

@@ -68,7 +68,9 @@ struct InternalState {
     /// Messaggi programmati: stanno aspettando il momento giusto (ordinati per Tempo)
     waiting_for_time: BTreeMap<u64, Vec<Uuid>>,
     /// Messaggi inviati: stanno aspettando un ACK o il timeout (ordinati per Scadenza)
-    waiting_for_ack: BTreeMap<u64, Vec<Uuid>>,
+    waiting_for_ack: BTreeMap<u64, Vec<Uuid>>, //BTreeMap<"expired_date"", Vec<"uuid_message_of_registry"">>
+    /// Indice TTL: Ordina i messaggi per data di scadenza assoluta (O(1) cleanup)
+    waiting_for_ttl: BTreeMap<u64, Vec<Uuid>>,
     /// Consumatori "parcheggiati": stanno aspettando che arrivi un messaggio
     waiting_consumers: VecDeque<oneshot::Sender<Message>>,
 }
@@ -80,6 +82,7 @@ impl InternalState {
             waiting_for_dispatch: BTreeMap::new(),
             waiting_for_time: BTreeMap::new(),
             waiting_for_ack: BTreeMap::new(),
+            waiting_for_ttl: BTreeMap::new(),
             waiting_consumers: VecDeque::new(),
         }
     }
@@ -196,6 +199,10 @@ impl Queue {
 
         state.registry.insert(id, msg.clone());
 
+        // Indice TTL: registriamo quando questo messaggio morirà
+        let ttl_expiry = msg.created_at + self.config.ttl_ms;
+        state.waiting_for_ttl.entry(ttl_expiry).or_default().push(id);
+
         if let Some(delay_ts) = msg.delayed_until {
             state.waiting_for_time.entry(delay_ts).or_default().push(id);
         } else {
@@ -212,8 +219,19 @@ impl Queue {
 
     pub fn ack(&self, id: Uuid) -> bool {
         let mut state = self.state.lock();
-        state.registry.remove(&id);
-        true // Idempotenza
+        if let Some(msg) = state.registry.remove(&id) {
+            // Pulizia indice TTL per evitare memory leak su TTL lunghi
+            let ttl_expiry = msg.created_at + self.config.ttl_ms;
+            if let Some(bucket) = state.waiting_for_ttl.get_mut(&ttl_expiry) {
+                bucket.retain(|&x| x != id);
+                if bucket.is_empty() {
+                    state.waiting_for_ttl.remove(&ttl_expiry);
+                }
+            }
+            true
+        } else {
+            true // Idempotenza
+        }
     }
 
     pub fn consume(&self) -> oneshot::Receiver<Message> {
@@ -234,51 +252,24 @@ impl Queue {
 
     pub fn start_reaper(self: Arc<Self>, manager: Arc<QueueManager>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(10));
-            let mut ticks = 0;
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 interval.tick().await;
-                ticks += 1;
-                let deep_cleanup = ticks >= 5;
-                if deep_cleanup {
-                    ticks = 0;
-                }
-                self.reprocess_expired_messages(&manager, deep_cleanup);
+                self.reprocess_expired_messages(&manager);
             }
         });
     }
 
-    fn reprocess_expired_messages(&self, manager: &Arc<QueueManager>, deep_cleanup: bool) {
+    fn reprocess_expired_messages(&self, manager: &Arc<QueueManager>) {
         let mut state = self.state.lock();
         let now = current_time_ms();
 
         // 0. Cleanup dei messaggi scaduti (TTL)
-        if deep_cleanup {
-            let expired_ttl_ids: std::collections::HashSet<Uuid> = state.registry
-                .iter()
-                .filter(|(_, msg)| {
-                    let age = now.saturating_sub(msg.created_at);
-                    age > self.config.ttl_ms
-                })
-                .map(|(id, _)| *id)
-                .collect();
-
-            if !expired_ttl_ids.is_empty() {
-                for id in &expired_ttl_ids {
-                    state.registry.remove(id);
-                }
-
-                // Pulizia Eager degli indici (O(n))
-                for bucket in state.waiting_for_dispatch.values_mut() {
-                    bucket.retain(|id| !expired_ttl_ids.contains(id));
-                }
-                for bucket in state.waiting_for_time.values_mut() {
-                    bucket.retain(|id| !expired_ttl_ids.contains(id));
-                }
-                for bucket in state.waiting_for_ack.values_mut() {
-                    bucket.retain(|id| !expired_ttl_ids.contains(id));
-                }
-            }
+        let expired_ttl_ids = self.extract_expired_ids(&mut state.waiting_for_ttl, now);
+        for id in expired_ttl_ids {
+            state.registry.remove(&id);
+            // Non serve pulire gli altri indici (dispatch/ack/time) subito.
+            // La Lazy Cleanup in next_available_message_id e gli altri check gestiranno i riferimenti "morti".
         }
 
         // 1. Messaggi programmati -> Pronti/Dispatch
