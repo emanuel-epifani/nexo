@@ -8,14 +8,14 @@ describe('QUEUE broker', () => {
         it('Producer PUSH message -> Consumer receives it', async () => {
             const q = nexo.queue('test_q_base_1');
             const payload = { msg: 'hello nexo' };
-
+            
             let received: any = null;
             const sub = q.subscribe(async (data) => {
                 received = data;
             });
 
             await q.push(payload);
-
+            
             for (let i = 0; i < 10; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 50));
@@ -197,11 +197,9 @@ describe('QUEUE broker', () => {
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => { received.push(msg); });
 
-            // Aspettiamo che scada solo il delay corto (300ms + margine)
             await new Promise(r => setTimeout(r, 450));
             expect(received).toEqual([msg_short_delay]);
 
-            // Aspettiamo che scada anche quello lungo (600ms totali)
             for (let i = 0; i < 10; i++) {
                 if (received.length === 2) break;
                 await new Promise(r => setTimeout(r, 100));
@@ -211,9 +209,9 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('Reliability & Custom Timeouts', () => {
+    describe('Reliability & Auto-ACK', () => {
         it('Consumer fails callback -> Message becomes VISIBLE again after Visibility Timeout', async () => {
-            const q = await nexo.queue('test_q_timeout_custom').declare({ visibilityTimeoutMs: 300 });
+            const q = nexo.queue('test_q_timeout_custom', { visibilityTimeoutMs: 300 });
             await q.push('timeout-msg');
 
             let receivedCount = 0;
@@ -228,7 +226,6 @@ describe('QUEUE broker', () => {
             }
             expect(receivedCount).toBe(1);
 
-            // Wait for visibility timeout (300ms + reaper margin)
             await new Promise(r => setTimeout(r, 800));
             sub.stop();
             expect(receivedCount).toBeGreaterThanOrEqual(2);
@@ -236,18 +233,17 @@ describe('QUEUE broker', () => {
 
         it('Consumer repeatedly fails -> Message moves to DLQ after maxRetries', async () => {
             const qName = 'test_q_custom_dlq';
-            const q = await nexo.queue(qName).declare({ maxRetries: 2, visibilityTimeoutMs: 300 });
+            const q = nexo.queue(qName, { maxRetries: 2, visibilityTimeoutMs: 300 });
             const dlq = nexo.queue(`${qName}_dlq`);
-
+            
             await q.push('poison-pill');
 
             let attempts = 0;
-            const sub = q.subscribe(async () => {
-                attempts++;
+            const sub = q.subscribe(async () => { 
+                attempts++; 
                 throw new Error("fail");
             });
 
-            // Wait for 2 attempts (~1s)
             await new Promise(r => setTimeout(r, 1200));
             sub.stop();
             expect(attempts).toBe(2);
@@ -266,10 +262,9 @@ describe('QUEUE broker', () => {
         }, 10000);
 
         it('Message age > TTL -> Message is discarded from queue (Retention)', async () => {
-            const q = await nexo.queue('test_q_ttl_custom').declare({ ttlMs: 300 });
+            const q = nexo.queue('test_q_ttl_custom', { ttlMs: 300 });
             await q.push("short-lived");
             
-            // Wait for expiration
             await new Promise(r => setTimeout(r, 800));
             
             let received = false;
@@ -287,10 +282,10 @@ describe('QUEUE broker', () => {
             const q = nexo.queue<Order>('test_q_json_complex');
             const data: Order = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
             await q.push(data);
-
+            
             let received: Order | null = null;
             const sub = q.subscribe(async (msg) => {
-                received = msg;
+                received = msg; 
             });
 
             for (let i = 0; i < 10; i++) {
@@ -304,7 +299,7 @@ describe('QUEUE broker', () => {
         it('User calls nexo.queue(name) twice -> SDK returns the SAME instance (Idempotency)', () => {
             const q1 = nexo.queue('test_q_idemp');
             const q2 = nexo.queue('test_q_idemp');
-
+            
             expect(q1).toBe(q2);
             expect(q1.name).toBe('test_q_idemp');
         });

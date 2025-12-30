@@ -331,22 +331,24 @@ export class NexoQueue<T = any> {
   private isDeclared = false;
   private declarePromise: Promise<void> | null = null;
 
-  constructor(private builder: RequestBuilder, public readonly name: string) { }
+  constructor(
+    private builder: RequestBuilder,
+    public readonly name: string,
+    private config?: QueueConfig
+  ) { }
 
   private async ensureDeclared(): Promise<void> {
     if (this.isDeclared) return;
     if (this.declarePromise) return this.declarePromise;
 
+    if (!this.config) {
+      this.isDeclared = true;
+      return;
+    }
+
     this.declarePromise = (async () => {
       try {
-        await this.builder.reset(Opcode.Q_DECLARE)
-          .writeU64(30000)
-          .writeU32(5)
-          .writeU64(604800000)
-          .writeU64(0)
-          .writeString(this.name)
-          .send();
-        this.isDeclared = true;
+        await this.declare(this.config!);
       } finally {
         this.declarePromise = null;
       }
@@ -445,10 +447,10 @@ export class NexoClient {
     return this._kv as NexoKV<T>;
   }
 
-  public queue<T = any>(name: string): NexoQueue<T> {
+  public queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {
     let q = this.queues.get(name);
     if (!q) {
-      q = new NexoQueue<T>(this.builder, name);
+      q = new NexoQueue<T>(this.builder, name, config);
       this.queues.set(name, q);
     }
     return q as NexoQueue<T>;
