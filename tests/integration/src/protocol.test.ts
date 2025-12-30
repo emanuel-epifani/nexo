@@ -36,7 +36,7 @@ describe('Nexo Protocol & Socket', () => {
         // 5. Rust Response encoding
         // 6. RingDecoder (Frame extraction from stream)
         // 7. DataCodec (JSON.parse)
-        const response = await nexo.$debug.echo(complexData);
+        const response = await (nexo as any).debug.echo(complexData);
         
         expect(response).toEqual(complexData);
     });
@@ -49,7 +49,7 @@ describe('Nexo Protocol & Socket', () => {
         }));
 
         const results = await Promise.all(
-            requests.map(data => nexo.$debug.echo(data))
+            requests.map(data => (nexo as any).debug.echo(data))
         );
 
         expect(results).toEqual(requests);
@@ -69,7 +69,7 @@ describe('Nexo Protocol & Socket', () => {
 
         const worker = async () => {
             for (let i = 0; i < opsPerWorker; i++) {
-                await nexo.$debug.echo(payload);
+                await (nexo as any).debug.echo(payload);
             }
         };
 

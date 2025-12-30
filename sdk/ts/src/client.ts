@@ -136,7 +136,6 @@ class RingDecoder {
 
 /**
  * NEXO CONNECTION: The "Engine" - handles all low-level networking and buffering.
- * Internal class, not intended for direct SDK usage.
  */
 class NexoConnection {
   private socket: net.Socket;
@@ -193,9 +192,6 @@ class NexoConnection {
     this.writeOffset = 0;
   };
 
-  /**
-   * CORE DISPATCH: High-performance binary write into shared buffer.
-   */
   async dispatch(opcode: number, payloadLen: number, ops: any[]): Promise<{ status: ResponseStatus, data: Buffer }> {
     const total = 9 + payloadLen;
     if (this.writeOffset + total > this.writeBuf.length) this.flush();
@@ -304,10 +300,10 @@ class RequestBuilder {
  * NEXO KV: Resource handle for Key-Value operations.
  */
 export class NexoKV<T = any> {
-  constructor(private client: NexoClient) { }
+  constructor(private builder: RequestBuilder) { }
 
   async set(key: string, value: T, ttlSeconds = 0): Promise<void> {
-    await (this.client as any).builder.reset(Opcode.KV_SET)
+    await this.builder.reset(Opcode.KV_SET)
       .writeU64(ttlSeconds)
       .writeString(key)
       .writeData(value)
@@ -315,14 +311,14 @@ export class NexoKV<T = any> {
   }
 
   async get(key: string): Promise<T | null> {
-    const res = await (this.client as any).builder.reset(Opcode.KV_GET)
+    const res = await this.builder.reset(Opcode.KV_GET)
       .writeString(key)
       .send();
     return res.status === ResponseStatus.NULL ? null : res.reader.readData() as T;
   }
 
   async del(key: string): Promise<void> {
-    await (this.client as any).builder.reset(Opcode.KV_DEL)
+    await this.builder.reset(Opcode.KV_DEL)
       .writeString(key)
       .send();
   }
@@ -332,24 +328,48 @@ export class NexoKV<T = any> {
  * NEXO QUEUE: Resource handle for Queue operations.
  */
 export class NexoQueue<T = any> {
-  constructor(private client: NexoClient, public readonly name: string) { }
+  private isDeclared = false;
+  private declarePromise: Promise<void> | null = null;
 
-  /**
-   * Declares the queue on the server with specified configuration.
-   */
+  constructor(private builder: RequestBuilder, public readonly name: string) { }
+
+  private async ensureDeclared(): Promise<void> {
+    if (this.isDeclared) return;
+    if (this.declarePromise) return this.declarePromise;
+
+    this.declarePromise = (async () => {
+      try {
+        await this.builder.reset(Opcode.Q_DECLARE)
+          .writeU64(30000)
+          .writeU32(5)
+          .writeU64(604800000)
+          .writeU64(0)
+          .writeString(this.name)
+          .send();
+        this.isDeclared = true;
+      } finally {
+        this.declarePromise = null;
+      }
+    })();
+
+    return this.declarePromise;
+  }
+
   async declare(config: QueueConfig = {}): Promise<this> {
-    await (this.client as any).builder.reset(Opcode.Q_DECLARE)
+    await this.builder.reset(Opcode.Q_DECLARE)
       .writeU64(config.visibilityTimeoutMs ?? 30000)
       .writeU32(config.maxRetries ?? 5)
       .writeU64(config.ttlMs ?? 604800000)
       .writeU64(config.delayMs ?? 0)
       .writeString(this.name)
       .send();
+    this.isDeclared = true;
     return this;
   }
 
   async push(data: T, options: PushOptions = {}): Promise<void> {
-    await (this.client as any).builder.reset(Opcode.Q_PUSH)
+    await this.ensureDeclared();
+    await this.builder.reset(Opcode.Q_PUSH)
       .writeU8(options.priority || 0)
       .writeU64(options.delayMs || 0)
       .writeString(this.name)
@@ -360,9 +380,10 @@ export class NexoQueue<T = any> {
   subscribe(callback: (data: T) => Promise<void> | void): { stop: () => void } {
     let active = true;
     const loop = async () => {
-      while (this.client.connected && active) {
+      await this.ensureDeclared();
+      while ((this.builder as any).conn.isConnected && active) {
         try {
-          const res = await (this.client as any).builder.reset(Opcode.Q_CONSUME).writeString(this.name).send();
+          const res = await this.builder.reset(Opcode.Q_CONSUME).writeString(this.name).send();
           if (!active) break;
           if (res.status === ResponseStatus.Q_DATA) {
             const idHex = res.reader.readUUID();
@@ -375,7 +396,7 @@ export class NexoQueue<T = any> {
             }
           }
         } catch (err) {
-          if (!this.client.connected || !active) break;
+          if (!(this.builder as any).conn.isConnected || !active) break;
           await new Promise(r => setTimeout(r, 1000));
         }
       }
@@ -384,14 +405,13 @@ export class NexoQueue<T = any> {
     return { stop: () => { active = false; } };
   }
 
-  async ack(id: string): Promise<void> {
-    await (this.client as any).builder.reset(Opcode.Q_ACK).writeUUID(id).writeString(this.name).send();
+  private async ack(id: string): Promise<void> {
+    await this.builder.reset(Opcode.Q_ACK).writeUUID(id).writeString(this.name).send();
   }
 }
 
 /**
  * NEXO CLIENT: The public-facing SDK entrypoint.
- * Optimized for Devex and high-performance throughput.
  */
 export class NexoClient {
   private conn: NexoConnection;
@@ -418,33 +438,23 @@ export class NexoClient {
     this.conn.disconnect();
   }
 
-  /**
-   * Returns a handle for Key-Value operations.
-   */
   public kv<T = any>(): NexoKV<T> {
     if (!this._kv) {
-      this._kv = new NexoKV<any>(this);
+      this._kv = new NexoKV<any>(this.builder);
     }
     return this._kv as NexoKV<T>;
   }
 
-  /**
-   * Returns a handle for a specific queue.
-   */
   public queue<T = any>(name: string): NexoQueue<T> {
     let q = this.queues.get(name);
     if (!q) {
-      q = new NexoQueue<T>(this, name);
+      q = new NexoQueue<T>(this.builder, name);
       this.queues.set(name, q);
     }
     return q as NexoQueue<T>;
   }
 
-  /**
-   * Internal debug utilities. Prefixed with $ to hide from IntelliSense.
-   * @internal
-   */
-  public get $debug() {
+  private get debug() {
     return {
       echo: async (data: any): Promise<any> => {
         const res = await this.builder.reset(Opcode.DEBUG_ECHO).writeData(data).send();
