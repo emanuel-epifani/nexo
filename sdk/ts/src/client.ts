@@ -370,3 +370,4 @@ export class NexoClient {
 
   disconnect() { this.flush(); this.socket.destroy(); this.isConnected = false; }
 }
+
