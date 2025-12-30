@@ -234,12 +234,12 @@ impl Queue {
 
     pub fn start_reaper(self: Arc<Self>, manager: Arc<QueueManager>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = tokio::time::interval(Duration::from_millis(10));
             let mut ticks = 0;
             loop {
                 interval.tick().await;
                 ticks += 1;
-                let deep_cleanup = ticks >= 10;
+                let deep_cleanup = ticks >= 5;
                 if deep_cleanup {
                     ticks = 0;
                 }

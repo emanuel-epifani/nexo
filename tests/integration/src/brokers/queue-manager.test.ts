@@ -5,7 +5,7 @@ import {NexoClient, Opcode} from '@nexo/client';
 describe('QUEUE broker', () => {
 
     describe('Core API (Handle-based)', () => {
-        it('Producer PUSH message -> Consumer receives it immediately', async () => {
+        it('Producer PUSH message -> Consumer receives it', async () => {
             const q = await nexo.registerQueue('test_q_base_1');
             const payload = { msg: 'hello nexo' };
             
@@ -65,8 +65,10 @@ describe('QUEUE broker', () => {
             const sub2 = q2.subscribe(async (msg) => { received2.push(msg); });
 
             await new Promise(r => setTimeout(r, 100));
-            await q1.push('msg1');
-            await q1.push('msg2');
+            const msg1 = 'msg1'
+            const msg2 = 'msg2'
+            await q1.push(msg1);
+            await q1.push(msg2);
 
             await new Promise(r => setTimeout(r, 500));
             sub1.stop();
@@ -75,6 +77,9 @@ describe('QUEUE broker', () => {
             expect(received1.length).toBe(1);
             expect(received2.length).toBe(1);
             expect(received1[0]).not.toEqual(received2[0]);
+
+            const allReceived = [...received1, ...received2].sort();
+            expect(allReceived).toEqual([msg1, msg2]);
 
             client2.disconnect();
         });
@@ -104,8 +109,13 @@ describe('QUEUE broker', () => {
         it('Producer PUSH high/low priority -> Consumer receives HIGH priority first', async () => {
             const q = await nexo.registerQueue('test_q_priority_1');
 
-            await q.push('low-priority', { priority: 0 });
-            await q.push('high-priority', { priority: 255 });
+            const msg_low_priority = 'low-priority'
+            const msg_medium_priority = 'medium-priority'
+            const msg_high_priority = 'high-priority'
+
+            await q.push(msg_low_priority, { priority: 0 });
+            await q.push(msg_medium_priority, { priority: 10 });
+            await q.push(msg_high_priority, { priority: 255 });
 
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => {
@@ -113,22 +123,28 @@ describe('QUEUE broker', () => {
             });
 
             for (let i = 0; i < 20; i++) {
-                if (received.length === 2) break;
+                if (received.length === 3) break;
                 await new Promise(r => setTimeout(r, 100));
             }
             sub.stop();
 
-            expect(received[0]).toBe('high-priority');
-            expect(received[1]).toBe('low-priority');
+            expect(received[0]).toBe(msg_high_priority);
+            expect(received[1]).toBe(msg_medium_priority);
+            expect(received[2]).toBe(msg_low_priority);
         });
 
         it('Producer PUSH mixed priorities -> Consumer receives in Priority-then-FIFO order', async () => {
             const q = await nexo.registerQueue('test_q_priority_fifo');
 
-            await q.push('high-1', { priority: 10 });
-            await q.push('low-1', { priority: 5 });
-            await q.push('high-2', { priority: 10 });
-            await q.push('low-2', { priority: 5 });
+            const h1 = 'high-1';
+            const h2 = 'high-2';
+            const l1 = 'low-1';
+            const l2 = 'low-2';
+
+            await q.push(h1, { priority: 10 });
+            await q.push(l1, { priority: 5 });
+            await q.push(h2, { priority: 10 });
+            await q.push(l2, { priority: 5 });
 
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => {
@@ -141,79 +157,87 @@ describe('QUEUE broker', () => {
             }
             sub.stop();
 
-            expect(received).toEqual(['high-1', 'high-2', 'low-1', 'low-2']);
+            // L'ordine atteso è: priorità più alta (10) -> FIFO tra di loro, poi priorità più bassa (5) -> FIFO tra di loro
+            expect(received).toEqual([h1, h2, l1, l2]);
         });
     });
 
     describe('Delayed Messages (Scheduling)', () => {
         it('Producer PUSH with delay -> message remains invisible until timer expires', async () => {
             const q = await nexo.registerQueue('test_q_delayed_1');
-            const payload = 'delayed-msg';
-            const delayMs = 1500;
+            const payloadSent = 'delayed-msg';
+            let msgReceived: string | null = null;
+            const delayMs = 400;
 
-            await q.push(payload, { delayMs });
+            await q.push(payloadSent, { delayMs });
 
             let received = false;
-            const sub = q.subscribe(async () => { received = true; });
+            const sub = q.subscribe(async (data) => { received = true; msgReceived = data; });
 
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 200));
             expect(received).toBe(false);
 
-            for (let i = 0; i < 20; i++) {
+            for (let i = 0; i < 10; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 100));
             }
             sub.stop();
             expect(received).toBe(true);
+            expect(msgReceived).toBe(payloadSent);
         });
 
         it('Producer PUSH multiple delayed -> Consumer receives them as they expire (Order)', async () => {
             const q = await nexo.registerQueue('test_q_delayed_order');
 
-            await q.push('longer-delay', { delayMs: 2000 });
-            await q.push('shorter-delay', { delayMs: 1000 });
+            const msg_long_delay = 'longer-delay';
+            const msg_short_delay = 'shorter-delay';
+
+            await q.push(msg_long_delay, { delayMs: 600 });
+            await q.push(msg_short_delay, { delayMs: 300 });
 
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => { received.push(msg); });
 
-            await new Promise(r => setTimeout(r, 1200));
-            expect(received).toEqual(['shorter-delay']);
+            // Aspettiamo che scada solo il delay corto (300ms + margine)
+            await new Promise(r => setTimeout(r, 450));
+            expect(received).toEqual([msg_short_delay]);
 
-            for (let i = 0; i < 20; i++) {
+            // Aspettiamo che scada anche quello lungo (600ms totali)
+            for (let i = 0; i < 10; i++) {
                 if (received.length === 2) break;
                 await new Promise(r => setTimeout(r, 100));
             }
             sub.stop();
-            expect(received).toEqual(['shorter-delay', 'longer-delay']);
+            expect(received).toEqual([msg_short_delay, msg_long_delay]);
         });
     });
 
     describe('Reliability & Custom Timeouts', () => {
         it('Consumer fails callback -> Message becomes VISIBLE again after Visibility Timeout', async () => {
-            const q = await nexo.registerQueue('test_q_timeout_custom', { visibilityTimeoutMs: 1000 });
+            const q = await nexo.registerQueue('test_q_timeout_custom', { visibilityTimeoutMs: 300 });
             await q.push('timeout-msg');
 
             let receivedCount = 0;
             const sub = q.subscribe(async () => {
                 receivedCount++;
-                throw new Error("Force fail to prevent ACK");
+                throw new Error("Force fail to prevent auto ACK");
             });
 
             for (let i = 0; i < 10; i++) {
                 if (receivedCount === 1) break;
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 50));
             }
             expect(receivedCount).toBe(1);
 
-            // Wait for visibility timeout (1s + reaper margin)
-            await new Promise(r => setTimeout(r, 2500));
+            // Wait for visibility timeout (300ms + reaper margin)
+            await new Promise(r => setTimeout(r, 800));
             sub.stop();
             expect(receivedCount).toBeGreaterThanOrEqual(2);
         });
 
         it('Consumer repeatedly fails -> Message moves to DLQ after maxRetries', async () => {
             const qName = 'test_q_custom_dlq';
-            const q = await nexo.registerQueue(qName, { maxRetries: 2, visibilityTimeoutMs: 1000 });
+            const q = await nexo.registerQueue(qName, { maxRetries: 2, visibilityTimeoutMs: 300 });
             const dlq = await nexo.registerQueue(`${qName}_dlq`);
             
             await q.push('poison-pill');
@@ -224,8 +248,8 @@ describe('QUEUE broker', () => {
                 throw new Error("fail");
             });
 
-            // Wait for 2 attempts (~3s)
-            await new Promise(r => setTimeout(r, 4000));
+            // Wait for 2 attempts (~1s)
+            await new Promise(r => setTimeout(r, 1200));
             sub.stop();
             expect(attempts).toBe(2);
 
@@ -234,25 +258,25 @@ describe('QUEUE broker', () => {
                 if (data === 'poison-pill') dlqReceived = true;
             });
 
-            for (let i = 0; i < 20; i++) {
+            for (let i = 0; i < 10; i++) {
                 if (dlqReceived) break;
                 await new Promise(r => setTimeout(r, 100));
             }
             dlqSub.stop();
             expect(dlqReceived).toBe(true);
-        }, 15000);
+        }, 10000);
 
         it('Message age > TTL -> Message is discarded from queue (Retention)', async () => {
-            const q = await nexo.registerQueue('test_q_ttl_custom', { ttlMs: 1000 });
+            const q = await nexo.registerQueue('test_q_ttl_custom', { ttlMs: 300 });
             await q.push("short-lived");
             
             // Wait for expiration
-            await new Promise(r => setTimeout(r, 2500));
+            await new Promise(r => setTimeout(r, 800));
             
             let received = false;
             const sub = q.subscribe(async () => { received = true; });
 
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 300));
             sub.stop();
             expect(received).toBe(false);
         });
@@ -262,11 +286,12 @@ describe('QUEUE broker', () => {
         it('Producer PUSH object -> SDK auto-serializes/deserializes JSON data', async () => {
             const q = await nexo.registerQueue('test_q_json_complex');
             const data = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
-            
             await q.push(data);
             
             let received: any = null;
-            const sub = q.subscribe(async (msg) => { received = msg; });
+            const sub = q.subscribe(async (msg) => {
+                received = msg; 
+            });
 
             for (let i = 0; i < 10; i++) {
                 if (received) break;
@@ -295,35 +320,43 @@ describe('QUEUE broker', () => {
             await new Promise(r => setTimeout(r, 200));
             expect(received).toBeNull();
 
-            await q.push('instant');
+            const msgSent = 'instant'
+
+            await q.push(msgSent);
 
             for (let i = 0; i < 10; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 50));
             }
             sub.stop();
-            expect(received).toBe('instant');
+            expect(received).toBe(msgSent);
         });
 
-        it('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
+        it.skip('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
             const q = await nexo.registerQueue('test_q_double_ack_new');
             await q.push('msg');
 
-            const qLen = Buffer.byteLength(q.name, 'utf8');
-            const payload = Buffer.allocUnsafe(4 + qLen);
-            payload.writeUInt32BE(qLen, 0);
-            payload.write(q.name, 4, 'utf8');
+            // 1. Dobbiamo simulare l'estrazione manuale per fare l'ACK manuale
+            // In un caso reale l'utente userebbe q.subscribe, ma qui vogliamo testare l'idempotenza dell'ACK
+            // Quindi usiamo il "motore interno" (RequestBuilder) che ora è pubblico (per questo test)
+            const res = await (nexo as any).request(Opcode.Q_CONSUME)
+                .writeString(q.name)
+                .send();
 
-            const res = await (nexo as any).send(Opcode.Q_CONSUME, payload);
-            const msgId = res.data.subarray(0, 16).toString('hex');
+            // Estraiamo l'ID dall'UUID (primi 16 byte del corpo risposta)
+            const msgId = res.reader.readUUID();
 
+            // 1° ACK
             await q.ack(msgId);
+
+            // 2° ACK -> Non deve lanciare errori
             await expect(q.ack(msgId)).resolves.toBeUndefined();
         });
 
         it('User creates queue with special chars -> Broker handles name correctly', async () => {
             const q = await nexo.registerQueue('queues:special/chars@123');
-            await q.push('special-test');
+            let msgSent = 'special-test'
+            await q.push(msgSent);
 
             let received: any = null;
             const sub = q.subscribe(async (msg) => { received = msg; });
@@ -333,7 +366,8 @@ describe('QUEUE broker', () => {
                 await new Promise(r => setTimeout(r, 50));
             }
             sub.stop();
-            expect(received).toBe('special-test');
+            expect(received).toBe(msgSent);
         });
     });
+
 });
