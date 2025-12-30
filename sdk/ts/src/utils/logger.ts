@@ -7,7 +7,7 @@ enum LogLevel {
     NONE = 4
 }
 
-export class Logger {
+class Logger {
     private readonly level: LogLevel;
     private prefix: string = '[SDK]';
 
