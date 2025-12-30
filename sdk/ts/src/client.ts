@@ -46,6 +46,11 @@ export interface PushOptions {
   delayMs?: number;
 }
 
+export interface NexoOptions {
+  host?: string;
+  port?: number;
+}
+
 /**
  * DATA CODEC: Centralized serialization logic.
  */
@@ -97,15 +102,148 @@ class ProtocolReader {
 }
 
 /**
- * OPTIMIZED REQUEST BUILDER: Fluid API that writes directly to the client's shared buffer.
- * Reusable to avoid GC pressure.
+ * RING BUFFER DECODER: Efficient frame extraction.
+ */
+class RingDecoder {
+  private buf: Buffer;
+  private head = 0;
+  private tail = 0;
+  constructor(size = 512 * 1024) { this.buf = Buffer.allocUnsafe(size); }
+
+  push(chunk: Buffer): void {
+    const needed = chunk.length;
+    if (this.buf.length - this.tail < needed) {
+      const used = this.tail - this.head;
+      if (used > 0) this.buf.copy(this.buf, 0, this.head, this.tail);
+      this.tail = used; this.head = 0;
+    }
+    chunk.copy(this.buf, this.tail);
+    this.tail += needed;
+  }
+
+  nextFrame(): { type: number; id: number; payload: Buffer } | null {
+    if (this.tail - this.head < 9) return null;
+    const type = this.buf[this.head];
+    const id = this.buf.readUInt32BE(this.head + 1);
+    const payloadLen = this.buf.readUInt32BE(this.head + 5);
+    if (this.tail - this.head < 9 + payloadLen) return null;
+    const payload = this.buf.subarray(this.head + 9, this.head + 9 + payloadLen);
+    this.head += 9 + payloadLen;
+    if (this.head === this.tail) { this.head = 0; this.tail = 0; }
+    return { type, id, payload };
+  }
+}
+
+/**
+ * NEXO CONNECTION: The "Engine" - handles all low-level networking and buffering.
+ * Internal class, not intended for direct SDK usage.
+ */
+class NexoConnection {
+  private socket: net.Socket;
+  public isConnected = false;
+  private decoder = new RingDecoder();
+  private nextId = 1;
+  private pending = new Map<number, { resolve: any, reject: any }>();
+  private writeBuf = Buffer.allocUnsafe(64 * 1024);
+  private writeOffset = 0;
+  private flushScheduled = false;
+
+  constructor(private host: string, private port: number) {
+    this.socket = new net.Socket();
+    this.socket.setNoDelay(true);
+    this.setupListeners();
+  }
+
+  async connect(): Promise<void> {
+    return new Promise((res, rej) => {
+      this.socket.connect(this.port, this.host, () => {
+        this.isConnected = true; res();
+      });
+      this.socket.once('error', rej);
+    });
+  }
+
+  private setupListeners() {
+    this.socket.on('data', (chunk) => {
+      this.decoder.push(chunk);
+      let frame;
+      while ((frame = this.decoder.nextFrame())) {
+        if (frame.type === FrameType.RESPONSE) {
+          const h = this.pending.get(frame.id);
+          if (h) {
+            this.pending.delete(frame.id);
+            h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+          }
+        }
+      }
+    });
+    const cleanup = (err: any) => {
+      this.isConnected = false;
+      this.pending.forEach(h => h.reject(err || new Error('Connection closed')));
+      this.pending.clear();
+    };
+    this.socket.on('error', cleanup);
+    this.socket.on('close', cleanup);
+  }
+
+  private flush = () => {
+    this.flushScheduled = false;
+    if (this.writeOffset === 0) return;
+    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
+    this.writeOffset = 0;
+  };
+
+  /**
+   * CORE DISPATCH: High-performance binary write into shared buffer.
+   */
+  async dispatch(opcode: number, payloadLen: number, ops: any[]): Promise<{ status: ResponseStatus, data: Buffer }> {
+    const total = 9 + payloadLen;
+    if (this.writeOffset + total > this.writeBuf.length) this.flush();
+
+    const id = this.nextId++;
+    if (this.nextId === 0) this.nextId = 1;
+
+    let off = this.writeOffset;
+    const buf = this.writeBuf;
+    buf[off] = FrameType.REQUEST;
+    buf.writeUInt32BE(id, off + 1);
+    buf.writeUInt32BE(payloadLen, off + 5);
+    buf[off + 9] = opcode;
+    off += 10;
+
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      switch (op.type) {
+        case 1: buf[off] = op.val; off += 1; break;
+        case 2: buf.writeUInt32BE(op.val, off); off += 4; break;
+        case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
+        case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
+        case 5:
+          const sLen = op.size - 4;
+          buf.writeUInt32BE(sLen, off);
+          buf.write(op.val, off + 4, 'utf8');
+          off += op.size;
+          break;
+      }
+    }
+    this.writeOffset = off;
+    if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
+
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+  }
+
+  disconnect() { this.flush(); this.socket.destroy(); this.isConnected = false; }
+}
+
+/**
+ * REQUEST BUILDER: Internal utility for fluent request construction.
  */
 class RequestBuilder {
   private _ops: { type: number, val: any, size: number }[] = [];
-  private _payloadSize = 1; // +1 for opcode
+  private _payloadSize = 1;
   private _opcode: Opcode = Opcode.DEBUG_ECHO;
 
-  constructor(private client: NexoClient) { }
+  constructor(private conn: NexoConnection) { }
 
   reset(opcode: Opcode): this {
     this._opcode = opcode;
@@ -154,16 +292,64 @@ class RequestBuilder {
   }
 
   async send(): Promise<{ status: ResponseStatus; reader: ProtocolReader }> {
-    const res = await (this.client as any).dispatch(this._opcode, this._payloadSize, this._ops);
+    const res = await this.conn.dispatch(this._opcode, this._payloadSize, this._ops);
+    if (res.status === ResponseStatus.ERR) {
+      throw new Error(new ProtocolReader(res.data).readString());
+    }
     return { status: res.status, reader: new ProtocolReader(res.data) };
   }
 }
 
-export class NexoQueue {
+/**
+ * NEXO KV: Resource handle for Key-Value operations.
+ */
+export class NexoKV<T = any> {
+  constructor(private client: NexoClient) { }
+
+  async set(key: string, value: T, ttlSeconds = 0): Promise<void> {
+    await (this.client as any).builder.reset(Opcode.KV_SET)
+      .writeU64(ttlSeconds)
+      .writeString(key)
+      .writeData(value)
+      .send();
+  }
+
+  async get(key: string): Promise<T | null> {
+    const res = await (this.client as any).builder.reset(Opcode.KV_GET)
+      .writeString(key)
+      .send();
+    return res.status === ResponseStatus.NULL ? null : res.reader.readData() as T;
+  }
+
+  async del(key: string): Promise<void> {
+    await (this.client as any).builder.reset(Opcode.KV_DEL)
+      .writeString(key)
+      .send();
+  }
+}
+
+/**
+ * NEXO QUEUE: Resource handle for Queue operations.
+ */
+export class NexoQueue<T = any> {
   constructor(private client: NexoClient, public readonly name: string) { }
 
-  async push(data: any, options: PushOptions = {}): Promise<void> {
-    await this.client.request(Opcode.Q_PUSH)
+  /**
+   * Declares the queue on the server with specified configuration.
+   */
+  async declare(config: QueueConfig = {}): Promise<this> {
+    await (this.client as any).builder.reset(Opcode.Q_DECLARE)
+      .writeU64(config.visibilityTimeoutMs ?? 30000)
+      .writeU32(config.maxRetries ?? 5)
+      .writeU64(config.ttlMs ?? 604800000)
+      .writeU64(config.delayMs ?? 0)
+      .writeString(this.name)
+      .send();
+    return this;
+  }
+
+  async push(data: T, options: PushOptions = {}): Promise<void> {
+    await (this.client as any).builder.reset(Opcode.Q_PUSH)
       .writeU8(options.priority || 0)
       .writeU64(options.delayMs || 0)
       .writeString(this.name)
@@ -171,21 +357,21 @@ export class NexoQueue {
       .send();
   }
 
-  subscribe(callback: (data: any) => Promise<void> | void): { stop: () => void } {
+  subscribe(callback: (data: T) => Promise<void> | void): { stop: () => void } {
     let active = true;
     const loop = async () => {
       while (this.client.connected && active) {
         try {
-          const res = await this.client.request(Opcode.Q_CONSUME).writeString(this.name).send();
+          const res = await (this.client as any).builder.reset(Opcode.Q_CONSUME).writeString(this.name).send();
           if (!active) break;
           if (res.status === ResponseStatus.Q_DATA) {
             const idHex = res.reader.readUUID();
-            const data = res.reader.readData();
+            const data = res.reader.readData() as T;
             try {
               await callback(data);
               await this.ack(idHex);
             } catch (e) {
-              if (active) console.error(`Callback error:`, e);
+              if (active) console.error(`Callback error in queue ${this.name}:`, e);
             }
           }
         } catch (err) {
@@ -199,175 +385,71 @@ export class NexoQueue {
   }
 
   async ack(id: string): Promise<void> {
-    await this.client.request(Opcode.Q_ACK).writeUUID(id).writeString(this.name).send();
+    await (this.client as any).builder.reset(Opcode.Q_ACK).writeUUID(id).writeString(this.name).send();
   }
 }
 
-// --- RING BUFFER DECODER ---
-class RingDecoder {
-  private buf: Buffer;
-  private head = 0;
-  private tail = 0;
-  constructor(size = 512 * 1024) { this.buf = Buffer.allocUnsafe(size); }
-
-  push(chunk: Buffer): void {
-    const needed = chunk.length;
-    if (this.buf.length - this.tail < needed) {
-      const used = this.tail - this.head;
-      if (used > 0) this.buf.copy(this.buf, 0, this.head, this.tail);
-      this.tail = used; this.head = 0;
-    }
-    chunk.copy(this.buf, this.tail);
-    this.tail += needed;
-  }
-
-  nextFrame(): { type: number; id: number; payload: Buffer } | null {
-    if (this.tail - this.head < 9) return null;
-    const type = this.buf[this.head];
-    const id = this.buf.readUInt32BE(this.head + 1);
-    const payloadLen = this.buf.readUInt32BE(this.head + 5);
-    if (this.tail - this.head < 9 + payloadLen) return null;
-    const payload = this.buf.subarray(this.head + 9, this.head + 9 + payloadLen);
-    this.head += 9 + payloadLen;
-    if (this.head === this.tail) { this.head = 0; this.tail = 0; }
-    return { type, id, payload };
-  }
-}
-
-// --- CLIENT IMPLEMENTATION ---
+/**
+ * NEXO CLIENT: The public-facing SDK entrypoint.
+ * Optimized for Devex and high-performance throughput.
+ */
 export class NexoClient {
-  private socket: net.Socket;
-  private isConnected = false;
-  private decoder = new RingDecoder();
-  private nextId = 1;
-  private pending = new Map<number, { resolve: any, reject: any }>();
-  private writeBuf = Buffer.allocUnsafe(64 * 1024);
-  private writeOffset = 0;
-  private flushScheduled = false;
-  private sharedBuilder: RequestBuilder;
-  private queues = new Map<string, NexoQueue>();
+  private conn: NexoConnection;
+  private builder: RequestBuilder;
+  private _kv: NexoKV<any> | null = null;
+  private queues = new Map<string, NexoQueue<any>>();
 
-  constructor(private options: { host?: string, port?: number } = {}) {
-    this.socket = new net.Socket();
-    this.socket.setNoDelay(true);
-    this.sharedBuilder = new RequestBuilder(this);
-    this.setupListeners();
+  constructor(options: NexoOptions = {}) {
+    this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080);
+    this.builder = new RequestBuilder(this.conn);
   }
 
-  public get connected() { return this.isConnected; }
-
-  static async connect(opts?: any) {
-    const c = new NexoClient(opts);
-    await c.connect();
-    return c;
+  static async connect(options?: NexoOptions): Promise<NexoClient> {
+    const client = new NexoClient(options);
+    await client.conn.connect();
+    return client;
   }
 
-  request(opcode: Opcode) { return this.sharedBuilder.reset(opcode); }
-
-  async registerQueue(name: string, config: QueueConfig = {}): Promise<NexoQueue> {
-    if (this.queues.has(name)) return this.queues.get(name)!;
-    await this.request(Opcode.Q_DECLARE)
-      .writeU64(config.visibilityTimeoutMs ?? 30000).writeU32(config.maxRetries ?? 5)
-      .writeU64(config.ttlMs ?? 604800000).writeU64(config.delayMs ?? 0)
-      .writeString(name).send();
-    const q = new NexoQueue(this, name);
-    this.queues.set(name, q);
-    return q;
+  public get connected(): boolean {
+    return this.conn.isConnected;
   }
 
-  public readonly kv = {
-    set: (key: string, val: any, ttl = 0) => this.request(Opcode.KV_SET).writeU64(ttl).writeString(key).writeData(val).send().then(() => { }),
-    get: (key: string) => this.request(Opcode.KV_GET).writeString(key).send().then(r => r.status === ResponseStatus.NULL ? null : r.reader.readData()),
-    del: (key: string) => this.request(Opcode.KV_DEL).writeString(key).send().then(() => { }),
-  };
+  public disconnect(): void {
+    this.conn.disconnect();
+  }
 
   /**
-   * Namespace for protocol validation and debugging.
+   * Returns a handle for Key-Value operations.
    */
-  public readonly debug = {
-    echo: async (data: any): Promise<any> => {
-      const res = await this.request(Opcode.DEBUG_ECHO)
-        .writeData(data)
-        .send();
-      return res.reader.readData();
+  public kv<T = any>(): NexoKV<T> {
+    if (!this._kv) {
+      this._kv = new NexoKV<any>(this);
     }
-  };
+    return this._kv as NexoKV<T>;
+  }
 
-  private setupListeners() {
-    this.socket.on('data', (chunk) => {
-      this.decoder.push(chunk);
-      let frame;
-      while ((frame = this.decoder.nextFrame())) {
-        if (frame.type === FrameType.RESPONSE) {
-          const h = this.pending.get(frame.id);
-          if (h) {
-            this.pending.delete(frame.id);
-            h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
-          }
-        }
+  /**
+   * Returns a handle for a specific queue.
+   */
+  public queue<T = any>(name: string): NexoQueue<T> {
+    let q = this.queues.get(name);
+    if (!q) {
+      q = new NexoQueue<T>(this, name);
+      this.queues.set(name, q);
+    }
+    return q as NexoQueue<T>;
+  }
+
+  /**
+   * Internal debug utilities. Prefixed with $ to hide from IntelliSense.
+   * @internal
+   */
+  public get $debug() {
+    return {
+      echo: async (data: any): Promise<any> => {
+        const res = await this.builder.reset(Opcode.DEBUG_ECHO).writeData(data).send();
+        return res.reader.readData();
       }
-    });
-    const cleanup = (err: any) => {
-      this.isConnected = false;
-      this.pending.forEach(h => h.reject(err || new Error('Closed')));
-      this.pending.clear();
     };
-    this.socket.on('error', cleanup);
-    this.socket.on('close', cleanup);
   }
-
-  async connect(): Promise<void> {
-    return new Promise((res, rej) => {
-      this.socket.connect(this.options.port || 8080, this.options.host || '127.0.0.1', () => {
-        this.isConnected = true; res();
-      });
-      this.socket.once('error', rej);
-    });
-  }
-
-  private flush = () => {
-    this.flushScheduled = false;
-    if (this.writeOffset === 0) return;
-    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
-    this.writeOffset = 0;
-  };
-
-  private dispatch(opcode: number, payloadLen: number, ops: any[]): Promise<any> {
-    const total = 9 + payloadLen;
-    if (this.writeOffset + total > this.writeBuf.length) this.flush();
-
-    const id = this.nextId++;
-    if (this.nextId === 0) this.nextId = 1;
-
-    let off = this.writeOffset;
-    const buf = this.writeBuf;
-    buf[off] = FrameType.REQUEST;
-    buf.writeUInt32BE(id, off + 1);
-    buf.writeUInt32BE(payloadLen, off + 5);
-    buf[off + 9] = opcode;
-    off += 10;
-
-    for (let i = 0; i < ops.length; i++) {
-      const op = ops[i];
-      switch (op.type) {
-        case 1: buf[off] = op.val; off += 1; break;
-        case 2: buf.writeUInt32BE(op.val, off); off += 4; break;
-        case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
-        case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
-        case 5:
-          const sLen = op.size - 4;
-          buf.writeUInt32BE(sLen, off);
-          buf.write(op.val, off + 4, 'utf8');
-          off += op.size;
-          break;
-      }
-    }
-    this.writeOffset = off;
-    if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
-
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
-  }
-
-  disconnect() { this.flush(); this.socket.destroy(); this.isConnected = false; }
 }
-
