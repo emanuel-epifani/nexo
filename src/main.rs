@@ -45,20 +45,32 @@ impl NexoEngine {
 async fn main() {
     dotenv::dotenv().ok();
 
+    // Init Tracing (NEXO_LOG)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_env("NEXO_LOG")
+                .add_directive(tracing::Level::ERROR.into()) // Default fallback
+        )
+        .compact()
+        .with_target(true)
+        .init();
+
     let engine = NexoEngine::new();
     
     let host = std::env::var("NEXO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("{}:{}", host, port);
 
-    println!("🚀 Nexo Server v0.2 Starting...");
-    println!("📦 Brokers initialized: KV, Queue, Topic, Stream");
+    tracing::info!("NEXO_LOG = {}", std::env::var("NEXO_LOG").unwrap_or_else(|_| "INFO".to_string()));
+
+    tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");
+    tracing::info!("📦 Brokers initialized: KV, Queue, Topic, Stream");
 
     let listener = TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
 
-    println!("[Server] Nexo listening on {}", addr);
+    tracing::info!(address = %addr, "Nexo listening");
 
     loop {
         let (socket, client_addr) = listener
@@ -68,13 +80,13 @@ async fn main() {
 
         let engine_clone = engine.clone();
 
-        println!("[Server] New connection from {}", client_addr);
+        tracing::info!(client = %client_addr, "New connection accepted");
 
         tokio::spawn(async move {
             if let Err(e) = server::socket_network::handle_connection(socket, engine_clone).await {
-                eprintln!("[Server] Error from {}: {}", client_addr, e);
+                tracing::error!(client = %client_addr, error = %e, "Connection error");
             }
-            println!("[Server] Connection closed from {}", client_addr);
+            tracing::debug!(client = %client_addr, "Connection closed");
         });
     }
 }

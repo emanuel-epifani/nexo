@@ -36,7 +36,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
-                eprintln!("[Network] Write error: {}", e);
+                tracing::error!(error = %e, "[Network] Write error");
                 break;
             }
             
@@ -86,15 +86,15 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         
                         match response {
                             Response::AsyncConsume(rx) => {
-                                println!("[Network] ID {} suspended, waiting for queues data...", id);
+                                tracing::debug!(req_id = %id, "[Network] Request suspended, waiting for queue data...");
                                 // Wait for the message in the background task
                                 match rx.await {
                                     Ok(msg) => {
-                                        println!("[Network] ID {} wake up! Sending QueueData for {}", id, msg.id);
+                                        tracing::debug!(req_id = %id, msg_id = %msg.id, "[Network] Woke up! Sending QueueData");
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::QueueData(msg.id, msg.payload))).await;
                                     }
                                     Err(_) => {
-                                        println!("[Network] ID {} consumer channel dropped", id);
+                                        tracing::warn!(req_id = %id, "[Network] Consumer channel dropped");
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Consumer dropped".into()))).await;
                                     }
                                 }
