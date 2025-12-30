@@ -1,4 +1,5 @@
 import * as net from 'net';
+import { logger } from './utils/logger';
 
 // --- PROTOCOL DEFINITIONS ---
 
@@ -394,7 +395,7 @@ export class NexoQueue<T = any> {
               await callback(data);
               await this.ack(idHex);
             } catch (e) {
-              if (active) console.error(`Callback error in queue ${this.name}:`, e);
+              if (active) logger.error(`Callback error in queue ${this.name}:`, e);
             }
           }
         } catch (err) {
