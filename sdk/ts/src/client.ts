@@ -166,14 +166,14 @@ class NexoConnection {
   private setupListeners() {
     this.socket.on('data', (chunk) => {
       // LOG: Cosa riceviamo (Bytes grezzi)
-      logger.trace(`<- SOCKET READ (${chunk.length} bytes)`, chunk.toString('hex'));
+      // logger.trace(`<- SOCKET READ (${chunk.length} bytes)`, chunk.toString('hex'));
 
       this.decoder.push(chunk);
       let frame;
       while ((frame = this.decoder.nextFrame())) {
         if (frame.type === FrameType.RESPONSE) {
           // LOG: Cosa riceviamo (Parsed Frame)
-          logger.debug(`<- FRAME RES #${frame.id} (Len: ${frame.payload.length})`);
+          // logger.debug(`<- FRAME RES #${frame.id} (Len: ${frame.payload.length})`);
 
           const h = this.pending.get(frame.id);
           if (h) {
@@ -199,7 +199,7 @@ class NexoConnection {
     // LOG: Cosa stiamo inviando (Bytes effettivi su socket)
     const dataToSend = this.writeBuf.subarray(0, this.writeOffset);
     // Nota: logger.trace è lazy, la conversione hex avviene solo se trace è attivo
-    logger.trace(`-> SOCKET WRITE (${dataToSend.length} bytes)`, dataToSend.toString('hex'));
+    // logger.trace(`-> SOCKET WRITE (${dataToSend.length} bytes)`, dataToSend.toString('hex'));
 
     this.socket.write(dataToSend);
     this.writeOffset = 0;
@@ -238,7 +238,7 @@ class NexoConnection {
     this.writeOffset = off;
 
     // LOG: Cosa stiamo inviando (Oggetto/Header)
-    logger.debug(`-> REQ #${id} Op: ${Opcode[opcode]} (Payload: ${payloadLen} bytes)`);
+    // logger.debug(`-> REQ #${id} Op: ${Opcode[opcode]} (Payload: ${payloadLen} bytes)`);
 
     if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
 
@@ -308,10 +308,10 @@ class RequestBuilder {
     const res = await this.conn.dispatch(this._opcode, this._payloadSize, this._ops);
     if (res.status === ResponseStatus.ERR) {
       const err = new ProtocolReader(res.data).readString();
-      logger.debug(`<- ERROR ${Opcode[this._opcode]} (${err})`);
+      logger.error(`<- ERROR ${Opcode[this._opcode]} (${err})`);
       throw new Error(err);
     }
-    logger.debug(`<- RES ${Opcode[this._opcode]} (Status: ${ResponseStatus[res.status]}, Bytes: ${res.data.length})`);
+    // logger.debug(`<- RES ${Opcode[this._opcode]} (Status: ${ResponseStatus[res.status]}, Bytes: ${res.data.length})`);
     return { status: res.status, reader: new ProtocolReader(res.data) };
   }
 }
