@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
 import { performance } from "perf_hooks";
+import {logger} from "../../../../sdk/ts/src/utils/logger";
 
 describe('KEY-VALUE broker', () => {
   it('should be able to set and get a value', async () => {

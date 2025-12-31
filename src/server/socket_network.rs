@@ -32,7 +32,10 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let bytes = match msg {
-                WriteMessage::Response(id, resp) => encode_response(id, &resp),
+                WriteMessage::Response(id, ref resp) => {
+                     tracing::debug!("[SRV] -> FRAME RES #{} (Status: {:?})", id, resp);
+                     encode_response(id, resp)
+                },
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
@@ -40,6 +43,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                 break;
             }
             
+            tracing::trace!("[SRV] -> SOCKET WRITE ({} bytes)", bytes.len());
+
             // If there are no more messages immediately available, flush the buffer
             if rx.is_empty() {
                 let _ = buffered_writer.flush().await;
@@ -58,6 +63,10 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             .await
             .map_err(|e| format!("Socket read error: {}", e))?;
 
+        if n > 0 {
+             tracing::trace!("[SRV] <- SOCKET READ ({} bytes): {:X?}", n, &buffer[buffer.len() - n..]);
+        }
+
         if n == 0 { break; }
 
         while let Some((frame_ref, consumed)) = match parse_frame(&buffer) {
@@ -68,6 +77,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         } {
             let id = frame_ref.id;
             let frame_type = frame_ref.frame_type;
+
+            tracing::debug!("[SRV] <- FRAME REQ #{} (Type: {:?}, Len: {})", id, frame_type, consumed);
             
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
             // This is O(1) and does not copy the underlying data.

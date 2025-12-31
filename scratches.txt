@@ -30,3 +30,9 @@ Perché lo fa? Kafka permette il multiplexing. Puoi inviare 10 richieste di "pro
 MQTT deve gestire messaggi che arrivano dal server in qualsiasi momento (Push) e conferme di ricezione (Ack).
 La Soluzione: Usa un Fixed Header dove i primi 4 bit del primo byte indicano il Packet Type (es: 3 è un messaggio Pubblicato, 4 è un PubAck, 12 è un Ping).
 Correlation: Per i comandi che richiedono risposta (come SUBSCRIBE), usa un Packet Identifier (un ID di 2 byte) per associare la risposta (SUBACK) alla richiesta.
+
+
+Logger:
+il logger
+In TS:  logger.debug("Messaggio", obj) (Argomenti = Veloce) passa argomenti
+In Rust: info!("Messaggio {}", obj) (Interpolazione nativa = Veloce/Lazy) non fare chiamate a funzioni

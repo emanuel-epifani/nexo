@@ -45,14 +45,14 @@ impl NexoEngine {
 async fn main() {
     dotenv::dotenv().ok();
 
-    // Init Tracing (NEXO_LOG)
+    // Init Tracing (logging)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("NEXO_LOG")
-                .add_directive(tracing::Level::ERROR.into()) // Default fallback
         )
         .compact()
-        .with_target(true)
+        .with_target(false)
+        .without_time()
         .init();
 
     let engine = NexoEngine::new();
@@ -61,7 +61,10 @@ async fn main() {
     let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "8080".to_string());
     let addr = format!("{}:{}", host, port);
 
-    tracing::info!("NEXO_LOG = {}", std::env::var("NEXO_LOG").unwrap_or_else(|_| "INFO".to_string()));
+    match std::env::var("NEXO_LOG") {
+        Ok(val) => tracing::info!("NEXO_LOG found: '{}'", val),
+        Err(_) => tracing::warn!("NEXO_LOG NOT FOUND!"),
+    }
 
     tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");
     tracing::info!("📦 Brokers initialized: KV, Queue, Topic, Stream");
