@@ -6,7 +6,7 @@ mod utils;
 
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use crate::brokers::kv::KvManager;
+use crate::brokers::store::StoreManager;
 use crate::brokers::queues::QueueManager;
 use crate::brokers::topic::TopicManager;
 use crate::brokers::stream::StreamManager;
@@ -17,7 +17,7 @@ use crate::brokers::stream::StreamManager;
 
 #[derive(Clone)]
 pub struct NexoEngine {
-    pub kv: Arc<KvManager>,
+    pub store: Arc<StoreManager>,
     pub queue: Arc<QueueManager>,
     pub topic: Arc<TopicManager>,
     pub stream: Arc<StreamManager>,
@@ -29,7 +29,7 @@ impl NexoEngine {
         queue_manager.set_self(queue_manager.clone());
         
         Self {
-            kv: Arc::new(KvManager::new()),
+            store: Arc::new(StoreManager::new()),
             queue: queue_manager,
             topic: Arc::new(TopicManager::new()),
             stream: Arc::new(StreamManager::new()),

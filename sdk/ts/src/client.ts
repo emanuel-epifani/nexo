@@ -22,15 +22,23 @@ enum ResponseStatus {
 
 export enum Opcode {
   DEBUG_ECHO = 0x00,
+  // Store KV: 0x02 - 0x05
   KV_SET = 0x02,
   KV_GET = 0x03,
   KV_DEL = 0x04,
+  // Future: KV_INCR = 0x05
+  // Future Store Hash: 0x06 - 0x09
+  // Future Store List: 0x0A - 0x0D
+  // Future Store Set: 0x0E - 0x0F
+  // Queue: 0x10 - 0x1F
   Q_DECLARE = 0x10,
   Q_PUSH = 0x11,
   Q_CONSUME = 0x12,
   Q_ACK = 0x13,
+  // Topic: 0x20 - 0x2F
   PUB = 0x21,
   SUB = 0x22,
+  // Stream: 0x30 - 0x3F
   S_ADD = 0x31,
   S_READ = 0x32,
 }
@@ -165,16 +173,10 @@ class NexoConnection {
 
   private setupListeners() {
     this.socket.on('data', (chunk) => {
-      // LOG: Cosa riceviamo (Bytes grezzi)
-      // logger.trace(`<- SOCKET READ (${chunk.length} bytes)`, chunk.toString('hex'));
-
       this.decoder.push(chunk);
       let frame;
       while ((frame = this.decoder.nextFrame())) {
         if (frame.type === FrameType.RESPONSE) {
-          // LOG: Cosa riceviamo (Parsed Frame)
-          // logger.debug(`<- FRAME RES #${frame.id} (Len: ${frame.payload.length})`);
-
           const h = this.pending.get(frame.id);
           if (h) {
             this.pending.delete(frame.id);
@@ -195,13 +197,7 @@ class NexoConnection {
   private flush = () => {
     this.flushScheduled = false;
     if (this.writeOffset === 0) return;
-
-    // LOG: Cosa stiamo inviando (Bytes effettivi su socket)
-    const dataToSend = this.writeBuf.subarray(0, this.writeOffset);
-    // Nota: logger.trace è lazy, la conversione hex avviene solo se trace è attivo
-    // logger.trace(`-> SOCKET WRITE (${dataToSend.length} bytes)`, dataToSend.toString('hex'));
-
-    this.socket.write(dataToSend);
+    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
     this.writeOffset = 0;
   };
 
@@ -236,9 +232,6 @@ class NexoConnection {
       }
     }
     this.writeOffset = off;
-
-    // LOG: Cosa stiamo inviando (Oggetto/Header)
-    // logger.debug(`-> REQ #${id} Op: ${Opcode[opcode]} (Payload: ${payloadLen} bytes)`);
 
     if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
 
@@ -311,13 +304,16 @@ class RequestBuilder {
       logger.error(`<- ERROR ${Opcode[this._opcode]} (${err})`);
       throw new Error(err);
     }
-    // logger.debug(`<- RES ${Opcode[this._opcode]} (Status: ${ResponseStatus[res.status]}, Bytes: ${res.data.length})`);
     return { status: res.status, reader: new ProtocolReader(res.data) };
   }
 }
 
+// ========================================
+// STORE BROKER - Data Structures
+// ========================================
+
 /**
- * NEXO KV: Resource handle for Key-Value operations.
+ * NEXO KV: Key-Value operations (store.kv.set/get/del)
  */
 export class NexoKV<T = any> {
   constructor(private builder: RequestBuilder) { }
@@ -342,7 +338,84 @@ export class NexoKV<T = any> {
       .writeString(key)
       .send();
   }
+
+  // Future: incr(key: string, delta: number): Promise<number>
 }
+
+/**
+ * NEXO HASH: Hash operations (store.hash("key").set/get)
+ * Placeholder for future implementation
+ */
+export class NexoHash<T = any> {
+  constructor(private builder: RequestBuilder, public readonly key: string) { }
+
+  // Future implementation
+  // async set(field: string, value: T): Promise<void>
+  // async get(field: string): Promise<T | null>
+  // async del(field: string): Promise<void>
+  // async getAll(): Promise<Record<string, T>>
+  // async incr(field: string, delta: number): Promise<number>
+}
+
+/**
+ * NEXO LIST: List operations (store.list("key").push/pop)
+ * Placeholder for future implementation
+ */
+export class NexoList<T = any> {
+  constructor(private builder: RequestBuilder, public readonly key: string) { }
+
+  // Future implementation
+  // async push(value: T): Promise<number>
+  // async pop(): Promise<T | null>
+  // async shift(): Promise<T | null>
+  // async range(start: number, end: number): Promise<T[]>
+}
+
+/**
+ * NEXO SET: Set operations (store.set("key").add/has)
+ * Placeholder for future implementation
+ */
+export class NexoSet<T = any> {
+  constructor(private builder: RequestBuilder, public readonly key: string) { }
+
+  // Future implementation
+  // async add(member: T): Promise<boolean>
+  // async has(member: T): Promise<boolean>
+  // async remove(member: T): Promise<boolean>
+  // async members(): Promise<T[]>
+}
+
+/**
+ * NEXO STORE: Container for all data structure operations
+ * Access via nexo.store.kv, nexo.store.hash(), etc.
+ */
+export class NexoStore {
+  /** Key-Value operations */
+  public readonly kv: NexoKV;
+
+  constructor(private builder: RequestBuilder) {
+    this.kv = new NexoKV(builder);
+  }
+
+  /** Hash operations for a specific key */
+  hash<T = any>(key: string): NexoHash<T> {
+    return new NexoHash<T>(this.builder, key);
+  }
+
+  /** List operations for a specific key */
+  list<T = any>(key: string): NexoList<T> {
+    return new NexoList<T>(this.builder, key);
+  }
+
+  /** Set operations for a specific key */
+  set<T = any>(key: string): NexoSet<T> {
+    return new NexoSet<T>(this.builder, key);
+  }
+}
+
+// ========================================
+// QUEUE BROKER
+// ========================================
 
 /**
  * NEXO QUEUE: Resource handle for Queue operations.
@@ -432,18 +505,39 @@ export class NexoQueue<T = any> {
   }
 }
 
+// ========================================
+// NEXO CLIENT - Main Entry Point
+// ========================================
+
 /**
  * NEXO CLIENT: The public-facing SDK entrypoint.
+ * 
+ * @example
+ * ```typescript
+ * const nexo = await NexoClient.connect();
+ * 
+ * // Store operations
+ * await nexo.store.kv.set("key", "value");
+ * const value = await nexo.store.kv.get("key");
+ * 
+ * // Queue operations
+ * const orders = nexo.queue("orders");
+ * await orders.push({ item: "book" });
+ * orders.subscribe(order => console.log(order));
+ * ```
  */
 export class NexoClient {
   private conn: NexoConnection;
   private builder: RequestBuilder;
-  private _kv: NexoKV<any> | null = null;
   private queues = new Map<string, NexoQueue<any>>();
+
+  /** Store broker - access data structures (kv, hash, list, set) */
+  public readonly store: NexoStore;
 
   constructor(options: NexoOptions = {}) {
     this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080);
     this.builder = new RequestBuilder(this.conn);
+    this.store = new NexoStore(this.builder);
   }
 
   static async connect(options?: NexoOptions): Promise<NexoClient> {
@@ -460,13 +554,7 @@ export class NexoClient {
     this.conn.disconnect();
   }
 
-  public kv<T = any>(): NexoKV<T> {
-    if (!this._kv) {
-      this._kv = new NexoKV<any>(this.builder);
-    }
-    return this._kv as NexoKV<T>;
-  }
-
+  /** Queue broker - get or create a queue by name */
   public queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {
     let q = this.queues.get(name);
     if (!q) {
@@ -476,7 +564,8 @@ export class NexoClient {
     return q as NexoQueue<T>;
   }
 
-  private get debug() {
+  /** @internal Debug utilities */
+  public get debug() {
     return {
       echo: async (data: any): Promise<any> => {
         const res = await this.builder.reset(Opcode.DEBUG_ECHO).writeData(data).send();

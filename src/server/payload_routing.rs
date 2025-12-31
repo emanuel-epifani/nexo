@@ -64,9 +64,20 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
     let body = payload.slice(1..);
 
     match opcode {
-        OP_DEBUG_ECHO => Response::Data(body),
+        // ==========================================
+        // DEBUG
+        // ==========================================
+        
+        // DEBUG_ECHO: [Data]
+        OP_DEBUG_ECHO => {
+            Response::Data(body)
+        }
 
-        // KV BROKER
+        // ==========================================
+        // STORE BROKER (KV operations)
+        // ==========================================
+        
+        // KV_SET: [TTL:8][KeyLen:4][Key][Value]
         OP_KV_SET => {
             if body.len() < 12 { return Response::Error("Payload too short for SET".to_string()); }
             let ttl_secs = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
@@ -76,35 +87,44 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
                 Err(e) => return Response::Error(e),
             };
             let offset = body.len() - val_ptr.len();
-            engine.kv.set(key.to_string(), body.slice(offset..), ttl)
-                .map(|_| Response::Ok).unwrap_or_else(Response::Error)
+            engine.store.set(key.to_string(), body.slice(offset..), ttl)
+                .map(|_| Response::Ok)
+                .unwrap_or_else(Response::Error)
         }
+        
+        // KV_GET: [KeyLen:4][Key]
         OP_KV_GET => {
             let (key, _) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.kv.get(key)
+            engine.store.get(key)
                 .map(|res| res.map(Response::Data).unwrap_or(Response::Null))
                 .unwrap_or_else(Response::Error)
         }
+        
+        // KV_DEL: [KeyLen:4][Key]
         OP_KV_DEL => {
             let (key, _) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.kv.del(key).map(|_| Response::Ok).unwrap_or_else(Response::Error)
+            engine.store.del(key)
+                .map(|_| Response::Ok)
+                .unwrap_or_else(Response::Error)
         }
 
+        // ==========================================
         // QUEUE BROKER
+        // ==========================================
+        
+        // Q_DECLARE: [Visibility:8][MaxRetries:4][TTL:8][Delay:8][NameLen:4][Name]
         OP_Q_DECLARE => {
-            // [Visibility: 8][MaxRetries: 4][TTL: 8][Delay: 8][NameLen: 4][Name]
             if body.len() < 32 { return Response::Error("Payload too short for Q_DECLARE".to_string()); }
             let visibility = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
             let max_retries = u32::from_be_bytes(body[8..12].as_ref().try_into().unwrap());
             let ttl = u64::from_be_bytes(body[12..20].as_ref().try_into().unwrap());
             let delay = u64::from_be_bytes(body[20..28].as_ref().try_into().unwrap());
-            
             let (q_name, _) = match parse_string(&body[28..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
@@ -116,26 +136,26 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
                 ttl_ms: ttl,
                 default_delay_ms: delay,
             };
-
             engine.queue.declare_queue(q_name.to_string(), config);
             Response::Ok
         }
+        
+        // Q_PUSH: [Priority:1][Delay:8][NameLen:4][Name][Data]
         OP_Q_PUSH => {
-            // [Priority: 1][Delay: 8][NameLen: 4][Name][Data]
             if body.len() < 13 { return Response::Error("Payload too short for Q_PUSH".to_string()); }
             let priority = body[0];
             let delay = u64::from_be_bytes(body[1..9].as_ref().try_into().unwrap());
             let delay_opt = if delay == 0 { None } else { Some(delay) };
-            
             let (q_name, data_ptr) = match parse_string(&body[9..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            
             let offset = body.len() - data_ptr.len();
             engine.queue.push(q_name.to_string(), body.slice(offset..), priority, delay_opt);
             Response::Ok
         }
+        
+        // Q_CONSUME: [NameLen:4][Name]
         OP_Q_CONSUME => {
             let (q_name, _) = match parse_string(&body) {
                 Ok(res) => res,
@@ -143,8 +163,9 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
             };
             Response::AsyncConsume(engine.queue.consume(q_name.to_string()))
         }
+        
+        // Q_ACK: [UUID:16][NameLen:4][Name]
         OP_Q_ACK => {
-            // [UUID: 16][NameLen: 4][Name]
             if body.len() < 20 { return Response::Error("Payload too short for Q_ACK".to_string()); }
             let id = Uuid::from_slice(&body[0..16]).unwrap_or_default();
             let (q_name, _) = match parse_string(&body[16..]) {
@@ -158,7 +179,11 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
             }
         }
 
+        // ==========================================
         // TOPIC BROKER
+        // ==========================================
+        
+        // PUB: [TopicLen:4][Topic]
         OP_PUB => {
             let (topic, _) = match parse_string(&body) {
                 Ok(res) => res,
@@ -167,6 +192,8 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
             engine.topic.publish(topic);
             Response::Ok
         }
+        
+        // SUB: [TopicLen:4][Topic]
         OP_SUB => {
             let (topic, _) = match parse_string(&body) {
                 Ok(res) => res,
@@ -176,7 +203,11 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
             Response::Ok
         }
 
+        // ==========================================
         // STREAM BROKER
+        // ==========================================
+        
+        // S_ADD: [TopicLen:4][Topic][Data]
         OP_S_ADD => {
             let (topic, val_ptr) = match parse_string(&body) {
                 Ok(res) => res,
@@ -186,6 +217,8 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
             let id = engine.stream.append(topic.to_string(), body.slice(offset..));
             Response::Data(Bytes::from(id.to_be_bytes().to_vec()))
         }
+        
+        // S_READ: [TopicLen:4][Topic][Offset:8]
         OP_S_READ => {
             let (topic, offset) = match parse_string_u64(&body) {
                 Ok(res) => res,
@@ -197,11 +230,4 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
 
         _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
     }
-}
-
-
-enum Command {
-    KvSet { key: String, value: Bytes, ttl: u64 },
-    QueuePush { queue: String, data: Bytes, priority: u8 },
-    // ... altri 50 comandi
 }

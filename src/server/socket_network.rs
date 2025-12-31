@@ -32,20 +32,14 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let bytes = match msg {
-                WriteMessage::Response(id, ref resp) => {
-                     tracing::debug!("[SRV] -> FRAME RES #{} (Status: {:?})", id, resp);
-                     encode_response(id, resp)
-                },
+                WriteMessage::Response(id, ref resp) => encode_response(id, resp),
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
                 tracing::error!(error = %e, "[Network] Write error");
                 break;
             }
-            
-            // Hex string compatta (TS style)
-            let hex_string: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
-            tracing::trace!("[SRV] -> SOCKET WRITE ({} bytes) {}", bytes.len(), hex_string);
+
 
             // If there are no more messages immediately available, flush the buffer
             if rx.is_empty() {
@@ -65,11 +59,6 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             .await
             .map_err(|e| format!("Socket read error: {}", e))?;
 
-        if n > 0 {
-             let chunk = &buffer[buffer.len() - n..];
-             let hex_string: String = chunk.iter().map(|b| format!("{:02X}", b)).collect();
-             tracing::trace!("[SRV] <- SOCKET READ ({} bytes) {}", n, hex_string);
-        }
 
         if n == 0 { break; }
 
@@ -82,8 +71,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             let id = frame_ref.id;
             let frame_type = frame_ref.frame_type;
 
-            tracing::debug!("[SRV] <- FRAME REQ #{} (Type: {:?}, Len: {})", id, frame_type, consumed);
-            
+
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
             // This is O(1) and does not copy the underlying data.
             let frame_data = buffer.split_to(consumed).freeze();

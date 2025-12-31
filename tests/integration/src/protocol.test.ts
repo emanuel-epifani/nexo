@@ -95,7 +95,7 @@ describe('Nexo Protocol & Socket', () => {
         for (let i = 0; i < PREFILL_COUNT; i += 1000) {
             const batch = [];
             for (let j = 0; j < 1000; j++) {
-                batch.push(nexo.kv().set(`dummy:${i + j}`, "payload", 3)); // Scadono tra 3 secondi
+                batch.push(nexo.store.kv.set(`dummy:${i + j}`, "payload", 3)); // Scadono tra 3 secondi
             }
             await Promise.all(batch);
         }
@@ -108,7 +108,7 @@ describe('Nexo Protocol & Socket', () => {
 
         const worker = async () => {
             while (isRunning) {
-                await nexo.kv().set(`bench:${operations++}`, "x".repeat(256));
+                await nexo.store.kv.set(`bench:${operations++}`, "x".repeat(256));
             }
         };
 
@@ -124,7 +124,7 @@ describe('Nexo Protocol & Socket', () => {
         console.log(`\n--- STRESS RESULT (with ${PREFILL_COUNT.toLocaleString()} keys) ---`);
         console.log(`Throughput: ${opsPerSec.toLocaleString()} ops/sec`);
         console.log(`------------------------------------\n`);
-        expect(opsPerSec).toBeGreaterThan(950_000);
+        expect(opsPerSec).toBeGreaterThan(1_000_000);
 
     });
 
