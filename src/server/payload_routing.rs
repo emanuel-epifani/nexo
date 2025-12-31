@@ -3,6 +3,7 @@
 
 use crate::server::header_protocol::*;
 use crate::NexoEngine;
+use crate::brokers::topic::ClientId;
 use bytes::Bytes;
 use std::convert::TryInto;
 use uuid::Uuid;
@@ -26,6 +27,7 @@ pub const OP_Q_ACK: u8 = 0x13;
 // Topic: 0x20 - 0x2F
 pub const OP_PUB: u8 = 0x21;
 pub const OP_SUB: u8 = 0x22;
+pub const OP_UNSUB: u8 = 0x23;
 
 // Stream: 0x30 - 0x3F
 pub const OP_S_ADD: u8 = 0x31;
@@ -58,7 +60,7 @@ pub fn parse_string_u64(payload: &[u8]) -> Result<(&str, u64), String> {
 // ROUTING - One place to route every command to its broker
 // ========================================
 
-pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
+pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
     if payload.is_empty() { return Response::Error("Empty payload".to_string()); }
     let opcode = payload[0];
     let body = payload.slice(1..);
@@ -183,13 +185,16 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
         // TOPIC BROKER
         // ==========================================
         
-        // PUB: [TopicLen:4][Topic]
+        // PUB: [TopicLen:4][Topic][Data]
         OP_PUB => {
-            let (topic, _) = match parse_string(&body) {
+            let (topic, val_ptr) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.topic.publish(topic);
+            // Calculate absolute offset of value in the body Bytes
+            let offset = body.len() - val_ptr.len();
+            // Publish using zero-copy slice for the message data
+            let _count = engine.topic.publish(topic, body.slice(offset..));
             Response::Ok
         }
         
@@ -199,7 +204,17 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.topic.subscribe(topic, crate::brokers::topic::ClientId("test-client".to_string()));
+            engine.topic.subscribe(topic, client_id.clone());
+            Response::Ok
+        }
+
+        // UNSUB: [TopicLen:4][Topic]
+        OP_UNSUB => {
+            let (topic, _) = match parse_string(&body) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            engine.topic.unsubscribe(topic, client_id);
             Response::Ok
         }
 

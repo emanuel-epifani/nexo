@@ -38,6 +38,7 @@ export enum Opcode {
   // Topic: 0x20 - 0x2F
   PUB = 0x21,
   SUB = 0x22,
+  UNSUB = 0x23,
   // Stream: 0x30 - 0x3F
   S_ADD = 0x31,
   S_READ = 0x32,
@@ -156,6 +157,8 @@ class NexoConnection {
   private writeOffset = 0;
   private flushScheduled = false;
 
+  public onPush?: (payload: Buffer) => void;
+
   constructor(private host: string, private port: number) {
     this.socket = new net.Socket();
     this.socket.setNoDelay(true);
@@ -176,12 +179,29 @@ class NexoConnection {
       this.decoder.push(chunk);
       let frame;
       while ((frame = this.decoder.nextFrame())) {
-        if (frame.type === FrameType.RESPONSE) {
-          const h = this.pending.get(frame.id);
-          if (h) {
-            this.pending.delete(frame.id);
-            h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+        switch (frame.type) {
+          case FrameType.RESPONSE: {
+            const h = this.pending.get(frame.id);
+            if (h) {
+              this.pending.delete(frame.id);
+              h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+            }
+            break;
           }
+          case FrameType.PUSH: {
+            if (this.onPush) {
+              this.onPush(frame.payload);
+            }
+            break;
+          }
+          case FrameType.PING:
+            // TODO: Auto-Pong if needed
+            break;
+          case FrameType.ERROR:
+            logger.error('Received Protocol Error frame');
+            break;
+          default:
+            logger.warn(`Unknown frame type: ${frame.type}`);
         }
       }
     });
@@ -506,6 +526,102 @@ export class NexoQueue<T = any> {
 }
 
 // ========================================
+// TOPIC BROKER
+// ========================================
+
+/**
+ * NEXO TOPIC: Publish/Subscribe operations
+ */
+export class NexoTopic {
+  private handlers = new Map<string, Array<(data: any) => void>>();
+  private wildcardHandlers = new Map<string, Array<(data: any) => void>>();
+
+  constructor(private builder: RequestBuilder, conn: NexoConnection) {
+    conn.onPush = (payload) => {
+      // Parse PUSH payload: [TopicLen:4][Topic][Data]
+      // We use ProtocolReader but manually, since the frame is already extracted
+      const reader = new ProtocolReader(payload);
+      const topic = reader.readString();
+      const data = reader.readData();
+
+      this.dispatch(topic, data);
+    };
+  }
+
+  async publish(topic: string, data: any): Promise<void> {
+    await this.builder.reset(Opcode.PUB)
+      .writeString(topic)
+      .writeData(data)
+      .send();
+  }
+
+  async subscribe<T = any>(topic: string, callback: (data: T) => void): Promise<void> {
+    // Register local handler
+    if (!this.handlers.has(topic)) {
+      this.handlers.set(topic, []);
+      // Send SUB to server only if it's the first local subscriber for this topic?
+      // For now, simpler to just send SUB always or once per topic.
+      // Let's send SUB always, server can handle idempotency (deduplication of ClientId in HashSet)
+      await this.builder.reset(Opcode.SUB).writeString(topic).send();
+    }
+    this.handlers.get(topic)!.push(callback);
+  }
+
+  async unsubscribe(topic: string): Promise<void> {
+    if (this.handlers.has(topic)) {
+      this.handlers.delete(topic);
+      await this.builder.reset(Opcode.UNSUB).writeString(topic).send();
+    }
+  }
+
+  private dispatch(topic: string, data: any) {
+    // 1. Exact match
+    const handlers = this.handlers.get(topic);
+    if (handlers) {
+      handlers.forEach(cb => {
+        try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+      });
+    }
+
+    // 2. Client-side Wildcard matching could be implemented here if needed,
+    // but usually the server filters for us. 
+    // However, if we subscribed to "home/+" and "home/kitchen/temp", the server sends "home/kitchen/temp".
+    // We need to map which client-side callbacks match this topic.
+    // Since our map key is the *subscription pattern*, we need to check:
+    // Does 'topic' match any key in this.handlers?
+    // Wait. The server pushes [TopicLen][Topic]... which Topic is it? The published one.
+    // So if I subscribed to "home/+", and someone publishes "home/kitchen", I receive "home/kitchen".
+    // But my handler is registered under "home/+".
+    // PROBLEM: I don't know which pattern triggered this push.
+    //
+    // SOLUTION: We must iterate all registered patterns in `handlers` and check if they match the incoming topic.
+
+    for (const [pattern, cbs] of this.handlers.entries()) {
+      if (pattern === topic) continue; // Already handled above
+      if (this.matches(pattern, topic)) {
+        cbs.forEach(cb => {
+          try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+        });
+      }
+    }
+  }
+
+  private matches(pattern: string, topic: string): boolean {
+    const pParts = pattern.split('/');
+    const tParts = topic.split('/');
+
+    for (let i = 0; i < pParts.length; i++) {
+      const p = pParts[i];
+      if (p === '#') return true;
+      if (i >= tParts.length) return false;
+      if (p !== '+' && p !== tParts[i]) return false;
+    }
+    return pParts.length === tParts.length;
+  }
+}
+
+
+// ========================================
 // NEXO CLIENT - Main Entry Point
 // ========================================
 
@@ -524,6 +640,10 @@ export class NexoQueue<T = any> {
  * const orders = nexo.queue("orders");
  * await orders.push({ item: "book" });
  * orders.subscribe(order => console.log(order));
+ * 
+ * // Topic operations
+ * nexo.topic.subscribe("chat/room/1", msg => console.log(msg));
+ * nexo.topic.publish("chat/room/1", "Hello World");
  * ```
  */
 export class NexoClient {
@@ -534,10 +654,14 @@ export class NexoClient {
   /** Store broker - access data structures (kv, hash, list, set) */
   public readonly store: NexoStore;
 
+  /** Topic broker - pub/sub operations */
+  public readonly topic: NexoTopic;
+
   constructor(options: NexoOptions = {}) {
     this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080);
     this.builder = new RequestBuilder(this.conn);
     this.store = new NexoStore(this.builder);
+    this.topic = new NexoTopic(this.builder, this.conn);
   }
 
   static async connect(options?: NexoOptions): Promise<NexoClient> {

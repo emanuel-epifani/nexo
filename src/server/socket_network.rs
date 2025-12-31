@@ -1,45 +1,71 @@
 //! Socket Network Layer: TCP listener + connection handling
 //! Handles raw bytes and spawns tasks for parallel command execution.
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BytesMut, Bytes};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::server::header_protocol::{
-    encode_response, parse_frame, ParseError, Response,
+    encode_response, encode_push, parse_frame, ParseError, Response,
     TYPE_REQUEST, TYPE_PING
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
+use crate::brokers::topic::ClientId;
 
 /// Internal message type for the write loop
 enum WriteMessage {
     Response(u32, Response),
+    Push(Bytes), // Push notification from broker (e.g. TopicManager)
 }
 
 /// Handle a single client connection.
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
     let (mut reader, writer) = tokio::io::split(socket);
     
+    // Generate a unique Client ID
+    let client_uuid = Uuid::new_v4();
+    let client_id = ClientId(client_uuid.to_string());
+    
     // BATCHING: Wrap writer in a BufWriter for automatic OS-level batching
     let mut buffered_writer = BufWriter::with_capacity(16 * 1024, writer);
     
+    // Main channel for writing to the socket
     let (tx, mut rx) = mpsc::channel::<WriteMessage>(1024);
+    
+    // Channel for TopicManager to send push notifications to this client
+    // We use Unbounded channel for high throughput, but we should monitor for memory usage
+    let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Bytes>();
+    
+    // Register with Topic Manager
+    engine.topic.connect(client_id.clone(), push_tx);
+    
+    // Bridge Task: Forward Pushes to Main Write Loop
+    let tx_bridge = tx.clone();
+    tokio::spawn(async move {
+        while let Some(payload) = push_rx.recv().await {
+            // Forward push message to the main write loop
+            if tx_bridge.send(WriteMessage::Push(payload)).await.is_err() {
+                break;
+            }
+        }
+    });
     
     // --- WRITE LOOP ---
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let bytes = match msg {
                 WriteMessage::Response(id, ref resp) => encode_response(id, resp),
+                WriteMessage::Push(ref payload) => encode_push(0, payload), // ID 0 for server pushes
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
                 tracing::error!(error = %e, "[Network] Write error");
                 break;
             }
-
 
             // If there are no more messages immediately available, flush the buffer
             if rx.is_empty() {
@@ -54,30 +80,36 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let engine = Arc::new(engine);
 
     loop {
-        let n = reader
-            .read_buf(&mut buffer)
-            .await
-            .map_err(|e| format!("Socket read error: {}", e))?;
+        let n = match reader.read_buf(&mut buffer).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Connection error
+                tracing::debug!("Socket read error/close: {}", e);
+                break; 
+            }
+        };
 
-
-        if n == 0 { break; }
+        if n == 0 { break; } // EOF
 
         while let Some((frame_ref, consumed)) = match parse_frame(&buffer) {
             Ok(Some(res)) => Some(res),
             Ok(None) => None,
-            Err(ParseError::Invalid(e)) => return Err(format!("Protocol error: {}", e)),
+            Err(ParseError::Invalid(e)) => {
+                let _ = tx.send(WriteMessage::Response(0, Response::Error(format!("Proto err: {}", e)))).await;
+                // We might want to close connection on protocol error, but for now just skip
+                return Err(format!("Protocol error: {}", e));
+            },
             Err(ParseError::Incomplete) => None,
         } {
             let id = frame_ref.id;
             let frame_type = frame_ref.frame_type;
 
-
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
-            // This is O(1) and does not copy the underlying data.
             let frame_data = buffer.split_to(consumed).freeze();
 
             let tx_clone = tx.clone();
             let engine_clone = Arc::clone(&engine);
+            let client_id_clone = client_id.clone();
 
             // Parallel execution: One task per request
             tokio::spawn(async move {
@@ -85,19 +117,17 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                     TYPE_REQUEST => {
                         // Extract payload from the frozen frame_data (offset 9)
                         let payload = frame_data.slice(9..);
-                        let response = route(payload, &engine_clone);
+                        // Pass client_id to route so SUB can use it
+                        let response = route(payload, &engine_clone, &client_id_clone);
                         
                         match response {
                             Response::AsyncConsume(rx) => {
                                 tracing::debug!(req_id = %id, "[Network] Request suspended, waiting for queue data...");
-                                // Wait for the message in the background task
                                 match rx.await {
                                     Ok(msg) => {
-                                        tracing::debug!(req_id = %id, msg_id = %msg.id, "[Network] Woke up! Sending QueueData");
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::QueueData(msg.id, msg.payload))).await;
                                     }
                                     Err(_) => {
-                                        tracing::warn!(req_id = %id, "[Network] Consumer channel dropped");
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Consumer dropped".into()))).await;
                                     }
                                 }
@@ -118,6 +148,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         }
     }
 
+    // Cleanup
+    engine.topic.disconnect(&client_id);
     drop(tx);
     let _ = write_task.await;
     Ok(())
