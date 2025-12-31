@@ -43,7 +43,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                 break;
             }
             
-            tracing::trace!("[SRV] -> SOCKET WRITE ({} bytes)", bytes.len());
+            // Hex string compatta (TS style)
+            let hex_string: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+            tracing::trace!("[SRV] -> SOCKET WRITE ({} bytes) {}", bytes.len(), hex_string);
 
             // If there are no more messages immediately available, flush the buffer
             if rx.is_empty() {
@@ -64,7 +66,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             .map_err(|e| format!("Socket read error: {}", e))?;
 
         if n > 0 {
-             tracing::trace!("[SRV] <- SOCKET READ ({} bytes): {:X?}", n, &buffer[buffer.len() - n..]);
+             let chunk = &buffer[buffer.len() - n..];
+             let hex_string: String = chunk.iter().map(|b| format!("{:02X}", b)).collect();
+             tracing::trace!("[SRV] <- SOCKET READ ({} bytes) {}", n, hex_string);
         }
 
         if n == 0 { break; }

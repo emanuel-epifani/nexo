@@ -198,3 +198,10 @@ pub fn route(payload: Bytes, engine: &NexoEngine) -> Response {
         _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
     }
 }
+
+
+enum Command {
+    KvSet { key: String, value: Bytes, ttl: u64 },
+    QueuePush { queue: String, data: Bytes, priority: u8 },
+    // ... altri 50 comandi
+}
