@@ -2,4 +2,3 @@
 .idea/*
 examples/*
 **/node_modules/**
-.env

@@ -4,6 +4,7 @@
 //! - Single-level wildcard: "home/+/temp"
 //! - Multi-level wildcard: "home/#"
 //! - Active Push to connected clients
+//! - Retained Messages (Last Value Caching)
 
 use std::sync::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -21,13 +22,19 @@ struct Node {
     children: HashMap<String, Node>,
     
     // Wildcard '+' child: matches any single token at this level
+    // Note: Used for routing messages TO subscribers who used '+'
     plus_child: Option<Box<Node>>,
     
-    // Wildcard '#' child: matches everything remaining from this level down
+    // Wildcard '#' child: matches everything remaining
+    // Note: Used for routing messages TO subscribers who used '#'
     hash_child: Option<Box<Node>>,
     
     // Clients subscribed exactly to the path ending at this node
     subscribers: HashSet<ClientId>, 
+    
+    // Last Retained Message for this topic node
+    // Protected by RwLock to allow updates during publish without locking the whole tree structure
+    last_retained: RwLock<Option<Bytes>>,
 }
 
 impl Node {
@@ -37,6 +44,7 @@ impl Node {
             plus_child: None,
             hash_child: None,
             subscribers: HashSet::new(),
+            last_retained: RwLock::new(None),
         }
     }
 }
@@ -46,8 +54,6 @@ pub struct TopicManager {
     router: RwLock<Node>,
     
     // Registry of active client connections to send messages to
-    // Maps ClientId -> Sender channel (Unbounded for high throughput)
-    // DashMap handles concurrency internally (sharding)
     clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
 }
 
@@ -69,21 +75,33 @@ impl TopicManager {
         self.clients.remove(client_id);
     }
 
-    /// Subscribe a client to a topic pattern (supports 'device/+', 'device/#')
+    /// Subscribe a client to a topic pattern
+    /// If the pattern matches existing nodes with retained messages, they are sent immediately.
     pub fn subscribe(&self, topic: &str, client: ClientId) {
         let mut root = self.router.write().unwrap();
         let parts: Vec<&str> = topic.split('/').collect();
         
+        // 1. Add subscription to the tree
         let mut current = &mut *root;
-        
         for part in parts.iter() {
             if *part == "#" {
                 if current.hash_child.is_none() {
                     current.hash_child = Some(Box::new(Node::new()));
                 }
                 let hash_node = current.hash_child.as_mut().unwrap();
-                hash_node.subscribers.insert(client);
-                return; 
+                hash_node.subscribers.insert(client.clone());
+                
+                // For '#' subscription, we need to traverse everything below 'current'
+                // to find retained messages.
+                // Since we hold the write lock on root, we can safely traverse.
+                // Optimization: We could release write lock and re-acquire read lock for traversal,
+                // but for simplicity we do it here. 
+                // However, we need to collect messages and send them.
+                // We shouldn't send inside the lock if possible (channel send is fast though).
+                // Actually, let's collect retained messages AFTER adding the sub.
+                // But wait, parts iter finishes here for '#'.
+                // We'll do retained collection separately below.
+                break; // '#' is terminal
             } else if *part == "+" {
                  if current.plus_child.is_none() {
                     current.plus_child = Some(Box::new(Node::new()));
@@ -94,7 +112,37 @@ impl TopicManager {
             }
         }
         
-        current.subscribers.insert(client);
+        // If not ended with '#', add to current node
+        if parts.last() != Some(&"#") {
+            current.subscribers.insert(client.clone());
+        }
+
+        // 2. Send Retained Messages matching this subscription
+        // We need to traverse the tree finding nodes that match the 'topic' pattern.
+        // If 'topic' is "a/+/b", we find nodes "a/x/b", "a/y/b" etc.
+        // If 'topic' is "a/#", we find "a", "a/x", "a/x/y" etc.
+        // Since we hold the lock (write lock on router), we can pass 'root' to helper.
+        // Note: collect_retained expects immutable ref, which we have (downgrade logic or just ref).
+        let mut retained_msgs = Vec::new();
+        // We construct the "topic so far" to rebuild the topic string for the PUSH message
+        Self::collect_retained(&*root, &parts, "", &mut retained_msgs);
+
+        // Release lock before sending
+        drop(root);
+
+        if !retained_msgs.is_empty() {
+            if let Some(sender) = self.clients.get(&client) {
+                for (topic_str, payload) in retained_msgs {
+                    // Re-package as PUSH frame
+                    let topic_len = topic_str.len();
+                    let mut push_payload = BytesMut::with_capacity(4 + topic_len + payload.len());
+                    push_payload.put_u32(topic_len as u32);
+                    push_payload.put_slice(topic_str.as_bytes());
+                    push_payload.put_slice(&payload);
+                    let _ = sender.send(push_payload.freeze());
+                }
+            }
+        }
     }
 
     /// Unsubscribe a client from a specific topic pattern
@@ -105,14 +153,47 @@ impl TopicManager {
     }
 
     /// Publish a message to all matching subscribers
-    /// Returns the number of clients the message was sent to
-    pub fn publish(&self, topic: &str, data: Bytes) -> usize {
-        // 1. Find target clients (Read lock on Trie)
+    /// flags: Bit 0 = RETAIN
+    pub fn publish(&self, topic: &str, data: Bytes, flags: u8) -> usize {
+        let retain = (flags & 0x01) != 0;
+
+        // 1. Find target clients (Read lock on Trie) & Update Retained if needed
         let targets = {
-            let root = self.router.read().unwrap();
-            let parts: Vec<&str> = topic.split('/').collect();
+            // We need a lock. 
+            // If retain=true, we ideally want a Write lock IF the node doesn't exist.
+            // But usually nodes exist. 
+            // Optimistic approach: Read lock. If retain=true and node exists, update it (it has internal RwLock).
+            // If node doesn't exist and retain=true, we need to upgrade to Write lock to create the path.
+            
+            // For simplicity in V1: If retain=true, take WRITE lock. 
+            // This ensures we can create the path.
+            // If retain=false, take READ lock.
+            // This might slow down 'retained' publishes, but they are usually infrequent updates.
+            
+            // Actually, let's try Read lock first for everything? No, can't create nodes.
+            // Let's stick to: retain=true -> Write Lock (safe/easy). retain=false -> Read Lock.
+            
             let mut matched_clients = HashSet::new();
-            Self::match_recursive(&root, &parts, &mut matched_clients);
+            let parts: Vec<&str> = topic.split('/').collect();
+
+            if retain {
+                let mut root = self.router.write().unwrap();
+                // Update retained value in a scope to drop mutable references to 'current'
+                {
+                    let mut current = &mut *root;
+                    for part in parts.iter() {
+                        current = current.children.entry(part.to_string()).or_insert_with(Node::new);
+                    }
+                    let mut val_lock = current.last_retained.write().unwrap();
+                    *val_lock = Some(data.clone());
+                }
+                
+                // Now we can reuse 'root' for matching (reborrow as immutable)
+                Self::match_recursive(&*root, &parts, &mut matched_clients);
+            } else {
+                let root = self.router.read().unwrap();
+                Self::match_recursive(&root, &parts, &mut matched_clients);
+            }
             matched_clients
         };
 
@@ -120,8 +201,7 @@ impl TopicManager {
             return 0;
         }
 
-        // 2. Prepare PUSH Payload: [TopicLen:4][Topic][Data]
-        // This format matches what the Client SDK expects in `onPush`
+        // 2. Prepare PUSH Payload
         let topic_len = topic.len();
         let mut push_payload = BytesMut::with_capacity(4 + topic_len + data.len());
         push_payload.put_u32(topic_len as u32);
@@ -129,7 +209,7 @@ impl TopicManager {
         push_payload.put_slice(&data);
         let push_payload = push_payload.freeze();
 
-        // 3. Dispatch messages (Lock-free via DashMap)
+        // 3. Dispatch messages
         let mut sent_count = 0;
         for client_id in targets {
             if let Some(sender) = self.clients.get(&client_id) {
@@ -143,6 +223,7 @@ impl TopicManager {
 
     // --- Helper Methods ---
 
+    // Finds subscribers whose patterns match the published topic
     fn match_recursive(node: &Node, parts: &[&str], results: &mut HashSet<ClientId>) {
         if let Some(hash_node) = &node.hash_child {
             results.extend(hash_node.subscribers.iter().cloned());
@@ -162,6 +243,60 @@ impl TopicManager {
 
         if let Some(plus_node) = &node.plus_child {
             Self::match_recursive(plus_node, tail, results);
+        }
+    }
+
+    // Traverses the tree to find retained messages that match the subscription pattern
+    // pattern: ["sensors", "+", "temp"]
+    // current_path: accumulator for the topic string (e.g. "sensors/kitchen/temp")
+    fn collect_retained(node: &Node, pattern: &[&str], current_path: &str, results: &mut Vec<(String, Bytes)>) {
+        if pattern.is_empty() {
+            // End of pattern. If this node has a retained value, collect it.
+            // Note: If pattern ended, we matched an exact path.
+            if let Some(val) = &*node.last_retained.read().unwrap() {
+                results.push((current_path.to_string(), val.clone()));
+            }
+            return;
+        }
+
+        let head = pattern[0];
+        let tail = &pattern[1..];
+
+        if head == "#" {
+            // Match EVERYTHING below this node recursively
+            Self::collect_all_retained_below(node, current_path, results);
+            return;
+        }
+
+        if head == "+" {
+            // Match all immediate children
+            for (key, child) in &node.children {
+                let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
+                Self::collect_retained(child, tail, &next_path, results);
+            }
+        } else {
+            // Exact match
+            if let Some(child) = node.children.get(head) {
+                let next_path = if current_path.is_empty() { head.to_string() } else { format!("{}/{}", current_path, head) };
+                Self::collect_retained(child, tail, &next_path, results);
+            }
+        }
+    }
+
+    fn collect_all_retained_below(node: &Node, current_path: &str, results: &mut Vec<(String, Bytes)>) {
+        // 1. Check current node
+        if let Some(val) = &*node.last_retained.read().unwrap() {
+            // Root node of '#' usually doesn't have value unless it's a concrete topic too.
+            // If current_path is empty (root), we skip? No, root can store data.
+            if !current_path.is_empty() {
+                results.push((current_path.to_string(), val.clone()));
+            }
+        }
+
+        // 2. Recurse children
+        for (key, child) in &node.children {
+            let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
+            Self::collect_all_retained_below(child, &next_path, results);
         }
     }
 

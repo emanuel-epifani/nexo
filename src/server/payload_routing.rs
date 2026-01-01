@@ -185,16 +185,29 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // TOPIC BROKER
         // ==========================================
         
-        // PUB: [TopicLen:4][Topic][Data]
+        // PUB: [Flags:1][TopicLen:4][Topic][Data]
         OP_PUB => {
-            let (topic, val_ptr) = match parse_string(&body) {
+            if body.len() < 1 { return Response::Error("Payload too short".to_string()); }
+            let flags = body[0];
+            
+            // Slice off the flags byte before parsing topic string
+            let remaining = &body[1..];
+            
+            let (topic, val_ptr) = match parse_string(remaining) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            // Calculate absolute offset of value in the body Bytes
-            let offset = body.len() - val_ptr.len();
+            
+            // Calculate data offset. 
+            // body = [Flags][Len][Topic][Data]
+            // val_ptr points to Data inside 'remaining'.
+            // We want zero-copy from 'body' Bytes object.
+            // Offset from body start = 1 (Flags) + (Data pos in remaining)
+            let data_offset_in_remaining = remaining.len() - val_ptr.len();
+            let absolute_offset = 1 + data_offset_in_remaining;
+            
             // Publish using zero-copy slice for the message data
-            let _count = engine.topic.publish(topic, body.slice(offset..));
+            let _count = engine.topic.publish(topic, body.slice(absolute_offset..), flags);
             Response::Ok
         }
         

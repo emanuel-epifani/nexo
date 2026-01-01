@@ -56,6 +56,10 @@ export interface PushOptions {
   delayMs?: number;
 }
 
+export interface PublishOptions {
+  retain?: boolean;
+}
+
 export interface NexoOptions {
   host?: string;
   port?: number;
@@ -198,10 +202,10 @@ class NexoConnection {
             // TODO: Auto-Pong if needed
             break;
           case FrameType.ERROR:
-            logger.error('Received Protocol Error frame');
-            break;
+             logger.error('Received Protocol Error frame');
+             break;
           default:
-            logger.warn(`Unknown frame type: ${frame.type}`);
+             logger.warn(`Unknown frame type: ${frame.type}`);
         }
       }
     });
@@ -534,37 +538,43 @@ export class NexoQueue<T = any> {
  */
 export class NexoTopic {
   private handlers = new Map<string, Array<(data: any) => void>>();
-  private wildcardHandlers = new Map<string, Array<(data: any) => void>>();
 
   constructor(private builder: RequestBuilder, conn: NexoConnection) {
     conn.onPush = (payload) => {
       // Parse PUSH payload: [TopicLen:4][Topic][Data]
-      // We use ProtocolReader but manually, since the frame is already extracted
       const reader = new ProtocolReader(payload);
       const topic = reader.readString();
       const data = reader.readData();
-
+      
       this.dispatch(topic, data);
     };
   }
 
-  async publish(topic: string, data: any): Promise<void> {
+  async publish(topic: string, data: any, options?: PublishOptions): Promise<void> {
+    let flags = 0;
+    if (options?.retain) flags |= 0x01;
+
     await this.builder.reset(Opcode.PUB)
+      .writeU8(flags)
       .writeString(topic)
       .writeData(data)
       .send();
   }
 
   async subscribe<T = any>(topic: string, callback: (data: T) => void): Promise<void> {
-    // Register local handler
+    // Register local handler immediately to catch retained messages that arrive before SUB-ACK
     if (!this.handlers.has(topic)) {
       this.handlers.set(topic, []);
-      // Send SUB to server only if it's the first local subscriber for this topic?
-      // For now, simpler to just send SUB always or once per topic.
-      // Let's send SUB always, server can handle idempotency (deduplication of ClientId in HashSet)
-      await this.builder.reset(Opcode.SUB).writeString(topic).send();
     }
     this.handlers.get(topic)!.push(callback);
+
+    // Send SUB command to server if this is the first handler (or we want to ensure subscription)
+    // Note: In a real robust client, we might track 'isSubscribed' state separate from handlers.
+    // Here we send SUB only if we just created the handler array (length was 0 before push? No, we just checked has).
+    // Actually, simple check: if length is 1, it's the first one.
+    if (this.handlers.get(topic)!.length === 1) {
+        await this.builder.reset(Opcode.SUB).writeString(topic).send();
+    }
   }
 
   async unsubscribe(topic: string): Promise<void> {
@@ -578,45 +588,33 @@ export class NexoTopic {
     // 1. Exact match
     const handlers = this.handlers.get(topic);
     if (handlers) {
-      handlers.forEach(cb => {
-        try { cb(data); } catch (e) { console.error("Topic handler error", e); }
-      });
+        handlers.forEach(cb => {
+            try { cb(data); } catch(e) { console.error("Topic handler error", e); }
+        });
     }
 
-    // 2. Client-side Wildcard matching could be implemented here if needed,
-    // but usually the server filters for us. 
-    // However, if we subscribed to "home/+" and "home/kitchen/temp", the server sends "home/kitchen/temp".
-    // We need to map which client-side callbacks match this topic.
-    // Since our map key is the *subscription pattern*, we need to check:
-    // Does 'topic' match any key in this.handlers?
-    // Wait. The server pushes [TopicLen][Topic]... which Topic is it? The published one.
-    // So if I subscribed to "home/+", and someone publishes "home/kitchen", I receive "home/kitchen".
-    // But my handler is registered under "home/+".
-    // PROBLEM: I don't know which pattern triggered this push.
-    //
-    // SOLUTION: We must iterate all registered patterns in `handlers` and check if they match the incoming topic.
-
+    // 2. Wildcard matching
     for (const [pattern, cbs] of this.handlers.entries()) {
-      if (pattern === topic) continue; // Already handled above
-      if (this.matches(pattern, topic)) {
-        cbs.forEach(cb => {
-          try { cb(data); } catch (e) { console.error("Topic handler error", e); }
-        });
-      }
+        if (pattern === topic) continue; // Already handled
+        if (this.matches(pattern, topic)) {
+             cbs.forEach(cb => {
+                try { cb(data); } catch(e) { console.error("Topic handler error", e); }
+            });
+        }
     }
   }
 
   private matches(pattern: string, topic: string): boolean {
-    const pParts = pattern.split('/');
-    const tParts = topic.split('/');
-
-    for (let i = 0; i < pParts.length; i++) {
-      const p = pParts[i];
-      if (p === '#') return true;
-      if (i >= tParts.length) return false;
-      if (p !== '+' && p !== tParts[i]) return false;
-    }
-    return pParts.length === tParts.length;
+      const pParts = pattern.split('/');
+      const tParts = topic.split('/');
+      
+      for(let i=0; i<pParts.length; i++) {
+          const p = pParts[i];
+          if (p === '#') return true;
+          if (i >= tParts.length) return false;
+          if (p !== '+' && p !== tParts[i]) return false;
+      }
+      return pParts.length === tParts.length;
   }
 }
 
@@ -643,7 +641,7 @@ export class NexoTopic {
  * 
  * // Topic operations
  * nexo.topic.subscribe("chat/room/1", msg => console.log(msg));
- * nexo.topic.publish("chat/room/1", "Hello World");
+ * nexo.topic.publish("chat/room/1", "Hello World", { retain: true });
  * ```
  */
 export class NexoClient {
