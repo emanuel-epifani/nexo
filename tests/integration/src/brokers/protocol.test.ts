@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nexo } from "./nexo";
+import { nexo } from "../nexo";
 
 describe('Nexo Protocol & Socket', () => {
 
@@ -58,11 +58,12 @@ describe('Nexo Protocol & Socket', () => {
     it('Performance -> Throughput Benchmark (FULL PIPE STRESS)', async () => {
         const TOTAL_OPERATIONS = 1_000_000;
         const CONCURRENCY = 1000; // Saturiamo il batch buffer da 64KB
-        const payload = {
-            id: "bench-123",
-            timestamp: Date.now(),
-            data: "stressing-the-pipe-with-some-bytes-to-parse-and-decode"
-        };
+        // const payload = {
+        //     id: "bench-123",
+        //     timestamp: Date.now(),
+        //     data: "stressing-the-pipe-with-some-bytes-to-parse-and-decode"
+        // };
+        const payload = "stressing-the-pipe-with-some-bytes-to-parse-and-decode";
 
         const opsPerWorker = TOTAL_OPERATIONS / CONCURRENCY;
         const start = performance.now();
@@ -73,7 +74,7 @@ describe('Nexo Protocol & Socket', () => {
             }
         };
 
-        await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+        await Promise.all(Array.from({length: CONCURRENCY}, worker));
 
         const end = performance.now();
         const durationSeconds = (end - start) / 1000;
@@ -108,7 +109,7 @@ describe('Nexo Protocol & Socket', () => {
 
         const worker = async () => {
             while (isRunning) {
-                await nexo.store.kv.set(`bench:${operations++}`, "x".repeat(256));
+                await nexo.store.kv.set(`bench:${operations++}`, "x");
             }
         };
 

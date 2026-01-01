@@ -18,10 +18,12 @@ SERVER RUST (Robustness > Throughput > latency)
 - tutta la logica di business dentro -> src/brokers (ogni broker deve avere logica di business quanto più isolato all'interno di se stesso)
 - safety first
 - se posso usare una struttura dati che lock ma permette multithread, e sacrificando magari un pelo di latenza ci fa stare 10k ops/sec in più, è la direzioen da preferire
+- quando non compromette performance, prediligi codice pulito (match anzichè molti if else if ecc)
 
 SDK TYPESCRIPT (devexperience over all)
 - max develoepr experience (senza leggere la docs deve essere super intuitivo capire come si usa e cosa può fare)
 - facade con un paio di classi di export (1 per tipo di broker), e tutta la logica di socket/parse ecc centralizzata nella send o pochi altri metodi estranei alla logica di business (all'interno dei quali poter fare ottimizzazioni estreme anche poco comprensibili)
+- quando non compromette performance, prediligi codice pulito (switch anzichè molti if else if ecc)
 
 TEST VITEST (business logic first)
 - ogni file di test deve contenere solo logia di business, tutto cio da fare prima e dopo ogni file configurato in global-setup (in pratica nel beforeaall x ogni file build binario in --release mode, run server, e alla fine di ogni tet kill server per pulizia massima)

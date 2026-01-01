@@ -44,6 +44,12 @@ export enum Opcode {
   S_READ = 0x32,
 }
 
+enum DataType {
+  RAW = 0x00,
+  STRING = 0x01,
+  JSON = 0x02,
+}
+
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
@@ -70,16 +76,43 @@ export interface NexoOptions {
  */
 class DataCodec {
   static serialize(data: any): Buffer {
-    if (Buffer.isBuffer(data)) return data;
-    if (typeof data === 'string') return Buffer.from(data, 'utf8');
-    if (data === undefined || data === null) return Buffer.alloc(0);
-    return Buffer.from(JSON.stringify(data), 'utf8');
+    let type = DataType.RAW;
+    let payload: Buffer;
+
+    if (Buffer.isBuffer(data)) {
+      type = DataType.RAW;
+      payload = data;
+    } else if (typeof data === 'string') {
+      type = DataType.STRING;
+      payload = Buffer.from(data, 'utf8');
+    } else {
+      type = DataType.JSON;
+      if (data === undefined || data === null) payload = Buffer.alloc(0);
+      else payload = Buffer.from(JSON.stringify(data), 'utf8');
+    }
+
+    // [Type:1][Payload...]
+    const buf = Buffer.allocUnsafe(1 + payload.length);
+    buf[0] = type;
+    payload.copy(buf, 1);
+    return buf;
   }
 
   static deserialize(buf: Buffer): any {
     if (buf.length === 0) return null;
-    const str = buf.toString('utf8');
-    try { return JSON.parse(str); } catch { return str; }
+
+    const type = buf[0];
+    const content = buf.subarray(1);
+
+    switch (type) {
+      case DataType.JSON:
+        return JSON.parse(content.toString('utf8'));
+      case DataType.STRING:
+        return content.toString('utf8');
+      case DataType.RAW:
+      default:
+        return content;
+    }
   }
 }
 
@@ -202,10 +235,10 @@ class NexoConnection {
             // TODO: Auto-Pong if needed
             break;
           case FrameType.ERROR:
-             logger.error('Received Protocol Error frame');
-             break;
+            logger.error('Received Protocol Error frame');
+            break;
           default:
-             logger.warn(`Unknown frame type: ${frame.type}`);
+            logger.warn(`Unknown frame type: ${frame.type}`);
         }
       }
     });
@@ -225,29 +258,53 @@ class NexoConnection {
     this.writeOffset = 0;
   };
 
-  async dispatch(opcode: number, payloadLen: number, ops: any[]): Promise<{ status: ResponseStatus, data: Buffer }> {
+  async dispatch(
+    opcode: number,
+    payloadLen: number,
+    payloadInstructions: { type: number, val: any, size: number }[]
+  ): Promise<{ status: ResponseStatus, data: Buffer }> {
     const total = 9 + payloadLen;
+
+    // ---------------------------------------------------------
+    // 1. GESTIONE SPAZIO (Check Buffer & Flush)
+    // ---------------------------------------------------------
+    // Se non c'è abbastanza spazio nel buffer corrente per tutto il pacchetto,
+    // svuotiamo quello che c'è per fare posto (flush sincrono).
     if (this.writeOffset + total > this.writeBuf.length) this.flush();
 
+    // ---------------------------------------------------------
+    // 2. PREPARAZIONE METADATI (Request ID)
+    // ---------------------------------------------------------
     const id = this.nextId++;
     if (this.nextId === 0) this.nextId = 1;
 
     let off = this.writeOffset;
     const buf = this.writeBuf;
-    buf[off] = FrameType.REQUEST;
-    buf.writeUInt32BE(id, off + 1);
-    buf.writeUInt32BE(payloadLen, off + 5);
-    buf[off + 9] = opcode;
+
+    // ---------------------------------------------------------
+    // 3. COSTRUZIONE HEADER (Protocol Framing)
+    // ---------------------------------------------------------
+    // Scriviamo i 9-10 byte fissi del protocollo direttamente nel buffer.
+    buf[off] = FrameType.REQUEST;           // Type
+    buf.writeUInt32BE(id, off + 1);         // Request ID
+    buf.writeUInt32BE(payloadLen, off + 5); // Payload Length
+    buf[off + 9] = opcode;                  // Opcode specifico
     off += 10;
 
-    for (let i = 0; i < ops.length; i++) {
-      const op = ops[i];
+    // ---------------------------------------------------------
+    // 4. COSTRUZIONE PAYLOAD (Serializzazione "Lazy")
+    // ---------------------------------------------------------
+    // Trasformiamo la lista di operazioni (payloadInstructions) in byte reali.
+    // Scriviamo DIRETTAMENTE nel buffer di rete finale.
+    for (let i = 0; i < payloadInstructions.length; i++) {
+      const op = payloadInstructions[i];
       switch (op.type) {
         case 1: buf[off] = op.val; off += 1; break;
         case 2: buf.writeUInt32BE(op.val, off); off += 4; break;
         case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
         case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
         case 5:
+          // String optimization: scriviamo length + string bytes
           const sLen = op.size - 4;
           buf.writeUInt32BE(sLen, off);
           buf.write(op.val, off + 4, 'utf8');
@@ -257,8 +314,16 @@ class NexoConnection {
     }
     this.writeOffset = off;
 
+    // ---------------------------------------------------------
+    // 5. INVIO (Scheduling Network Flush)
+    // ---------------------------------------------------------
+    // Non inviamo subito (syscall costosa), ma scheduliamo l'invio
+    // alla fine del tick corrente di Node.js.
     if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
 
+    // ---------------------------------------------------------
+    // 6. REGISTRAZIONE PROMISE (Async Wait)
+    // ---------------------------------------------------------
     return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
   }
 
@@ -545,7 +610,7 @@ export class NexoPubSub {
       const reader = new ProtocolReader(payload);
       const topic = reader.readString();
       const data = reader.readData();
-      
+
       this.dispatch(topic, data);
     };
   }
@@ -573,7 +638,7 @@ export class NexoPubSub {
     // Here we send SUB only if we just created the handler array (length was 0 before push? No, we just checked has).
     // Actually, simple check: if length is 1, it's the first one.
     if (this.handlers.get(topic)!.length === 1) {
-        await this.builder.reset(Opcode.SUB).writeString(topic).send();
+      await this.builder.reset(Opcode.SUB).writeString(topic).send();
     }
   }
 
@@ -588,33 +653,33 @@ export class NexoPubSub {
     // 1. Exact match
     const handlers = this.handlers.get(topic);
     if (handlers) {
-        handlers.forEach(cb => {
-            try { cb(data); } catch(e) { console.error("Topic handler error", e); }
-        });
+      handlers.forEach(cb => {
+        try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+      });
     }
 
     // 2. Wildcard matching
     for (const [pattern, cbs] of this.handlers.entries()) {
-        if (pattern === topic) continue; // Already handled
-        if (this.matches(pattern, topic)) {
-             cbs.forEach(cb => {
-                try { cb(data); } catch(e) { console.error("Topic handler error", e); }
-            });
-        }
+      if (pattern === topic) continue; // Already handled
+      if (this.matches(pattern, topic)) {
+        cbs.forEach(cb => {
+          try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+        });
+      }
     }
   }
 
   private matches(pattern: string, topic: string): boolean {
-      const pParts = pattern.split('/');
-      const tParts = topic.split('/');
-      
-      for(let i=0; i<pParts.length; i++) {
-          const p = pParts[i];
-          if (p === '#') return true;
-          if (i >= tParts.length) return false;
-          if (p !== '+' && p !== tParts[i]) return false;
-      }
-      return pParts.length === tParts.length;
+    const pParts = pattern.split('/');
+    const tParts = topic.split('/');
+
+    for (let i = 0; i < pParts.length; i++) {
+      const p = pParts[i];
+      if (p === '#') return true;
+      if (i >= tParts.length) return false;
+      if (p !== '+' && p !== tParts[i]) return false;
+    }
+    return pParts.length === tParts.length;
   }
 }
 
