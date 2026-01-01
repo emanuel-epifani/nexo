@@ -27,7 +27,7 @@ describe('Nexo Protocol & Socket', () => {
             binarySim: Buffer.from("hello world").toString('base64') // JSON handles buffers as strings usually, but let's test typical JS usage
         };
 
-        // Test the internal request/send mechanism via the debug namespace
+        // Test the internal request/send mechanism via the examples namespace
         // This validates: 
         // 1. DataCodec (JSON.stringify)
         // 2. RequestBuilder (Binary framing, Opcode, FrameType, Lengths)

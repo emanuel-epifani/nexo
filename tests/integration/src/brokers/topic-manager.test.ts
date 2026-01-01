@@ -12,9 +12,9 @@ describe('Topic Broker Integration (MQTT Style)', () => {
 
   // Start Server before tests
   beforeAll(async () => {
-    // Assumiamo che "nexo" sia compilato in target/debug
+    // Assumiamo che "nexo" sia compilato in target/examples
     // Risaliamo di 4 livelli: src -> brokers -> src -> integration -> tests -> root
-    const serverPath = path.resolve(__dirname, '../../../../target/debug/nexo');
+    const serverPath = path.resolve(__dirname, '../../../../target/examples/nexo');
     console.log(`Starting server from: ${serverPath}`);
     
     server = spawn(serverPath, [], {
@@ -247,7 +247,7 @@ describe('Topic Broker Integration (MQTT Style)', () => {
         // 2. Publisher Logic (In Main Thread for Vitest Simplicity but Optimized)
         // Note: Running Pub in main thread limits us to ~700k-1M.
         // To get 2.6M we need Worker, but Vitest+TS Workers are flaky.
-        // We stick to the optimized Main Thread loop which is enough to prove logic.
+        // We stick to the optimized Main Thread loop which is enough to examples logic.
 
         const start = performance.now();
         const payload = { v: 1 };

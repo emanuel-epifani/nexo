@@ -37,7 +37,7 @@ class Logger {
 
     debug(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.DEBUG) {
-            // Ciano per debug
+            // Ciano per examples
             console.debug(`\x1b[36mDEBUG\x1b[0m [SDK] ${msg}`, ...args);
         }
     }

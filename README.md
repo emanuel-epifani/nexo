@@ -14,7 +14,7 @@ Modern backend architecture suffers from **Infrastructure Fatigue**. A typical s
 
 ## ⚡ Core Features
 
-### 1. KV Store (The Cache)
+### 1. Store (The Cache)
 *   **Use Case:** Session storage, API caching, temporary state.
 *   **Features:** In-memory, O(1) access, TTL (Time-To-Live).
 *   **Alternative to:** Redis, Memcached.

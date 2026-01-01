@@ -21,7 +21,7 @@ rustup component add clippy rustfmt
 ### Comandi principali
 ```bash
 cargo new myproj --bin     # crea nuovo progetto
-cargo build                # build debug
+cargo build                # build examples
 cargo build --release      # build ottimizzata
 cargo run                  # build + run
 cargo check                # type check (without build)
