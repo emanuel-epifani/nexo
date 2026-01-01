@@ -14,12 +14,12 @@ use crate::server::header_protocol::{
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
-use crate::brokers::topic::ClientId;
+use crate::brokers::pub_sub::ClientId;
 
 /// Internal message type for the write loop
 enum WriteMessage {
     Response(u32, Response),
-    Push(Bytes), // Push notification from broker (e.g. TopicManager)
+    Push(Bytes), // Push notification from broker (e.g. PubSubManager)
 }
 
 /// Handle a single client connection.
@@ -36,12 +36,12 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // Main channel for writing to the socket
     let (tx, mut rx) = mpsc::channel::<WriteMessage>(1024);
     
-    // Channel for TopicManager to send push notifications to this client
+    // Channel for PubSubManager to send push notifications to this client
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Bytes>();
     
-    // Register with Topic Manager
-    engine.topic.connect(client_id.clone(), push_tx);
+    // Register with PubSub Manager
+    engine.pubsub.connect(client_id.clone(), push_tx);
     
     // Bridge Task: Forward Pushes to Main Write Loop
     let tx_bridge = tx.clone();
@@ -73,7 +73,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             }
         }
     });
-
+    
     // --- READ LOOP ---
     // Use a larger buffer to allow for more data in a single read syscall
     let mut buffer = BytesMut::with_capacity(64 * 1024);
@@ -149,7 +149,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     }
 
     // Cleanup
-    engine.topic.disconnect(&client_id);
+    engine.pubsub.disconnect(&client_id);
     drop(tx);
     let _ = write_task.await;
     Ok(())

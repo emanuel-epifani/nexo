@@ -1,4 +1,4 @@
-//! Topic Manager: MQTT-style Pub/Sub with wildcard routing
+//! PubSub Manager: MQTT-style Publish/Subscribe with wildcard routing
 //! Supports:
 //! - Exact matching: "home/kitchen/temp"
 //! - Single-level wildcard: "home/+/temp"
@@ -16,7 +16,7 @@ use dashmap::DashMap;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientId(pub String);
 
-/// A Node in the Radix Tree (Trie) for topic routing
+/// A Node in the Radix Tree (Trie) for pub-sub routing
 struct Node {
     // Exact match children: "kitchen" -> Node
     children: HashMap<String, Node>,
@@ -32,7 +32,7 @@ struct Node {
     // Clients subscribed exactly to the path ending at this node
     subscribers: HashSet<ClientId>, 
     
-    // Last Retained Message for this topic node
+    // Last Retained Message for this pub-sub node
     // Protected by RwLock to allow updates during publish without locking the whole tree structure
     last_retained: RwLock<Option<Bytes>>,
 }
@@ -49,7 +49,7 @@ impl Node {
     }
 }
 
-pub struct TopicManager {
+pub struct PubSubManager {
     // RwLock allows concurrent reads (publish) while protecting writes (subscribe)
     router: RwLock<Node>,
     
@@ -57,7 +57,7 @@ pub struct TopicManager {
     clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
 }
 
-impl TopicManager {
+impl PubSubManager {
     pub fn new() -> Self {
         Self {
             router: RwLock::new(Node::new()),
@@ -93,14 +93,6 @@ impl TopicManager {
                 
                 // For '#' subscription, we need to traverse everything below 'current'
                 // to find retained messages.
-                // Since we hold the write lock on root, we can safely traverse.
-                // Optimization: We could release write lock and re-acquire read lock for traversal,
-                // but for simplicity we do it here. 
-                // However, we need to collect messages and send them.
-                // We shouldn't send inside the lock if possible (channel send is fast though).
-                // Actually, let's collect retained messages AFTER adding the sub.
-                // But wait, parts iter finishes here for '#'.
-                // We'll do retained collection separately below.
                 break; // '#' is terminal
             } else if *part == "+" {
                  if current.plus_child.is_none() {
@@ -159,20 +151,6 @@ impl TopicManager {
 
         // 1. Find target clients (Read lock on Trie) & Update Retained if needed
         let targets = {
-            // We need a lock. 
-            // If retain=true, we ideally want a Write lock IF the node doesn't exist.
-            // But usually nodes exist. 
-            // Optimistic approach: Read lock. If retain=true and node exists, update it (it has internal RwLock).
-            // If node doesn't exist and retain=true, we need to upgrade to Write lock to create the path.
-            
-            // For simplicity in V1: If retain=true, take WRITE lock. 
-            // This ensures we can create the path.
-            // If retain=false, take READ lock.
-            // This might slow down 'retained' publishes, but they are usually infrequent updates.
-            
-            // Actually, let's try Read lock first for everything? No, can't create nodes.
-            // Let's stick to: retain=true -> Write Lock (safe/easy). retain=false -> Read Lock.
-            
             let mut matched_clients = HashSet::new();
             let parts: Vec<&str> = topic.split('/').collect();
 
@@ -286,8 +264,6 @@ impl TopicManager {
     fn collect_all_retained_below(node: &Node, current_path: &str, results: &mut Vec<(String, Bytes)>) {
         // 1. Check current node
         if let Some(val) = &*node.last_retained.read().unwrap() {
-            // Root node of '#' usually doesn't have value unless it's a concrete topic too.
-            // If current_path is empty (root), we skip? No, root can store data.
             if !current_path.is_empty() {
                 results.push((current_path.to_string(), val.clone()));
             }

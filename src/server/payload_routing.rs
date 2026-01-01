@@ -3,10 +3,10 @@
 
 use crate::server::header_protocol::*;
 use crate::NexoEngine;
-use crate::brokers::topic::ClientId;
 use bytes::Bytes;
 use std::convert::TryInto;
 use uuid::Uuid;
+use crate::brokers::pub_sub::ClientId;
 
 // ========================================
 // OPCODES (First byte of Request Payload)
@@ -24,7 +24,7 @@ pub const OP_Q_PUSH: u8 = 0x11;
 pub const OP_Q_CONSUME: u8 = 0x12;
 pub const OP_Q_ACK: u8 = 0x13;
 
-// Topic: 0x20 - 0x2F
+// Topic: 0x20 - 0x2F (Renamed to PubSub internally, but opcodes remain same)
 pub const OP_PUB: u8 = 0x21;
 pub const OP_SUB: u8 = 0x22;
 pub const OP_UNSUB: u8 = 0x23;
@@ -182,7 +182,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         }
 
         // ==========================================
-        // TOPIC BROKER
+        // PUBSUB BROKER
         // ==========================================
         
         // PUB: [Flags:1][TopicLen:4][Topic][Data]
@@ -207,7 +207,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             let absolute_offset = 1 + data_offset_in_remaining;
             
             // Publish using zero-copy slice for the message data
-            let _count = engine.topic.publish(topic, body.slice(absolute_offset..), flags);
+            let _count = engine.pubsub.publish(topic, body.slice(absolute_offset..), flags);
             Response::Ok
         }
         
@@ -217,7 +217,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.topic.subscribe(topic, client_id.clone());
+            engine.pubsub.subscribe(topic, client_id.clone());
             Response::Ok
         }
 
@@ -227,7 +227,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.topic.unsubscribe(topic, client_id);
+            engine.pubsub.unsubscribe(topic, client_id);
             Response::Ok
         }
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use crate::brokers::store::StoreManager;
 use crate::brokers::queues::QueueManager;
-use crate::brokers::topic::TopicManager;
+use crate::brokers::pub_sub::PubSubManager;
 use crate::brokers::stream::StreamManager;
 
 // ========================================
@@ -19,7 +19,7 @@ use crate::brokers::stream::StreamManager;
 pub struct NexoEngine {
     pub store: Arc<StoreManager>,
     pub queue: Arc<QueueManager>,
-    pub topic: Arc<TopicManager>,
+    pub pubsub: Arc<PubSubManager>,
     pub stream: Arc<StreamManager>,
 }
 
@@ -31,7 +31,7 @@ impl NexoEngine {
         Self {
             store: Arc::new(StoreManager::new()),
             queue: queue_manager,
-            topic: Arc::new(TopicManager::new()),
+            pubsub: Arc::new(PubSubManager::new()),
             stream: Arc::new(StreamManager::new()),
         }
     }
@@ -67,7 +67,7 @@ async fn main() {
     }
 
     tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");
-    tracing::info!("📦 Brokers initialized: KV, Queue, Topic, Stream");
+    tracing::info!("📦 Brokers initialized: KV, Queue, PubSub, Stream");
 
     let listener = TcpListener::bind(&addr)
         .await

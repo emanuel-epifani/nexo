@@ -530,13 +530,13 @@ export class NexoQueue<T = any> {
 }
 
 // ========================================
-// TOPIC BROKER
+// PUB-SUB BROKER
 // ========================================
 
 /**
- * NEXO TOPIC: Publish/Subscribe operations
+ * NEXO PUBSUB: Publish/Subscribe operations
  */
-export class NexoTopic {
+export class NexoPubSub {
   private handlers = new Map<string, Array<(data: any) => void>>();
 
   constructor(private builder: RequestBuilder, conn: NexoConnection) {
@@ -652,14 +652,14 @@ export class NexoClient {
   /** Store broker - access data structures (kv, hash, list, set) */
   public readonly store: NexoStore;
 
-  /** Topic broker - pub/sub operations */
-  public readonly topic: NexoTopic;
+  /** PubSub broker - pub/sub operations */
+  public readonly pubsub: NexoPubSub;
 
   constructor(options: NexoOptions = {}) {
     this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080);
     this.builder = new RequestBuilder(this.conn);
     this.store = new NexoStore(this.builder);
-    this.topic = new NexoTopic(this.builder, this.conn);
+    this.pubsub = new NexoPubSub(this.builder, this.conn);
   }
 
   static async connect(options?: NexoOptions): Promise<NexoClient> {

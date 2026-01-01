@@ -1,21 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { NexoClient } from '../../../../sdk/ts/src/client';
-import { nexo } from '../nexo'; // Singleton instance connected to global server
+import { nexo } from '../nexo';
 
 const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
 
-describe('Topic Broker (MQTT-Style)', () => {
+describe('PubSub Broker (MQTT-Style)', () => {
 
     it('Should subscribe and receive exact matches', async () => {
         const topic = 'home/kitchen/temp';
         const payload = { value: 25.5 };
         let received = null;
 
-        await nexo.topic.subscribe(topic, (data) => {
+        await nexo.pubsub.subscribe(topic, (data) => {
             received = data;
         });
 
-        await nexo.topic.publish(topic, payload);
+        await nexo.pubsub.publish(topic, payload);
 
         // Wait for push
         await new Promise(r => setTimeout(r, 100));
@@ -26,13 +26,13 @@ describe('Topic Broker (MQTT-Style)', () => {
         const pattern = 'home/+/temp';
         const received: any[] = [];
 
-        await nexo.topic.subscribe(pattern, (data) => {
+        await nexo.pubsub.subscribe(pattern, (data) => {
             received.push(data);
         });
 
-        await nexo.topic.publish('home/kitchen/temp', { loc: 'kitchen' });
-        await nexo.topic.publish('home/garage/temp', { loc: 'garage' });
-        await nexo.topic.publish('home/kitchen/light', { loc: 'light' }); // Should NOT match
+        await nexo.pubsub.publish('home/kitchen/temp', { loc: 'kitchen' });
+        await nexo.pubsub.publish('home/garage/temp', { loc: 'garage' });
+        await nexo.pubsub.publish('home/kitchen/light', { loc: 'light' }); // Should NOT match
 
         await new Promise(r => setTimeout(r, 100));
         expect(received).toHaveLength(2);
@@ -45,14 +45,14 @@ describe('Topic Broker (MQTT-Style)', () => {
         const pattern = 'sensors/#';
         const received: any[] = [];
 
-        await nexo.topic.subscribe(pattern, (data) => {
+        await nexo.pubsub.subscribe(pattern, (data) => {
             received.push(data);
         });
 
-        await nexo.topic.publish('sensors/temp', 1);
-        await nexo.topic.publish('sensors/temp/ext', 2);
-        await nexo.topic.publish('sensors/a/b/c', 3);
-        await nexo.topic.publish('other/stuff', 4); // No match
+        await nexo.pubsub.publish('sensors/temp', 1);
+        await nexo.pubsub.publish('sensors/temp/ext', 2);
+        await nexo.pubsub.publish('sensors/a/b/c', 3);
+        await nexo.pubsub.publish('other/stuff', 4); // No match
 
         await new Promise(r => setTimeout(r, 100));
         expect(received).toHaveLength(3);
@@ -71,13 +71,13 @@ describe('Topic Broker (MQTT-Style)', () => {
         // We need a fresh connection to test clean unsubscribe isolation
         const client2 = await NexoClient.connect({ port: SERVER_PORT });
         
-        await client2.topic.subscribe(topic, handler);
-        await client2.topic.publish(topic, 'msg1');
+        await client2.pubsub.subscribe(topic, handler);
+        await client2.pubsub.publish(topic, 'msg1');
         await new Promise(r => setTimeout(r, 50));
         expect(count).toBe(1);
 
-        await client2.topic.unsubscribe(topic);
-        await client2.topic.publish(topic, 'msg2');
+        await client2.pubsub.unsubscribe(topic);
+        await client2.pubsub.publish(topic, 'msg2');
         await new Promise(r => setTimeout(r, 50));
         expect(count).toBe(1); // Should not increase
 
@@ -89,12 +89,12 @@ describe('Topic Broker (MQTT-Style)', () => {
         const value = { max: 100 };
 
         // 1. Publish with RETAIN = true
-        await nexo.topic.publish(topic, value, { retain: true });
+        await nexo.pubsub.publish(topic, value, { retain: true });
 
         // 2. Subscribe after publish
         let received = null;
 
-        await nexo.topic.subscribe(topic, (data) => {
+        await nexo.pubsub.subscribe(topic, (data) => {
             received = data;
         });
 
@@ -106,14 +106,14 @@ describe('Topic Broker (MQTT-Style)', () => {
 
     it('Should support RETAINED messages with Single-level Wildcard (+)', async () => {
         // Publish retained messages to different topics
-        await nexo.topic.publish('status/s1', 'online', { retain: true });
-        await nexo.topic.publish('status/s2', 'offline', { retain: true });
-        await nexo.topic.publish('status/s3/detail', 'verbose', { retain: true }); // Deeper level
+        await nexo.pubsub.publish('status/s1', 'online', { retain: true });
+        await nexo.pubsub.publish('status/s2', 'offline', { retain: true });
+        await nexo.pubsub.publish('status/s3/detail', 'verbose', { retain: true }); // Deeper level
 
         const received: string[] = [];
 
         // Subscribe with wildcard
-        await nexo.topic.subscribe('status/+', (data) => {
+        await nexo.pubsub.subscribe('status/+', (data) => {
             received.push(data as string);
         });
         await new Promise(r => setTimeout(r, 500));
@@ -127,15 +127,15 @@ describe('Topic Broker (MQTT-Style)', () => {
 
     it('Should support RETAINED messages with Multi-level Wildcard (#)', async () => {
         // Publish retained messages to a deep hierarchy
-        await nexo.topic.publish('config/app/db/host', 'localhost', { retain: true });
-        await nexo.topic.publish('config/app/db/port', 5432, { retain: true });
-        await nexo.topic.publish('config/app/cache/ttl', 60, { retain: true });
-        await nexo.topic.publish('config/system/os', 'linux', { retain: true }); // Different branch
+        await nexo.pubsub.publish('config/app/db/host', 'localhost', { retain: true });
+        await nexo.pubsub.publish('config/app/db/port', 5432, { retain: true });
+        await nexo.pubsub.publish('config/app/cache/ttl', 60, { retain: true });
+        await nexo.pubsub.publish('config/system/os', 'linux', { retain: true }); // Different branch
 
         const received: any[] = [];
 
         // Subscribe to config/app/# -> should get db/host, db/port, cache/ttl. Should NOT get system/os.
-        await nexo.topic.subscribe('config/app/#', (data) => {
+        await nexo.pubsub.subscribe('config/app/#', (data) => {
             received.push(data);
         });
 
@@ -158,11 +158,11 @@ describe('Topic Broker (MQTT-Style)', () => {
 
         for (let i = 0; i < subscribers; i++) {
             const c = await NexoClient.connect({ port: SERVER_PORT });
-            await c.topic.subscribe('news/global', () => { receivedCount++; });
+            await c.pubsub.subscribe('news/global', () => { receivedCount++; });
             clients.push(c);
         }
 
-        await nexo.topic.publish('news/global', 'Breaking News');
+        await nexo.pubsub.publish('news/global', 'Breaking News');
         
         await new Promise(r => setTimeout(r, 500));
         expect(receivedCount).toBe(subscribers);
@@ -177,7 +177,7 @@ describe('Topic Broker (MQTT-Style)', () => {
         const payload = { temp: 20 };
         let receivedCount = 0;
 
-        await nexo.topic.subscribe('sensors/+', () => { receivedCount++; });
+        await nexo.pubsub.subscribe('sensors/+', () => { receivedCount++; });
 
         for (let i = 0; i < publishers; i++) {
             const c = await NexoClient.connect({ port: SERVER_PORT });
@@ -185,7 +185,7 @@ describe('Topic Broker (MQTT-Style)', () => {
         }
 
         // Parallel publish
-        await Promise.all(clients.map((c, i) => c.topic.publish(`sensors/dev${i}`, payload)));
+        await Promise.all(clients.map((c, i) => c.pubsub.publish(`sensors/dev${i}`, payload)));
 
         await new Promise(r => setTimeout(r, 500));
         expect(receivedCount).toBe(publishers);
@@ -201,11 +201,11 @@ describe('Topic Broker (MQTT-Style)', () => {
 
         for (let i = 0; i < count; i++) {
             const c = await NexoClient.connect({ port: SERVER_PORT });
-            await c.topic.subscribe('room/1', () => { totalDeliveries++; });
+            await c.pubsub.subscribe('room/1', () => { totalDeliveries++; });
             clients.push(c);
         }
 
-        await Promise.all(clients.map(c => c.topic.publish('room/1', 'Hello')));
+        await Promise.all(clients.map(c => c.pubsub.publish('room/1', 'Hello')));
 
         await new Promise(r => setTimeout(r, 500));
         expect(totalDeliveries).toBe(count * count);
