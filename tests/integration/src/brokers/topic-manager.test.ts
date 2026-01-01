@@ -207,7 +207,6 @@ describe('Topic Broker Integration (MQTT Style)', () => {
   });
 
     it('Performance -> Pub/Sub Throughput (Heavy Load)', async () => {
-        // SCALED DOWN for CI stability (but same logic)
         // 500 Subs * 2000 Msgs = 1M Total Deliveries
         const TOTAL_PUBS = 2000;
         const SUBSCRIBERS = 500;
@@ -254,7 +253,7 @@ describe('Topic Broker Integration (MQTT Style)', () => {
         const payload = { v: 1 };
 
         // Burst Parallelism
-        const BATCH_SIZE = 500; // Larger batch for throughput
+        const BATCH_SIZE = 1000; // Larger batch for throughput
         for (let i = 0; i < TOTAL_PUBS; i += BATCH_SIZE) {
             const promises = [];
             for(let j=0; j<BATCH_SIZE && i+j < TOTAL_PUBS; j++) {
@@ -273,5 +272,125 @@ describe('Topic Broker Integration (MQTT Style)', () => {
 
         console.log(`\n[PERF VITEST] Throughput: ${throughput.toLocaleString()} deliveries/sec`);
         expect(throughput).toBeGreaterThan(1_900_000);
+    });
+
+
+    /*
+    [PERF Fan-Out] 1 Pubs -> 100 Subs on 1 Topics
+   - Sent: 2000, Received: 200000
+   - Time: 1.072s
+   - Throughput: 186,613 deliveries/sec
+
+    [PERF Fan-In] 100 Pubs -> 1 Subs on 1 Topics
+   - Sent: 20000, Received: 20000
+   - Time: 0.202s
+   - Throughput: 98,876 deliveries/sec
+
+    [PERF Mesh] 50 Pubs -> 50 Subs on 10 Topics
+   - Sent: 10000, Received: 50000
+   - Time: 0.194s
+   - Throughput: 258,052 deliveries/sec
+     */
+    describe('Performance Suite (Topic Broker)', () => {
+        // Helper to generate traffic
+        const runBenchmark = async (
+            label: string,
+            pubCount: number,
+            subCount: number,
+            topics: string[],
+            msgPerPub: number
+        ) => {
+            const subscribers: NexoClient[] = [];
+            const publishers: NexoClient[] = [];
+            let receivedTotal = 0;
+
+            const totalExpected = msgPerPub * pubCount * (subCount / Math.max(1, (topics.length > 1 ? topics.length : 1)));
+            // Note: The expected calc above is approximate for Mesh, precise for FanIn/Out.
+            // For Mesh: 100 Pubs, 100 Subs, 10 Topics. Each sub on 1 topic.
+            // 1 Pub sends to random topic. Probability of match is 1/TopicCount.
+
+            // Setup Subscribers
+            for (let i = 0; i < subCount; i++) {
+                const client = await NexoClient.connect({ port: 8083 });
+                const topic = topics[i % topics.length];
+                await client.topic.subscribe(topic, () => { receivedTotal++; });
+                subscribers.push(client);
+            }
+
+            // Setup Publishers
+            for (let i = 0; i < pubCount; i++) {
+                publishers.push(await NexoClient.connect({ port: 8083 }));
+            }
+
+            // Wait for connections stabilize
+            await new Promise(r => setTimeout(r, 200));
+
+            const start = performance.now();
+            const payload = { t: Date.now() };
+
+            // Traffic Generation
+            const allPubPromises = publishers.map(async (pub, pubIdx) => {
+                for (let m = 0; m < msgPerPub; m++) {
+                    // Round-robin topics or single topic
+                    const topic = topics[(pubIdx + m) % topics.length];
+                    await pub.topic.publish(topic, payload);
+                }
+            });
+
+            await Promise.all(allPubPromises);
+
+            // Wait for drain (simple timeout based, or we could wait for receivedTotal)
+            // For robust bench, we wait until we get enough or timeout
+            const timeout = Date.now() + 5000;
+            while(receivedTotal < totalExpected && Date.now() < timeout) {
+                await new Promise(r => setTimeout(r, 10));
+            }
+
+            const end = performance.now();
+            const duration = (end - start) / 1000;
+            const throughput = Math.floor(receivedTotal / duration);
+
+            console.log(`[PERF ${label}] ${pubCount} Pubs -> ${subCount} Subs on ${topics.length} Topics`);
+            console.log(`   - Sent: ${pubCount * msgPerPub}, Received: ${receivedTotal}`);
+            console.log(`   - Time: ${duration.toFixed(3)}s`);
+            console.log(`   - Throughput: \x1b[32m${throughput.toLocaleString()} deliveries/sec\x1b[0m`);
+
+            // Cleanup
+            [...subscribers, ...publishers].forEach(c => c.disconnect());
+
+            return throughput;
+        };
+
+        it('Scenario 1: Fan-Out (Notification/Broadcasting) - 1 publisher - N subscriber - 1 topic', async () => {
+            // 1 Publisher -> 100 Subscribers. Single Topic.
+            /*
+            Stress: for client in subscribers { channel.send() }.
+            Il Collo di Bottiglia: Il loop sequenziale di invio nel TopicManager (dentro il Lock Read).
+            Come Migliorare:
+            Multithreading: Non molto utile qui, perché iterare 100 client è veloce.
+            Lock: Il ReadLock sul Trie blocca eventuali nuovi subscribe, ma non rallenta i publish concorrenti. Va bene così.
+            Struttura Dati: Qui la struttura dati non c'entra (hai solo 1 nodo attivo). C'entra la lista dei subscriber.
+             */
+            const throughput = await runBenchmark('Fan-Out', 1, 100, ['broadcast/live'], 2000);
+            expect(throughput).toBeGreaterThan(150_000); //original value: 186,613
+        });
+
+        it('Scenario 2: Fan-In (Telemetry/IoT) - N publisher - 1 subscriber - 1 topic', async () => {
+            // 100 Publishers -> 1 Subscriber. Single Topic.
+            // Stress: RwLock Contention (Many writers to socket, one reader from socket)
+            const throughput = await runBenchmark('Fan-In', 100, 1, ['sensors/ingest'], 200);
+            expect(throughput).toBeGreaterThan(75_000); //original value: 98,876
+        });
+
+        it('Scenario 3: Traffic Mesh (Chat/Microservices) - N publisher - N subscriber - N topic', async () => {
+            // 50 Clients (acting as Pub & Sub). 10 Different Topics.
+            // Stress: Routing Tree Jumping & Mixed Load
+            // Each client is both a pub and a sub (we simulate by having distinct connections for simplicity
+            // but logically it's a mesh).
+            // 50 Pubs, 50 Subs. Distributed over 10 topics.
+            const topics = Array.from({length: 10}, (_, i) => `chat/room${i}`);
+            const throughput = await runBenchmark('Mesh', 50, 50, topics, 200);
+            expect(throughput).toBeGreaterThan(200_000); //original value: 258,052
+        });
     });
 });
