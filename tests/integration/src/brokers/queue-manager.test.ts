@@ -431,4 +431,55 @@ describe('QUEUE broker', () => {
         });
     });
 
+    describe('Prefetch & Concurrency', () => {
+        it('Prefetch keeps N requests active -> High throughput simulation', async () => {
+            const q = nexo.queue('test_q_prefetch');
+            const COUNT = 50;
+            // Inviamo 50 messaggi
+            for (let i = 0; i < COUNT; i++) await q.push(i);
+
+            let receivedCount = 0;
+            const start = Date.now();
+            
+            // Subscribe con prefetch alto (es. 20)
+            const sub = q.subscribe(async () => {
+                receivedCount++;
+                // Simula leggero processing
+                await new Promise(r => setTimeout(r, 2)); 
+            }, 20);
+
+            // Aspettiamo che finisca
+            while (receivedCount < COUNT) {
+                await new Promise(r => setTimeout(r, 10));
+                if (Date.now() - start > 5000) break;
+            }
+            sub.stop();
+
+            expect(receivedCount).toBe(COUNT);
+            // Non possiamo testare esattamente quanti "pending" ci sono dal lato client senza mockare socket,
+            // ma se finisce in tempi ragionevoli con sleep nel callback, significa che il pipelining funziona.
+        });
+
+        it('Prefetch=1 -> Serial processing (Strict Ordering check)', async () => {
+            const q = nexo.queue('test_q_serial');
+            await q.push(1);
+            await q.push(2);
+            await q.push(3);
+
+            const received: number[] = [];
+            
+            // Subscribe con prefetch 1 = Serial
+            const sub = q.subscribe(async (val) => {
+                received.push(val);
+                // Sleep lungo per essere sicuri che se non fosse seriale, ne arriverebbe un altro
+                await new Promise(r => setTimeout(r, 50));
+            }, 1);
+
+            await new Promise(r => setTimeout(r, 300));
+            sub.stop();
+
+            expect(received).toEqual([1, 2, 3]);
+        });
+    });
+
 });

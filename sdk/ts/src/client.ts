@@ -311,7 +311,14 @@ class NexoConnection {
   private flush = () => {
     this.flushScheduled = false;
     if (this.writeOffset === 0) return;
-    this.socket.write(this.writeBuf.subarray(0, this.writeOffset));
+
+    // FIX: Creiamo una copia dei dati da inviare.
+    // socket.write è asincrono; se passassimo una view del buffer riutilizzabile (this.writeBuf),
+    // le successive scritture corromperebbero i dati in coda non ancora inviati.
+    const chunk = Buffer.allocUnsafe(this.writeOffset);
+    this.writeBuf.copy(chunk, 0, 0, this.writeOffset);
+    this.socket.write(chunk);
+
     this.writeOffset = 0;
   };
 
@@ -322,65 +329,78 @@ class NexoConnection {
   ): Promise<{ status: ResponseStatus, data: Buffer }> {
     const total = 9 + payloadLen;
 
-    // ---------------------------------------------------------
-    // 1. GESTIONE SPAZIO (Check Buffer & Flush)
-    // ---------------------------------------------------------
-    // Se non c'è abbastanza spazio nel buffer corrente per tutto il pacchetto,
-    // svuotiamo quello che c'è per fare posto (flush sincrono).
-    if (this.writeOffset + total > this.writeBuf.length) this.flush();
+    // 1. GESTIONE SPAZIO (Flush se necessario)
+    if (this.writeOffset + total > this.writeBuf.length) {
+      this.flush();
+    }
 
-    // ---------------------------------------------------------
-    // 2. PREPARAZIONE METADATI (Request ID)
-    // ---------------------------------------------------------
+    // 2. METADATI
     const id = this.nextId++;
     if (this.nextId === 0) this.nextId = 1;
 
-    let off = this.writeOffset;
-    const buf = this.writeBuf;
+    // 3. REGISTRAZIONE PROMISE
+    const promise = new Promise<{ status: ResponseStatus, data: Buffer }>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, ts: Date.now() });
+    });
 
-    // ---------------------------------------------------------
-    // 3. COSTRUZIONE HEADER (Protocol Framing)
-    // ---------------------------------------------------------
-    // Scriviamo i 9-10 byte fissi del protocollo direttamente nel buffer.
-    buf[off] = FrameType.REQUEST;           // Type
-    buf.writeUInt32BE(id, off + 1);         // Request ID
-    buf.writeUInt32BE(payloadLen, off + 5); // Payload Length
-    buf[off + 9] = opcode;                  // Opcode specifico
-    off += 10;
+    // 4. SCRITTURA DATI
+    // Se il pacchetto è più grande dell'intero buffer di scrittura (es. 10MB > 64KB),
+    // non possiamo usare il buffer condiviso. Creiamo un buffer dedicato e inviamo subito.
+    if (total > this.writeBuf.length) {
+      const largeBuf = Buffer.allocUnsafe(total);
 
-    // ---------------------------------------------------------
-    // 4. COSTRUZIONE PAYLOAD (Serializzazione "Lazy")
-    // ---------------------------------------------------------
-    // Trasformiamo la lista di operazioni (payloadInstructions) in byte reali.
-    // Scriviamo DIRETTAMENTE nel buffer di rete finale.
-    for (let i = 0; i < payloadInstructions.length; i++) {
-      const op = payloadInstructions[i];
-      switch (op.type) {
-        case 1: buf[off] = op.val; off += 1; break;
-        case 2: buf.writeUInt32BE(op.val, off); off += 4; break;
-        case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
-        case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
-        case 5:
-          // Pre-encoded string: length prefix + buffer copy (no double UTF-8 encoding)
-          buf.writeUInt32BE(op.val.length, off);
-          (op.val as Buffer).copy(buf, off + 4);
-          off += 4 + op.val.length;
-          break;
+      // Header
+      largeBuf[0] = FrameType.REQUEST;
+      largeBuf.writeUInt32BE(id, 1);
+      largeBuf.writeUInt32BE(payloadLen, 5);
+      largeBuf[9] = opcode;
+
+      // Payload
+      let off = 10;
+      for (const op of payloadInstructions) {
+        off = this.writeInstruction(largeBuf, off, op);
       }
+
+      this.socket.write(largeBuf); // Invio diretto (bypass batching)
+
+    } else {
+      // Percorso Standard (Batching nel buffer condiviso)
+      const buf = this.writeBuf;
+      let off = this.writeOffset;
+
+      // Header
+      buf[off] = FrameType.REQUEST;
+      buf.writeUInt32BE(id, off + 1);
+      buf.writeUInt32BE(payloadLen, off + 5);
+      buf[off + 9] = opcode;
+      off += 10;
+
+      // Payload
+      for (const op of payloadInstructions) {
+        off = this.writeInstruction(buf, off, op);
+      }
+      this.writeOffset = off;
+
+      // Scheduling Flush
+      if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
     }
-    this.writeOffset = off;
 
-    // ---------------------------------------------------------
-    // 5. INVIO (Scheduling Network Flush)
-    // ---------------------------------------------------------
-    // Non inviamo subito (syscall costosa), ma scheduliamo l'invio
-    // alla fine del tick corrente di Node.js.
-    if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
+    return promise;
+  }
 
-    // ---------------------------------------------------------
-    // 6. REGISTRAZIONE PROMISE (Async Wait)
-    // ---------------------------------------------------------
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, ts: Date.now() }));
+  // Helper per scrivere le istruzioni nel buffer target
+  private writeInstruction(buf: Buffer, off: number, op: { type: number, val: any, size: number }): number {
+    switch (op.type) {
+      case 1: buf[off] = op.val; return off + 1;
+      case 2: buf.writeUInt32BE(op.val, off); return off + 4;
+      case 3: buf.writeBigUInt64BE(op.val, off); return off + 8;
+      case 4: (op.val as Buffer).copy(buf, off); return off + op.size;
+      case 5:
+        buf.writeUInt32BE(op.val.length, off);
+        (op.val as Buffer).copy(buf, off + 4);
+        return off + 4 + op.val.length;
+    }
+    return off;
   }
 
   disconnect() {
@@ -622,32 +642,60 @@ export class NexoQueue<T = any> {
       .send();
   }
 
-  subscribe(callback: (data: T) => Promise<void> | void): { stop: () => void } {
+  subscribe(callback: (data: T) => Promise<void> | void, prefetch: number = 50): { stop: () => void } {
     let active = true;
-    const loop = async () => {
-      await this.ensureDeclared();
-      while ((this.builder as any).conn.isConnected && active) {
-        try {
-          const res = await this.builder.reset(Opcode.Q_CONSUME).writeString(this.name).send();
-          if (!active) break;
-          if (res.status === ResponseStatus.Q_DATA) {
-            const idHex = res.reader.readUUID();
-            const data = res.reader.readData() as T;
-            try {
-              await callback(data);
-              await this.ack(idHex);
-            } catch (e) {
-              if (active) logger.error(`Callback error in queue ${this.name}:`, e);
+    let pendingRequests = 0;
+
+    const loop = () => {
+      if (!active) return;
+
+      // Maintain a pool of pending requests up to 'prefetch' limit
+      while (pendingRequests < prefetch && (this.builder as any).conn.isConnected) {
+        pendingRequests++;
+
+        // Send request asynchronously
+        this.builder.reset(Opcode.Q_CONSUME).writeString(this.name).send()
+          .then(async (res) => {
+            pendingRequests--; // Request completed
+            if (!active) return;
+
+            if (res.status === ResponseStatus.Q_DATA) {
+              // Message received!
+              // 1. Immediately schedule a new request to fill the pool (Pipelining)
+              loop();
+
+              // 2. Process the message
+              const idHex = res.reader.readUUID();
+              const data = res.reader.readData() as T;
+              try {
+                await callback(data);
+                await this.ack(idHex);
+              } catch (e) {
+                logger.error(`Callback error in queue ${this.name}:`, e);
+              }
+            } else {
+              // Queue empty (NULL) or Error
+              // Backoff slightly to avoid spamming loop when empty
+              setTimeout(loop, 1000);
             }
-          }
-        } catch (err) {
-          if (!(this.builder as any).conn.isConnected || !active) break;
-          await new Promise(r => setTimeout(r, 1000));
-        }
+          })
+          .catch(() => {
+            pendingRequests--;
+            // On network error, wait a bit before retrying
+            setTimeout(loop, 1000);
+          });
       }
     };
+
+    // Kickstart the loop
     loop();
-    return { stop: () => { active = false; } };
+
+    return {
+      stop: () => {
+        active = false;
+        // Note: pending requests will complete but their callbacks will early-return due to !active
+      }
+    };
   }
 
   private async ack(id: string): Promise<void> {
