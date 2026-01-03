@@ -57,11 +57,23 @@ pub enum Response {
 // PARSER (from socket -> to server)
 // ========================================
 
+// 512MB Hard Limit to prevent OOM attacks
+const MAX_PAYLOAD_SIZE: usize = 512 * 1024 * 1024;
+
 pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError> {
     if buf.len() < 9 { return Ok(None); }
     let frame_type = buf[0];
     let id = u32::from_be_bytes(buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?);
     let payload_len = u32::from_be_bytes(buf[5..9].try_into().map_err(|_| ParseError::Incomplete)?) as usize;
+    
+    // Security Check: Hard Limit
+    if payload_len > MAX_PAYLOAD_SIZE {
+        return Err(ParseError::Invalid(format!(
+            "Payload too large: {} bytes (Limit: {} bytes)", 
+            payload_len, MAX_PAYLOAD_SIZE
+        )));
+    }
+
     let total_len = 9 + payload_len;
     if buf.len() < total_len { return Ok(None); }
     let payload = &buf[9..total_len];

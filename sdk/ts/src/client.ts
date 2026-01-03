@@ -156,6 +156,8 @@ class RingDecoder {
   private buf: Buffer;
   private head = 0;
   private tail = 0;
+  private readonly MAX_FRAME_SIZE = 512 * 1024 * 1024; // 512MB Hard Limit
+
   constructor(size = 512 * 1024) { this.buf = Buffer.allocUnsafe(size); }
 
   push(chunk: Buffer): void {
@@ -182,10 +184,13 @@ class RingDecoder {
 
     // 3. Not enough space even after compact -> RESIZE
     let newSize = this.buf.length * 2;
-    while (newSize - used < needed) newSize *= 2;
+    while (newSize - used < needed) {
+      newSize *= 2;
+      if (newSize > this.MAX_FRAME_SIZE) {
+        throw new Error(`Frame too large: limit is ${this.MAX_FRAME_SIZE / 1024 / 1024}MB`);
+      }
+    }
     
-    // Safety check: Don't allocate huge buffers blindly? 
-    // For now we trust Node.js to throw if we OOM
     const newBuf = Buffer.allocUnsafe(newSize);
     this.buf.copy(newBuf, 0, this.head, this.tail);
     
@@ -259,33 +264,38 @@ class NexoConnection {
 
   private setupListeners() {
     this.socket.on('data', (chunk) => {
-      this.decoder.push(chunk);
-      let frame;
-      while ((frame = this.decoder.nextFrame())) {
-        switch (frame.type) {
-          case FrameType.RESPONSE: {
-            const h = this.pending.get(frame.id);
-            if (h) {
-              this.pending.delete(frame.id);
-              h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+      try {
+        this.decoder.push(chunk);
+        let frame;
+        while ((frame = this.decoder.nextFrame())) {
+          switch (frame.type) {
+            case FrameType.RESPONSE: {
+              const h = this.pending.get(frame.id);
+              if (h) {
+                this.pending.delete(frame.id);
+                h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+              }
+              break;
             }
-            break;
-          }
-          case FrameType.PUSH: {
-            if (this.onPush) {
-              this.onPush(frame.payload);
+            case FrameType.PUSH: {
+              if (this.onPush) {
+                this.onPush(frame.payload);
+              }
+              break;
             }
-            break;
+            case FrameType.PING:
+              // TODO: Auto-Pong if needed
+              break;
+            case FrameType.ERROR:
+              logger.error('Received Protocol Error frame');
+              break;
+            default:
+              logger.warn(`Unknown frame type: ${frame.type}`);
           }
-          case FrameType.PING:
-            // TODO: Auto-Pong if needed
-            break;
-          case FrameType.ERROR:
-            logger.error('Received Protocol Error frame');
-            break;
-          default:
-            logger.warn(`Unknown frame type: ${frame.type}`);
         }
+      } catch (err) {
+        logger.error('Decoder error (likely frame too large)', err);
+        this.socket.destroy(); // Fatal error, close connection
       }
     });
     const cleanup = (err: any) => {
