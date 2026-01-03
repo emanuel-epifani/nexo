@@ -7,33 +7,32 @@ const SERVER_PORT = parseInt(process.env.NEXO_PORT || "8080");
 class BenchmarkProbe {
     private latencies: number[] = [];
     private start: number = 0;
+    private currentIndex = 0;
 
     constructor(private name: string, private totalOps: number) {
-        // Pre-allocate memory to avoid resizing overhead during test
-        // This makes 100% sampling much cheaper!
         this.latencies = new Array(totalOps);
     }
 
-    private currentIndex = 0;
-
     startTimer() { this.start = performance.now(); }
 
-    // Record every single operation (100% Sampling - Audit Grade)
-    record(startMs: number) {
+    record(val: number) {
         if (this.currentIndex < this.totalOps) {
-            this.latencies[this.currentIndex++] = performance.now() - startMs;
+            this.latencies[this.currentIndex++] = val;
         }
+    }
+
+    // Per misurare latenza End-to-End (da timestamp nel payload)
+    recordLatency(startMs: number) {
+        this.record(Date.now() - startMs);
     }
 
     printResult() {
         const durationSec = (performance.now() - this.start) / 1000;
         const throughput = Math.floor(this.totalOps / durationSec);
 
-        // Filter out empty slots if test didn't complete exactly totalOps
         const validLatencies = this.latencies.slice(0, this.currentIndex).sort((a, b) => a - b);
         const count = validLatencies.length;
 
-        // LE METRICHE PRAGMATICHE (AUDIT GRADE)
         const p50 = validLatencies[Math.floor(count * 0.50)] || 0;
         const p99 = validLatencies[Math.floor(count * 0.99)] || 0;
         const max = validLatencies[count - 1] || 0;
@@ -42,13 +41,13 @@ class BenchmarkProbe {
         console.log(` 🚀 Throughput:  \x1b[32m${throughput.toLocaleString()} ops/sec\x1b[0m`);
 
         if (count > 0) {
-            // Regola del pollice: se MAX > 100ms su localhost, c'è un problema.
-            const colorMax = max > 100 ? "\x1b[31m" : "\x1b[33m"; // Rosso se > 100ms
-            console.log(` ⏱️  Latency:     p50: ${p50.toFixed(2)}ms | p99: ${p99.toFixed(2)}ms | ${colorMax}MAX: ${max.toFixed(2)}ms\x1b[0m (100% Audit: ${count} samples)`);
+            const colorMax = max > 100 ? "\x1b[31m" : "\x1b[33m";
+            console.log(` ⏱️  Latency:     p50: ${p50.toFixed(2)}ms | p99: ${p99.toFixed(2)}ms | ${colorMax}MAX: ${max.toFixed(2)}ms\x1b[0m (samples: ${count})`);
         } else {
             console.log(` ⏱️  Latency:     (no samples recorded)`);
         }
-        return throughput;
+
+        return { throughput, p99, max };
     }
 }
 
@@ -69,13 +68,15 @@ describe('Performance & Stress Tests', function () {
                 for (let i = 0; i < opsPerWorker; i++) {
                     const t0 = performance.now();
                     await (nexo as any).debug.echo(payload);
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-            const throughput = probe.printResult();
-            expect(throughput).toBeGreaterThan(50_000);
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(680_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(3);
+            expect(stats.max).toBeLessThan(5);
         });
 
         it('Large Payload (10KB) Bandwidth', async () => {
@@ -91,15 +92,18 @@ describe('Performance & Stress Tests', function () {
                 for (let i = 0; i < opsPerWorker; i++) {
                     const t0 = performance.now();
                     await (nexo as any).debug.echo(payload);
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-            const throughput = probe.printResult();
-            const mbs = (throughput * 10) / 1024;
+            const stats = probe.printResult();
+            const mbs = (stats.throughput * 10) / 1024;
             console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
-            expect(throughput).toBeGreaterThan(1000);
+
+            expect(stats.throughput).toBeGreaterThan(28_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(2.5);
+            expect(stats.max).toBeLessThan(3);
         });
     });
 
@@ -117,16 +121,18 @@ describe('Performance & Stress Tests', function () {
                 for (let i = 0; i < opsPerWorker; i++) {
                     const t0 = performance.now();
                     await nexo.store.kv.set(`stress:${id}:${i}`, "val");
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => worker(i)));
 
-            const throughput = probe.printResult();
-            expect(throughput).toBeGreaterThan(50_000);
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(790_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(1);
+            expect(stats.max).toBeLessThan(3);
         });
 
-        it('Read Throughput (1M Keys)', async () => {
+        it('Read Throughput', async () => {
             const PREFILL = 100_000;
             const READ_OPS = 50_000;
             const CONCURRENCY = 100;
@@ -147,47 +153,87 @@ describe('Performance & Stress Tests', function () {
                     const key = `k:${Math.floor(Math.random() * PREFILL)}`;
                     const t0 = performance.now();
                     await nexo.store.kv.get(key);
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-            const throughput = probe.printResult();
-            expect(throughput).toBeGreaterThan(50_000);
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(690_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(1);
+            expect(stats.max).toBeLessThan(3);
         });
     });
 
     // --- PUBSUB ---
     describe('3. PUBSUB Broker', function () {
-        it('Fan-Out (Broadcasting)', async () => {
+        it('Fan-Out (1 Pub -> 100 Subs)', async () => {
             const SUBSCRIBERS = 100;
             const MESSAGES = 100;
             const TOTAL_EVENTS = MESSAGES * SUBSCRIBERS;
 
             const clients: NexoClient[] = [];
             let received = 0;
+            const probe = new BenchmarkProbe("PUBSUB - FANOUT", TOTAL_EVENTS);
 
             for (let i = 0; i < SUBSCRIBERS; i++) {
                 const c = await NexoClient.connect({ port: SERVER_PORT });
-                await c.pubsub.subscribe('perf/fanout', () => { received++; });
+                await c.pubsub.subscribe('perf/fanout', (msg: any) => {
+                    received++;
+                    if (msg.ts) probe.recordLatency(msg.ts);
+                });
                 clients.push(c);
             }
 
-            // Fan-out is asynchronous, hard to measure per-message latency reliably without complex coordination
-            // Keeping throughput only for this specific scenario
-            const probe = new BenchmarkProbe("PUBSUB - FANOUT (1 Pub -> ${SUBSCRIBERS} Subs)", TOTAL_EVENTS);
             probe.startTimer();
-
-            await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub.publish('perf/fanout', { t: 1 })));
+            await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub.publish('perf/fanout', { ts: Date.now() })));
 
             while (received < TOTAL_EVENTS) {
                 await new Promise(r => setTimeout(r, 10));
                 if ((performance.now() - probe['start']) > 5000) break;
             }
 
-            const throughput = probe.printResult();
+            const stats = probe.printResult();
             clients.forEach(c => c.disconnect());
             expect(received).toBe(TOTAL_EVENTS);
+            expect(stats.throughput).toBeGreaterThan(200_000); // Strict Baseline M4 Pro
+        });
+
+        it('Fan-In (50 Pubs -> 1 Sub)', async () => {
+            const PUBLISHERS = 50;
+            const MSGS_PER_PUB = 50;
+            const TOTAL_EXPECTED = PUBLISHERS * MSGS_PER_PUB;
+            const clients: NexoClient[] = [];
+            let received = 0;
+
+            const probe = new BenchmarkProbe("PUBSUB - FANIN", TOTAL_EXPECTED);
+
+            await nexo.pubsub.subscribe('sensors/+', (msg: any) => {
+                received++;
+                if (msg.ts) probe.recordLatency(msg.ts);
+            });
+
+            for (let i = 0; i < PUBLISHERS; i++) {
+                clients.push(await NexoClient.connect({ port: SERVER_PORT }));
+            }
+
+            probe.startTimer();
+            await Promise.all(clients.map((c, i) => {
+                const promises = [];
+                for (let k = 0; k < MSGS_PER_PUB; k++) {
+                    promises.push(c.pubsub.publish(`sensors/d${i}`, { ts: Date.now() }));
+                }
+                return Promise.all(promises);
+            }));
+
+            while (received < TOTAL_EXPECTED) {
+                await new Promise(r => setTimeout(r, 10));
+                if ((performance.now() - probe['start']) > 5000) break;
+            }
+
+            probe.printResult();
+            clients.forEach(c => c.disconnect());
+            expect(received).toBe(TOTAL_EXPECTED);
         });
 
         it('Wildcard Routing Stress', async () => {
@@ -203,20 +249,22 @@ describe('Performance & Stress Tests', function () {
                 for (let i = 0; i < opsPerWorker; i++) {
                     const t0 = performance.now();
                     await nexo.pubsub.publish('infra/us-east/server-1/cpu', { u: 90 });
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: 10 }, worker));
 
             while (received < OPS) await new Promise(r => setTimeout(r, 10));
 
-            probe.printResult();
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(130_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(5);
         });
     });
 
     // --- QUEUES ---
     describe('4. QUEUE Broker', function () {
-        it('Push Throughput', async () => {
+        it('Producer (Push) Throughput', async () => {
             const TOTAL = 20_000;
             const CONCURRENCY = 50;
             const q = nexo.queue("bench-push");
@@ -229,33 +277,52 @@ describe('Performance & Stress Tests', function () {
                 for (let i = 0; i < opsPerWorker; i++) {
                     const t0 = performance.now();
                     await q.push({ job: i });
-                    probe.record(t0);
+                    probe.record(performance.now() - t0);
                 }
             };
             await Promise.all(Array.from({ length: CONCURRENCY }, producer));
 
-            probe.printResult();
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(200_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(5);
         });
 
-        it('Pop (Subscribe) Throughput', async () => {
-            const TOTAL = 5_000;
-            const q = nexo.queue("bench-pop");
-            for (let i = 0; i < TOTAL; i++) await q.push({ j: i });
+        it('Consumer (Subscribe) Throughput', async () => {
+            const TOTAL = 10_000;
+            const CONCURRENCY_PUSH = 10;
+            const q = nexo.queue("bench-concurrent");
 
             let consumed = 0;
-            const probe = new BenchmarkProbe("QUEUE - POP", TOTAL);
-            probe.startTimer();
+            const probe = new BenchmarkProbe("QUEUE - CONSUME", TOTAL);
 
-            return new Promise<void>((resolve) => {
-                const sub = q.subscribe(async (msg) => {
+            // 1. Consumer ready
+            const consumerPromise = new Promise<void>((resolve) => {
+                const sub = q.subscribe(async (msg: any) => {
                     consumed++;
+                    if (msg.ts) probe.recordLatency(msg.ts);
+
                     if (consumed >= TOTAL) {
                         sub.stop();
-                        probe.printResult();
+                        const stats = probe.printResult();
+                        expect(stats.throughput).toBeGreaterThan(15_000); // Baseline concurrent
+                        expect(stats.p99).toBeLessThan(10); // Should be fast in steady state
                         resolve();
                     }
                 });
             });
+
+            probe.startTimer();
+
+            // 2. Producer start
+            const producer = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY_PUSH;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    await q.push({ ts: Date.now() });
+                }
+            };
+            const producerPromise = Promise.all(Array.from({ length: CONCURRENCY_PUSH }, producer));
+
+            await Promise.all([producerPromise, consumerPromise]);
         });
     });
 });
