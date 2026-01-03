@@ -88,8 +88,8 @@ class DataCodec {
       payload = Buffer.from(data, 'utf8');
     } else {
       type = DataType.JSON;
-      if (data === undefined || data === null) payload = Buffer.alloc(0);
-      else payload = Buffer.from(JSON.stringify(data), 'utf8');
+      // null/undefined → JSON "null" string, not empty buffer
+      payload = Buffer.from(JSON.stringify(data ?? null), 'utf8');
     }
 
     // [Type:1][Payload...]
@@ -107,6 +107,7 @@ class DataCodec {
 
     switch (type) {
       case DataType.JSON:
+        if (content.length === 0) return null;
         return JSON.parse(content.toString('utf8'));
       case DataType.STRING:
         return content.toString('utf8');
@@ -208,7 +209,8 @@ class RingDecoder {
     const id = this.buf.readUInt32BE(this.head + 1);
     const payloadLen = this.buf.readUInt32BE(this.head + 5);
     if (this.tail - this.head < 9 + payloadLen) return null;
-    const payload = this.buf.subarray(this.head + 9, this.head + 9 + payloadLen);
+    // CRITICAL: Use slice() to create a COPY of the payload (subarray() returns a view that gets corrupted when the ring buffer is reused)
+    const payload = this.buf.slice(this.head + 9, this.head + 9 + payloadLen);
     this.head += 9 + payloadLen;
     if (this.head === this.tail) { this.head = 0; this.tail = 0; }
     return { type, id, payload };

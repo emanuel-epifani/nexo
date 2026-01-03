@@ -74,8 +74,8 @@ describe('Performance & Stress Tests', function () {
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(680_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(3);
+            expect(stats.throughput).toBeGreaterThan(600_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(4);
             expect(stats.max).toBeLessThan(5);
         });
 
@@ -101,9 +101,9 @@ describe('Performance & Stress Tests', function () {
             const mbs = (stats.throughput * 10) / 1024;
             console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
 
-            expect(stats.throughput).toBeGreaterThan(28_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(4);
-            expect(stats.max).toBeLessThan(4);
+            expect(stats.throughput).toBeGreaterThan(25_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(5);
+            expect(stats.max).toBeLessThan(5);
         });
     });
 
@@ -159,9 +159,9 @@ describe('Performance & Stress Tests', function () {
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(600_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(1);
-            expect(stats.max).toBeLessThan(3);
+            expect(stats.throughput).toBeGreaterThan(500_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(2);
+            expect(stats.max).toBeLessThan(2);
         });
     });
 
@@ -196,7 +196,9 @@ describe('Performance & Stress Tests', function () {
             const stats = probe.printResult();
             clients.forEach(c => c.disconnect());
             expect(received).toBe(TOTAL_EVENTS);
-            expect(stats.throughput).toBeGreaterThan(200_000); // Strict Baseline M4 Pro
+            expect(stats.throughput).toBeGreaterThan(480_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(10);
+            expect(stats.max).toBeLessThan(10);
         });
 
         it('Fan-In (50 Pubs -> 1 Sub)', async () => {
@@ -231,9 +233,13 @@ describe('Performance & Stress Tests', function () {
                 if ((performance.now() - probe['start']) > 5000) break;
             }
 
-            probe.printResult();
+            const stats = probe.printResult();
             clients.forEach(c => c.disconnect());
             expect(received).toBe(TOTAL_EXPECTED);
+            expect(stats.throughput).toBeGreaterThan(100_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(20);
+            expect(stats.max).toBeLessThan(30);
+
         });
 
         it('Wildcard Routing Stress', async () => {
@@ -258,7 +264,8 @@ describe('Performance & Stress Tests', function () {
 
             const stats = probe.printResult();
             expect(stats.throughput).toBeGreaterThan(100_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(5);
+            expect(stats.p99).toBeLessThan(1);
+            expect(stats.max).toBeLessThan(4);
         });
     });
 

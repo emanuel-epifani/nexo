@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
+import { NexoClient } from "@nexo/client/dist/client";
+
+const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
 
 describe('Nexo Protocol & Socket', () => {
 
-    it('Protocol -> Complex Object Roundtrip (JSON Serialization & Binary Framing)', async () => {
+    // --- SERIALIZATION & FRAMING ---
+
+    it('JSON Roundtrip - Complex nested object with special chars', async () => {
         const complexData = {
             string: "Nexo Engine",
             number: 42.5,
@@ -13,35 +18,45 @@ describe('Nexo Protocol & Socket', () => {
             nested: {
                 id: "abc-123",
                 tags: ["rust", "typescript", "fast"],
-                meta: {
-                    active: true,
-                    version: 0.2,
-                    nestedAgain: {
-                        deep: "value"
-                    }
-                }
+                meta: { active: true, version: 0.2, deep: { value: "ok" } }
             },
             specialChars: "🚀🔥 €$ £",
             unicode: "こんにちは",
-            longString: "A".repeat(1000), // Test larger payloads
-            binarySim: Buffer.from("hello world").toString('base64') // JSON handles buffers as strings usually, but let's test typical JS usage
+            longString: "A".repeat(1000),
+            base64: Buffer.from("hello world").toString('base64')
         };
 
-        // Test the internal request/send mechanism via the examples namespace
-        // This validates: 
-        // 1. DataCodec (JSON.stringify)
-        // 2. RequestBuilder (Binary framing, Opcode, FrameType, Lengths)
-        // 3. Socket Transmission (TCP Fragmentation/Merging)
-        // 4. Rust Router (Jump table, Payload parsing)
-        // 5. Rust Response encoding
-        // 6. RingDecoder (Frame extraction from stream)
-        // 7. DataCodec (JSON.parse)
         const response = await (nexo as any).debug.echo(complexData);
-        
         expect(response).toEqual(complexData);
     });
 
-    it('Protocol -> Multiple rapid requests (Concurrency & Frame ID matching)', async () => {
+    it('JSON Roundtrip - Empty object', async () => {
+        const result = await (nexo as any).debug.echo({});
+        expect(result).toEqual({});
+    });
+
+    it('JSON Roundtrip - Null and undefined values', async () => {
+        const result = await (nexo as any).debug.echo({ a: null, b: undefined });
+        expect(result).toEqual({ a: null }); // undefined stripped by JSON
+    });
+
+    it('DataType - Empty string vs null distinction', async () => {
+        await nexo.store.kv.set('proto:empty-str', '');
+        await nexo.store.kv.set('proto:null-val', null);
+
+        expect(await nexo.store.kv.get('proto:empty-str')).toBe('');
+        expect(await nexo.store.kv.get('proto:null-val')).toBeNull();
+    });
+
+    it('DataType - Binary-like data via base64', async () => {
+        const binaryData = Buffer.from([0x00, 0x01, 0xFF, 0xFE]).toString('base64');
+        const result = await (nexo as any).debug.echo({ bin: binaryData });
+        expect(result.bin).toBe(binaryData);
+    });
+
+    // --- CONCURRENCY & FRAME ID MATCHING ---
+
+    it('Frame ID Matching - 50 concurrent requests return correct responses', async () => {
         const requests = Array.from({ length: 50 }, (_, i) => ({
             id: i,
             token: Math.random().toString(36),
@@ -55,75 +70,228 @@ describe('Nexo Protocol & Socket', () => {
         expect(results).toEqual(requests);
     });
 
-    describe('Nexo Protocol under load pressure', () => {
+    it('Frame ID Matching - Burst followed by burst', async () => {
+        const burst1 = await Promise.all(
+            Array.from({ length: 100 }, (_, i) => (nexo as any).debug.echo({ burst: 1, i }))
+        );
+        const burst2 = await Promise.all(
+            Array.from({ length: 100 }, (_, i) => (nexo as any).debug.echo({ burst: 2, i }))
+        );
 
-        it('Protocol -> Massive Payload (Force Buffer Resize & Fragmentation)', async () => {
-            // 1. Genera un payload di 10MB (superiore al buffer di default che spesso è 64kb o 512kb)
-            // Questo obbliga il RingDecoder a fare resize e il TCP a frammentare i dati in molti pacchetti.
-            const size = 10 * 1024 * 1024;
-            const largeString = "A".repeat(size);
-            const payload = { data: largeString, meta: "huge-payload" };
-
-            const start = Date.now();
-            const response = await (nexo as any).debug.echo(payload);
-            const duration = Date.now() - start;
-
-            expect(response.data.length).toBe(size);
-            expect(response.data).toBe(largeString);
-            console.log(`[Stress] 10MB Payload Echo: ${duration}ms`);
-        }, 30000); // Timeout aumentato per sicurezza
-
-        it('Protocol -> High Throughput Pipelining (10k requests)', async () => {
-            // 2. Invia 10.000 richieste in parallelo (senza attendere la precedente)
-            // Questo stressa l'ID matching e il parsing di frame multipli in un singolo evento 'data'.
-            const COUNT = 10000;
-            const requests = Array.from({ length: COUNT }, (_, i) => ({
-                id: i,
-                val: `req-${i}`
-            }));
-
-            const start = Date.now();
-
-            // Promise.all invia tutto "insieme" (nel limite del loop event di JS)
-            // Il socket riceverà un fiume di byte.
-            const results = await Promise.all(
-                requests.map(data => (nexo as any).debug.echo(data))
-            );
-
-            const duration = Date.now() - start;
-            const rps = Math.floor(COUNT / (duration / 1000));
-
-            expect(results).toHaveLength(COUNT);
-            expect(results[0]).toEqual(requests[0]);
-            expect(results[COUNT - 1]).toEqual(requests[COUNT - 1]);
-
-            console.log(`[Stress] 10k Requests: ${duration}ms (${rps} req/sec)`);
-        }, 30000);
-
-        it('Protocol -> Random Chaos (Mixed Sizes & Concurrent)', async () => {
-            // 3. Caos totale: payload piccoli e grandi mischiati per rompere il buffering
-            const COUNT = 1000;
-            const requests = Array.from({ length: COUNT }, (_, i) => {
-                // Random size da 1 byte a 100KB
-                const size = Math.floor(Math.random() * 100000) + 1;
-                return {
-                    idx: i,
-                    blob: Buffer.allocUnsafe(size).toString('hex') // Contenuto random
-                };
-            });
-
-            const results = await Promise.all(
-                requests.map(data => (nexo as any).debug.echo(data))
-            );
-
-            expect(results).toHaveLength(COUNT);
-            // Verifica a campione per non rallentare troppo
-            expect(results[50]).toEqual(requests[50]);
-        }, 30000);
-
+        expect(burst1.every((r, i) => r.burst === 1 && r.i === i)).toBe(true);
+        expect(burst2.every((r, i) => r.burst === 2 && r.i === i)).toBe(true);
     });
 
+    // --- BUFFER BOUNDARIES ---
 
+    it('Buffer Boundary - Payload at 64KB (writeBuf size)', async () => {
+        const size = 64 * 1024 - 100;
+        const payload = { data: 'x'.repeat(size) };
+        const result = await (nexo as any).debug.echo(payload);
+        expect(result.data.length).toBe(size);
+    });
+
+    it('Buffer Boundary - Payload just over 64KB forces flush', async () => {
+        const size = 64 * 1024 + 100;
+        const payload = { data: 'x'.repeat(size) };
+        const result = await (nexo as any).debug.echo(payload);
+        expect(result.data.length).toBe(size);
+    });
+
+    it('Buffer Boundary - Large then small payloads', async () => {
+        const largePayload = { big: 'x'.repeat(100_000) };
+        const smallPayloads = Array.from({ length: 50 }, (_, i) => ({ id: i }));
+
+        const bigResult = await (nexo as any).debug.echo(largePayload);
+        expect(bigResult.big.length).toBe(100_000);
+
+        const smallResults = await Promise.all(
+            smallPayloads.map(p => (nexo as any).debug.echo(p))
+        );
+        expect(smallResults).toEqual(smallPayloads);
+    });
+
+    // --- STRESS TESTS ---
+
+    it('Stress - 10MB Payload (RingDecoder resize + TCP fragmentation)', async () => {
+        const size = 10 * 1024 * 1024;
+        const largeString = "A".repeat(size);
+        const payload = { data: largeString, meta: "huge-payload" };
+
+        const response = await (nexo as any).debug.echo(payload);
+
+        expect(response.data.length).toBe(size);
+        expect(response.data).toBe(largeString);
+    }, 30000);
+
+    it('Stress - 10k Pipelined requests', async () => {
+        const COUNT = 10000;
+        const requests = Array.from({ length: COUNT }, (_, i) => ({ id: i, val: `req-${i}` }));
+
+        const results = await Promise.all(
+            requests.map(data => (nexo as any).debug.echo(data))
+        );
+
+        expect(results).toHaveLength(COUNT);
+        expect(results[0]).toEqual(requests[0]);
+        expect(results[COUNT - 1]).toEqual(requests[COUNT - 1]);
+    }, 30000);
+
+    it('Stress - Random payload sizes (1B to 100KB)', async () => {
+        const COUNT = 1000;
+        const requests = Array.from({ length: COUNT }, (_, i) => {
+            const size = Math.floor(Math.random() * 100000) + 1;
+            return { idx: i, blob: Buffer.allocUnsafe(size).toString('hex') };
+        });
+
+        const results = await Promise.all(
+            requests.map(data => (nexo as any).debug.echo(data))
+        );
+
+        expect(results).toHaveLength(COUNT);
+        expect(results[50]).toEqual(requests[50]);
+    }, 30000);
+
+    // --- PUSH FRAME INTEGRITY (RingDecoder slice vs subarray bug) ---
+
+    it('PUSH Integrity - Rapid fire messages should not corrupt', async () => {
+        const MESSAGES = 1000;
+        const received: any[] = [];
+
+        await nexo.pubsub.subscribe('proto/rapid', (msg: any) => {
+            received.push(msg);
+        });
+
+        for (let i = 0; i < MESSAGES; i++) {
+            await nexo.pubsub.publish('proto/rapid', {
+                seq: i,
+                data: `payload-${i}-${'x'.repeat(100)}`
+            });
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+
+        expect(received.length).toBe(MESSAGES);
+        for (const msg of received) {
+            expect(msg).toHaveProperty('seq');
+            expect(msg).toHaveProperty('data');
+            expect(typeof msg.seq).toBe('number');
+            expect(msg.data).toContain(`payload-${msg.seq}-`);
+        }
+    });
+
+    it('PUSH Integrity - Interleaved REQUEST + PUSH', async () => {
+        const pushMessages: any[] = [];
+
+        await nexo.pubsub.subscribe('proto/interleave', (msg) => {
+            pushMessages.push(msg);
+        });
+
+        const requests = Array.from({ length: 100 }, (_, i) =>
+            (nexo as any).debug.echo({ reqId: i })
+        );
+        const publishes = Array.from({ length: 100 }, (_, i) =>
+            nexo.pubsub.publish('proto/interleave', { pushId: i })
+        );
+
+        const [responses] = await Promise.all([
+            Promise.all(requests),
+            Promise.all(publishes)
+        ]);
+
+        await new Promise(r => setTimeout(r, 200));
+
+        expect(responses.every((r, i) => r.reqId === i)).toBe(true);
+        expect(pushMessages.length).toBe(100);
+        expect(pushMessages.every(m => typeof m.pushId === 'number')).toBe(true);
+    });
+
+    it('PUSH Integrity - Subscribe then rapid publish from another client', async () => {
+        const received: any[] = [];
+
+        const subscriber = await NexoClient.connect({ port: SERVER_PORT });
+        await subscriber.pubsub.subscribe('proto/cross-client', (msg) => {
+            received.push(msg);
+        });
+
+        await new Promise(r => setTimeout(r, 50));
+
+        const MSGS = 500;
+        await Promise.all(
+            Array.from({ length: MSGS }, (_, i) =>
+                nexo.pubsub.publish('proto/cross-client', { seq: i })
+            )
+        );
+
+        await new Promise(r => setTimeout(r, 300));
+
+        expect(received.length).toBe(MSGS);
+        expect(new Set(received.map(m => m.seq)).size).toBe(MSGS);
+
+        subscriber.disconnect();
+    });
+
+    // --- QUEUE PAYLOAD INTEGRITY ---
+
+    it('Queue Integrity - Rapid messages preserve payload', async () => {
+        const TOTAL = 500;
+        const q = nexo.queue("proto-integrity");
+        const received: any[] = [];
+
+        await Promise.all(
+            Array.from({ length: TOTAL }, (_, i) =>
+                q.push({ idx: i, check: `val-${i}` })
+            )
+        );
+
+        await new Promise<void>((resolve) => {
+            const sub = q.subscribe((msg: any) => {
+                received.push(msg);
+                if (received.length >= TOTAL) {
+                    sub.stop();
+                    resolve();
+                }
+            });
+        });
+
+        for (const msg of received) {
+            expect(msg).toHaveProperty('idx');
+            expect(msg).toHaveProperty('check');
+            expect(msg.check).toBe(`val-${msg.idx}`);
+        }
+    }, 60000);
+
+    // --- MULTI-CLIENT ISOLATION ---
+
+    it('Multi-Client - 10 clients x 100 requests each, responses isolated', async () => {
+        const clients = await Promise.all(
+            Array.from({ length: 10 }, () => NexoClient.connect({ port: SERVER_PORT }))
+        );
+
+        const allResults = await Promise.all(
+            clients.map((client, clientIdx) =>
+                Promise.all(
+                    Array.from({ length: 100 }, (_, reqIdx) =>
+                        (client as any).debug.echo({ clientIdx, reqIdx })
+                    )
+                )
+            )
+        );
+
+        for (let c = 0; c < 10; c++) {
+            for (let r = 0; r < 100; r++) {
+                expect(allResults[c][r]).toEqual({ clientIdx: c, reqIdx: r });
+            }
+        }
+
+        clients.forEach(c => c.disconnect());
+    });
+
+    // --- ERROR HANDLING ---
+
+    it('Error Handling - Non-existent key returns null', async () => {
+        const result = await nexo.store.kv.get('proto:nonexistent-key-12345');
+        expect(result).toBeNull();
+    });
 
 });
-
