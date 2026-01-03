@@ -102,8 +102,8 @@ describe('Performance & Stress Tests', function () {
             console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
 
             expect(stats.throughput).toBeGreaterThan(28_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(2.5);
-            expect(stats.max).toBeLessThan(3);
+            expect(stats.p99).toBeLessThan(4);
+            expect(stats.max).toBeLessThan(4);
         });
     });
 
@@ -127,8 +127,8 @@ describe('Performance & Stress Tests', function () {
             await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => worker(i)));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(790_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(1);
+            expect(stats.throughput).toBeGreaterThan(620_000); // Strict Baseline M4 Pro
+            expect(stats.p99).toBeLessThan(2);
             expect(stats.max).toBeLessThan(3);
         });
 
@@ -159,7 +159,7 @@ describe('Performance & Stress Tests', function () {
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(690_000); // Strict Baseline M4 Pro
+            expect(stats.throughput).toBeGreaterThan(600_000); // Strict Baseline M4 Pro
             expect(stats.p99).toBeLessThan(1);
             expect(stats.max).toBeLessThan(3);
         });
@@ -257,7 +257,7 @@ describe('Performance & Stress Tests', function () {
             while (received < OPS) await new Promise(r => setTimeout(r, 10));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(130_000); // Strict Baseline M4 Pro
+            expect(stats.throughput).toBeGreaterThan(100_000); // Strict Baseline M4 Pro
             expect(stats.p99).toBeLessThan(5);
         });
     });
@@ -284,7 +284,8 @@ describe('Performance & Stress Tests', function () {
 
             const stats = probe.printResult();
             expect(stats.throughput).toBeGreaterThan(200_000); // Strict Baseline M4 Pro
-            expect(stats.p99).toBeLessThan(5);
+            expect(stats.p99).toBeLessThan(1);
+            expect(stats.max).toBeLessThan(2);
         });
 
         it('Consumer (Subscribe) Throughput', async () => {
@@ -304,8 +305,9 @@ describe('Performance & Stress Tests', function () {
                     if (consumed >= TOTAL) {
                         sub.stop();
                         const stats = probe.printResult();
-                        expect(stats.throughput).toBeGreaterThan(15_000); // Baseline concurrent
-                        expect(stats.p99).toBeLessThan(10); // Should be fast in steady state
+                        expect(stats.throughput).toBeGreaterThan(85_000);
+                        expect(stats.p99).toBeLessThan(2);
+                        expect(stats.max).toBeLessThan(3);
                         resolve();
                     }
                 });

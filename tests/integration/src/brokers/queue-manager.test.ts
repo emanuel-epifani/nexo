@@ -61,8 +61,8 @@ describe('QUEUE broker', () => {
             const received1: any[] = [];
             const received2: any[] = [];
 
-            const sub1 = q1.subscribe(async (msg) => { received1.push(msg); });
-            const sub2 = q2.subscribe(async (msg) => { received2.push(msg); });
+            const sub1 = q1.subscribe(async (msg) => { received1.push(msg); },1);
+            const sub2 = q2.subscribe(async (msg) => { received2.push(msg); },1);
 
             await new Promise(r => setTimeout(r, 100));
             const msg1 = 'msg1'
