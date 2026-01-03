@@ -160,11 +160,39 @@ class RingDecoder {
 
   push(chunk: Buffer): void {
     const needed = chunk.length;
-    if (this.buf.length - this.tail < needed) {
-      const used = this.tail - this.head;
-      if (used > 0) this.buf.copy(this.buf, 0, this.head, this.tail);
-      this.tail = used; this.head = 0;
+    const used = this.tail - this.head;
+    const freeSpace = this.buf.length - this.tail;
+
+    // 1. If there is enough space at the end, write directly
+    if (freeSpace >= needed) {
+      chunk.copy(this.buf, this.tail);
+      this.tail += needed;
+      return;
     }
+
+    // 2. If compacting would free enough space
+    if (this.buf.length - used >= needed) {
+      this.buf.copy(this.buf, 0, this.head, this.tail);
+      this.tail = used;
+      this.head = 0;
+      chunk.copy(this.buf, this.tail);
+      this.tail += needed;
+      return;
+    }
+
+    // 3. Not enough space even after compact -> RESIZE
+    let newSize = this.buf.length * 2;
+    while (newSize - used < needed) newSize *= 2;
+    
+    // Safety check: Don't allocate huge buffers blindly? 
+    // For now we trust Node.js to throw if we OOM
+    const newBuf = Buffer.allocUnsafe(newSize);
+    this.buf.copy(newBuf, 0, this.head, this.tail);
+    
+    this.buf = newBuf;
+    this.tail = used;
+    this.head = 0;
+    
     chunk.copy(this.buf, this.tail);
     this.tail += needed;
   }
@@ -634,7 +662,7 @@ export class NexoPubSub {
       const reader = new ProtocolReader(payload);
       const topic = reader.readString();
       const data = reader.readData();
-
+      
       this.dispatch(topic, data);
     };
   }
@@ -745,7 +773,7 @@ export class NexoClient {
   public readonly pubsub: NexoPubSub;
 
   constructor(options: NexoOptions = {}) {
-    this.conn = new NexoConnection(options.host!, options.port!, options);
+    this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080, options);
     this.builder = new RequestBuilder(this.conn);
     this.store = new NexoStore(this.builder);
     this.pubsub = new NexoPubSub(this.builder, this.conn);
