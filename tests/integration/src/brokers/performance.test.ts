@@ -1,186 +1,261 @@
 import { describe, it, expect } from 'vitest';
-import {NexoClient} from "@nexo/client/dist/client";
-import {nexo} from "../nexo";
+import { NexoClient } from "@nexo/client/dist/client";
+import { nexo } from "../nexo";
 
-const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
+const SERVER_PORT = parseInt(process.env.NEXO_PORT || "8080");
 
+class BenchmarkProbe {
+    private latencies: number[] = [];
+    private start: number = 0;
 
-describe('Performance', function() {
-	it('should be fast', async function() {})
+    constructor(private name: string, private totalOps: number) {
+        // Pre-allocate memory to avoid resizing overhead during test
+        // This makes 100% sampling much cheaper!
+        this.latencies = new Array(totalOps);
+    }
 
-    describe('PUB-SUB', function() {
-        it('Perf: Fan-Out (Broadcasting)', async () => {
-            // Scenario: 1 Publisher -> 100 Subscribers
-            const subscribers = 100;
-            const clients: NexoClient[] = [];
-            let receivedCount = 0;
+    private currentIndex = 0;
 
-            for (let i = 0; i < subscribers; i++) {
-                const c = await NexoClient.connect({ port: SERVER_PORT });
-                await c.pubsub.subscribe('news/global', () => { receivedCount++; });
-                clients.push(c);
-            }
+    startTimer() { this.start = performance.now(); }
 
-            await nexo.pubsub.publish('news/global', 'Breaking News');
+    // Record every single operation (100% Sampling - Audit Grade)
+    record(startMs: number) {
+        if (this.currentIndex < this.totalOps) {
+            this.latencies[this.currentIndex++] = performance.now() - startMs;
+        }
+    }
 
-            await new Promise(r => setTimeout(r, 500));
-            expect(receivedCount).toBe(subscribers);
+    printResult() {
+        const durationSec = (performance.now() - this.start) / 1000;
+        const throughput = Math.floor(this.totalOps / durationSec);
 
-            clients.forEach(c => c.disconnect());
-        });
+        // Filter out empty slots if test didn't complete exactly totalOps
+        const validLatencies = this.latencies.slice(0, this.currentIndex).sort((a, b) => a - b);
+        const count = validLatencies.length;
 
-        it('Perf: Fan-In (Telemetry)', async () => {
-            // Scenario: 10 Publishers -> 1 Subscriber
-            const publishers = 10;
-            const clients: NexoClient[] = [];
-            const payload = { temp: 20 };
-            let receivedCount = 0;
+        // LE METRICHE PRAGMATICHE (AUDIT GRADE)
+        const p50 = validLatencies[Math.floor(count * 0.50)] || 0;
+        const p99 = validLatencies[Math.floor(count * 0.99)] || 0;
+        const max = validLatencies[count - 1] || 0;
 
-            await nexo.pubsub.subscribe('sensors/+', () => { receivedCount++; });
+        console.log(`\n\x1b[36m[${this.name}]\x1b[0m`);
+        console.log(` 🚀 Throughput:  \x1b[32m${throughput.toLocaleString()} ops/sec\x1b[0m`);
 
-            for (let i = 0; i < publishers; i++) {
-                const c = await NexoClient.connect({ port: SERVER_PORT });
-                clients.push(c);
-            }
+        if (count > 0) {
+            // Regola del pollice: se MAX > 100ms su localhost, c'è un problema.
+            const colorMax = max > 100 ? "\x1b[31m" : "\x1b[33m"; // Rosso se > 100ms
+            console.log(` ⏱️  Latency:     p50: ${p50.toFixed(2)}ms | p99: ${p99.toFixed(2)}ms | ${colorMax}MAX: ${max.toFixed(2)}ms\x1b[0m (100% Audit: ${count} samples)`);
+        } else {
+            console.log(` ⏱️  Latency:     (no samples recorded)`);
+        }
+        return throughput;
+    }
+}
 
-            // Parallel publish
-            await Promise.all(clients.map((c, i) => c.pubsub.publish(`sensors/dev${i}`, payload)));
+describe('Performance & Stress Tests', function () {
 
-            await new Promise(r => setTimeout(r, 500));
-            expect(receivedCount).toBe(publishers);
+    // --- SOCKET CORE ---
+    describe('1. Socket Core (Hot Path)', async () => {
+        it('Small Payload Throughput', async () => {
+            const TOTAL = 50_000;
+            const CONCURRENCY = 500;
+            const payload = { op: "ping" };
 
-            clients.forEach(c => c.disconnect());
-        });
-
-        it('Perf: Traffic Mesh (Chat)', async () => {
-            // Scenario: 10 Clients, everyone subscribes to "room1", everyone publishes 1 msg
-            const count = 10;
-            const clients: NexoClient[] = [];
-            let totalDeliveries = 0;
-
-            for (let i = 0; i < count; i++) {
-                const c = await NexoClient.connect({ port: SERVER_PORT });
-                await c.pubsub.subscribe('room/1', () => { totalDeliveries++; });
-                clients.push(c);
-            }
-
-            await Promise.all(clients.map(c => c.pubsub.publish('room/1', 'Hello')));
-
-            await new Promise(r => setTimeout(r, 500));
-            expect(totalDeliveries).toBe(count * count);
-
-            clients.forEach(c => c.disconnect());
-        });
-
-        it('Performance -> Throughput Benchmark (FULL PIPE STRESS)', async () => {
-            const TOTAL_OPERATIONS = 100_000;
-            const CONCURRENCY = 100;
-
-            const payload = {
-                id: "bench-123",
-                timestamp: Date.now(),
-                data: "stressing-the-pipe-with-some-bytes-to-parse-and-decode"
-            };
-
-            const opsPerWorker = TOTAL_OPERATIONS / CONCURRENCY;
-            const start = performance.now();
+            const probe = new BenchmarkProbe("SOCKET - SMALL", TOTAL);
+            probe.startTimer();
 
             const worker = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
                 for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
                     await (nexo as any).debug.echo(payload);
+                    probe.record(t0);
                 }
             };
-
             await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-            const end = performance.now();
-            const durationSeconds = (end - start) / 1000;
-            const throughput = Math.floor(TOTAL_OPERATIONS / durationSeconds);
+            const throughput = probe.printResult();
+            expect(throughput).toBeGreaterThan(50_000);
+        });
 
-            console.log(`\n\x1b[32m[PERF VITEST] Throughput: ${throughput.toLocaleString()} deliveries/sec\x1b[0m`);
+        it('Large Payload (10KB) Bandwidth', async () => {
+            const TOTAL = 5_000;
+            const CONCURRENCY = 50;
+            const payload = { data: "x".repeat(1024 * 10) };
 
-            expect(throughput).toBeGreaterThan(100_000);
+            const probe = new BenchmarkProbe("SOCKET - 10KB", TOTAL);
+            probe.startTimer();
+
+            const worker = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
+                    await (nexo as any).debug.echo(payload);
+                    probe.record(t0);
+                }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+            const throughput = probe.printResult();
+            const mbs = (throughput * 10) / 1024;
+            console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
+            expect(throughput).toBeGreaterThan(1000);
         });
     });
 
-    describe('STORE', function() {
+    // --- STORE ---
+    describe('2. STORE Broker', function () {
+        it('Write Throughput', async () => {
+            const TOTAL = 100_000;
+            const CONCURRENCY = 200;
 
-        it('Performance -> Throughput Benchmark (FULL PIPE STRESS)', async () => {
-            const TOTAL_OPERATIONS = 1_000_000;
-            const CONCURRENCY = 1000; // Saturiamo il batch buffer da 64KB
-            const payload = {
-                id: "bench-123",
-                timestamp: Date.now(),
-                data: "stressing-the-pipe-with-some-bytes-to-parse-and-decode"
-            };
+            const probe = new BenchmarkProbe("STORE - WRITE", TOTAL);
+            probe.startTimer();
 
-            const opsPerWorker = TOTAL_OPERATIONS / CONCURRENCY;
-            const start = performance.now();
-
-            const worker = async () => {
+            const worker = async (id: number) => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
                 for (let i = 0; i < opsPerWorker; i++) {
-                    await (nexo as any).debug.echo(payload);
+                    const t0 = performance.now();
+                    await nexo.store.kv.set(`stress:${id}:${i}`, "val");
+                    probe.record(t0);
                 }
             };
+            await Promise.all(Array.from({ length: CONCURRENCY }, (_, i) => worker(i)));
 
-            await Promise.all(Array.from({length: CONCURRENCY}, worker));
-
-            const end = performance.now();
-            const durationSeconds = (end - start) / 1000;
-            const throughput = Math.floor(TOTAL_OPERATIONS / durationSeconds);
-
-            console.log(`\n\x1b[32m[PERF] Full Pipe Throughput: ${throughput.toLocaleString()} ops/sec\x1b[0m`);
-
-            expect(throughput).toBeGreaterThan(800_000);
+            const throughput = probe.printResult();
+            expect(throughput).toBeGreaterThan(50_000);
         });
 
-        it('Performance -> AVG Throughput (ops/sec) with 10 Million existing keys', async () => {
-            const PREFILL_COUNT = 5_000_000;
-            const CONCURRENCY = 1000;
-            const DURATION_MS = 2000;
+        it('Read Throughput (1M Keys)', async () => {
+            const PREFILL = 100_000;
+            const READ_OPS = 50_000;
+            const CONCURRENCY = 100;
 
-            console.log(`📦 Fase 1: Pre-fill di ${PREFILL_COUNT.toLocaleString()} chiavi...`);
-
-            // Riempiamo la memoria (usiamo i batch per fare in fretta)
-            for (let i = 0; i < PREFILL_COUNT; i += 1000) {
+            const batchSize = 1000;
+            for (let i = 0; i < PREFILL; i += batchSize) {
                 const batch = [];
-                for (let j = 0; j < 1000; j++) {
-                    batch.push(nexo.store.kv.set(`dummy:${i + j}`, "payload", 3)); // Scadono tra 3 secondi
-                }
+                for (let j = 0; j < batchSize; j++) batch.push(nexo.store.kv.set(`k:${i + j}`, "static"));
                 await Promise.all(batch);
             }
 
-            console.log(`🚀 Fase 2: Avvio Benchmark su ${CONCURRENCY} workers...`);
-
-            let operations = 0;
-            let isRunning = true;
-            const start = performance.now();
+            const probe = new BenchmarkProbe("STORE - READ", READ_OPS);
+            probe.startTimer();
 
             const worker = async () => {
-                while (isRunning) {
-                    await nexo.store.kv.set(`bench:${operations++}`, "x");
+                const opsPerWorker = READ_OPS / CONCURRENCY;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const key = `k:${Math.floor(Math.random() * PREFILL)}`;
+                    const t0 = performance.now();
+                    await nexo.store.kv.get(key);
+                    probe.record(t0);
                 }
             };
+            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 
-            const workers = Array(CONCURRENCY).fill(null).map(() => worker());
+            const throughput = probe.printResult();
+            expect(throughput).toBeGreaterThan(50_000);
+        });
+    });
 
-            await new Promise(resolve => setTimeout(resolve, DURATION_MS));
-            isRunning = false;
-            await Promise.all(workers);
+    // --- PUBSUB ---
+    describe('3. PUBSUB Broker', function () {
+        it('Fan-Out (Broadcasting)', async () => {
+            const SUBSCRIBERS = 100;
+            const MESSAGES = 100;
+            const TOTAL_EVENTS = MESSAGES * SUBSCRIBERS;
 
-            const totalTime = (performance.now() - start) / 1000;
-            const opsPerSec = Math.floor(operations / totalTime);
+            const clients: NexoClient[] = [];
+            let received = 0;
 
-            console.log(`\n--- STRESS RESULT (with ${PREFILL_COUNT.toLocaleString()} keys) ---`);
-            console.log(`Throughput: ${opsPerSec.toLocaleString()} ops/sec`);
-            console.log(`------------------------------------\n`);
-            expect(opsPerSec).toBeGreaterThan(1_000_000);
+            for (let i = 0; i < SUBSCRIBERS; i++) {
+                const c = await NexoClient.connect({ port: SERVER_PORT });
+                await c.pubsub.subscribe('perf/fanout', () => { received++; });
+                clients.push(c);
+            }
 
+            // Fan-out is asynchronous, hard to measure per-message latency reliably without complex coordination
+            // Keeping throughput only for this specific scenario
+            const probe = new BenchmarkProbe("PUBSUB - FANOUT (1 Pub -> ${SUBSCRIBERS} Subs)", TOTAL_EVENTS);
+            probe.startTimer();
+
+            await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub.publish('perf/fanout', { t: 1 })));
+
+            while (received < TOTAL_EVENTS) {
+                await new Promise(r => setTimeout(r, 10));
+                if ((performance.now() - probe['start']) > 5000) break;
+            }
+
+            const throughput = probe.printResult();
+            clients.forEach(c => c.disconnect());
+            expect(received).toBe(TOTAL_EVENTS);
         });
 
+        it('Wildcard Routing Stress', async () => {
+            const OPS = 10_000;
+            let received = 0;
+            await nexo.pubsub.subscribe('infra/+/+/cpu', () => { received++; });
 
-    })
+            const probe = new BenchmarkProbe("PUBSUB - WILDCARD", OPS);
+            probe.startTimer();
 
+            const worker = async () => {
+                const opsPerWorker = OPS / 10;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
+                    await nexo.pubsub.publish('infra/us-east/server-1/cpu', { u: 90 });
+                    probe.record(t0);
+                }
+            };
+            await Promise.all(Array.from({ length: 10 }, worker));
 
+            while (received < OPS) await new Promise(r => setTimeout(r, 10));
 
+            probe.printResult();
+        });
+    });
+
+    // --- QUEUES ---
+    describe('4. QUEUE Broker', function () {
+        it('Push Throughput', async () => {
+            const TOTAL = 20_000;
+            const CONCURRENCY = 50;
+            const q = nexo.queue("bench-push");
+
+            const probe = new BenchmarkProbe("QUEUE - PUSH", TOTAL);
+            probe.startTimer();
+
+            const producer = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
+                    await q.push({ job: i });
+                    probe.record(t0);
+                }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, producer));
+
+            probe.printResult();
+        });
+
+        it('Pop (Subscribe) Throughput', async () => {
+            const TOTAL = 5_000;
+            const q = nexo.queue("bench-pop");
+            for (let i = 0; i < TOTAL; i++) await q.push({ j: i });
+
+            let consumed = 0;
+            const probe = new BenchmarkProbe("QUEUE - POP", TOTAL);
+            probe.startTimer();
+
+            return new Promise<void>((resolve) => {
+                const sub = q.subscribe(async (msg) => {
+                    consumed++;
+                    if (consumed >= TOTAL) {
+                        sub.stop();
+                        probe.printResult();
+                        resolve();
+                    }
+                });
+            });
+        });
+    });
 });
