@@ -190,14 +190,14 @@ class RingDecoder {
         throw new Error(`Frame too large: limit is ${this.MAX_FRAME_SIZE / 1024 / 1024}MB`);
       }
     }
-    
+
     const newBuf = Buffer.allocUnsafe(newSize);
     this.buf.copy(newBuf, 0, this.head, this.tail);
-    
+
     this.buf = newBuf;
     this.tail = used;
     this.head = 0;
-    
+
     chunk.copy(this.buf, this.tail);
     this.tail += needed;
   }
@@ -361,11 +361,10 @@ class NexoConnection {
         case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
         case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
         case 5:
-          // String optimization: scriviamo length + string bytes
-          const sLen = op.size - 4;
-          buf.writeUInt32BE(sLen, off);
-          buf.write(op.val, off + 4, 'utf8');
-          off += op.size;
+          // Pre-encoded string: length prefix + buffer copy (no double UTF-8 encoding)
+          buf.writeUInt32BE(op.val.length, off);
+          (op.val as Buffer).copy(buf, off + 4);
+          off += 4 + op.val.length;
           break;
       }
     }
@@ -384,10 +383,10 @@ class NexoConnection {
     return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, ts: Date.now() }));
   }
 
-  disconnect() { 
-    this.flush(); 
-    this.socket.destroy(); 
-    this.isConnected = false; 
+  disconnect() {
+    this.flush();
+    this.socket.destroy();
+    this.isConnected = false;
     if (this.timeoutTimer) clearInterval(this.timeoutTimer);
   }
 }
@@ -435,9 +434,9 @@ class RequestBuilder {
   }
 
   writeString(s: string): this {
-    const len = Buffer.byteLength(s, 'utf8');
-    this._ops.push({ type: 5, val: s, size: 4 + len });
-    this._payloadSize += 4 + len;
+    const encoded = Buffer.from(s, 'utf8');
+    this._ops.push({ type: 5, val: encoded, size: 4 + encoded.length });
+    this._payloadSize += 4 + encoded.length;
     return this;
   }
 
@@ -672,7 +671,7 @@ export class NexoPubSub {
       const reader = new ProtocolReader(payload);
       const topic = reader.readString();
       const data = reader.readData();
-      
+
       this.dispatch(topic, data);
     };
   }
@@ -715,33 +714,33 @@ export class NexoPubSub {
     // 1. Exact match
     const handlers = this.handlers.get(topic);
     if (handlers) {
-        handlers.forEach(cb => {
-            try { cb(data); } catch(e) { console.error("Topic handler error", e); }
-        });
+      handlers.forEach(cb => {
+        try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+      });
     }
 
     // 2. Wildcard matching
     for (const [pattern, cbs] of this.handlers.entries()) {
-        if (pattern === topic) continue; // Already handled
-        if (this.matches(pattern, topic)) {
-             cbs.forEach(cb => {
-                try { cb(data); } catch(e) { console.error("Topic handler error", e); }
-            });
-        }
+      if (pattern === topic) continue; // Already handled
+      if (this.matches(pattern, topic)) {
+        cbs.forEach(cb => {
+          try { cb(data); } catch (e) { console.error("Topic handler error", e); }
+        });
+      }
     }
   }
 
   private matches(pattern: string, topic: string): boolean {
-      const pParts = pattern.split('/');
-      const tParts = topic.split('/');
-      
-      for(let i=0; i<pParts.length; i++) {
-          const p = pParts[i];
-          if (p === '#') return true;
-          if (i >= tParts.length) return false;
-          if (p !== '+' && p !== tParts[i]) return false;
-      }
-      return pParts.length === tParts.length;
+    const pParts = pattern.split('/');
+    const tParts = topic.split('/');
+
+    for (let i = 0; i < pParts.length; i++) {
+      const p = pParts[i];
+      if (p === '#') return true;
+      if (i >= tParts.length) return false;
+      if (p !== '+' && p !== tParts[i]) return false;
+    }
+    return pParts.length === tParts.length;
   }
 }
 
