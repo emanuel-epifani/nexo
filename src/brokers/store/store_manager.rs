@@ -79,7 +79,10 @@ impl StoreManager {
     // ========================================
 
     pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
-        let expires_at = ttl.map(|secs| Instant::now() + Duration::from_secs(secs));
+        // Default TTL: 1 hour (3600 seconds) if not specified to prevent memory leaks
+        let ttl_secs = ttl.unwrap_or(3600);
+        let expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
+        
         let entry = Entry { 
             value: Value::Bytes(value), 
             expires_at 
