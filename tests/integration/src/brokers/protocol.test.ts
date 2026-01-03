@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
 import { NexoClient } from "@nexo/client/dist/client";
+import {BenchmarkProbe} from "../utils/benchmark-misure";
 
 const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
 
@@ -293,5 +294,60 @@ describe('Nexo Protocol & Socket', () => {
         const result = await nexo.store.kv.get('proto:nonexistent-key-12345');
         expect(result).toBeNull();
     });
+
+    // --- PERFORMANCE ---
+    describe('Socket Core (Hot Path)', async () => {
+        it('Small Payload Throughput', async () => {
+            const TOTAL = 50_000;
+            const CONCURRENCY = 500;
+            const payload = { op: "ping" };
+
+            const probe = new BenchmarkProbe("SOCKET - SMALL", TOTAL);
+            probe.startTimer();
+
+            const worker = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
+                    await (nexo as any).debug.echo(payload);
+                    probe.record(performance.now() - t0);
+                }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+            const stats = probe.printResult();
+            expect(stats.throughput).toBeGreaterThan(500_000);
+            expect(stats.p99).toBeLessThan(5);
+            expect(stats.max).toBeLessThan(6);
+        });
+
+        it('Large Payload (10KB) Bandwidth', async () => {
+            const TOTAL = 5_000;
+            const CONCURRENCY = 50;
+            const payload = { data: "x".repeat(1024 * 10) };
+
+            const probe = new BenchmarkProbe("SOCKET - 10KB", TOTAL);
+            probe.startTimer();
+
+            const worker = async () => {
+                const opsPerWorker = TOTAL / CONCURRENCY;
+                for (let i = 0; i < opsPerWorker; i++) {
+                    const t0 = performance.now();
+                    await (nexo as any).debug.echo(payload);
+                    probe.record(performance.now() - t0);
+                }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+            const stats = probe.printResult();
+            const mbs = (stats.throughput * 10) / 1024;
+            console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
+
+            expect(stats.throughput).toBeGreaterThan(25_000);
+            expect(stats.p99).toBeLessThan(4);
+            expect(stats.max).toBeLessThan(5);
+        });
+    });
+
 
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
 import { NexoClient, Opcode } from '@nexo/client';
+import {BenchmarkProbe} from "../utils/benchmark-misure";
 
 describe('QUEUE broker', () => {
 
@@ -149,7 +150,7 @@ describe('QUEUE broker', () => {
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => {
                 received.push(msg);
-            });
+            }, 1);
 
             for (let i = 0; i < 20; i++) {
                 if (received.length === 4) break;
@@ -480,6 +481,71 @@ describe('QUEUE broker', () => {
 
             expect(received).toEqual([1, 2, 3]);
         });
+    });
+
+
+    // --- PERFORMANCE ---
+    it('Producer (Push) Throughput', async () => {
+        const TOTAL = 20_000;
+        const CONCURRENCY = 50;
+        const q = nexo.queue("bench-push");
+
+        const probe = new BenchmarkProbe("QUEUE - PUSH", TOTAL);
+        probe.startTimer();
+
+        const producer = async () => {
+            const opsPerWorker = TOTAL / CONCURRENCY;
+            for (let i = 0; i < opsPerWorker; i++) {
+                const t0 = performance.now();
+                await q.push({ job: i });
+                probe.record(performance.now() - t0);
+            }
+        };
+        await Promise.all(Array.from({ length: CONCURRENCY }, producer));
+
+        const stats = probe.printResult();
+        expect(stats.throughput).toBeGreaterThan(180_000);
+        expect(stats.p99).toBeLessThan(2);
+        expect(stats.max).toBeLessThan(3);
+    });
+
+    it('Consumer (Subscribe) Throughput', async () => {
+        const TOTAL = 10_000;
+        const CONCURRENCY_PUSH = 10;
+        const q = nexo.queue("bench-concurrent");
+
+        let consumed = 0;
+        const probe = new BenchmarkProbe("QUEUE - CONSUME", TOTAL);
+
+        // 1. Consumer ready
+        const consumerPromise = new Promise<void>((resolve) => {
+            const sub = q.subscribe(async (msg: any) => {
+                consumed++;
+                if (msg.ts) probe.recordLatency(msg.ts);
+
+                if (consumed >= TOTAL) {
+                    sub.stop();
+                    const stats = probe.printResult();
+                    expect(stats.throughput).toBeGreaterThan(80_000);
+                    expect(stats.p99).toBeLessThan(2);
+                    expect(stats.max).toBeLessThan(3);
+                    resolve();
+                }
+            });
+        });
+
+        probe.startTimer();
+
+        // 2. Producer start
+        const producer = async () => {
+            const opsPerWorker = TOTAL / CONCURRENCY_PUSH;
+            for (let i = 0; i < opsPerWorker; i++) {
+                await q.push({ ts: Date.now() });
+            }
+        };
+        const producerPromise = Promise.all(Array.from({ length: CONCURRENCY_PUSH }, producer));
+
+        await Promise.all([producerPromise, consumerPromise]);
     });
 
 });
