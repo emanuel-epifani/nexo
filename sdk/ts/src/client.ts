@@ -69,6 +69,7 @@ export interface PublishOptions {
 export interface NexoOptions {
   host?: string;
   port?: number;
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -189,17 +190,21 @@ class NexoConnection {
   public isConnected = false;
   private decoder = new RingDecoder();
   private nextId = 1;
-  private pending = new Map<number, { resolve: any, reject: any }>();
+  private pending = new Map<number, { resolve: any, reject: any, ts: number }>();
   private writeBuf = Buffer.allocUnsafe(64 * 1024);
   private writeOffset = 0;
   private flushScheduled = false;
+  private timeoutTimer?: NodeJS.Timeout;
+  private readonly requestTimeoutMs: number;
 
   public onPush?: (payload: Buffer) => void;
 
-  constructor(private host: string, private port: number) {
+  constructor(private host: string, private port: number, options: NexoOptions = {}) {
     this.socket = new net.Socket();
     this.socket.setNoDelay(true);
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30000;
     this.setupListeners();
+    this.startTimeoutLoop();
   }
 
   async connect(): Promise<void> {
@@ -209,6 +214,19 @@ class NexoConnection {
       });
       this.socket.once('error', rej);
     });
+  }
+
+  private startTimeoutLoop() {
+    this.timeoutTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [id, req] of this.pending) {
+        if (now - req.ts > this.requestTimeoutMs) {
+          this.pending.delete(id);
+          req.reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
+        }
+      }
+    }, 1000); // Check every second
+    this.timeoutTimer.unref(); // Don't block process exit
   }
 
   private setupListeners() {
@@ -246,6 +264,7 @@ class NexoConnection {
       this.isConnected = false;
       this.pending.forEach(h => h.reject(err || new Error('Connection closed')));
       this.pending.clear();
+      if (this.timeoutTimer) clearInterval(this.timeoutTimer);
     };
     this.socket.on('error', cleanup);
     this.socket.on('close', cleanup);
@@ -324,10 +343,15 @@ class NexoConnection {
     // ---------------------------------------------------------
     // 6. REGISTRAZIONE PROMISE (Async Wait)
     // ---------------------------------------------------------
-    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, ts: Date.now() }));
   }
 
-  disconnect() { this.flush(); this.socket.destroy(); this.isConnected = false; }
+  disconnect() { 
+    this.flush(); 
+    this.socket.destroy(); 
+    this.isConnected = false; 
+    if (this.timeoutTimer) clearInterval(this.timeoutTimer);
+  }
 }
 
 /**
@@ -653,33 +677,33 @@ export class NexoPubSub {
     // 1. Exact match
     const handlers = this.handlers.get(topic);
     if (handlers) {
-      handlers.forEach(cb => {
-        try { cb(data); } catch (e) { console.error("Topic handler error", e); }
-      });
+        handlers.forEach(cb => {
+            try { cb(data); } catch(e) { console.error("Topic handler error", e); }
+        });
     }
 
     // 2. Wildcard matching
     for (const [pattern, cbs] of this.handlers.entries()) {
-      if (pattern === topic) continue; // Already handled
-      if (this.matches(pattern, topic)) {
-        cbs.forEach(cb => {
-          try { cb(data); } catch (e) { console.error("Topic handler error", e); }
-        });
-      }
+        if (pattern === topic) continue; // Already handled
+        if (this.matches(pattern, topic)) {
+             cbs.forEach(cb => {
+                try { cb(data); } catch(e) { console.error("Topic handler error", e); }
+            });
+        }
     }
   }
 
   private matches(pattern: string, topic: string): boolean {
-    const pParts = pattern.split('/');
-    const tParts = topic.split('/');
-
-    for (let i = 0; i < pParts.length; i++) {
-      const p = pParts[i];
-      if (p === '#') return true;
-      if (i >= tParts.length) return false;
-      if (p !== '+' && p !== tParts[i]) return false;
-    }
-    return pParts.length === tParts.length;
+      const pParts = pattern.split('/');
+      const tParts = topic.split('/');
+      
+      for(let i=0; i<pParts.length; i++) {
+          const p = pParts[i];
+          if (p === '#') return true;
+          if (i >= tParts.length) return false;
+          if (p !== '+' && p !== tParts[i]) return false;
+      }
+      return pParts.length === tParts.length;
   }
 }
 
@@ -721,7 +745,7 @@ export class NexoClient {
   public readonly pubsub: NexoPubSub;
 
   constructor(options: NexoOptions = {}) {
-    this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080);
+    this.conn = new NexoConnection(options.host!, options.port!, options);
     this.builder = new RequestBuilder(this.conn);
     this.store = new NexoStore(this.builder);
     this.pubsub = new NexoPubSub(this.builder, this.conn);
