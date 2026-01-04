@@ -759,7 +759,7 @@ export class NexoStream<T = any> {
       .send();
   }
 
-  async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<void> {
+  async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<{ stop: () => void }> {
     if (!this.consumerGroup) {
       throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
     }
@@ -783,17 +783,27 @@ export class NexoStream<T = any> {
 
       this.partitions.push(pId);
       this.nextOffsets.set(pId, startOffset);
+      // console.log(`[SDK] Joined Group. Partition: ${pId}, StartOffset: ${startOffset}`);
     }
+
+    // Shared active flag for all partition loops
+    const controller = { active: true };
 
     // 2. Start Polling Loop for each partition
     // We launch one loop per partition to maximize parallelism (simulating multi-thread)
     const batchSize = options.batchSize || 100;
-    this.partitions.forEach(pId => this.pollPartition(pId, callback, batchSize));
+    this.partitions.forEach(pId => this.pollPartition(pId, callback, batchSize, controller));
+
+    return {
+      stop: () => {
+        controller.active = false;
+      }
+    };
   }
 
-  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void, batchSize: number) {
+  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void, batchSize: number, controller: { active: boolean }) {
     // Loop forever
-    while ((this.builder as any).conn.isConnected) {
+    while ((this.builder as any).conn.isConnected && controller.active) {
       const offset = this.nextOffsets.get(pId)!;
 
       try {
@@ -853,6 +863,7 @@ export class NexoStream<T = any> {
           this.nextOffsets.set(pId, nextOffset);
 
           // Send Commit to Server
+          console.log(`[SDK] Auto-Committing Partition: ${pId}, Offset: ${nextOffset}`);
           await this.builder.reset(Opcode.S_COMMIT)
             .writeString(this.consumerGroup)
             .writeString(this.name)

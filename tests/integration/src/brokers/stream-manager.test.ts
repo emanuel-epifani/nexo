@@ -215,18 +215,19 @@ describe('Stream Broker', () => {
             const sub1 = client1.stream(topicName, groupName);
             
             let count1 = 0;
+            let subHandle1: { stop: () => void } | undefined;
             
-            await new Promise<void>((resolve, reject) => {
+            await new Promise<void>(async (resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error("Client 1 Timeout")), 5000);
                 
-                sub1.subscribe(async (msg) => {
+                subHandle1 = await sub1.subscribe(async (msg) => {
                     count1++;
                     if (count1 === 20) {
-                        console.log("Client 1 reached 20 messages. Stopping...");
+                        console.log("Client 1 reached 20 messages. Stopping SDK loop...");
                         clearTimeout(timeout);
-                        // Give PLENTY of time for auto-commit to happen and be ACKed by server
-                        // The loop in SDK needs to finish processing, then send COMMIT, then receive OK.
-                        setTimeout(resolve, 2000);
+                        if (subHandle1) subHandle1.stop();
+                        // Wait for loop to exit and auto-commit to happen
+                        setTimeout(resolve, 500);
                     }
                 }, { batchSize: 20 });
             });
