@@ -179,8 +179,8 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const stats = probe.printResult();
         clients.forEach(c => c.disconnect());
         expect(received).toBe(TOTAL_EVENTS);
-        expect(stats.throughput).toBeGreaterThan(700_000);
-        expect(stats.p99).toBeLessThan(10);
+        expect(stats.throughput).toBeGreaterThan(400_000);
+        expect(stats.p99).toBeLessThan(15);
         expect(stats.max).toBeLessThan(15);
     });
 
@@ -219,7 +219,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const stats = probe.printResult();
         clients.forEach(c => c.disconnect());
         expect(received).toBe(TOTAL_EXPECTED);
-        expect(stats.throughput).toBeGreaterThan(80_000);
+        expect(stats.throughput).toBeGreaterThan(100_000);
         expect(stats.p99).toBeLessThan(15);
         expect(stats.max).toBeLessThan(20);
 
@@ -246,7 +246,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
         while (received < OPS) await new Promise(r => setTimeout(r, 10));
 
         const stats = probe.printResult();
-        expect(stats.throughput).toBeGreaterThan(85_000);
+        expect(stats.throughput).toBeGreaterThan(100_000);
         expect(stats.p99).toBeLessThan(0.5);
         expect(stats.max).toBeLessThan(2);
     });

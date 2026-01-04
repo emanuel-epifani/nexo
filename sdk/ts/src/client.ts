@@ -218,7 +218,8 @@ class RingDecoder {
 }
 
 /**
- * NEXO CONNECTION: The "Engine" - handles all low-level networking and buffering.
+ * NEXO CONNECTION: Low-latency networking engine.
+ * Uses process.nextTick batching (~0.1ms) for optimal latency/throughput balance.
  */
 class NexoConnection {
   private socket: net.Socket;
@@ -226,11 +227,12 @@ class NexoConnection {
   private decoder = new RingDecoder();
   private nextId = 1;
   private pending = new Map<number, { resolve: any, reject: any, ts: number }>();
-  private writeBuf = Buffer.allocUnsafe(64 * 1024);
-  private writeOffset = 0;
-  private flushScheduled = false;
   private timeoutTimer?: NodeJS.Timeout;
   private readonly requestTimeoutMs: number;
+
+  // Micro-batching: collect buffers and flush on nextTick
+  private writeQueue: Buffer[] = [];
+  private flushScheduled = false;
 
   public onPush?: (payload: Buffer) => void;
 
@@ -260,8 +262,8 @@ class NexoConnection {
           req.reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
         }
       }
-    }, 1000); // Check every second
-    this.timeoutTimer.unref(); // Don't block process exit
+    }, 1000);
+    this.timeoutTimer.unref();
   }
 
   private setupListeners() {
@@ -280,13 +282,10 @@ class NexoConnection {
               break;
             }
             case FrameType.PUSH: {
-              if (this.onPush) {
-                this.onPush(frame.payload);
-              }
+              if (this.onPush) this.onPush(frame.payload);
               break;
             }
             case FrameType.PING:
-              // TODO: Auto-Pong if needed
               break;
             case FrameType.ERROR:
               logger.error('Received Protocol Error frame');
@@ -296,10 +295,11 @@ class NexoConnection {
           }
         }
       } catch (err) {
-        logger.error('Decoder error (likely frame too large)', err);
-        this.socket.destroy(); // Fatal error, close connection
+        logger.error('Decoder error', err);
+        this.socket.destroy();
       }
     });
+
     const cleanup = (err: any) => {
       this.isConnected = false;
       this.pending.forEach(h => h.reject(err || new Error('Connection closed')));
@@ -312,97 +312,56 @@ class NexoConnection {
 
   private flush = () => {
     this.flushScheduled = false;
-    if (this.writeOffset === 0) return;
+    if (this.writeQueue.length === 0) return;
 
-    // FIX: Creiamo una copia dei dati da inviare.
-    // socket.write è asincrono; se passassimo una view del buffer riutilizzabile (this.writeBuf),
-    // le successive scritture corromperebbero i dati in coda non ancora inviati.
-    const chunk = Buffer.allocUnsafe(this.writeOffset);
-    this.writeBuf.copy(chunk, 0, 0, this.writeOffset);
-    this.socket.write(chunk);
-
-    this.writeOffset = 0;
+    // Concatenate all queued buffers into single write (1 syscall)
+    const combined = Buffer.concat(this.writeQueue);
+    this.writeQueue.length = 0;
+    this.socket.write(combined);
   };
 
-  async dispatch(
+  dispatch(
     opcode: number,
     payloadLen: number,
-    payloadInstructions: { type: number, val: any, size: number }[]
+    ops: { type: number, val: any, size: number }[]
   ): Promise<{ status: ResponseStatus, data: Buffer }> {
-    const total = 9 + payloadLen;
-
-    // 1. GESTIONE SPAZIO (Flush se necessario)
-    if (this.writeOffset + total > this.writeBuf.length) {
-      this.flush();
-    }
-
-    // 2. METADATI
     const id = this.nextId++;
     if (this.nextId === 0) this.nextId = 1;
 
-    // 3. REGISTRAZIONE PROMISE
-    const promise = new Promise<{ status: ResponseStatus, data: Buffer }>((resolve, reject) => {
+    const buf = Buffer.allocUnsafe(9 + payloadLen);
+
+    // Header: [Type:1][ID:4][PayloadLen:4]
+    buf[0] = FrameType.REQUEST;
+    buf.writeUInt32BE(id, 1);
+    buf.writeUInt32BE(payloadLen, 5);
+
+    // Payload: [Opcode:1][...fields]
+    buf[9] = opcode;
+    let off = 10;
+    for (const op of ops) {
+      switch (op.type) {
+        case 1: buf[off++] = op.val; break;
+        case 2: buf.writeUInt32BE(op.val, off); off += 4; break;
+        case 3: buf.writeBigUInt64BE(op.val, off); off += 8; break;
+        case 4: (op.val as Buffer).copy(buf, off); off += op.size; break;
+        case 5:
+          buf.writeUInt32BE(op.val.length, off);
+          (op.val as Buffer).copy(buf, off + 4);
+          off += 4 + op.val.length;
+          break;
+      }
+    }
+
+    // Queue buffer and schedule flush on nextTick (~0.1ms vs setImmediate ~4ms)
+    this.writeQueue.push(buf);
+    if (!this.flushScheduled) {
+      this.flushScheduled = true;
+      process.nextTick(this.flush);
+    }
+
+    return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject, ts: Date.now() });
     });
-
-    // 4. SCRITTURA DATI
-    // Se il pacchetto è più grande dell'intero buffer di scrittura (es. 10MB > 64KB),
-    // non possiamo usare il buffer condiviso. Creiamo un buffer dedicato e inviamo subito.
-    if (total > this.writeBuf.length) {
-      const largeBuf = Buffer.allocUnsafe(total);
-
-      // Header
-      largeBuf[0] = FrameType.REQUEST;
-      largeBuf.writeUInt32BE(id, 1);
-      largeBuf.writeUInt32BE(payloadLen, 5);
-      largeBuf[9] = opcode;
-
-      // Payload
-      let off = 10;
-      for (const op of payloadInstructions) {
-        off = this.writeInstruction(largeBuf, off, op);
-      }
-
-      this.socket.write(largeBuf); // Invio diretto (bypass batching)
-
-    } else {
-      // Percorso Standard (Batching nel buffer condiviso)
-      const buf = this.writeBuf;
-      let off = this.writeOffset;
-
-      // Header
-      buf[off] = FrameType.REQUEST;
-      buf.writeUInt32BE(id, off + 1);
-      buf.writeUInt32BE(payloadLen, off + 5);
-      buf[off + 9] = opcode;
-      off += 10;
-
-      // Payload
-      for (const op of payloadInstructions) {
-        off = this.writeInstruction(buf, off, op);
-      }
-      this.writeOffset = off;
-
-      // Scheduling Flush
-      if (!this.flushScheduled) { this.flushScheduled = true; setImmediate(this.flush); }
-    }
-
-    return promise;
-  }
-
-  // Helper per scrivere le istruzioni nel buffer target
-  private writeInstruction(buf: Buffer, off: number, op: { type: number, val: any, size: number }): number {
-    switch (op.type) {
-      case 1: buf[off] = op.val; return off + 1;
-      case 2: buf.writeUInt32BE(op.val, off); return off + 4;
-      case 3: buf.writeBigUInt64BE(op.val, off); return off + 8;
-      case 4: (op.val as Buffer).copy(buf, off); return off + op.size;
-      case 5:
-        buf.writeUInt32BE(op.val.length, off);
-        (op.val as Buffer).copy(buf, off + 4);
-        return off + 4 + op.val.length;
-    }
-    return off;
   }
 
   disconnect() {
