@@ -25,15 +25,16 @@ impl QueueManager {
         let _ = self.self_ref.set(self_arc);
     }
 
-    pub fn push(&self, queue_name: String, value: Bytes, priority: u8, delay_ms: Option<u64>, auto_create: bool) -> Result<(), String> {
-        let queue = if auto_create {
-            self.get_or_create(queue_name)
-        } else {
-            self.get(queue_name.as_str())
-                .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?
-        };
+    pub fn push(&self, queue_name: String, value: Bytes, priority: u8, delay_ms: Option<u64>) -> Result<(), String> {
+        let queue = self.get(queue_name.as_str())
+                .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
         queue.push(value, priority, delay_ms);
         Ok(())
+    }
+
+    pub fn push_internal(&self, queue_name: String, value: Bytes, priority: u8, delay_ms: Option<u64>) {
+         let queue = self.get_or_create(queue_name);
+         queue.push(value, priority, delay_ms);
     }
 
     pub fn pop(&self, queue_name: &str) -> Option<Message> {
@@ -56,7 +57,8 @@ impl QueueManager {
         Ok(queue.consume())
     }
 
-    pub fn declare_queue(&self, queue_name: String, config: QueueConfig) -> Arc<Queue> {
+    pub fn create_queue(&self, queue_name: String, mut config: QueueConfig) -> Arc<Queue> {
+        config.merge_defaults();
         self.queues.entry(queue_name.clone())
             .or_insert_with(|| {
                 let queue = Arc::new(Queue::new(queue_name, config));
@@ -70,7 +72,7 @@ impl QueueManager {
     }
 
     pub fn get_or_create(&self, queue_name: String) -> Arc<Queue> {
-        self.declare_queue(queue_name, QueueConfig::default())
+        self.create_queue(queue_name, QueueConfig::default())
     }
 
     pub fn get(&self, queue_name: &str) -> Option<Arc<Queue>> {

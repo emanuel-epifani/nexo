@@ -23,7 +23,8 @@ impl StreamManager {
     /// Creates a topic (or returns OK if it already exists with compatible config)
     pub fn create_topic(&self, name: String, partitions: u32) {
         if !self.topics.contains_key(&name) {
-            let config = TopicConfig { partitions, }; 
+            let mut config = TopicConfig { partitions }; 
+            config.merge_defaults();
             let topic = Topic::new(name.clone(), config);
             self.topics.insert(name, Arc::new(topic));
         }

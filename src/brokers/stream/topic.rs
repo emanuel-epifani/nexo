@@ -11,6 +11,22 @@ pub struct TopicConfig {
     // Future: retention_ms, retention_bytes
 }
 
+impl Default for TopicConfig {
+    fn default() -> Self {
+        Self {
+            partitions: 4,
+        }
+    }
+}
+
+impl TopicConfig {
+    pub fn merge_defaults(&mut self) {
+        if self.partitions == 0 {
+            self.partitions = 4;
+        }
+    }
+}
+
 pub struct Topic {
     pub name: String,
     pub partitions: Vec<RwLock<Partition>>,

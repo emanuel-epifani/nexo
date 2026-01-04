@@ -31,7 +31,7 @@ export enum Opcode {
   // Future Store List: 0x0A - 0x0D
   // Future Store Set: 0x0E - 0x0F
   // Queue: 0x10 - 0x1F
-  Q_DECLARE = 0x10,
+  Q_CREATE = 0x10,
   Q_PUSH = 0x11,
   Q_CONSUME = 0x12,
   Q_ACK = 0x13,
@@ -553,10 +553,10 @@ export class NexoQueue<T = any> {
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
-    await this.builder.reset(Opcode.Q_DECLARE)
-      .writeU64(config.visibilityTimeoutMs ?? 30000)
-      .writeU32(config.maxRetries ?? 5)
-      .writeU64(config.ttlMs ?? 604800000)
+    await this.builder.reset(Opcode.Q_CREATE)
+      .writeU64(config.visibilityTimeoutMs ?? 0)
+      .writeU32(config.maxRetries ?? 0)
+      .writeU64(config.ttlMs ?? 0)
       .writeU64(config.delayMs ?? 0)
       .writeString(this.name)
       .send();
@@ -739,7 +739,7 @@ export class NexoStream<T = any> {
 
   async create(config: StreamConfig = {}): Promise<this> {
     await this.builder.reset(Opcode.S_CREATE)
-      .writeU32(config.partitions ?? 8)
+      .writeU32(config.partitions ?? 0)
       .writeString(this.name)
       .send();
     return this;
