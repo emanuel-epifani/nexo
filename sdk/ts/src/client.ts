@@ -552,27 +552,7 @@ export class NexoQueue<T = any> {
     private config?: QueueConfig
   ) { }
 
-  private async ensureDeclared(): Promise<void> {
-    if (this.isDeclared) return;
-    if (this.declarePromise) return this.declarePromise;
-
-    if (!this.config) {
-      this.isDeclared = true;
-      return;
-    }
-
-    this.declarePromise = (async () => {
-      try {
-        await this.declare(this.config!);
-      } finally {
-        this.declarePromise = null;
-      }
-    })();
-
-    return this.declarePromise;
-  }
-
-  async declare(config: QueueConfig = {}): Promise<this> {
+  async create(config: QueueConfig = {}): Promise<this> {
     await this.builder.reset(Opcode.Q_DECLARE)
       .writeU64(config.visibilityTimeoutMs ?? 30000)
       .writeU32(config.maxRetries ?? 5)
@@ -580,12 +560,10 @@ export class NexoQueue<T = any> {
       .writeU64(config.delayMs ?? 0)
       .writeString(this.name)
       .send();
-    this.isDeclared = true;
     return this;
   }
 
   async push(data: T, options: PushOptions = {}): Promise<void> {
-    await this.ensureDeclared();
     await this.builder.reset(Opcode.Q_PUSH)
       .writeU8(options.priority || 0)
       .writeU64(options.delayMs || 0)
@@ -759,7 +737,7 @@ export class NexoStream<T = any> {
     public readonly consumerGroup?: string
   ) { }
 
-  async create(config: StreamConfig): Promise<this> {
+  async create(config: StreamConfig = {}): Promise<this> {
     await this.builder.reset(Opcode.S_CREATE)
       .writeU32(config.partitions ?? 8)
       .writeString(this.name)

@@ -7,7 +7,8 @@ describe('QUEUE broker', () => {
 
     describe('Core API (Handle-based)', () => {
         it('Producer PUSH message -> Consumer receives it', async () => {
-            const q = nexo.queue('test_q_base_1');
+            const q = await nexo.queue('test_q_base_1').create();
+
             const payload = { msg: 'hello nexo' };
             
             let received: any = null;
@@ -26,9 +27,15 @@ describe('QUEUE broker', () => {
             expect(received).toEqual(payload);
         });
 
+        it('Should FAIL to push to a non-existent queue', async () => {
+            const q = nexo.queue('ghost-queue');
+            await expect(q.push('fail')).rejects.toThrow('Queue \'ghost-queue\' not found');
+        });
+
         it('Producer PUSH 1 message -> only ONE of 2 competing consumers receives it', async () => {
             const qName = 'test_q_competing';
-            const q1 = nexo.queue(qName);
+            const q1 = await nexo.queue(qName).create();
+
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST,
                 port: parseInt(process.env.NEXO_PORT!)
@@ -52,7 +59,8 @@ describe('QUEUE broker', () => {
 
         it('Producer PUSH 2 messages -> 2 consumers receive ONE message each (Fair Distribution)', async () => {
             const qName = 'test_q_fair';
-            const q1 = nexo.queue(qName);
+            const q1 = await nexo.queue(qName).create();
+
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST,
                 port: parseInt(process.env.NEXO_PORT!)
@@ -86,7 +94,8 @@ describe('QUEUE broker', () => {
         });
 
         it('Producer PUSH 3 messages -> Consumer receives them in FIFO order', async () => {
-            const q = nexo.queue('test_q_fifo');
+            const q = await nexo.queue('test_q_fifo').create();
+
             const messages = ['first', 'second', 'third'];
 
             for (const m of messages) await q.push(m);
@@ -108,7 +117,7 @@ describe('QUEUE broker', () => {
 
     describe('Message Priority', () => {
         it('Producer PUSH high/low priority -> Consumer receives HIGH priority first', async () => {
-            const q = nexo.queue('test_q_priority_1');
+            const q = await nexo.queue('test_q_priority_1').create();
 
             const msg_low_priority = 'low-priority'
             const msg_medium_priority = 'medium-priority'
@@ -135,7 +144,7 @@ describe('QUEUE broker', () => {
         });
 
         it('Producer PUSH mixed priorities -> Consumer receives in Priority-then-FIFO order', async () => {
-            const q = nexo.queue('test_q_priority_fifo');
+            const q = await nexo.queue('test_q_priority_fifo').create();
 
             const h1 = 'high-1';
             const h2 = 'high-2';
@@ -164,7 +173,8 @@ describe('QUEUE broker', () => {
 
     describe('Delayed Messages (Scheduling)', () => {
         it('Producer PUSH with delay -> message remains invisible until timer expires', async () => {
-            const q = nexo.queue('test_q_delayed_1');
+            const q = await nexo.queue('test_q_delayed_1').create();
+
             const payloadSent = 'delayed-msg';
             let msgReceived: string | null = null;
             const delayMs = 400;
@@ -187,7 +197,7 @@ describe('QUEUE broker', () => {
         });
 
         it('Producer PUSH multiple delayed -> Consumer receives them as they expire (Order)', async () => {
-            const q = nexo.queue('test_q_delayed_order');
+            const q = await nexo.queue('test_q_delayed_order').create();
 
             const msg_long_delay = 'longer-delay';
             const msg_short_delay = 'shorter-delay';
@@ -212,7 +222,8 @@ describe('QUEUE broker', () => {
 
     describe('Reliability & Auto-ACK', () => {
         it('Consumer fails callback -> Message becomes VISIBLE again after Visibility Timeout', async () => {
-            const q = nexo.queue('test_q_timeout_custom', { visibilityTimeoutMs: 300 });
+            const q = await nexo.queue('test_q_timeout_custom').create({ visibilityTimeoutMs: 300 });
+
             await q.push('timeout-msg');
 
             let receivedCount = 0;
@@ -234,8 +245,9 @@ describe('QUEUE broker', () => {
 
         it('Consumer repeatedly fails -> Message moves to DLQ after maxRetries', async () => {
             const qName = 'test_q_custom_dlq';
-            const q = nexo.queue(qName, { maxRetries: 2, visibilityTimeoutMs: 300 });
-            const dlq = nexo.queue(`${qName}_dlq`);
+            const q = await nexo.queue(qName).create({ maxRetries: 2, visibilityTimeoutMs: 300 });
+
+            const dlq = await nexo.queue(`${qName}_dlq`).create(); // Create DLQ as well
             
             await q.push('poison-pill');
 
@@ -263,7 +275,8 @@ describe('QUEUE broker', () => {
         }, 10000);
 
         it('Message age > TTL -> Message is discarded from queue (Retention)', async () => {
-            const q = nexo.queue('test_q_ttl_custom', { ttlMs: 300 });
+            const q = await nexo.queue('test_q_ttl_custom').create({ ttlMs: 300 });
+
             await q.push("short-lived");
             
             await new Promise(r => setTimeout(r, 800));
@@ -277,69 +290,40 @@ describe('QUEUE broker', () => {
         });
 
         it('TTL expires while message is waiting for Retry -> Message is discarded (TTL wins over DLQ)', async () => {
-            // 1. SETUP
-            // Creiamo una coda con:
-            // - TTL molto breve (200ms): il messaggio deve morire presto.
-            // - MaxRetries alto (5): avrebbe diritto a molti tentativi.
-            // - VisibilityTimeout (100ms): dopo un errore, aspetta 100ms prima di riprovare.
             const qName = 'test_ttl_vs_dlq';
-            const q = nexo.queue(qName, {
+            const q = await nexo.queue(qName).create({
                 ttlMs: 200,
                 maxRetries: 5,
                 visibilityTimeoutMs: 100
             });
 
-            // Serve anche la DLQ per verificare che NON ci finisca dentro
-            const dlq = nexo.queue(`${qName}_dlq`);
+            const dlq = await nexo.queue(`${qName}_dlq`).create();
 
-            // 2. AZIONE
-            // Inviamo il messaggio. Nasce al tempo T=0. Morirà a T=200ms.
             await q.push('msg-destined-to-die');
 
-            // 3. CONSUMO FALLITO (T=~10ms)
-            // Consumiamo subito e lanciamo errore.
-            // Il messaggio va in "waiting_for_ack" (invisibile).
-            // Diventerà visibile di nuovo a T=110ms (10 + 100 visibility).
             let attempts = 0;
             const sub = q.subscribe(async () => {
                 attempts++;
                 throw new Error('fail');
             });
 
-            // 4. ATTESA STRATEGICA
-            // Aspettiamo 400ms. Cosa succede in questo lasso di tempo?
-            // - T=110ms: Visibility scade. Il messaggio "potrebbe" essere riprovato.
-            // - T=200ms: TTL scade. Il messaggio DEVE morire.
-            // - Il reaper gira ogni 100ms.
-            //
-            // Se il codice è corretto:
-            // Il reaper (o il prossimo fetch) si accorge che T > 200ms e lo cancella.
             await new Promise(r => setTimeout(r, 400));
             sub.stop();
-
-            // 5. VERIFICA
-            // a. Il messaggio non deve essere stato processato troppe volte (magari 1 o 2, ma poi basta).
-            // b. SOPRATTUTTO: La DLQ deve essere VUOTA.
-            //    Se il messaggio fosse finito in DLQ, significherebbe che il Retry ha "vinto" sul TTL.
 
             let dlqMessage: any = null;
             const dlqSub = dlq.subscribe(async (msg) => { dlqMessage = msg; });
 
-            // Diamo tempo per un eventuale dispatch errato verso la DLQ
             await new Promise(r => setTimeout(r, 100));
             dlqSub.stop();
 
-            // EXPECTATIONS
-            expect(dlqMessage).toBeNull(); // Non deve essere in DLQ
+            expect(dlqMessage).toBeNull(); 
 
-            // Verifichiamo anche che la coda principale sia vuota (pulizia avvenuta)
-            // Proviamo a consumare di nuovo: non deve arrivare nulla.
             let zombieMessage: any = null;
             const zombieSub = q.subscribe(async (msg) => { zombieMessage = msg; });
             await new Promise(r => setTimeout(r, 100));
             zombieSub.stop();
 
-            expect(zombieMessage).toBeNull(); // Non deve essere risorto
+            expect(zombieMessage).toBeNull(); 
         });
 
     });
@@ -347,7 +331,8 @@ describe('QUEUE broker', () => {
     describe('JSON & DevEx', () => {
         it('Producer PUSH object -> SDK auto-serializes/deserializes JSON data with Generics', async () => {
             interface Order { id: number; meta: { type: string }; list: number[] };
-            const q = nexo.queue<Order>('test_q_json_complex');
+            const q = await nexo.queue<Order>('test_q_json_complex').create();
+
             const data: Order = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
             await q.push(data);
             
@@ -375,7 +360,8 @@ describe('QUEUE broker', () => {
 
     describe('Robustness & Edge Cases', () => {
         it('Consumer starts BEFORE push -> receives message as soon as it arrives', async () => {
-            const q = nexo.queue('test_q_blocking_new');
+            const q = await nexo.queue('test_q_blocking_new').create();
+
             let received: any = null;
 
             const sub = q.subscribe(async (msg) => { received = msg; });
@@ -395,28 +381,23 @@ describe('QUEUE broker', () => {
         });
 
         it('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
-            const q = nexo.queue('test_q_double_ack_new');
+            const q = await nexo.queue('test_q_double_ack_new').create();
+            
             await q.push('msg');
 
-            // 1. Dobbiamo simulare l'estrazione manuale per fare l'ACK manuale
-            // In un caso reale l'utente userebbe q.subscribe, ma qui vogliamo testare l'idempotenza dell'ACK
-            // Quindi usiamo il "motore interno" (RequestBuilder) che ora è pubblico (per questo test)
             const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME)
                 .writeString(q.name)
                 .send();
 
-            // Estraiamo l'ID dall'UUID (primi 16 byte del corpo risposta)
             const msgId = res.reader.readUUID();
 
-            // 1° ACK
             await (q as any).ack(msgId);
-
-            // 2° ACK -> Non deve lanciare errori
             await expect((q as any).ack(msgId)).resolves.toBeUndefined();
         });
 
         it('User creates queue with special chars -> Broker handles name correctly', async () => {
-            const q = nexo.queue('queues:special/chars@123');
+            const q = await nexo.queue('queues:special/chars@123').create();
+
             let msgSent = 'special-test'
             await q.push(msgSent);
 
@@ -434,22 +415,19 @@ describe('QUEUE broker', () => {
 
     describe('Prefetch & Concurrency', () => {
         it('Prefetch keeps N requests active -> High throughput simulation', async () => {
-            const q = nexo.queue('test_q_prefetch');
+            const q = await nexo.queue('test_q_prefetch').create();
+
             const COUNT = 50;
-            // Inviamo 50 messaggi
             for (let i = 0; i < COUNT; i++) await q.push(i);
 
             let receivedCount = 0;
             const start = Date.now();
             
-            // Subscribe con prefetch alto (es. 20)
             const sub = q.subscribe(async () => {
                 receivedCount++;
-                // Simula leggero processing
                 await new Promise(r => setTimeout(r, 2)); 
             }, 20);
 
-            // Aspettiamo che finisca
             while (receivedCount < COUNT) {
                 await new Promise(r => setTimeout(r, 10));
                 if (Date.now() - start > 5000) break;
@@ -457,22 +435,19 @@ describe('QUEUE broker', () => {
             sub.stop();
 
             expect(receivedCount).toBe(COUNT);
-            // Non possiamo testare esattamente quanti "pending" ci sono dal lato client senza mockare socket,
-            // ma se finisce in tempi ragionevoli con sleep nel callback, significa che il pipelining funziona.
         });
 
         it('Prefetch=1 -> Serial processing (Strict Ordering check)', async () => {
-            const q = nexo.queue('test_q_serial');
+            const q = await nexo.queue('test_q_serial').create();
+
             await q.push(1);
             await q.push(2);
             await q.push(3);
 
             const received: number[] = [];
             
-            // Subscribe con prefetch 1 = Serial
             const sub = q.subscribe(async (val) => {
                 received.push(val);
-                // Sleep lungo per essere sicuri che se non fosse seriale, ne arriverebbe un altro
                 await new Promise(r => setTimeout(r, 50));
             }, 1);
 
@@ -488,7 +463,7 @@ describe('QUEUE broker', () => {
     it('Producer (Push) Throughput', async () => {
         const TOTAL = 20_000;
         const CONCURRENCY = 50;
-        const q = nexo.queue("bench-push");
+        const q = await nexo.queue("bench-push").create();
 
         const probe = new BenchmarkProbe("QUEUE - PUSH", TOTAL);
         probe.startTimer();
@@ -512,7 +487,7 @@ describe('QUEUE broker', () => {
     it('Consumer (Subscribe) Throughput', async () => {
         const TOTAL = 10_000;
         const CONCURRENCY_PUSH = 10;
-        const q = nexo.queue("bench-concurrent");
+        const q = await nexo.queue("bench-concurrent").create();
 
         let consumed = 0;
         const probe = new BenchmarkProbe("QUEUE - CONSUME", TOTAL);

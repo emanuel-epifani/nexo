@@ -294,7 +294,7 @@ impl Queue {
                 let dlq_name = format!("{}_dlq", self.name);
                 let manager_clone = Arc::clone(manager);
                 tokio::spawn(async move {
-                    manager_clone.push(dlq_name, payload, priority, None);
+                    let _ = manager_clone.push(dlq_name, payload, priority, None, true);
                 });
             } else {
                 self.dispatch(&mut state, id, now);

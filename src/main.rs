@@ -23,6 +23,12 @@ pub struct NexoEngine {
     pub stream: Arc<StreamManager>,
 }
 
+impl Default for NexoEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NexoEngine {
     pub fn new() -> Self {
         let queue_manager = Arc::new(QueueManager::new());

@@ -34,7 +34,7 @@ impl StreamManager {
         if let Some(topic) = self.topics.get(topic_name) {
             Ok(topic.publish(payload, key))
         } else {
-            Err(format!("Topic '{}' not found. Use create() first.", topic_name))
+            Err(format!("Topic '{}' not found. Create it first.", topic_name))
         }
     }
     
@@ -52,8 +52,9 @@ impl StreamManager {
     pub fn join_group(&self, group_id: &str, topic_name: &str, client_id: &str) -> Result<Vec<u32>, String> {
         // Ensure topic exists
         let topic = self.topics.get(topic_name)
-            .ok_or_else(|| format!("Topic '{}' not found", topic_name))?;
-        
+            .ok_or_else(|| format!("Topic '{}' not found. Create it first.", topic_name))?;
+
+
         let num_partitions = topic.config.partitions;
 
         let group = self.groups.entry(group_id.to_string())

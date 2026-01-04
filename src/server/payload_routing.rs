@@ -155,8 +155,10 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Err(e) => return Response::Error(e),
             };
             let offset = body.len() - data_ptr.len();
-            engine.queue.push(q_name.to_string(), body.slice(offset..), priority, delay_opt);
-            Response::Ok
+            match engine.queue.push(q_name.to_string(), body.slice(offset..), priority, delay_opt, false) {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         
         // Q_CONSUME: [NameLen:4][Name]
@@ -165,7 +167,10 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            Response::AsyncConsume(engine.queue.consume(q_name.to_string()))
+            match engine.queue.consume(q_name.to_string()) {
+                Ok(receiver) => Response::AsyncConsume(receiver),
+                Err(e) => Response::Error(e),
+            }
         }
         
         // Q_ACK: [UUID:16][NameLen:4][Name]

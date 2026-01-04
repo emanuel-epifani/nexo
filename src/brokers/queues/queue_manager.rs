@@ -25,9 +25,15 @@ impl QueueManager {
         let _ = self.self_ref.set(self_arc);
     }
 
-    pub fn push(&self, queue_name: String, value: Bytes, priority: u8, delay_ms: Option<u64>) {
-        let queue = self.get_or_create(queue_name);
+    pub fn push(&self, queue_name: String, value: Bytes, priority: u8, delay_ms: Option<u64>, auto_create: bool) -> Result<(), String> {
+        let queue = if auto_create {
+            self.get_or_create(queue_name)
+        } else {
+            self.get(queue_name.as_str())
+                .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?
+        };
         queue.push(value, priority, delay_ms);
+        Ok(())
     }
 
     pub fn pop(&self, queue_name: &str) -> Option<Message> {
@@ -44,9 +50,10 @@ impl QueueManager {
         false
     }
 
-    pub fn consume(&self, queue_name: String) -> oneshot::Receiver<Message> {
-        let queue = self.get_or_create(queue_name);
-        queue.consume()
+    pub fn consume(&self, queue_name: String) -> Result<oneshot::Receiver<Message>, String> {
+        let queue = self.get(queue_name.as_str())
+            .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
+        Ok(queue.consume())
     }
 
     pub fn declare_queue(&self, queue_name: String, config: QueueConfig) -> Arc<Queue> {
@@ -64,6 +71,10 @@ impl QueueManager {
 
     pub fn get_or_create(&self, queue_name: String) -> Arc<Queue> {
         self.declare_queue(queue_name, QueueConfig::default())
+    }
+
+    pub fn get(&self, queue_name: &str) -> Option<Arc<Queue>> {
+        self.queues.get(queue_name).map(|q| q.value().clone())
     }
 
     // This method should be called after QueueManager is wrapped in an Arc

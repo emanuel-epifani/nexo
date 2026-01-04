@@ -101,8 +101,9 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
     match response {
         Response::Ok => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
         Response::Error(msg) => {
-            buf.put_u32((1 + msg.len()) as u32);
+            buf.put_u32((1 + 4 + msg.len()) as u32);
             buf.put_u8(STATUS_ERR);
+            buf.put_u32(msg.len() as u32);
             buf.put_slice(msg.as_bytes());
         }
         Response::Null => { buf.put_u32(1); buf.put_u8(STATUS_NULL); }
