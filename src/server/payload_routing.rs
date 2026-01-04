@@ -30,8 +30,10 @@ pub const OP_SUB: u8 = 0x22;
 pub const OP_UNSUB: u8 = 0x23;
 
 // Stream: 0x30 - 0x3F
-pub const OP_S_ADD: u8 = 0x31;
-pub const OP_S_READ: u8 = 0x32;
+pub const OP_S_CREATE: u8 = 0x30;
+pub const OP_S_PUB: u8 = 0x31;
+pub const OP_S_FETCH: u8 = 0x32;
+pub const OP_S_JOIN: u8 = 0x33;
 
 // ========================================
 // PARSING HELPERS
@@ -235,25 +237,103 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // STREAM BROKER
         // ==========================================
         
-        // S_ADD: [TopicLen:4][Topic][Data]
-        OP_S_ADD => {
-            let (topic, val_ptr) = match parse_string(&body) {
+        // S_CREATE: [Partitions:4][TopicLen:4][Topic]
+        OP_S_CREATE => {
+            if body.len() < 4 { return Response::Error("Payload too short".to_string()); }
+            let partitions = u32::from_be_bytes(body[0..4].as_ref().try_into().unwrap());
+            let (topic, _) = match parse_string(&body[4..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            let offset = body.len() - val_ptr.len();
-            let id = engine.stream.append(topic.to_string(), body.slice(offset..));
-            Response::Data(Bytes::from(id.to_be_bytes().to_vec()))
+            engine.stream.create_topic(topic.to_string(), partitions);
+            Response::Ok
+        }
+
+        // S_PUB: [KeyLen:4][Key][TopicLen:4][Topic][Data]
+        OP_S_PUB => {
+            // 1. Parse Key
+            let (key_str, rest1) = match parse_string(&body) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            let key = if key_str.is_empty() { None } else { Some(key_str.to_string()) };
+            
+            // 2. Parse Topic
+            let (topic, data_ptr) = match parse_string(rest1) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            
+            // 3. Extract Data (Zero Copy)
+            // body = [KeyLen][Key][TopicLen][Topic][Data]
+            let offset = body.len() - data_ptr.len();
+            
+            match engine.stream.publish(topic, body.slice(offset..), key) {
+                Ok(offset_id) => Response::Data(Bytes::from(offset_id.to_be_bytes().to_vec())),
+                Err(e) => Response::Error(e),
+            }
         }
         
-        // S_READ: [TopicLen:4][Topic][Offset:8]
-        OP_S_READ => {
-            let (topic, offset) = match parse_string_u64(&body) {
+        // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
+        OP_S_FETCH => {
+            let (topic, rest1) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            let msgs = engine.stream.read(topic, offset as usize);
-            msgs.first().map(|m| Response::Data(m.payload.clone())).unwrap_or(Response::Null)
+            if rest1.len() < 16 { return Response::Error("Payload too short for fetch params".to_string()); }
+            
+            let partition = u32::from_be_bytes(rest1[0..4].as_ref().try_into().unwrap());
+            let offset = u64::from_be_bytes(rest1[4..12].as_ref().try_into().unwrap());
+            let limit = u32::from_be_bytes(rest1[12..16].as_ref().try_into().unwrap());
+            
+            let msgs = engine.stream.read(topic, partition, offset, limit as usize);
+            
+            // Serialize messages: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
+            // This is getting complex for zero-copy.
+            // For now, let's just return JSON or a simplified binary list.
+            // Let's use binary.
+            
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
+            
+            for msg in msgs {
+                buf.extend_from_slice(&msg.offset.to_be_bytes());
+                buf.extend_from_slice(&msg.timestamp.to_be_bytes());
+                
+                let k = msg.key.as_deref().unwrap_or("");
+                buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
+                buf.extend_from_slice(k.as_bytes());
+                
+                buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                buf.extend_from_slice(&msg.payload);
+            }
+            
+            Response::Data(Bytes::from(buf))
+        }
+
+        // S_JOIN: [GroupLen:4][Group][TopicLen:4][Topic]
+        OP_S_JOIN => {
+             let (group, rest1) = match parse_string(&body) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            let (topic, _) = match parse_string(rest1) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            
+            match engine.stream.join_group(group, topic, &client_id.0) {
+                Ok(partitions) => {
+                    // Return [Num:4][P1:4][P2:4]...
+                    let mut buf = Vec::new();
+                    buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
+                    for p in partitions {
+                        buf.extend_from_slice(&p.to_be_bytes());
+                    }
+                    Response::Data(Bytes::from(buf))
+                },
+                Err(e) => Response::Error(e),
+            }
         }
 
         _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),

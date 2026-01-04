@@ -40,8 +40,10 @@ export enum Opcode {
   SUB = 0x22,
   UNSUB = 0x23,
   // Stream: 0x30 - 0x3F
-  S_ADD = 0x31,
-  S_READ = 0x32,
+  S_CREATE = 0x30,
+  S_PUB = 0x31,
+  S_FETCH = 0x32,
+  S_JOIN = 0x33,
 }
 
 enum DataType {
@@ -57,6 +59,10 @@ export interface QueueConfig {
   delayMs?: number;
 }
 
+export interface StreamConfig {
+  partitions?: number;
+}
+
 export interface PushOptions {
   priority?: number;
   delayMs?: number;
@@ -64,6 +70,10 @@ export interface PushOptions {
 
 export interface PublishOptions {
   retain?: boolean;
+}
+
+export interface StreamPublishOptions {
+    key?: string;
 }
 
 export interface NexoOptions {
@@ -146,6 +156,11 @@ class ProtocolReader {
     const s = this.buffer.subarray(this.offset, this.offset + len).toString('utf8');
     this.offset += len;
     return s;
+  }
+  readBuffer(len: number): Buffer {
+    const b = this.buffer.subarray(this.offset, this.offset + len);
+    this.offset += len;
+    return b;
   }
   readData(): any { return DataCodec.deserialize(this.buffer.subarray(this.offset)); }
 }
@@ -469,51 +484,27 @@ export class NexoKV<T = any> {
       .writeString(key)
       .send();
   }
-
-  // Future: incr(key: string, delta: number): Promise<number>
 }
 
 /**
  * NEXO HASH: Hash operations (store.hash("key").set/get)
- * Placeholder for future implementation
  */
 export class NexoHash<T = any> {
   constructor(private builder: RequestBuilder, public readonly key: string) { }
-
-  // Future implementation
-  // async set(field: string, value: T): Promise<void>
-  // async get(field: string): Promise<T | null>
-  // async del(field: string): Promise<void>
-  // async getAll(): Promise<Record<string, T>>
-  // async incr(field: string, delta: number): Promise<number>
 }
 
 /**
  * NEXO LIST: List operations (store.list("key").push/pop)
- * Placeholder for future implementation
  */
 export class NexoList<T = any> {
   constructor(private builder: RequestBuilder, public readonly key: string) { }
-
-  // Future implementation
-  // async push(value: T): Promise<number>
-  // async pop(): Promise<T | null>
-  // async shift(): Promise<T | null>
-  // async range(start: number, end: number): Promise<T[]>
 }
 
 /**
  * NEXO SET: Set operations (store.set("key").add/has)
- * Placeholder for future implementation
  */
 export class NexoSet<T = any> {
   constructor(private builder: RequestBuilder, public readonly key: string) { }
-
-  // Future implementation
-  // async add(member: T): Promise<boolean>
-  // async has(member: T): Promise<boolean>
-  // async remove(member: T): Promise<boolean>
-  // async members(): Promise<T[]>
 }
 
 /**
@@ -610,22 +601,17 @@ export class NexoQueue<T = any> {
     const loop = () => {
       if (!active) return;
 
-      // Maintain a pool of pending requests up to 'prefetch' limit
       while (pendingRequests < prefetch && (this.builder as any).conn.isConnected) {
         pendingRequests++;
 
-        // Send request asynchronously
         this.builder.reset(Opcode.Q_CONSUME).writeString(this.name).send()
           .then(async (res) => {
-            pendingRequests--; // Request completed
+            pendingRequests--;
             if (!active) return;
 
             if (res.status === ResponseStatus.Q_DATA) {
-              // Message received!
-              // 1. Immediately schedule a new request to fill the pool (Pipelining)
               loop();
 
-              // 2. Process the message
               const idHex = res.reader.readUUID();
               const data = res.reader.readData() as T;
               try {
@@ -635,26 +621,21 @@ export class NexoQueue<T = any> {
                 logger.error(`Callback error in queue ${this.name}:`, e);
               }
             } else {
-              // Queue empty (NULL) or Error
-              // Backoff slightly to avoid spamming loop when empty
               setTimeout(loop, 1000);
             }
           })
           .catch(() => {
             pendingRequests--;
-            // On network error, wait a bit before retrying
             setTimeout(loop, 1000);
           });
       }
     };
 
-    // Kickstart the loop
     loop();
 
     return {
       stop: () => {
         active = false;
-        // Note: pending requests will complete but their callbacks will early-return due to !active
       }
     };
   }
@@ -668,15 +649,11 @@ export class NexoQueue<T = any> {
 // PUB-SUB BROKER
 // ========================================
 
-/**
- * NEXO PUBSUB: Publish/Subscribe operations
- */
 export class NexoPubSub {
   private handlers = new Map<string, Array<(data: any) => void>>();
 
   constructor(private builder: RequestBuilder, conn: NexoConnection) {
     conn.onPush = (payload) => {
-      // Parse PUSH payload: [TopicLen:4][Topic][Data]
       const reader = new ProtocolReader(payload);
       const topic = reader.readString();
       const data = reader.readData();
@@ -697,16 +674,11 @@ export class NexoPubSub {
   }
 
   async subscribe<T = any>(topic: string, callback: (data: T) => void): Promise<void> {
-    // Register local handler immediately to catch retained messages that arrive before SUB-ACK
     if (!this.handlers.has(topic)) {
       this.handlers.set(topic, []);
     }
     this.handlers.get(topic)!.push(callback);
 
-    // Send SUB command to server if this is the first handler (or we want to ensure subscription)
-    // Note: In a real robust client, we might track 'isSubscribed' state separate from handlers.
-    // Here we send SUB only if we just created the handler array (length was 0 before push? No, we just checked has).
-    // Actually, simple check: if length is 1, it's the first one.
     if (this.handlers.get(topic)!.length === 1) {
       await this.builder.reset(Opcode.SUB).writeString(topic).send();
     }
@@ -720,7 +692,6 @@ export class NexoPubSub {
   }
 
   private dispatch(topic: string, data: any) {
-    // 1. Exact match
     const handlers = this.handlers.get(topic);
     if (handlers) {
       handlers.forEach(cb => {
@@ -728,9 +699,8 @@ export class NexoPubSub {
       });
     }
 
-    // 2. Wildcard matching
     for (const [pattern, cbs] of this.handlers.entries()) {
-      if (pattern === topic) continue; // Already handled
+      if (pattern === topic) continue;
       if (this.matches(pattern, topic)) {
         cbs.forEach(cb => {
           try { cb(data); } catch (e) { console.error("Topic handler error", e); }
@@ -753,36 +723,157 @@ export class NexoPubSub {
   }
 }
 
+// ========================================
+// STREAM BROKER
+// ========================================
+
+export class NexoStream<T = any> {
+  private partitions: number[] = [];
+  // Per-partition offset tracking is complex to do purely client-side without rebalance info.
+  // For V1, we simply poll all assigned partitions. 
+  // We need to track the next offset to fetch for each partition?
+  // No, the Server tracks committed offsets for the group.
+  // But wait, the S_FETCH command we designed (low level) takes Offset.
+  // So Client MUST track offsets. 
+  
+  // Correction: V1 design we implemented assumes the client asks for specific offsets.
+  // "Client loops OP_S_FETCH(Topic, Partition, Offset)".
+  
+  // So we need to maintain local state of "next_offset" for each partition we are assigned.
+  // And we need to initialize this state by fetching "committed_offset" from server?
+  // We didn't implement OP_S_GET_COMMITTED_OFFSET. 
+  
+  // Workaround for V1: Start from 0. (Replay all). 
+  // Or: S_JOIN could return the stored committed offsets? 
+  // Currently S_JOIN only returns partition IDs.
+  
+  // Let's implement local offset tracking starting from 0. 
+  // This means if I restart consumer, I replay everything. (Kafka behavior if auto.offset.reset=earliest).
+  // This is acceptable for V1.
+  
+  private nextOffsets = new Map<number, bigint>();
+
+  constructor(
+    private builder: RequestBuilder,
+    public readonly name: string,
+    public readonly consumerGroup?: string
+  ) { }
+
+  async create(config: StreamConfig): Promise<this> {
+    await this.builder.reset(Opcode.S_CREATE)
+      .writeU32(config.partitions ?? 8)
+      .writeString(this.name)
+      .send();
+    return this;
+  }
+
+  async publish(data: T, options?: StreamPublishOptions): Promise<void> {
+    // S_PUB: [KeyLen:4][Key][TopicLen:4][Topic][Data]
+    await this.builder.reset(Opcode.S_PUB)
+      .writeString(options?.key ?? "")
+      .writeString(this.name)
+      .writeData(data)
+      .send();
+  }
+
+  async subscribe(callback: (data: T) => Promise<void> | void): Promise<void> {
+    if (!this.consumerGroup) {
+      throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
+    }
+
+    // 1. Join Group
+    const res = await this.builder.reset(Opcode.S_JOIN)
+        .writeString(this.consumerGroup)
+        .writeString(this.name)
+        .send();
+
+    // Parse Assigned Partitions
+    const numPartitions = res.reader.readU32();
+    this.partitions = [];
+    for(let i=0; i<numPartitions; i++) {
+        const pId = res.reader.readU32();
+        this.partitions.push(pId);
+        // Initialize offset to 0 (should fetch committed from server in V2)
+        if (!this.nextOffsets.has(pId)) {
+            this.nextOffsets.set(pId, BigInt(0));
+        }
+    }
+
+    // 2. Start Polling Loop for each partition
+    // We launch one loop per partition to maximize parallelism (simulating multi-thread)
+    this.partitions.forEach(pId => this.pollPartition(pId, callback));
+  }
+
+  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void) {
+      // Loop forever
+      while ((this.builder as any).conn.isConnected) {
+          const offset = this.nextOffsets.get(pId)!;
+          
+          try {
+              // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
+              const res = await this.builder.reset(Opcode.S_FETCH)
+                  .writeString(this.name)
+                  .writeU32(pId)
+                  .writeU64(offset)
+                  .writeU32(10) // Batch size 10
+                  .send();
+
+              // Parse Messages
+              // Response: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
+              const numMsgs = res.reader.readU32();
+              
+              if (numMsgs === 0) {
+                  // Wait a bit if empty (should be replaced by Long Polling/Notify in V2)
+                  await new Promise(r => setTimeout(r, 100));
+                  continue;
+              }
+
+              for(let i=0; i<numMsgs; i++) {
+                  const msgOffset = res.reader.readU64();
+                  const ts = res.reader.readU64();
+                  const keyLen = res.reader.readU32();
+                  let key = "";
+                  if (keyLen > 0) {
+                      const keyBuf = res.reader.readBuffer(keyLen);
+                      key = keyBuf.toString('utf8');
+                  }
+                  
+                  const payloadLen = res.reader.readU32();
+                  const payloadBuf = res.reader.readBuffer(payloadLen);
+                  const data = DataCodec.deserialize(payloadBuf);
+                  
+                  try {
+                      await callback(data);
+                  } catch(e) {
+                      logger.error("Error in stream callback", e);
+                  }
+                  
+                  // Update Next Offset
+                  this.nextOffsets.set(pId, msgOffset + BigInt(1));
+              }
+              
+              // Actually I need to re-write the file anyway so I will add readBuffer.
+              
+              // Update local offset
+              // The last message offset + 1
+              // Or better: use the returned offsets.
+          } catch (e) {
+              console.error("Stream poll error", e);
+              await new Promise(r => setTimeout(r, 1000));
+          }
+      }
+  }
+}
 
 // ========================================
 // NEXO CLIENT - Main Entry Point
 // ========================================
 
-/**
- * NEXO CLIENT: The public-facing SDK entrypoint.
- * 
- * @example
- * ```typescript
- * const nexo = await NexoClient.connect();
- * 
- * // Store operations
- * await nexo.store.kv.set("key", "value");
- * const value = await nexo.store.kv.get("key");
- * 
- * // Queue operations
- * const orders = nexo.queue("orders");
- * await orders.push({ item: "book" });
- * orders.subscribe(order => console.log(order));
- * 
- * // Topic operations
- * nexo.topic.subscribe("chat/room/1", msg => console.log(msg));
- * nexo.topic.publish("chat/room/1", "Hello World", { retain: true });
- * ```
- */
 export class NexoClient {
   private conn: NexoConnection;
   private builder: RequestBuilder;
   private queues = new Map<string, NexoQueue<any>>();
+  private streams = new Map<string, NexoStream<any>>();
 
   /** Store broker - access data structures (kv, hash, list, set) */
   public readonly store: NexoStore;
@@ -819,6 +910,17 @@ export class NexoClient {
       this.queues.set(name, q);
     }
     return q as NexoQueue<T>;
+  }
+
+  /** Stream broker - get or create a stream handle */
+  public stream<T = any>(name: string, consumerGroup?: string): NexoStream<T> {
+      const key = consumerGroup ? `${name}:${consumerGroup}` : name;
+      let s = this.streams.get(key);
+      if (!s) {
+          s = new NexoStream<T>(this.builder, name, consumerGroup);
+          this.streams.set(key, s);
+      }
+      return s as NexoStream<T>;
   }
 
   /** @internal Debug utilities */
