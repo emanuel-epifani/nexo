@@ -118,7 +118,7 @@ describe('Stream Broker', () => {
             await nexo.stream(topicName).create({ partitions: 4 });
 
             const pub = nexo.stream(topicName);
-
+            
             // Client 2 connection
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST!,
@@ -146,7 +146,7 @@ describe('Stream Broker', () => {
 
             // Logic: Total received must be 20. Neither should be 0 (statistically unlikely with 4 partitions and 20 random keys)
             console.log(`Load Balanced: Client1=${received1.length}, Client2=${received2.length}`);
-
+            
             expect(received1.length + received2.length).toBe(20);
             expect(received1.length).toBeGreaterThan(0);
             expect(received2.length).toBeGreaterThan(0);
@@ -159,7 +159,7 @@ describe('Stream Broker', () => {
             await nexo.stream(topicName).create({ partitions: 2 }); // 2 partitions, easier to test
 
             const pub = nexo.stream(topicName);
-
+            
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST!,
                 port: parseInt(process.env.NEXO_PORT!)
@@ -178,7 +178,7 @@ describe('Stream Broker', () => {
 
             // Kill Client 2
             client2.disconnect();
-
+            
             // Wait for server to detect disconnect and rebalance
             await new Promise(r => setTimeout(r, 500));
 
@@ -186,14 +186,91 @@ describe('Stream Broker', () => {
             for (let i = 0; i < 10; i++) {
                 await pub.publish({ i });
             }
-
+            
             await new Promise(r => setTimeout(r, 1000));
 
             // Client 1 should have received ALL messages because Client 2 is dead
-            // Note: Client 2 might have received 0 because it disconnected before publish
             expect(received1.length).toBe(10);
             expect(received2.length).toBe(0);
         });
+
+        it('Smart Resume: Client should restart from last committed batch', async () => {
+            console.log("Starting Smart Resume Test...");
+            const topicName = 'resume-test';
+            await nexo.stream(topicName).create({ partitions: 1 }); 
+
+            const pub = nexo.stream(topicName);
+            const groupName = 'resume-group';
+
+            console.log("Publishing 50 messages...");
+            for (let i = 0; i < 50; i++) {
+                await pub.publish({ val: i });
+            }
+
+            console.log("Starting Client 1...");
+            const client1 = await NexoClient.connect({
+                host: process.env.NEXO_HOST!,
+                port: parseInt(process.env.NEXO_PORT!)
+            });
+            const sub1 = client1.stream(topicName, groupName);
+            
+            let count1 = 0;
+            
+            await new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error("Client 1 Timeout")), 5000);
+                
+                sub1.subscribe(async (msg) => {
+                    count1++;
+                    if (count1 === 20) {
+                        console.log("Client 1 reached 20 messages. Stopping...");
+                        clearTimeout(timeout);
+                        // Give PLENTY of time for auto-commit to happen and be ACKed by server
+                        // The loop in SDK needs to finish processing, then send COMMIT, then receive OK.
+                        setTimeout(resolve, 2000);
+                    }
+                }, { batchSize: 20 });
+            });
+
+            console.log("Disconnecting Client 1...");
+            client1.disconnect(); 
+            
+            // CRITICAL: Wait for Server to detect disconnect, remove member, and be ready for C2.
+            // If C2 joins while C1 is still considered "active" (race condition), C2 might get 0 partitions 
+            // because C1 still holds the only partition.
+            await new Promise(r => setTimeout(r, 1000));
+
+            console.log("Starting Client 2...");
+            const client2 = await NexoClient.connect({
+                host: process.env.NEXO_HOST!,
+                port: parseInt(process.env.NEXO_PORT!)
+            });
+            const sub2 = client2.stream(topicName, groupName);
+            
+            const received2: any[] = [];
+            
+            // Wait for Client 2 to consume remaining 30 messages
+            await new Promise<void>((resolve, reject) => {
+                 const timeout = setTimeout(() => reject(new Error("Client 2 Timeout")), 5000);
+                 
+                 sub2.subscribe((msg) => {
+                    received2.push(msg);
+                    if (received2.length === 30) {
+                        console.log("Client 2 reached 30 messages. Success.");
+                        clearTimeout(timeout);
+                        resolve();
+                    }
+                }, { batchSize: 100 });
+            });
+
+            console.log(`Smart Resume Result: Client1=${count1}, Client2=${received2.length}`);
+            
+            expect(count1).toBe(20); // Should verify we stopped exactly at 20 (might be slightly more if race condition, but let's see)
+            expect(received2.length).toBe(30);
+            expect(received2[0].val).toBe(20); 
+            expect(received2[29].val).toBe(49); 
+
+            client2.disconnect();
+        }, 15000); // Increased test timeout
     });
 
 });
