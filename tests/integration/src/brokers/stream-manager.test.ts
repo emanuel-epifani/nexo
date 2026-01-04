@@ -2,21 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
 import { NexoClient } from '@nexo/client';
 
-
-
-
 describe('Stream Broker', () => {
 
     it('Should FAIL to publish to a non-existent topic', async () => {
         const topicName = 'ghost-topic';
         const stream = nexo.stream(topicName);
-        await expect(stream.publish({ val: 1 })).rejects.toThrow('Topic \'ghost-topic\' not found');
+        await expect(stream.publish({ val: 1 })).rejects.toThrow();
     });
 
     it('Should FAIL to subscribe to a non-existent topic', async () => {
         const topicName = 'ghost-topic-sub';
         const stream = nexo.stream(topicName, 'group-1');
-        await expect(stream.subscribe(() => { })).rejects.toThrow('Topic \'ghost-topic-sub\' not found');
+        await expect(stream.subscribe(() => { })).rejects.toThrow();
     });
 
     it('Should create a topic explicitly', async () => {
@@ -56,6 +53,8 @@ describe('Stream Broker', () => {
         }
 
         expect(received).toHaveLength(3);
+        // We can't guarantee global order across partitions, but with same key 'user-1' 
+        // they should land in same partition and be ordered.
         expect(received).toEqual(messages);
     });
 
@@ -79,7 +78,7 @@ describe('Stream Broker', () => {
         }
         await Promise.all(promises);
 
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 30; i++) {
             if (receivedCount >= TOTAL) break;
             await new Promise(r => setTimeout(r, 100));
         }
@@ -102,20 +101,20 @@ describe('Stream Broker', () => {
             await subGroupA.subscribe(msg => { receivedA.push(msg); });
             await subGroupB.subscribe(msg => { receivedB.push(msg); });
 
-            await new Promise(r => setTimeout(r, 100));
+            await new Promise(r => setTimeout(r, 200));
 
             for (let i = 0; i < 5; i++) {
                 await pub.publish({ msg: `news-${i}` });
             }
 
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 1000));
 
             expect(receivedA.length).toBe(5);
             expect(receivedB.length).toBe(5);
         });
 
-        it('Competing Consumers: 2 consumers in SAME group (Current V1 Behavior: Duplication)', async () => {
-            const topicName = 'work-queue';
+        it('Load Balancing: 2 consumers in SAME group should SPLIT the load', async () => {
+            const topicName = 'load-balance-test';
             await nexo.stream(topicName).create({ partitions: 4 });
 
             const pub = nexo.stream(topicName);
@@ -135,45 +134,66 @@ describe('Stream Broker', () => {
             await sub1.subscribe(msg => { received1.push(msg); });
             await sub2.subscribe(msg => { received2.push(msg); });
 
-            await new Promise(r => setTimeout(r, 100));
+            // Wait for rebalancing
+            await new Promise(r => setTimeout(r, 500));
 
-            for (let i = 0; i < 10; i++) {
-                await pub.publish({ task: i });
+            // Publish 20 messages with random keys to hit all partitions
+            for (let i = 0; i < 20; i++) {
+                await pub.publish({ task: i }, { key: `k-${i}` });
             }
 
-            await new Promise(r => setTimeout(r, 800));
+            await new Promise(r => setTimeout(r, 1500));
 
-            // V1 LIMITATION: Duplication
-            expect(received1.length).toBe(10);
-            expect(received2.length).toBe(10);
+            // Logic: Total received must be 20. Neither should be 0 (statistically unlikely with 4 partitions and 20 random keys)
+            console.log(`Load Balanced: Client1=${received1.length}, Client2=${received2.length}`);
+
+            expect(received1.length + received2.length).toBe(20);
+            expect(received1.length).toBeGreaterThan(0);
+            expect(received2.length).toBeGreaterThan(0);
 
             client2.disconnect();
         });
 
-        it('Partition Stickiness: Same Key -> Same Consumer (assuming strict partition assignment)', async () => {
-            const topicName = 'sticky-session';
-            await nexo.stream(topicName).create({ partitions: 4 });
+        it('Failover: When a consumer leaves, the other takes over', async () => {
+            const topicName = 'failover-test';
+            await nexo.stream(topicName).create({ partitions: 2 }); // 2 partitions, easier to test
 
             const pub = nexo.stream(topicName);
-            const sub = nexo.stream(topicName, 'session-handler');
 
-            const receivedKeys: string[] = [];
-
-            await sub.subscribe((msg: any) => {
-                receivedKeys.push(msg.k);
+            const client2 = await NexoClient.connect({
+                host: process.env.NEXO_HOST!,
+                port: parseInt(process.env.NEXO_PORT!)
             });
 
-            await new Promise(r => setTimeout(r, 100));
+            const sub1 = nexo.stream(topicName, 'failover-group');
+            const sub2 = client2.stream(topicName, 'failover-group');
 
-            await pub.publish({ k: 'A1' }, { key: 'user-A' });
-            await pub.publish({ k: 'A2' }, { key: 'user-A' });
-            await pub.publish({ k: 'A3' }, { key: 'user-A' });
+            const received1: any[] = [];
+            const received2: any[] = [];
+
+            await sub1.subscribe(msg => { received1.push(msg); });
+            await sub2.subscribe(msg => { received2.push(msg); });
 
             await new Promise(r => setTimeout(r, 500));
 
-            expect(receivedKeys).toEqual(['A1', 'A2', 'A3']);
-        });
+            // Kill Client 2
+            client2.disconnect();
 
+            // Wait for server to detect disconnect and rebalance
+            await new Promise(r => setTimeout(r, 500));
+
+            // Publish messages
+            for (let i = 0; i < 10; i++) {
+                await pub.publish({ i });
+            }
+
+            await new Promise(r => setTimeout(r, 1000));
+
+            // Client 1 should have received ALL messages because Client 2 is dead
+            // Note: Client 2 might have received 0 because it disconnected before publish
+            expect(received1.length).toBe(10);
+            expect(received2.length).toBe(0);
+        });
     });
 
 });

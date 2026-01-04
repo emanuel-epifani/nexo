@@ -43,7 +43,35 @@ impl StreamManager {
     }
     
     /// Reads messages from a specific partition
-    pub fn read(&self, topic_name: &str, partition_id: u32, offset: u64, limit: usize) -> Vec<Message> {
+    /// Authenticates that the client (if provided) actually owns this partition
+    pub fn read(&self, topic_name: &str, partition_id: u32, offset: u64, limit: usize, client_id_opt: Option<&str>) -> Vec<Message> {
+        // OWNERSHIP CHECK
+        // If client_id is provided, we must check if it belongs to any group on this topic
+        // and if so, whether it is assigned this partition.
+        // NOTE: This check is complex because a client might read without a group (Direct Access).
+        // Current Protocol V1: S_FETCH doesn't send GroupID. 
+        // So we rely on: "Is this client in ANY group for this topic?"
+        
+        if let Some(client_id) = client_id_opt {
+             if let Some(groups) = self.client_groups.get(client_id) {
+                 for group_id in groups.iter() {
+                     if let Some(group) = self.groups.get(group_id) {
+                         if group.topic == topic_name {
+                             // The client is in a group for this topic. 
+                             // It MUST own the partition to read it.
+                             if let Some(member) = group.members.get(client_id) {
+                                 if !member.assigned_partitions.contains(&partition_id) {
+                                     // Client is in group but NOT assigned this partition (Rebalanced away?)
+                                     // Return empty to stop processing.
+                                     return Vec::new();
+                                 }
+                             }
+                         }
+                     }
+                 }
+             }
+        }
+
         if let Some(topic) = self.topics.get(topic_name) {
             if let Some(msgs) = topic.read(partition_id, offset, limit) {
                 return msgs;
@@ -108,7 +136,25 @@ impl StreamManager {
         }
     }
     
-    /// Global disconnect for a client (called on socket close)
+    /// Commits an offset for a specific partition in a consumer group
+    pub fn commit_offset(&self, group_id: &str, topic_name: &str, partition_id: u32, offset: u64) -> Result<(), String> {
+        // Ensure topic exists (optional validation)
+        if !self.topics.contains_key(topic_name) {
+            return Err(format!("Topic '{}' not found", topic_name));
+        }
+
+        if let Some(group) = self.groups.get(group_id) {
+            // Validation: Is the group actually for this topic?
+            if group.topic != topic_name {
+                 return Err(format!("Group '{}' is for topic '{}', not '{}'", group_id, group.topic, topic_name));
+            }
+            
+            group.commit(partition_id, offset);
+            Ok(())
+        } else {
+             Err(format!("Group '{}' not found. Join it first.", group_id))
+        }
+    }
     pub fn disconnect(&self, client_id: &str) {
         if let Some((_, groups)) = self.client_groups.remove(client_id) {
             for group_id in groups {

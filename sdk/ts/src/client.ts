@@ -44,6 +44,7 @@ export enum Opcode {
   S_PUB = 0x31,
   S_FETCH = 0x32,
   S_JOIN = 0x33,
+  S_COMMIT = 0x34,
 }
 
 enum DataType {
@@ -63,6 +64,10 @@ export interface StreamConfig {
   partitions?: number;
 }
 
+export interface StreamSubscribeOptions {
+  batchSize?: number; // Default 100
+}
+
 export interface PushOptions {
   priority?: number;
   delayMs?: number;
@@ -73,7 +78,7 @@ export interface PublishOptions {
 }
 
 export interface StreamPublishOptions {
-    key?: string;
+  key?: string;
 }
 
 export interface NexoOptions {
@@ -713,22 +718,22 @@ export class NexoStream<T = any> {
   // No, the Server tracks committed offsets for the group.
   // But wait, the S_FETCH command we designed (low level) takes Offset.
   // So Client MUST track offsets. 
-  
+
   // Correction: V1 design we implemented assumes the client asks for specific offsets.
   // "Client loops OP_S_FETCH(Topic, Partition, Offset)".
-  
+
   // So we need to maintain local state of "next_offset" for each partition we are assigned.
   // And we need to initialize this state by fetching "committed_offset" from server?
   // We didn't implement OP_S_GET_COMMITTED_OFFSET. 
-  
+
   // Workaround for V1: Start from 0. (Replay all). 
   // Or: S_JOIN could return the stored committed offsets? 
   // Currently S_JOIN only returns partition IDs.
-  
+
   // Let's implement local offset tracking starting from 0. 
   // This means if I restart consumer, I replay everything. (Kafka behavior if auto.offset.reset=earliest).
   // This is acceptable for V1.
-  
+
   private nextOffsets = new Map<number, bigint>();
 
   constructor(
@@ -754,92 +759,113 @@ export class NexoStream<T = any> {
       .send();
   }
 
-  async subscribe(callback: (data: T) => Promise<void> | void): Promise<void> {
+  async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<void> {
     if (!this.consumerGroup) {
       throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
     }
 
     // 1. Join Group
     const res = await this.builder.reset(Opcode.S_JOIN)
-        .writeString(this.consumerGroup)
-        .writeString(this.name)
-        .send();
+      .writeString(this.consumerGroup)
+      .writeString(this.name)
+      .send();
 
-    // Parse Assigned Partitions
+    // Parse Assigned Partitions and Start Offsets
+    // Server returns: [Num:4] + ([PartitionID:4][StartOffset:8] ...)
     const numPartitions = res.reader.readU32();
     this.partitions = [];
-    for(let i=0; i<numPartitions; i++) {
-        const pId = res.reader.readU32();
-        this.partitions.push(pId);
-        // Initialize offset to 0 (should fetch committed from server in V2)
-        if (!this.nextOffsets.has(pId)) {
-            this.nextOffsets.set(pId, BigInt(0));
-        }
+
+    // We overwrite nextOffsets because the server is the source of truth 
+    // for where we should start reading after a rebalance.
+    for (let i = 0; i < numPartitions; i++) {
+      const pId = res.reader.readU32();
+      const startOffset = res.reader.readU64();
+
+      this.partitions.push(pId);
+      this.nextOffsets.set(pId, startOffset);
     }
 
     // 2. Start Polling Loop for each partition
     // We launch one loop per partition to maximize parallelism (simulating multi-thread)
-    this.partitions.forEach(pId => this.pollPartition(pId, callback));
+    const batchSize = options.batchSize || 100;
+    this.partitions.forEach(pId => this.pollPartition(pId, callback, batchSize));
   }
 
-  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void) {
-      // Loop forever
-      while ((this.builder as any).conn.isConnected) {
-          const offset = this.nextOffsets.get(pId)!;
-          
-          try {
-              // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
-              const res = await this.builder.reset(Opcode.S_FETCH)
-                  .writeString(this.name)
-                  .writeU32(pId)
-                  .writeU64(offset)
-                  .writeU32(10) // Batch size 10
-                  .send();
+  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void, batchSize: number) {
+    // Loop forever
+    while ((this.builder as any).conn.isConnected) {
+      const offset = this.nextOffsets.get(pId)!;
 
-              // Parse Messages
-              // Response: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
-              const numMsgs = res.reader.readU32();
-              
-              if (numMsgs === 0) {
-                  // Wait a bit if empty (should be replaced by Long Polling/Notify in V2)
-                  await new Promise(r => setTimeout(r, 100));
-                  continue;
-              }
+      try {
+        // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
+        const res = await this.builder.reset(Opcode.S_FETCH)
+          .writeString(this.name)
+          .writeU32(pId)
+          .writeU64(offset)
+          .writeU32(batchSize)
+          .send();
 
-              for(let i=0; i<numMsgs; i++) {
-                  const msgOffset = res.reader.readU64();
-                  const ts = res.reader.readU64();
-                  const keyLen = res.reader.readU32();
-                  let key = "";
-                  if (keyLen > 0) {
-                      const keyBuf = res.reader.readBuffer(keyLen);
-                      key = keyBuf.toString('utf8');
-                  }
-                  
-                  const payloadLen = res.reader.readU32();
-                  const payloadBuf = res.reader.readBuffer(payloadLen);
-                  const data = DataCodec.deserialize(payloadBuf);
-                  
-                  try {
-                      await callback(data);
-                  } catch(e) {
-                      logger.error("Error in stream callback", e);
-                  }
-                  
-                  // Update Next Offset
-                  this.nextOffsets.set(pId, msgOffset + BigInt(1));
-              }
-              
-              // Actually I need to re-write the file anyway so I will add readBuffer.
-              
-              // Update local offset
-              // The last message offset + 1
-              // Or better: use the returned offsets.
-          } catch (e) {
-              console.error("Stream poll error", e);
-              await new Promise(r => setTimeout(r, 1000));
+        // Parse Messages
+        // Response: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
+        const numMsgs = res.reader.readU32();
+
+        if (numMsgs === 0) {
+          // Wait a bit if empty (should be replaced by Long Polling/Notify in V2)
+          await new Promise(r => setTimeout(r, 100));
+          continue;
+        }
+
+        let lastMsgOffset = offset;
+        let processedCount = 0;
+
+        for (let i = 0; i < numMsgs; i++) {
+          const msgOffset = res.reader.readU64();
+          lastMsgOffset = msgOffset; // Keep track for commit
+
+          const ts = res.reader.readU64();
+          const keyLen = res.reader.readU32();
+          let key = "";
+          if (keyLen > 0) {
+            const keyBuf = res.reader.readBuffer(keyLen);
+            key = keyBuf.toString('utf8');
           }
+
+          const payloadLen = res.reader.readU32();
+          const payloadBuf = res.reader.readBuffer(payloadLen);
+          const data = DataCodec.deserialize(payloadBuf);
+
+          try {
+            await callback(data);
+            processedCount++;
+          } catch (e) {
+            logger.error("Error in stream callback, skipping message", e);
+            // In a robust system we might want to NACK or Stop here.
+            // For now we log and continue (At-most-once for failing msgs)
+          }
+        }
+
+        // AUTO-COMMIT if we processed anything
+        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8]
+        // We commit the offset of the LAST message + 1 (next to read)
+        if (processedCount > 0 && this.consumerGroup) {
+          // Update local next offset
+          const nextOffset = lastMsgOffset + BigInt(1);
+          this.nextOffsets.set(pId, nextOffset);
+
+          // Send Commit to Server
+          await this.builder.reset(Opcode.S_COMMIT)
+            .writeString(this.consumerGroup)
+            .writeString(this.name)
+            .writeU32(pId)
+            .writeU64(nextOffset)
+            .send();
+        }
+
+      } catch (e) {
+        console.error("Stream poll error", e);
+        await new Promise(r => setTimeout(r, 1000));
       }
+    }
   }
 }
 
@@ -892,13 +918,13 @@ export class NexoClient {
 
   /** Stream broker - get or create a stream handle */
   public stream<T = any>(name: string, consumerGroup?: string): NexoStream<T> {
-      const key = consumerGroup ? `${name}:${consumerGroup}` : name;
-      let s = this.streams.get(key);
-      if (!s) {
-          s = new NexoStream<T>(this.builder, name, consumerGroup);
-          this.streams.set(key, s);
-      }
-      return s as NexoStream<T>;
+    const key = consumerGroup ? `${name}:${consumerGroup}` : name;
+    let s = this.streams.get(key);
+    if (!s) {
+      s = new NexoStream<T>(this.builder, name, consumerGroup);
+      this.streams.set(key, s);
+    }
+    return s as NexoStream<T>;
   }
 
   /** @internal Debug utilities */

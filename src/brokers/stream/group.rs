@@ -76,6 +76,6 @@ impl ConsumerGroup {
     pub fn get_committed_offset(&self, partition_id: u32) -> u64 {
         // Default to 0 if no commit found (Start from beginning)
         // Future: Configurable 'auto.offset.reset' (earliest/latest)
-        *self.committed_offsets.get(&partition_id).map(|v| v.value()).unwrap_or(&0)
+        self.committed_offsets.get(&partition_id).map(|v| *v.value()).unwrap_or(0)
     }
 }

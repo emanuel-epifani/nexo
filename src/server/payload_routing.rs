@@ -34,6 +34,7 @@ pub const OP_S_CREATE: u8 = 0x30;
 pub const OP_S_PUB: u8 = 0x31;
 pub const OP_S_FETCH: u8 = 0x32;
 pub const OP_S_JOIN: u8 = 0x33;
+pub const OP_S_COMMIT: u8 = 0x34;
 
 // ========================================
 // PARSING HELPERS
@@ -291,7 +292,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             let offset = u64::from_be_bytes(rest1[4..12].as_ref().try_into().unwrap());
             let limit = u32::from_be_bytes(rest1[12..16].as_ref().try_into().unwrap());
             
-            let msgs = engine.stream.read(topic, partition, offset, limit as usize);
+            let msgs = engine.stream.read(topic, partition, offset, limit as usize, Some(&client_id.0));
             
             // Serialize messages: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
             // This is getting complex for zero-copy.
@@ -338,6 +339,27 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                     }
                     Response::Data(Bytes::from(buf))
                 },
+                Err(e) => Response::Error(e),
+            }
+        }
+
+        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8]
+        OP_S_COMMIT => {
+            let (group, rest1) = match parse_string(&body) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            let (topic, rest2) = match parse_string(rest1) {
+                Ok(res) => res,
+                Err(e) => return Response::Error(e),
+            };
+            if rest2.len() < 12 { return Response::Error("Payload too short for commit".to_string()); }
+            
+            let partition = u32::from_be_bytes(rest2[0..4].as_ref().try_into().unwrap());
+            let offset = u64::from_be_bytes(rest2[4..12].as_ref().try_into().unwrap());
+            
+            match engine.stream.commit_offset(group, topic, partition, offset) {
+                Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }
         }
