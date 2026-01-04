@@ -150,6 +150,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
     // Cleanup
     engine.pubsub.disconnect(&client_id);
+    engine.stream.disconnect(&client_id.0);
     drop(tx);
     let _ = write_task.await;
     Ok(())

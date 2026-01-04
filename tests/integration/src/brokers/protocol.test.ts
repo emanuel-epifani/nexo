@@ -236,7 +236,7 @@ describe('Nexo Protocol & Socket', () => {
 
     it('Queue Integrity - Rapid messages preserve payload', async () => {
         const TOTAL = 500;
-        const q = nexo.queue("proto-integrity");
+        const q = await nexo.queue("proto-integrity").create();
         const received: any[] = [];
 
         await Promise.all(
@@ -260,7 +260,7 @@ describe('Nexo Protocol & Socket', () => {
             expect(msg).toHaveProperty('check');
             expect(msg.check).toBe(`val-${msg.idx}`);
         }
-    }, 60000);
+    });
 
     // --- MULTI-CLIENT ISOLATION ---
 

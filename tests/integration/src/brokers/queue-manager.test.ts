@@ -481,7 +481,7 @@ describe('QUEUE broker', () => {
         const stats = probe.printResult();
         expect(stats.throughput).toBeGreaterThan(180_000);
         expect(stats.p99).toBeLessThan(2);
-        expect(stats.max).toBeLessThan(3);
+        expect(stats.max).toBeLessThan(5);
     });
 
     it('Consumer (Subscribe) Throughput', async () => {

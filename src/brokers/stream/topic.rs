@@ -42,6 +42,10 @@ impl Topic {
             partitions.push(RwLock::new(Partition::new(i)));
         }
 
+        // TODO: Start Background Retention Thread here
+        // Spawn a tokio task that periodically checks partitions
+        // and removes messages older than config.retention_ms
+
         Self {
             name,
             partitions,

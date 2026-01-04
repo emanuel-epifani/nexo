@@ -328,12 +328,13 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             };
             
             match engine.stream.join_group(group, topic, &client_id.0) {
-                Ok(partitions) => {
-                    // Return [Num:4][P1:4][P2:4]...
+                Ok(assigned) => {
+                    // Return [Num:4][P1:4][Off1:8][P2:4][Off2:8]...
                     let mut buf = Vec::new();
-                    buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
-                    for p in partitions {
-                        buf.extend_from_slice(&p.to_be_bytes());
+                    buf.extend_from_slice(&(assigned.len() as u32).to_be_bytes());
+                    for (p_id, start_offset) in assigned {
+                        buf.extend_from_slice(&p_id.to_be_bytes());
+                        buf.extend_from_slice(&start_offset.to_be_bytes());
                     }
                     Response::Data(Bytes::from(buf))
                 },

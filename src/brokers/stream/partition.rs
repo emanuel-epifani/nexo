@@ -38,6 +38,10 @@ impl Partition {
             key,
         };
 
+        // TODO: Persistence Layer (AOL - Append Only Log)
+        // Before pushing to memory, we should write to disk (or buffer it).
+        // if let Err(e) = self.wal_writer.append(&msg) { return error; }
+
         self.messages.push_back(msg);
         self.next_offset += 1;
         
