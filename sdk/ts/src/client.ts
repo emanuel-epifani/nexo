@@ -863,7 +863,7 @@ export class NexoStream<T = any> {
           this.nextOffsets.set(pId, nextOffset);
 
           // Send Commit to Server
-          console.log(`[SDK] Auto-Committing Partition: ${pId}, Offset: ${nextOffset}`);
+          // console.log(`[SDK] Auto-Committing Partition: ${pId}, Offset: ${nextOffset}`);
           await this.builder.reset(Opcode.S_COMMIT)
             .writeString(this.consumerGroup)
             .writeString(this.name)
