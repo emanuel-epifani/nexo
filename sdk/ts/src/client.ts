@@ -319,13 +319,9 @@ class NexoConnection {
     this.flushScheduled = false;
     if (this.writeQueue.length === 0) return;
 
-    // Use cork/uncork for scatter-gather I/O (writev) - zero-copy batching
-    const buffers = this.writeQueue;
-    this.writeQueue = [];
-
-    this.socket.cork();
-    for (const buf of buffers) this.socket.write(buf);
-    this.socket.uncork();
+    const combined = Buffer.concat(this.writeQueue);
+    this.writeQueue.length = 0;
+    this.socket.write(combined);
   };
 
   dispatch(
@@ -670,24 +666,24 @@ class NexoPubSub {
 export class NexoStream<T = any> {
   private partitions: number[] = [];
   // Per-partition offset tracking is complex to do purely client-side without rebalance info.
-  // For V1, we simply poll all assigned partitions. 
+  // For V1, we simply poll all assigned partitions.
   // We need to track the next offset to fetch for each partition?
   // No, the Server tracks committed offsets for the group.
   // But wait, the S_FETCH command we designed (low level) takes Offset.
-  // So Client MUST track offsets. 
+  // So Client MUST track offsets.
 
   // Correction: V1 design we implemented assumes the client asks for specific offsets.
   // "Client loops OP_S_FETCH(Topic, Partition, Offset)".
 
   // So we need to maintain local state of "next_offset" for each partition we are assigned.
   // And we need to initialize this state by fetching "committed_offset" from server?
-  // We didn't implement OP_S_GET_COMMITTED_OFFSET. 
+  // We didn't implement OP_S_GET_COMMITTED_OFFSET.
 
-  // Workaround for V1: Start from 0. (Replay all). 
-  // Or: S_JOIN could return the stored committed offsets? 
+  // Workaround for V1: Start from 0. (Replay all).
+  // Or: S_JOIN could return the stored committed offsets?
   // Currently S_JOIN only returns partition IDs.
 
-  // Let's implement local offset tracking starting from 0. 
+  // Let's implement local offset tracking starting from 0.
   // This means if I restart consumer, I replay everything. (Kafka behavior if auto.offset.reset=earliest).
   // This is acceptable for V1.
 
@@ -732,7 +728,7 @@ export class NexoStream<T = any> {
     const numPartitions = res.reader.readU32();
     this.partitions = [];
 
-    // We overwrite nextOffsets because the server is the source of truth 
+    // We overwrite nextOffsets because the server is the source of truth
     // for where we should start reading after a rebalance.
     for (let i = 0; i < numPartitions; i++) {
       const pId = res.reader.readU32();
