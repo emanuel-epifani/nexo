@@ -292,28 +292,33 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
                 port: parseInt(process.env.NEXO_PORT!)
             });
 
-            await nexo.stream(topic, group).subscribe(() => { });
-            await client2.stream(topic, group).subscribe(() => { });
+            const received1: any[] = [];
+            const received2: any[] = [];
 
-            // Disconnect client2
-            client2.disconnect();
-            await new Promise(r => setTimeout(r, 100));
-
-            // Publish messages - client1 should handle all
-            const received: any[] = [];
-            // Re-subscribe on nexo to capture
-            const handle = await nexo.stream(topic, group).subscribe(msg => {
-                received.push(msg);
+            const handle1 = await nexo.stream(topic, group).subscribe(msg => {
+                received1.push(msg);
+            });
+            const handle2 = await client2.stream(topic, group).subscribe(msg => {
+                received2.push(msg);
             });
 
             await new Promise(r => setTimeout(r, 100));
+
+            // Disconnect client2
+            handle2.stop();
+            await new Promise(r => setTimeout(r, 50));
+            client2.disconnect();
+            await new Promise(r => setTimeout(r, 100));
+
+            // Publish messages - only client1 should receive them now
             for (let i = 0; i < 5; i++) {
                 await nexo.stream(topic).publish({ i });
             }
 
-            await waitFor(() => received.length === 5);
-            expect(received.length).toBe(5);
-            handle.stop();
+            await waitFor(() => received1.length === 5);
+            expect(received1.length).toBe(5);
+
+            handle1.stop();
         });
 
         it('Same Group Name Different Topics: Groups are isolated by topic', async () => {
@@ -347,95 +352,150 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
         });
     });
 
-    describe('Performance Benchmarks', () => {
+    describe('Performance Benchmarks (Stress)', () => {
 
-        it('Ingestion Throughput (Single Topic)', async () => {
-            const MESSAGES = 10_000;
-            const topicName = 'perf-ingestion';
+        it('Ingestion Throughput (Multi-Client Pipelining)', async () => {
+            const MESSAGES = 100_000;
+            const NUM_CLIENTS = 4;
+            const topicName = 'perf-stress-ingestion';
+
             await nexo.stream(topicName).create();
-            const pub = nexo.stream(topicName);
 
-            const probe = new BenchmarkProbe("STREAM - INGESTION - write on topic", MESSAGES);
+            // Create multiple clients
+            const clients = await Promise.all(
+                Array.from({ length: NUM_CLIENTS }).map(() =>
+                    NexoClient.connect({
+                        host: process.env.NEXO_HOST!,
+                        port: parseInt(process.env.NEXO_PORT!)
+                    })
+                )
+            );
+
+            const messagesPerClient = MESSAGES / NUM_CLIENTS;
+            const probe = new BenchmarkProbe("STREAM - INGESTION (STRESS)", MESSAGES);
             probe.startTimer();
 
-            // Parallel publish
-            const chunks = 10;
-            const chunkSize = MESSAGES / chunks;
+            // Each client fires messages without waiting (pipelining)
+            await Promise.all(clients.map(async (client, idx) => {
+                const pub = client.stream(topicName);
+                const batchSize = 100;
 
-            await Promise.all(Array.from({ length: chunks }).map(async () => {
-                for (let i = 0; i < chunkSize; i++) {
-                    await pub.publish({ ts: Date.now() });
+                for (let i = 0; i < messagesPerClient; i += batchSize) {
+                    // Fire batch without await on individual publishes
+                    const batch = Array.from({ length: batchSize }).map((_, j) =>
+                        pub.publish({ idx, i: i + j })
+                    );
+                    await Promise.all(batch);
                 }
             }));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(1000);
+
+            // Cleanup
+            clients.forEach(c => c.disconnect());
+
+            expect(stats.throughput).toBeGreaterThan(50_000);
         });
 
-        it('Consumer Throughput (Catch-up Read)', async () => {
-            const topicName = 'perf-catchup';
-            const MESSAGES = 10_000;
-            await nexo.stream(topicName).create();
-            const pub = nexo.stream(topicName);
+        it('Consumer Throughput (Multi-Consumer Parallel)', async () => {
+            const MESSAGES = 100_000;
+            const NUM_CONSUMERS = 4;
+            const topicName = 'perf-stress-catchup';
 
-            // Pre-fill
-            const batch = 500;
-            for (let i = 0; i < MESSAGES; i += batch) {
-                const promises = [];
-                for (let j = 0; j < batch; j++) promises.push(pub.publish({ i }));
-                await Promise.all(promises);
+            await nexo.stream(topicName).create();
+
+            // Pre-fill with pipelining
+            const batchSize = 500;
+            for (let i = 0; i < MESSAGES; i += batchSize) {
+                const batch = Array.from({ length: batchSize }).map((_, j) =>
+                    nexo.stream(topicName).publish({ i: i + j })
+                );
+                await Promise.all(batch);
             }
 
-            const probe = new BenchmarkProbe("STREAM - CATCHUP - read from topic", MESSAGES);
-            let received = 0;
-            const sub = nexo.stream(topicName, 'perf-reader');
+            // Create multiple consumers (different groups = fan-out)
+            const clients = await Promise.all(
+                Array.from({ length: NUM_CONSUMERS }).map(() =>
+                    NexoClient.connect({
+                        host: process.env.NEXO_HOST!,
+                        port: parseInt(process.env.NEXO_PORT!)
+                    })
+                )
+            );
+
+            const handles: { stop: () => void }[] = [];
+            const probe = new BenchmarkProbe("STREAM - CATCHUP (STRESS)", MESSAGES * NUM_CONSUMERS);
 
             probe.startTimer();
-            await new Promise<void>(resolve => {
-                sub.subscribe(async () => {
-                    received++;
-                    if (received === MESSAGES) resolve();
-                }, { batchSize: 500 });
-            });
+
+            await Promise.all(clients.map((client, idx) => {
+                return new Promise<void>(async (resolve) => {
+                    let count = 0;
+                    const handle = await client.stream(topicName, `stress-reader-${idx}`).subscribe(() => {
+                        count++;
+                        if (count === MESSAGES) resolve();
+                    }, { batchSize: 1000 });
+                    handles.push(handle);
+                });
+            }));
 
             const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(5000);
+
+            // Stop subscriptions before disconnect to avoid "Connection closed" errors
+            handles.forEach(h => h.stop());
+            await new Promise(r => setTimeout(r, 50));
+            clients.forEach(c => c.disconnect());
+
+            expect(stats.throughput).toBeGreaterThan(200_000);
         });
 
-        it('Mixed Load (Read/Write Contention)', async () => {
-            const topicName = 'perf-mixed';
+        it('Sustained Load (Fire-and-Forget Style)', async () => {
+            const DURATION_MS = 5000;
+            const topicName = 'perf-sustained';
+
             await nexo.stream(topicName).create();
-            const pub = nexo.stream(topicName);
-            const sub = nexo.stream(topicName, 'mixed-group');
 
-            const DURATION_MS = 2000;
-            let producing = true;
-            let written = 0;
-            let read = 0;
+            // Multiple producer clients
+            const NUM_PRODUCERS = 4;
+            const clients = await Promise.all(
+                Array.from({ length: NUM_PRODUCERS }).map(() =>
+                    NexoClient.connect({
+                        host: process.env.NEXO_HOST!,
+                        port: parseInt(process.env.NEXO_PORT!)
+                    })
+                )
+            );
 
-            const producerPromise = (async () => {
-                while (producing) {
-                    const promises = [];
-                    for (let k = 0; k < 20; k++) promises.push(pub.publish({ i: written++ }));
-                    await Promise.all(promises);
-                    await new Promise(r => setImmediate(r));
+            let totalWritten = 0;
+            let running = true;
+
+            const startTime = Date.now();
+
+            // Fire as fast as possible
+            const producers = clients.map(async (client) => {
+                const pub = client.stream(topicName);
+                while (running) {
+                    // Batch of 50 fire-and-forget
+                    const batch = Array.from({ length: 50 }).map(() => {
+                        totalWritten++;
+                        return pub.publish({ t: Date.now() });
+                    });
+                    await Promise.all(batch);
                 }
-            })();
-
-            const subHandle = await sub.subscribe(() => {
-                read++;
-            }, { batchSize: 50 });
+            });
 
             await new Promise(r => setTimeout(r, DURATION_MS));
+            running = false;
+            await Promise.all(producers);
 
-            producing = false;
-            await producerPromise;
-            if (subHandle) subHandle.stop();
+            const elapsed = Date.now() - startTime;
+            const throughput = Math.round(totalWritten / (elapsed / 1000));
 
-            console.log(`[STREAM - MIXED] Written: ${written} | Read: ${read} | Ratio: ${(read / written).toFixed(2)}`);
+            console.log(`[STREAM - SUSTAINED] Written: ${totalWritten} in ${elapsed}ms | Throughput: ${throughput.toLocaleString()} ops/sec`);
 
-            expect(written).toBeGreaterThan(500);
-            expect(read).toBeGreaterThan(written * 0.5);
+            clients.forEach(c => c.disconnect());
+
+            expect(throughput).toBeGreaterThan(100_000);
         });
     });
 
