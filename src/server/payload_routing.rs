@@ -332,9 +332,11 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             };
             
             match engine.stream.join_group(group, topic, &client_id.0) {
-                Ok(assigned) => {
-                    // Return [Num:4][P1:4][Off1:8][P2:4][Off2:8]...
+                Ok((generation_id, assigned)) => {
+                    // Return [GenerationID:8][Num:4][P1:4][Off1:8][P2:4][Off2:8]...
                     let mut buf = Vec::new();
+                    buf.extend_from_slice(&generation_id.to_be_bytes());
+
                     let len_u32 = assigned.len() as u32;
                     buf.extend_from_slice(&len_u32.to_be_bytes());
                     for (p_id, start_offset) in assigned {
@@ -347,7 +349,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             }
         }
 
-        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8]
+        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8][GenerationID:8]
         OP_S_COMMIT => {
             let (group, rest1) = match parse_string(&body) {
                 Ok(res) => res,
@@ -357,12 +359,14 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            if rest2.len() < 12 { return Response::Error("Payload too short for commit".to_string()); }
+            // 4 + 8 + 8 = 20
+            if rest2.len() < 20 { return Response::Error("Payload too short for commit".to_string()); }
             
             let partition = u32::from_be_bytes(rest2[0..4].as_ref().try_into().unwrap());
             let offset = u64::from_be_bytes(rest2[4..12].as_ref().try_into().unwrap());
+            let generation_id = u64::from_be_bytes(rest2[12..20].as_ref().try_into().unwrap());
             
-            match engine.stream.commit_offset(group, topic, partition, offset) {
+            match engine.stream.commit_offset(group, topic, partition, offset, generation_id, &client_id.0) {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

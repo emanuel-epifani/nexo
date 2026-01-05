@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use crate::brokers::stream::snapshot::{GroupSummary, MemberDetail};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct ConsumerGroupMember {
@@ -11,6 +12,8 @@ pub struct ConsumerGroupMember {
 pub struct ConsumerGroup {
     pub id: String,
     pub topic: String,
+    // Generation ID (Epoch) for Fencing
+    pub generation_id: AtomicU64,
     // Committed offsets: PartitionID -> Offset
     pub committed_offsets: DashMap<u32, u64>,
     // Active members: ClientID -> MemberInfo
@@ -22,6 +25,7 @@ impl ConsumerGroup {
         Self {
             id,
             topic,
+            generation_id: AtomicU64::new(0),
             committed_offsets: DashMap::new(),
             members: DashMap::new(),
         }
@@ -39,9 +43,13 @@ impl ConsumerGroup {
     }
     
     /// Redistributes partitions among current members deterministically
-    pub fn rebalance(&self, num_partitions: u32) {
+    /// Returns the new Generation ID
+    pub fn rebalance(&self, num_partitions: u32) -> u64 {
+        // Increment Generation ID
+        let new_gen_id = self.generation_id.fetch_add(1, Ordering::SeqCst) + 1;
+
         if self.members.is_empty() {
-            return;
+            return new_gen_id;
         }
 
         // 1. Get all member IDs and sort them to ensure deterministic assignment
@@ -52,22 +60,26 @@ impl ConsumerGroup {
         // Map MemberID -> List of Partitions
         let mut assignments: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
         
+        // Ensure all members have an entry (even if empty)
+        for m_id in &member_ids {
+            assignments.insert(m_id.clone(), Vec::new());
+        }
+        
         for p_id in 0..num_partitions {
             let member_idx = (p_id as usize) % member_ids.len();
             let member_id = &member_ids[member_idx];
             
-            assignments.entry(member_id.clone())
-                .or_default()
-                .push(p_id);
+            assignments.get_mut(member_id).unwrap().push(p_id);
         }
 
         // 3. Apply assignments
-        // We iterate all members to ensure those who lost partitions get cleared
         for mut member_ref in self.members.iter_mut() {
             let client_id = member_ref.key();
             let new_partitions = assignments.remove(client_id).unwrap_or_default();
             member_ref.assigned_partitions = new_partitions;
         }
+        
+        new_gen_id
     }
     
     pub fn commit(&self, partition_id: u32, offset: u64) {
@@ -75,8 +87,6 @@ impl ConsumerGroup {
     }
     
     pub fn get_committed_offset(&self, partition_id: u32) -> u64 {
-        // Default to 0 if no commit found (Start from beginning)
-        // Future: Configurable 'auto.offset.reset' (earliest/latest)
         self.committed_offsets.get(&partition_id).map(|v| *v.value()).unwrap_or(0)
     }
 

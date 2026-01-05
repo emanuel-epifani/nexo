@@ -433,7 +433,10 @@ class RequestBuilder {
     const res = await this.conn.dispatch(this._opcode, this._payloadSize, this._ops);
     if (res.status === ResponseStatus.ERR) {
       const err = new ProtocolReader(res.data).readString();
-      logger.error(`<- ERROR ${Opcode[this._opcode]} (${err})`);
+      // Only log errors that are not expected protocol validations
+      if (!err.includes('FENCED') && !err.includes('not found')) {
+        logger.error(`<- ERROR ${Opcode[this._opcode]} (${err})`);
+      }
       throw new Error(err);
     }
     return { status: res.status, reader: new ProtocolReader(res.data) };
@@ -444,9 +447,6 @@ class RequestBuilder {
 // STORE BROKER - Data Structures
 // ========================================
 
-/**
- * NEXO KV: Key-Value operations (store.kv.set/get/del)
- */
 export class NexoKV {
   constructor(private builder: RequestBuilder) { }
 
@@ -472,26 +472,17 @@ export class NexoKV {
   }
 }
 
-/**
- * NEXO HASH: Hash operations (store.hash("key").set/get)
- */
 export class NexoHash<T = any> {
   constructor(private builder: RequestBuilder, public readonly key: string) { }
 }
 
-/**
- * NEXO STORE: Container for all data structure operations
- * Access via nexo.store.kv, nexo.store.hash()
- */
 export class NexoStore {
-  /** Key-Value operations */
   public readonly kv: NexoKV;
 
   constructor(private builder: RequestBuilder) {
     this.kv = new NexoKV(builder);
   }
 
-  /** Hash operations for a specific key */
   hash<T = any>(key: string): NexoHash<T> {
     return new NexoHash<T>(this.builder, key);
   }
@@ -501,9 +492,6 @@ export class NexoStore {
 // QUEUE BROKER
 // ========================================
 
-/**
- * NEXO QUEUE: Resource handle for Queue operations.
- */
 export class NexoQueue<T = any> {
   private isDeclared = false;
   private declarePromise: Promise<void> | null = null;
@@ -665,29 +653,14 @@ class NexoPubSub {
 
 export class NexoStream<T = any> {
   private partitions: number[] = [];
-  // Per-partition offset tracking is complex to do purely client-side without rebalance info.
-  // For V1, we simply poll all assigned partitions.
-  // We need to track the next offset to fetch for each partition?
-  // No, the Server tracks committed offsets for the group.
-  // But wait, the S_FETCH command we designed (low level) takes Offset.
-  // So Client MUST track offsets.
-
-  // Correction: V1 design we implemented assumes the client asks for specific offsets.
-  // "Client loops OP_S_FETCH(Topic, Partition, Offset)".
-
-  // So we need to maintain local state of "next_offset" for each partition we are assigned.
-  // And we need to initialize this state by fetching "committed_offset" from server?
-  // We didn't implement OP_S_GET_COMMITTED_OFFSET.
-
-  // Workaround for V1: Start from 0. (Replay all).
-  // Or: S_JOIN could return the stored committed offsets?
-  // Currently S_JOIN only returns partition IDs.
-
-  // Let's implement local offset tracking starting from 0.
-  // This means if I restart consumer, I replay everything. (Kafka behavior if auto.offset.reset=earliest).
-  // This is acceptable for V1.
-
   private nextOffsets = new Map<number, bigint>();
+  private generationId: bigint = BigInt(0);
+
+  // Controls the lifecycle of polling loops.
+  // When rebalancing, we set active=false to stop old loops,
+  // then create a new controller for new loops.
+  private currentController: { active: boolean } = { active: false };
+  private retryTimer?: NodeJS.Timeout;
 
   constructor(
     private builder: RequestBuilder,
@@ -717,50 +690,86 @@ export class NexoStream<T = any> {
       throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
     }
 
-    // 1. Join Group
-    const res = await this.builder.reset(Opcode.S_JOIN)
-      .writeString(this.consumerGroup)
-      .writeString(this.name)
-      .send();
+    // Stop any previous subscription logic
+    this.stopInternal();
+    this.currentController = { active: true };
 
-    // Parse Assigned Partitions and Start Offsets
-    // Server returns: [Num:4] + ([PartitionID:4][StartOffset:8] ...)
-    const numPartitions = res.reader.readU32();
-    this.partitions = [];
-
-    // We overwrite nextOffsets because the server is the source of truth
-    // for where we should start reading after a rebalance.
-    for (let i = 0; i < numPartitions; i++) {
-      const pId = res.reader.readU32();
-      const startOffset = res.reader.readU64();
-
-      this.partitions.push(pId);
-      this.nextOffsets.set(pId, startOffset);
-      // console.log(`[SDK] Joined Group. Partition: ${pId}, StartOffset: ${startOffset}`);
-    }
-
-    // Shared active flag for all partition loops
-    const controller = { active: true };
-
-    // 2. Start Polling Loop for each partition
-    // We launch one loop per partition to maximize parallelism (simulating multi-thread)
     const batchSize = options.batchSize || 100;
-    this.partitions.forEach(pId => this.pollPartition(pId, callback, batchSize, controller));
+
+    // Encapsulate Rejoin Logic
+    const performJoinAndPoll = async (isRetry = false) => {
+      if (!this.currentController.active) return;
+
+      try {
+        // 1. Join Group
+        const res = await this.builder.reset(Opcode.S_JOIN)
+          .writeString(this.consumerGroup!)
+          .writeString(this.name)
+          .send();
+
+        // Parse Response
+        this.generationId = res.reader.readU64();
+        const numPartitions = res.reader.readU32();
+
+        const newPartitions: number[] = [];
+        this.partitions = newPartitions;
+
+        // Update Offsets from Server (Source of Truth)
+        for (let i = 0; i < numPartitions; i++) {
+          const pId = res.reader.readU32();
+          const startOffset = res.reader.readU64();
+          newPartitions.push(pId);
+          this.nextOffsets.set(pId, startOffset);
+        }
+
+        // 2. Start Polling for each partition
+        // Capture the controller for this generation of loops
+        const myController = this.currentController;
+        newPartitions.forEach(pId => {
+          this.pollPartition(pId, callback, batchSize, myController, () => performJoinAndPoll(true));
+        });
+
+      } catch (e) {
+        if (!isRetry) {
+          // First attempt failed? Throw to caller of subscribe()
+          throw e;
+        }
+
+        logger.error(`[SDK] Failed to join group: ${e}. Retrying in 1s...`);
+        if (this.currentController.active) {
+          this.retryTimer = setTimeout(() => performJoinAndPoll(true), 1000);
+        }
+      }
+    };
+
+    // Initial Join (not a retry, so it throws if fails)
+    await performJoinAndPoll(false);
 
     return {
-      stop: () => {
-        controller.active = false;
-      }
+      stop: () => this.stopInternal()
     };
   }
 
-  private async pollPartition(pId: number, callback: (data: T) => Promise<void> | void, batchSize: number, controller: { active: boolean }) {
-    // Loop forever
+  private stopInternal() {
+    this.currentController.active = false;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+  }
+
+  private async pollPartition(
+    pId: number,
+    callback: (data: T) => Promise<void> | void,
+    batchSize: number,
+    controller: { active: boolean },
+    rejoinCallback: () => Promise<void>
+  ) {
     while ((this.builder as any).conn.isConnected && controller.active) {
       const offset = this.nextOffsets.get(pId)!;
 
       try {
-        // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
+        // S_FETCH
         const res = await this.builder.reset(Opcode.S_FETCH)
           .writeString(this.name)
           .writeU32(pId)
@@ -768,12 +777,9 @@ export class NexoStream<T = any> {
           .writeU32(batchSize)
           .send();
 
-        // Parse Messages
-        // Response: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
         const numMsgs = res.reader.readU32();
 
         if (numMsgs === 0) {
-          // Wait a bit if empty (should be replaced by Long Polling/Notify in V2)
           await new Promise(r => setTimeout(r, 100));
           continue;
         }
@@ -783,15 +789,12 @@ export class NexoStream<T = any> {
 
         for (let i = 0; i < numMsgs; i++) {
           const msgOffset = res.reader.readU64();
-          lastMsgOffset = msgOffset; // Keep track for commit
+          lastMsgOffset = msgOffset;
 
           const ts = res.reader.readU64();
           const keyLen = res.reader.readU32();
-          let key = "";
-          if (keyLen > 0) {
-            const keyBuf = res.reader.readBuffer(keyLen);
-            key = keyBuf.toString('utf8');
-          }
+          // skip key
+          if (keyLen > 0) res.reader.readBuffer(keyLen);
 
           const payloadLen = res.reader.readU32();
           const payloadBuf = res.reader.readBuffer(payloadLen);
@@ -801,33 +804,43 @@ export class NexoStream<T = any> {
             await callback(data);
             processedCount++;
           } catch (e) {
-            logger.error("Error in stream callback, skipping message", e);
-            // In a robust system we might want to NACK or Stop here.
-            // For now we log and continue (At-most-once for failing msgs)
+            logger.error("Error in stream callback", e);
           }
         }
 
-        // AUTO-COMMIT if we processed anything
-        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8]
-        // We commit the offset of the LAST message + 1 (next to read)
         if (processedCount > 0 && this.consumerGroup) {
-          // Update local next offset
           const nextOffset = lastMsgOffset + BigInt(1);
           this.nextOffsets.set(pId, nextOffset);
 
-          // Send Commit to Server
-          // console.log(`[SDK] Auto-Committing Partition: ${pId}, Offset: ${nextOffset}`);
           await this.builder.reset(Opcode.S_COMMIT)
             .writeString(this.consumerGroup)
             .writeString(this.name)
             .writeU32(pId)
             .writeU64(nextOffset)
+            .writeU64(this.generationId)
             .send();
         }
 
       } catch (e) {
-        console.error("Stream poll error", e);
-        await new Promise(r => setTimeout(r, 1000));
+        if (!controller.active) return; // Stopped externally
+
+        if (e instanceof Error && e.message.includes("FENCED")) {
+          // logger.warn(`[SDK] Fenced on P${pId} (Gen ${this.generationId}). Triggering Rejoin...`);
+
+          // CRITICAL: Stop ALL loops for this subscription immediately
+          // because we are in an invalid state for the whole group
+          if (controller.active) {
+            controller.active = false; // Stop current loops
+            // Trigger Rejoin (which creates NEW controller)
+            setTimeout(() => {
+              rejoinCallback();
+            }, 50);
+          }
+          return; // Exit this loop
+        } else {
+          // logger.error("Stream poll error", e);
+          await new Promise(r => setTimeout(r, 1000));
+        }
       }
     }
   }
@@ -837,9 +850,6 @@ export class NexoStream<T = any> {
 // TOPIC BROKER
 // ========================================
 
-/**
- * NEXO TOPIC: Typed handle for a specific Pub/Sub topic.
- */
 export class NexoTopic<T = any> {
   constructor(
     private broker: NexoPubSub,

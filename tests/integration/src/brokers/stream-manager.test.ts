@@ -6,7 +6,7 @@ import { waitFor } from '../utils/wait-for';
 
 describe('Stream Broker (In-Memory)', () => {
 
-    describe('Core Functionality', () => {
+    describe('Core Functionality (Happy Path)', () => {
 
         it('Should create a topic explicitly', async () => {
             const topicName = 'orders-v1';
@@ -88,7 +88,7 @@ describe('Stream Broker (In-Memory)', () => {
 
             // Single client subscribing to both, but processing one slowly?
             // Actually JS is single threaded, so we simulate logical blocking or just order of processing.
-            // Better test: Ensure 'fast' message arrives even if 'slow' one is "being processed".
+            // Better test: Ensure 'fast' message arrives even if 'slow' is "being processed".
             // Since the handler is async, we can simulate delay.
 
             nexo.stream(topic, group).subscribe(async (msg) => {
@@ -121,12 +121,8 @@ describe('Stream Broker (In-Memory)', () => {
             const subGroupA = nexo.stream(topicName, 'analytics-service');
             const subGroupB = nexo.stream(topicName, 'notification-service');
 
-            await subGroupA.subscribe(msg => {
-                receivedA.push(msg)
-            });
-            await subGroupB.subscribe(msg => {
-                receivedB.push(msg)
-            });
+            await subGroupA.subscribe(msg => receivedA.push(msg));
+            await subGroupB.subscribe(msg => receivedB.push(msg));
 
             // Wait slightly for subscriptions to register on server
             await new Promise(r => setTimeout(r, 100));
@@ -152,12 +148,8 @@ describe('Stream Broker (In-Memory)', () => {
             const received1: any[] = [];
             const received2: any[] = [];
 
-            await nexo.stream(topicName, 'workers').subscribe(msg => {
-                received1.push(msg)
-            });
-            await client2.stream(topicName, 'workers').subscribe(msg => {
-                received2.push(msg)
-            });
+            await nexo.stream(topicName, 'workers').subscribe(msg => received1.push(msg));
+            await client2.stream(topicName, 'workers').subscribe(msg => received2.push(msg));
 
             // Wait for rebalancing (server side)
             // We can't query rebalance status easily, so we wait or just rely on eventual consistency
@@ -169,11 +161,15 @@ describe('Stream Broker (In-Memory)', () => {
                 await nexo.stream(topicName).publish({ task: i }, { key: `k-${i}` });
             }
 
-            await waitFor(() => (received1.length + received2.length) === TOTAL);
+            // Allow for duplicates (At-Least-Once due to rebalancing)
+            await waitFor(() => (received1.length + received2.length) >= TOTAL);
+
+            // Check uniqueness to confirm we got everything
+            const allIds = new Set([...received1, ...received2].map(m => m.task));
+            expect(allIds.size).toBe(TOTAL);
 
             expect(received1.length).toBeGreaterThan(0);
             expect(received2.length).toBeGreaterThan(0);
-            expect(received1.length + received2.length).toBe(TOTAL);
 
             client2.disconnect();
         });
@@ -191,9 +187,7 @@ describe('Stream Broker (In-Memory)', () => {
             const received1: any[] = [];
 
             // Client 1 tracks messages
-            await nexo.stream(topicName, group).subscribe(msg => {
-                received1.push(msg)
-            });
+            await nexo.stream(topicName, group).subscribe(msg => received1.push(msg));
             // Client 2 is just a sink to occupy partitions
             await client2.stream(topicName, group).subscribe(() => { });
 
@@ -209,9 +203,13 @@ describe('Stream Broker (In-Memory)', () => {
             }
 
             // Client 1 should eventually pick up ALL partitions and get all messages
-            await waitFor(() => received1.length === 10, 3000);
-            expect(received1.length).toBe(10);
+            // Allow duplicates
+            await waitFor(() => received1.length >= 10, 5000);
+
+            const unique = new Set(received1.map(m => m.i));
+            expect(unique.size).toBe(10);
         });
+
 
         it('Offset Persistence: Should resume from last committed offset after restart', async () => {
             const topic = 'offset-resume-test';
@@ -245,13 +243,118 @@ describe('Stream Broker (In-Memory)', () => {
             // 3. New Client (simulating restart) joins same group
             const received: any[] = [];
             const sub2 = nexo.stream(topic, group);
-            await sub2.subscribe(msg => {
-                received.push(msg)
-            });
+            await sub2.subscribe(msg => received.push(msg));
 
             // 4. Should receive only 5..9
             await waitFor(() => received.length === 5);
             expect(received.map(m => m.id)).toEqual([5, 6, 7, 8, 9]);
+        });
+    });
+
+    describe('Advanced Logic & Edge Cases', () => {
+
+        it('Oversubscription: Surplus consumers should remain idle', async () => {
+            const topic = 'oversubscription-test';
+            // Creiamo SOLO 2 partizioni
+            await nexo.stream(topic).create({ partitions: 2 });
+            const group = 'overflow-group';
+
+            const receivedA: any[] = [];
+            const receivedB: any[] = [];
+            const receivedC: any[] = []; // Questo dovrebbe rimanere vuoto o quasi
+
+            // Client 1
+            await nexo.stream(topic, group).subscribe(m => receivedA.push(m));
+
+            // Client 2 (Nuova connessione)
+            const client2 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            await client2.stream(topic, group).subscribe(m => receivedB.push(m));
+
+            // Client 3 (Nuova connessione - dovrebbe essere di troppo)
+            const client3 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            await client3.stream(topic, group).subscribe(m => receivedC.push(m));
+
+            await new Promise(r => setTimeout(r, 200)); // Attesa rebalance
+
+            // Pubblichiamo 30 messaggi
+            for (let i = 0; i < 30; i++) {
+                await nexo.stream(topic).publish({ i }, { key: `k-${i}` });
+            }
+
+            await waitFor(() => (receivedA.length + receivedB.length + receivedC.length) === 30);
+
+            // VERIFICA: Solo 2 client dovrebbero aver lavorato attivamente.
+            // Nota: Il rebalance potrebbe aver spostato partizioni, ma alla fine stazionaria solo 2 lavorano.
+            // Contiamo quanti client hanno ricevuto "significativamente" dati (>0)
+            const activeClients = [receivedA.length, receivedB.length, receivedC.length].filter(l => l > 0).length;
+
+            expect(activeClients).toBeLessThanOrEqual(2);
+
+            client2.disconnect();
+            client3.disconnect();
+        });
+
+        it('Zombie Commit: Should Reject Commit from Fenced (Old Epoch) Client', async () => {
+            // 1. Setup
+            const topic = 'zombie-fencing';
+            const group = 'zombie-check';
+            await nexo.stream(topic).create({ partitions: 1 });
+
+            // Publish 1 message
+            await nexo.stream(topic).publish({ val: 'critical-data' });
+
+            // 2. Client A (Victim)
+            const clientA = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            const receivedA: any[] = [];
+
+            // Hook to pause A before commit? We simulate "slow processing"
+            // Using batchSize: 1 to ensure fetch-process-commit cycle is tight
+            let resolveProcessingA: () => void;
+            const processingA = new Promise<void>(r => resolveProcessingA = r);
+
+            await clientA.stream(topic, group).subscribe(async (msg) => {
+                receivedA.push(msg);
+                // Client A hangs here! holding the old Epoch (e.g., 1)
+                // Only hang on the FIRST message
+                if (receivedA.length === 1) {
+                    await processingA;
+                }
+            }, { batchSize: 1 });
+
+            // Wait for A to fetch the message but NOT commit yet (it's stuck in await processingA)
+            await waitFor(() => receivedA.length === 1);
+
+            // 3. Client B (Usurper) joins -> Triggers Rebalance -> Epoch 2
+            const clientB = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            const receivedB: any[] = [];
+            await clientB.stream(topic, group).subscribe(async (msg) => {
+                receivedB.push(msg);
+            });
+
+            // Wait for Rebalance to complete on server
+            await new Promise(r => setTimeout(r, 500));
+
+            // 4. Resume A -> It will try to S_COMMIT with Epoch 1 -> FAIL -> REJOIN
+            resolveProcessingA!();
+
+            // Wait a bit for commit to fly, fail, and rejoin logic to kick in
+            await new Promise(r => setTimeout(r, 500));
+
+            // 5. Verification
+            // The message 'critical-data' was NEVER committed.
+            // So either A (after rejoin) or B (new owner) MUST receive it again.
+            // receivedA would become 2 (duplicate delivery) OR receivedB would become 1.
+
+            await waitFor(() => receivedA.length === 2 || receivedB.length === 1);
+
+            if (receivedB.length === 1) {
+                expect(receivedB[0].val).toBe('critical-data');
+            } else {
+                expect(receivedA[1].val).toBe('critical-data');
+            }
+
+            clientA.disconnect();
+            clientB.disconnect();
         });
     });
 
@@ -285,70 +388,6 @@ describe('Stream Broker (In-Memory)', () => {
 
             await waitFor(() => receivedSize > 0);
             expect(receivedSize).toBe(1024 * 1024);
-        });
-    });
-
-    describe('Advanced Logic & Edge Cases', () => {
-
-        it('Oversubscription: Surplus consumers should remain idle', async () => {
-            const topic = 'oversubscription-test';
-            // Creiamo SOLO 2 partizioni
-            await nexo.stream(topic).create({ partitions: 2 });
-            const group = 'overflow-group';
-
-            const receivedA: any[] = [];
-            const receivedB: any[] = [];
-            const receivedC: any[] = []; // Questo dovrebbe rimanere vuoto o quasi
-
-            // Client 1
-            await nexo.stream(topic, group).subscribe(m => {
-                receivedA.push(m)
-            });
-
-            // Client 2 (Nuova connessione)
-            const client2 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
-            await client2.stream(topic, group).subscribe(m => {
-                receivedB.push(m)
-            });
-
-            // Client 3 (Nuova connessione - dovrebbe essere di troppo)
-            const client3 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
-            await client3.stream(topic, group).subscribe(m => {
-                receivedC.push(m)
-            });
-
-            await new Promise(r => setTimeout(r, 200)); // Attesa rebalance
-
-            // Pubblichiamo 30 messaggi
-            for (let i = 0; i < 30; i++) {
-                await nexo.stream(topic).publish({ i }, { key: `k-${i}` });
-            }
-
-            await waitFor(() => (receivedA.length + receivedB.length + receivedC.length) === 30);
-
-            // VERIFICA: Solo 2 client dovrebbero aver lavorato attivamente.
-            // Nota: Il rebalance potrebbe aver spostato partizioni, ma alla fine stazionaria solo 2 lavorano.
-            // Contiamo quanti client hanno ricevuto "significativamente" dati (>0)
-            const activeClients = [receivedA.length, receivedB.length, receivedC.length].filter(l => l > 0).length;
-
-            expect(activeClients).toBeLessThanOrEqual(2);
-
-            client2.disconnect();
-            client3.disconnect();
-        });
-
-        // Questo test documenta un comportamento attuale (potenzialmente pericoloso) del server
-        it('Zombie Commit: Should demonstrate eventual consistency risk on rebalance', async () => {
-            // Questo test simula una race condition.
-            // Idealmente, vorremmo che il server RIFIUTASSE il commit se non possiedo più la partizione.
-            // Attualmente il server Rust lo accetta. Questo test serve a ricordarcelo.
-            const topic = 'zombie-test';
-            await nexo.stream(topic).create({ partitions: 1 });
-
-            // ... logica simulata ...
-            // Per ora lo lasciamo come placeholder mentale o TODO,
-            // dato che richiede di manipolare manualmente le chiamate SDK per forzare l'errore.
-            expect(true).toBe(true);
         });
     });
 
