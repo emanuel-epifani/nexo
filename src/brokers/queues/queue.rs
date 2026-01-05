@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use crate::brokers::queues::QueueManager;
+use crate::brokers::queues::snapshot::QueueSummary;
 // ---------- Message ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +315,22 @@ impl Queue {
             } else {
                 self.dispatch(&mut state, id, now);
             }
+        }
+    }
+
+    pub fn get_snapshot(&self) -> QueueSummary {
+        let state = self.state.lock();
+        
+        let pending_count: usize = state.waiting_for_dispatch.values().map(|q| q.len()).sum();
+        let inflight_count: usize = state.waiting_for_ack.values().map(|v| v.len()).sum();
+        let scheduled_count: usize = state.waiting_for_time.values().map(|v| v.len()).sum();
+        
+        QueueSummary {
+            name: self.name.clone(),
+            pending_count,
+            inflight_count,
+            scheduled_count,
+            consumers_waiting: state.waiting_consumers.len(),
         }
     }
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::brokers::stream::topic::{Topic, TopicConfig};
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
+use crate::brokers::stream::snapshot::StreamBrokerSnapshot;
 
 pub struct StreamManager {
     // Topic Name -> Topic Struct
@@ -166,6 +167,33 @@ impl StreamManager {
                     }
                 }
             }
+        }
+    }
+
+    pub fn get_snapshot(&self) -> StreamBrokerSnapshot {
+        // 1. Group all consumer groups by topic name for easier lookup
+        let mut groups_by_topic: std::collections::HashMap<String, Vec<Arc<ConsumerGroup>>> = std::collections::HashMap::new();
+        for group in self.groups.iter() {
+            groups_by_topic.entry(group.topic.clone())
+                .or_default()
+                .push(group.value().clone());
+        }
+
+        // 2. Iterate topics and build summaries
+        let mut topics_summary = Vec::new();
+        for topic_entry in self.topics.iter() {
+            let topic_name = topic_entry.key();
+            let topic = topic_entry.value();
+            
+            let topic_groups = groups_by_topic.remove(topic_name).unwrap_or_default();
+            
+            topics_summary.push(topic.get_snapshot(topic_groups));
+        }
+
+        StreamBrokerSnapshot {
+            total_topics: self.topics.len(),
+            total_active_groups: self.groups.len(),
+            topics: topics_summary,
         }
     }
 }

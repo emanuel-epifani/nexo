@@ -130,4 +130,59 @@ impl StoreManager {
     // ========================================
     // pub fn sadd(&self, key: &str, member: Bytes) -> Result<bool, String>
     // pub fn sismember(&self, key: &str, member: &Bytes) -> Result<bool, String>
+
+    pub fn get_snapshot(&self) -> crate::brokers::store::snapshot::StoreBrokerSnapshot {
+        let mut keys_detail = Vec::new();
+        let mut expiring = 0;
+        
+        // This iteration might be slow if map is huge, but it's for snapshot
+        for entry in self.store.iter() {
+            let val = entry.value();
+            if val.expires_at.is_some() {
+                expiring += 1;
+            }
+            
+            // Format preview
+            let value_preview = match &val.value {
+                Value::Bytes(b) => {
+                    if let Ok(s) = std::str::from_utf8(b) {
+                        if s.len() > 50 {
+                            format!("{}...", &s[0..50])
+                        } else {
+                            s.to_string()
+                        }
+                    } else {
+                        format!("[Binary {} bytes]", b.len())
+                    }
+                }
+            };
+
+            let expires_at_str = val.expires_at
+                .map(|inst| {
+                    // Convert Instant to SystemTime approx
+                    let now = Instant::now();
+                    let sys_now = std::time::SystemTime::now();
+                    if inst > now {
+                        let dur = inst - now;
+                        let future_sys = sys_now + dur;
+                        chrono::DateTime::<chrono::Utc>::from(future_sys).to_rfc3339()
+                    } else {
+                        "Expired".to_string()
+                    }
+                });
+
+            keys_detail.push(crate::brokers::store::snapshot::KeyDetail {
+                key: entry.key().clone(),
+                value_preview,
+                created_at: None, // We don't track creation time yet in Entry
+                expires_at: expires_at_str,
+            });
+        }
+        
+        crate::brokers::store::snapshot::StoreBrokerSnapshot {
+            total_keys: self.store.len(),
+            expiring_keys: expiring,
+            keys: keys_detail,
+        }
+    }
 }

@@ -201,6 +201,42 @@ impl PubSubManager {
 
     // --- Helper Methods ---
 
+    pub fn get_snapshot(&self) -> crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
+        let root = self.router.read().unwrap();
+        crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
+            active_clients: self.clients.len(),
+            topic_tree: Self::build_tree_snapshot("root", &root),
+        }
+    }
+
+    fn build_tree_snapshot(name: &str, node: &Node) -> crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
+        let mut children = Vec::new();
+
+        // 1. Regular Children
+        for (key, child) in &node.children {
+            children.push(Self::build_tree_snapshot(key, child));
+        }
+
+        // 2. Plus Child
+        if let Some(plus) = &node.plus_child {
+            children.push(Self::build_tree_snapshot("+", plus));
+        }
+
+        // 3. Hash Child
+        if let Some(hash) = &node.hash_child {
+            children.push(Self::build_tree_snapshot("#", hash));
+        }
+
+        let has_retained = node.last_retained.read().unwrap().is_some();
+
+        crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
+            name: name.to_string(),
+            subscribers: node.subscribers.len(),
+            retained_msg: has_retained,
+            children,
+        }
+    }
+
     // Finds subscribers whose patterns match the published topic
     fn match_recursive(node: &Node, parts: &[&str], results: &mut HashSet<ClientId>) {
         if let Some(hash_node) = &node.hash_child {

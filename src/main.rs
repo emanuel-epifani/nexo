@@ -3,8 +3,10 @@
 mod server;
 mod brokers;
 mod utils;
+mod system_snapshot;
 
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use crate::brokers::store::StoreManager;
 use crate::brokers::queues::QueueManager;
@@ -21,6 +23,7 @@ pub struct NexoEngine {
     pub queue: Arc<QueueManager>,
     pub pubsub: Arc<PubSubManager>,
     pub stream: Arc<StreamManager>,
+    pub start_time: Instant,
 }
 
 impl Default for NexoEngine {
@@ -39,6 +42,20 @@ impl NexoEngine {
             queue: queue_manager,
             pubsub: Arc::new(PubSubManager::new()),
             stream: Arc::new(StreamManager::new()),
+            start_time: Instant::now(),
+        }
+    }
+
+    pub fn get_global_snapshot(&self) -> system_snapshot::SystemSnapshot {
+        system_snapshot::SystemSnapshot {
+            uptime_seconds: self.start_time.elapsed().as_secs(),
+            server_time: chrono::Local::now().to_rfc3339(),
+            brokers: system_snapshot::BrokersSnapshot {
+                store: self.store.get_snapshot(),
+                queue: self.queue.get_snapshot(),
+                pubsub: self.pubsub.get_snapshot(),
+                stream: self.stream.get_snapshot(),
+            },
         }
     }
 }
@@ -60,20 +77,31 @@ async fn main() {
         .with_target(false)
         .without_time()
         .init();
-
-    let engine = NexoEngine::new();
-    
-    let host = std::env::var("NEXO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "8080".to_string());
-    let addr = format!("{}:{}", host, port);
-
+    // -- LOGGING CONFIGURATION --
     match std::env::var("NEXO_LOG") {
         Ok(val) => tracing::info!("NEXO_LOG found: '{}'", val),
         Err(_) => tracing::warn!("NEXO_LOG NOT FOUND!"),
     }
 
+
+
+    let engine = NexoEngine::new();
+    
+    let host = std::env::var("NEXO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "7654".to_string());
+    let dashboard_port = std::env::var("NEXO_DASHBOARD_PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()
+        .unwrap_or(8080);
+
+    let addr = format!("{}:{}", host, port);
+
+    let engine_clone_for_dashboard = engine.clone();
+    tokio::spawn(async move {
+        server::dashboard_api::start_dashboard_server(engine_clone_for_dashboard, dashboard_port).await;
+    });
+
     tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");
-    tracing::info!("📦 Brokers initialized: KV, Queue, PubSub, Stream");
 
     let listener = TcpListener::bind(&addr)
         .await

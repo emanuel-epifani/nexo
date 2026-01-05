@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use crate::brokers::stream::snapshot::{GroupSummary, MemberDetail};
 
 #[derive(Debug, Clone)]
 pub struct ConsumerGroupMember {
@@ -77,5 +78,30 @@ impl ConsumerGroup {
         // Default to 0 if no commit found (Start from beginning)
         // Future: Configurable 'auto.offset.reset' (earliest/latest)
         self.committed_offsets.get(&partition_id).map(|v| *v.value()).unwrap_or(0)
+    }
+
+    pub fn get_snapshot(&self, topic_partition_offsets: &std::collections::HashMap<u32, u64>) -> GroupSummary {
+        let mut pending_messages = 0;
+        
+        for (pid, max_offset) in topic_partition_offsets {
+             let committed = self.get_committed_offset(*pid);
+             if *max_offset > committed {
+                 pending_messages += *max_offset - committed;
+             }
+        }
+
+        let members_detail: Vec<MemberDetail> = self.members.iter().map(|m| {
+            MemberDetail {
+                client_id: m.key().clone(),
+                partitions_assigned: m.value().assigned_partitions.clone(),
+            }
+        }).collect();
+
+        GroupSummary {
+            name: self.id.clone(),
+            pending_messages,
+            connected_clients: self.members.len(),
+            members: members_detail,
+        }
     }
 }

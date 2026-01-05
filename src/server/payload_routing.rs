@@ -275,7 +275,10 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             let offset = body.len() - data_ptr.len();
             
             match engine.stream.publish(topic, body.slice(offset..), key) {
-                Ok(offset_id) => Response::Data(Bytes::from(offset_id.to_be_bytes().to_vec())),
+                Ok(offset_id) => {
+                    let bytes = offset_id.to_be_bytes();
+                    Response::Data(Bytes::from(bytes.to_vec()))
+                },
                 Err(e) => Response::Error(e),
             }
         }
@@ -332,7 +335,8 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(assigned) => {
                     // Return [Num:4][P1:4][Off1:8][P2:4][Off2:8]...
                     let mut buf = Vec::new();
-                    buf.extend_from_slice(&(assigned.len() as u32).to_be_bytes());
+                    let len_u32 = assigned.len() as u32;
+                    buf.extend_from_slice(&len_u32.to_be_bytes());
                     for (p_id, start_offset) in assigned {
                         buf.extend_from_slice(&p_id.to_be_bytes());
                         buf.extend_from_slice(&start_offset.to_be_bytes());

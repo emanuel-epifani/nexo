@@ -3,7 +3,10 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::Bytes;
+use std::sync::Arc;
 use crate::brokers::stream::partition::Partition;
+use crate::brokers::stream::group::ConsumerGroup;
+use crate::brokers::stream::snapshot::TopicSummary;
 
 #[derive(Clone, Debug)]
 pub struct TopicConfig {
@@ -82,6 +85,34 @@ impl Topic {
             Some(part.read(offset, limit))
         } else {
             None // Partition not found
+        }
+    }
+
+    pub fn get_snapshot(&self, groups: Vec<Arc<ConsumerGroup>>) -> TopicSummary {
+        let mut total_messages = 0;
+        let mut partition_max_offsets = std::collections::HashMap::new();
+
+        for (i, p) in self.partitions.iter().enumerate() {
+            let part = p.read().unwrap();
+            let count = if part.next_offset >= part.start_offset {
+                part.next_offset - part.start_offset
+            } else {
+                0
+            };
+            total_messages += count;
+            partition_max_offsets.insert(i as u32, part.next_offset);
+        }
+
+        let group_summaries = groups.into_iter().map(|g| {
+            g.get_snapshot(&partition_max_offsets)
+        }).collect();
+
+        TopicSummary {
+            name: self.name.clone(),
+            partitions_count: self.partitions.len(),
+            retention_ms: 0, 
+            total_messages,
+            consumer_groups: group_summaries,
         }
     }
 }
