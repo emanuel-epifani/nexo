@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { NexoClient } from '../../../../sdk/ts/src/client';
 import { nexo } from '../nexo';
-import {BenchmarkProbe} from "../utils/benchmark-misure";
+import { BenchmarkProbe } from "../utils/benchmark-misure";
 
 const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
 
@@ -12,11 +12,11 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const payload = { value: 25.5 };
         let received = null;
 
-        await nexo.pubsub.subscribe(topic, (data) => {
+        await nexo.pubsub(topic).subscribe((data) => {
             received = data;
         });
 
-        await nexo.pubsub.publish(topic, payload);
+        await nexo.pubsub(topic).publish(payload);
 
         // Wait for push
         await new Promise(r => setTimeout(r, 100));
@@ -27,13 +27,13 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const pattern = 'home/+/temp';
         const received: any[] = [];
 
-        await nexo.pubsub.subscribe(pattern, (data) => {
+        await nexo.pubsub(pattern).subscribe((data) => {
             received.push(data);
         });
 
-        await nexo.pubsub.publish('home/kitchen/temp', { loc: 'kitchen' });
-        await nexo.pubsub.publish('home/garage/temp', { loc: 'garage' });
-        await nexo.pubsub.publish('home/kitchen/light', { loc: 'light' }); // Should NOT match
+        await nexo.pubsub('home/kitchen/temp').publish({ loc: 'kitchen' });
+        await nexo.pubsub('home/garage/temp').publish({ loc: 'garage' });
+        await nexo.pubsub('home/kitchen/light').publish({ loc: 'light' }); // Should NOT match
 
         await new Promise(r => setTimeout(r, 100));
         expect(received).toHaveLength(2);
@@ -46,14 +46,14 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const pattern = 'sensors/#';
         const received: any[] = [];
 
-        await nexo.pubsub.subscribe(pattern, (data) => {
+        await nexo.pubsub(pattern).subscribe((data) => {
             received.push(data);
         });
 
-        await nexo.pubsub.publish('sensors/temp', 1);
-        await nexo.pubsub.publish('sensors/temp/ext', 2);
-        await nexo.pubsub.publish('sensors/a/b/c', 3);
-        await nexo.pubsub.publish('other/stuff', 4); // No match
+        await nexo.pubsub('sensors/temp').publish(1);
+        await nexo.pubsub('sensors/temp/ext').publish(2);
+        await nexo.pubsub('sensors/a/b/c').publish(3);
+        await nexo.pubsub('other/stuff').publish(4); // No match
 
         await new Promise(r => setTimeout(r, 100));
         expect(received).toHaveLength(3);
@@ -68,17 +68,17 @@ describe('PubSub Broker (MQTT-Style)', () => {
         let count = 0;
 
         const handler = () => { count++; };
-        
+
         // We need a fresh connection to test clean unsubscribe isolation
         const client2 = await NexoClient.connect({ port: SERVER_PORT });
-        
-        await client2.pubsub.subscribe(topic, handler);
-        await client2.pubsub.publish(topic, 'msg1');
+
+        await client2.pubsub(topic).subscribe(handler);
+        await client2.pubsub(topic).publish('msg1');
         await new Promise(r => setTimeout(r, 50));
         expect(count).toBe(1);
 
-        await client2.pubsub.unsubscribe(topic);
-        await client2.pubsub.publish(topic, 'msg2');
+        await client2.pubsub(topic).unsubscribe();
+        await client2.pubsub(topic).publish('msg2');
         await new Promise(r => setTimeout(r, 50));
         expect(count).toBe(1); // Should not increase
 
@@ -90,12 +90,12 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const value = { max: 100 };
 
         // 1. Publish with RETAIN = true
-        await nexo.pubsub.publish(topic, value, { retain: true });
+        await nexo.pubsub(topic).publish(value, { retain: true });
 
         // 2. Subscribe after publish
         let received = null;
 
-        await nexo.pubsub.subscribe(topic, (data) => {
+        await nexo.pubsub(topic).subscribe((data) => {
             received = data;
         });
 
@@ -107,18 +107,18 @@ describe('PubSub Broker (MQTT-Style)', () => {
 
     it('Should support RETAINED messages with Single-level Wildcard (+)', async () => {
         // Publish retained messages to different topics
-        await nexo.pubsub.publish('status/s1', 'online', { retain: true });
-        await nexo.pubsub.publish('status/s2', 'offline', { retain: true });
-        await nexo.pubsub.publish('status/s3/detail', 'verbose', { retain: true }); // Deeper level
+        await nexo.pubsub('status/s1').publish('online', { retain: true });
+        await nexo.pubsub('status/s2').publish('offline', { retain: true });
+        await nexo.pubsub('status/s3/detail').publish('verbose', { retain: true }); // Deeper level
 
         const received: string[] = [];
 
         // Subscribe with wildcard
-        await nexo.pubsub.subscribe('status/+', (data) => {
-            received.push(data as string);
+        await nexo.pubsub<string>('status/+').subscribe((data) => {
+            received.push(data);
         });
         await new Promise(r => setTimeout(r, 500));
-        
+
         // Should receive s1 and s2, but NOT s3 (because + matches one level)
         expect(received).toContain('online');
         expect(received).toContain('offline');
@@ -128,15 +128,15 @@ describe('PubSub Broker (MQTT-Style)', () => {
 
     it('Should support RETAINED messages with Multi-level Wildcard (#)', async () => {
         // Publish retained messages to a deep hierarchy
-        await nexo.pubsub.publish('config/app/db/host', 'localhost', { retain: true });
-        await nexo.pubsub.publish('config/app/db/port', 5432, { retain: true });
-        await nexo.pubsub.publish('config/app/cache/ttl', 60, { retain: true });
-        await nexo.pubsub.publish('config/system/os', 'linux', { retain: true }); // Different branch
+        await nexo.pubsub('config/app/db/host').publish('localhost', { retain: true });
+        await nexo.pubsub('config/app/db/port').publish(5432, { retain: true });
+        await nexo.pubsub('config/app/cache/ttl').publish(60, { retain: true });
+        await nexo.pubsub('config/system/os').publish('linux', { retain: true }); // Different branch
 
         const received: any[] = [];
 
         // Subscribe to config/app/# -> should get db/host, db/port, cache/ttl. Should NOT get system/os.
-        await nexo.pubsub.subscribe('config/app/#', (data) => {
+        await nexo.pubsub('config/app/#').subscribe((data) => {
             received.push(data);
         });
 
@@ -161,7 +161,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
 
         for (let i = 0; i < SUBSCRIBERS; i++) {
             const c = await NexoClient.connect({ port: SERVER_PORT });
-            await c.pubsub.subscribe('perf/fanout', (msg: any) => {
+            await c.pubsub('perf/fanout').subscribe((msg: any) => {
                 received++;
                 if (msg.ts) probe.recordLatency(msg.ts);
             });
@@ -169,7 +169,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
         }
 
         probe.startTimer();
-        await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub.publish('perf/fanout', { ts: Date.now() })));
+        await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub('perf/fanout').publish({ ts: Date.now() })));
 
         while (received < TOTAL_EVENTS) {
             await new Promise(r => setTimeout(r, 10));
@@ -193,7 +193,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
 
         const probe = new BenchmarkProbe("PUBSUB - FANIN", TOTAL_EXPECTED);
 
-        await nexo.pubsub.subscribe('sensors/+', (msg: any) => {
+        await nexo.pubsub('sensors/+').subscribe((msg: any) => {
             received++;
             if (msg.ts) probe.recordLatency(msg.ts);
         });
@@ -206,7 +206,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
         await Promise.all(clients.map((c, i) => {
             const promises = [];
             for (let k = 0; k < MSGS_PER_PUB; k++) {
-                promises.push(c.pubsub.publish(`sensors/d${i}`, { ts: Date.now() }));
+                promises.push(c.pubsub(`sensors/d${i}`).publish({ ts: Date.now() }));
             }
             return Promise.all(promises);
         }));
@@ -228,7 +228,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
     it('Wildcard Routing Stress', async () => {
         const OPS = 10_000;
         let received = 0;
-        await nexo.pubsub.subscribe('infra/+/+/cpu', () => { received++; });
+        await nexo.pubsub('infra/+/+/cpu').subscribe(() => { received++; });
 
         const probe = new BenchmarkProbe("PUBSUB - WILDCARD", OPS);
         probe.startTimer();
@@ -237,7 +237,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
             const opsPerWorker = OPS / 10;
             for (let i = 0; i < opsPerWorker; i++) {
                 const t0 = performance.now();
-                await nexo.pubsub.publish('infra/us-east/server-1/cpu', { u: 90 });
+                await nexo.pubsub('infra/us-east/server-1/cpu').publish({ u: 90 });
                 probe.record(performance.now() - t0);
             }
         };
@@ -250,5 +250,5 @@ describe('PubSub Broker (MQTT-Style)', () => {
         expect(stats.p99).toBeLessThan(0.5);
         expect(stats.max).toBeLessThan(2);
     });
-    
+
 });

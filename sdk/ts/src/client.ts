@@ -28,8 +28,6 @@ export enum Opcode {
   KV_DEL = 0x04,
   // Future: KV_INCR = 0x05
   // Future Store Hash: 0x06 - 0x09
-  // Future Store List: 0x0A - 0x0D
-  // Future Store Set: 0x0E - 0x0F
   // Queue: 0x10 - 0x1F
   Q_CREATE = 0x10,
   Q_PUSH = 0x11,
@@ -87,9 +85,6 @@ export interface NexoOptions {
   requestTimeoutMs?: number;
 }
 
-/**
- * DATA CODEC: Centralized serialization logic.
- */
 class DataCodec {
   static serialize(data: any): Buffer {
     let type = DataType.RAW;
@@ -133,9 +128,6 @@ class DataCodec {
   }
 }
 
-/**
- * PROTOCOL READER: Zero-copy wrapper for server responses.
- */
 class ProtocolReader {
   private offset = 0;
   constructor(public readonly buffer: Buffer) { }
@@ -170,9 +162,6 @@ class ProtocolReader {
   readData(): any { return DataCodec.deserialize(this.buffer.subarray(this.offset)); }
 }
 
-/**
- * RING BUFFER DECODER: Efficient frame extraction.
- */
 class RingDecoder {
   private buf: Buffer;
   private head = 0;
@@ -237,10 +226,6 @@ class RingDecoder {
   }
 }
 
-/**
- * NEXO CONNECTION: Low-latency networking engine.
- * Uses process.nextTick batching (~0.1ms) for optimal latency/throughput balance.
- */
 class NexoConnection {
   private socket: net.Socket;
   public isConnected = false;
@@ -392,9 +377,6 @@ class NexoConnection {
   }
 }
 
-/**
- * REQUEST BUILDER: Internal utility for fluent request construction.
- */
 class RequestBuilder {
   private _ops: { type: number, val: any, size: number }[] = [];
   private _payloadSize = 1;
@@ -466,10 +448,10 @@ class RequestBuilder {
 /**
  * NEXO KV: Key-Value operations (store.kv.set/get/del)
  */
-export class NexoKV<T = any> {
+export class NexoKV {
   constructor(private builder: RequestBuilder) { }
 
-  async set(key: string, value: T, ttlSeconds = 0): Promise<void> {
+  async set(key: string, value: any, ttlSeconds = 0): Promise<void> {
     await this.builder.reset(Opcode.KV_SET)
       .writeU64(ttlSeconds)
       .writeString(key)
@@ -477,7 +459,7 @@ export class NexoKV<T = any> {
       .send();
   }
 
-  async get(key: string): Promise<T | null> {
+  async get<T = any>(key: string): Promise<T | null> {
     const res = await this.builder.reset(Opcode.KV_GET)
       .writeString(key)
       .send();
@@ -499,22 +481,8 @@ export class NexoHash<T = any> {
 }
 
 /**
- * NEXO LIST: List operations (store.list("key").push/pop)
- */
-export class NexoList<T = any> {
-  constructor(private builder: RequestBuilder, public readonly key: string) { }
-}
-
-/**
- * NEXO SET: Set operations (store.set("key").add/has)
- */
-export class NexoSet<T = any> {
-  constructor(private builder: RequestBuilder, public readonly key: string) { }
-}
-
-/**
  * NEXO STORE: Container for all data structure operations
- * Access via nexo.store.kv, nexo.store.hash(), etc.
+ * Access via nexo.store.kv, nexo.store.hash()
  */
 export class NexoStore {
   /** Key-Value operations */
@@ -527,16 +495,6 @@ export class NexoStore {
   /** Hash operations for a specific key */
   hash<T = any>(key: string): NexoHash<T> {
     return new NexoHash<T>(this.builder, key);
-  }
-
-  /** List operations for a specific key */
-  list<T = any>(key: string): NexoList<T> {
-    return new NexoList<T>(this.builder, key);
-  }
-
-  /** Set operations for a specific key */
-  set<T = any>(key: string): NexoSet<T> {
-    return new NexoSet<T>(this.builder, key);
   }
 }
 
@@ -628,11 +586,7 @@ export class NexoQueue<T = any> {
   }
 }
 
-// ========================================
-// PUB-SUB BROKER
-// ========================================
-
-export class NexoPubSub {
+class NexoPubSub {
   private handlers = new Map<string, Array<(data: any) => void>>();
 
   constructor(private builder: RequestBuilder, conn: NexoConnection) {
@@ -881,6 +835,32 @@ export class NexoStream<T = any> {
 }
 
 // ========================================
+// TOPIC BROKER
+// ========================================
+
+/**
+ * NEXO TOPIC: Typed handle for a specific Pub/Sub topic.
+ */
+export class NexoTopic<T = any> {
+  constructor(
+    private broker: NexoPubSub,
+    public readonly name: string
+  ) { }
+
+  async publish(data: T, options?: PublishOptions): Promise<void> {
+    return this.broker.publish(this.name, data, options);
+  }
+
+  async subscribe(callback: (data: T) => void): Promise<void> {
+    return this.broker.subscribe<T>(this.name, callback);
+  }
+
+  async unsubscribe(): Promise<void> {
+    return this.broker.unsubscribe(this.name);
+  }
+}
+
+// ========================================
 // NEXO CLIENT - Main Entry Point
 // ========================================
 
@@ -888,19 +868,20 @@ export class NexoClient {
   private conn: NexoConnection;
   private builder: RequestBuilder;
   private queues = new Map<string, NexoQueue<any>>();
-  private streams = new Map<string, NexoStream<any>>();
+  private streams = new Map<string, NexoStream<any>>(); //KAFKA style
+  private topics = new Map<string, NexoTopic<any>>(); //MQTT style
 
-  /** Store broker - access data structures (kv, hash, list, set) */
+  /** Store broker - access data structures (kv, hash) */
   public readonly store: NexoStore;
 
   /** PubSub broker - pub/sub operations */
-  public readonly pubsub: NexoPubSub;
+  private readonly pubsubBroker: NexoPubSub;
 
   constructor(options: NexoOptions = {}) {
     this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080, options);
     this.builder = new RequestBuilder(this.conn);
     this.store = new NexoStore(this.builder);
-    this.pubsub = new NexoPubSub(this.builder, this.conn);
+    this.pubsubBroker = new NexoPubSub(this.builder, this.conn);
   }
 
   static async connect(options?: NexoOptions): Promise<NexoClient> {
@@ -936,6 +917,16 @@ export class NexoClient {
       this.streams.set(key, s);
     }
     return s as NexoStream<T>;
+  }
+
+  /** PubSub broker - get or create a typed topic handle */
+  public pubsub<T = any>(name: string): NexoTopic<T> {
+    let t = this.topics.get(name);
+    if (!t) {
+      t = new NexoTopic<T>(this.pubsubBroker, name);
+      this.topics.set(name, t);
+    }
+    return t as NexoTopic<T>;
   }
 
   /** @internal Debug utilities */

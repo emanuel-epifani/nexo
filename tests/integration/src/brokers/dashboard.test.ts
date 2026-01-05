@@ -75,19 +75,25 @@ describe('NEXO Dashboard Prefill', () => {
 
         // 4. PUBSUB
         console.log("📢 Populating PubSub...");
-        // Syntax: nexo.pubsub.publish(topic, payload, options?)
-        await nexo.pubsub.publish('settings/global/theme', 'dark', { retain: true });
-        await nexo.pubsub.publish('settings/global/maintenance', 'false', { retain: true });
-        await nexo.pubsub.publish('sensors/kitchen/temp', '24.5', { retain: true });
-        await nexo.pubsub.publish('sensors/livingroom/temp', '22.0', { retain: true });
+        // Syntax: nexo.pubsub(topic).publish(payload, options?)
+        await nexo.pubsub('settings/global/theme').publish('dark', { retain: true });
+        await nexo.pubsub('settings/global/maintenance').publish('false', { retain: true });
+        await nexo.pubsub('sensors/kitchen/temp').publish('24.5', { retain: true });
+        await nexo.pubsub('sensors/livingroom/temp').publish('22.0', { retain: true });
 
         // Active Clients (Simulate by creating dummy connections)
         // The test runner itself is a client.
-        await nexo.pubsub.subscribe('sensors/#', (msg) => { });
+        await nexo.pubsub('sensors/#').subscribe((msg) => { });
 
         console.log("✅ Data Population Complete! Check Dashboard at http://localhost:8080");
 
         // Keep alive for a bit if running manually
-        // await new Promise(r => setTimeout(r, 60000)); 
-    }, 60000);
+        // await new Promise(r => setTimeout(r, 60000));
+    });
+
+
+
 });
+
+
+
