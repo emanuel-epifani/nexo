@@ -59,7 +59,7 @@ export interface QueueConfig {
 }
 
 export interface StreamConfig {
-  partitions?: number;
+  // Reserved for future options (e.g., retention)
 }
 
 export interface StreamSubscribeOptions {
@@ -648,19 +648,12 @@ class NexoPubSub {
 }
 
 // ========================================
-// STREAM BROKER
+// STREAM BROKER (Simplified - No Partitions)
 // ========================================
 
 export class NexoStream<T = any> {
-  private partitions: number[] = [];
-  private nextOffsets = new Map<number, bigint>();
-  private generationId: bigint = BigInt(0);
-
-  // Controls the lifecycle of polling loops.
-  // When rebalancing, we set active=false to stop old loops,
-  // then create a new controller for new loops.
-  private currentController: { active: boolean } = { active: false };
-  private retryTimer?: NodeJS.Timeout;
+  private nextOffset = BigInt(0);
+  private active = false;
 
   constructor(
     private builder: RequestBuilder,
@@ -668,16 +661,14 @@ export class NexoStream<T = any> {
     public readonly consumerGroup?: string
   ) { }
 
-  async create(config: StreamConfig = {}): Promise<this> {
+  async create(_config: StreamConfig = {}): Promise<this> {
     await this.builder.reset(Opcode.S_CREATE)
-      .writeU32(config.partitions ?? 0)
       .writeString(this.name)
       .send();
     return this;
   }
 
   async publish(data: T, options?: StreamPublishOptions): Promise<void> {
-    // S_PUB: [KeyLen:4][Key][TopicLen:4][Topic][Data]
     await this.builder.reset(Opcode.S_PUB)
       .writeString(options?.key ?? "")
       .writeString(this.name)
@@ -690,90 +681,36 @@ export class NexoStream<T = any> {
       throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
     }
 
-    // Stop any previous subscription logic
-    this.stopInternal();
-    this.currentController = { active: true };
+    // Stop any previous subscription
+    this.active = false;
+    await new Promise(r => setTimeout(r, 10)); // Let previous loop exit
+    this.active = true;
 
     const batchSize = options.batchSize || 100;
 
-    // Encapsulate Rejoin Logic
-    const performJoinAndPoll = async (isRetry = false) => {
-      if (!this.currentController.active) return;
+    // Join group and get starting offset
+    const res = await this.builder.reset(Opcode.S_JOIN)
+      .writeString(this.consumerGroup)
+      .writeString(this.name)
+      .send();
 
-      try {
-        // 1. Join Group
-        const res = await this.builder.reset(Opcode.S_JOIN)
-          .writeString(this.consumerGroup!)
-          .writeString(this.name)
-          .send();
+    // New simplified response: just [StartOffset:8]
+    this.nextOffset = res.reader.readU64();
 
-        // Parse Response
-        this.generationId = res.reader.readU64();
-        const numPartitions = res.reader.readU32();
-
-        const newPartitions: number[] = [];
-        this.partitions = newPartitions;
-
-        // Update Offsets from Server (Source of Truth)
-        for (let i = 0; i < numPartitions; i++) {
-          const pId = res.reader.readU32();
-          const startOffset = res.reader.readU64();
-          newPartitions.push(pId);
-          this.nextOffsets.set(pId, startOffset);
-        }
-
-        // 2. Start Polling for each partition
-        // Capture the controller for this generation of loops
-        const myController = this.currentController;
-        newPartitions.forEach(pId => {
-          this.pollPartition(pId, callback, batchSize, myController, () => performJoinAndPoll(true));
-        });
-
-      } catch (e) {
-        if (!isRetry) {
-          // First attempt failed? Throw to caller of subscribe()
-          throw e;
-        }
-
-        logger.error(`[SDK] Failed to join group: ${e}. Retrying in 1s...`);
-        if (this.currentController.active) {
-          this.retryTimer = setTimeout(() => performJoinAndPoll(true), 1000);
-        }
-      }
-    };
-
-    // Initial Join (not a retry, so it throws if fails)
-    await performJoinAndPoll(false);
+    // Start single polling loop
+    this.pollLoop(callback, batchSize);
 
     return {
-      stop: () => this.stopInternal()
+      stop: () => { this.active = false; }
     };
   }
 
-  private stopInternal() {
-    this.currentController.active = false;
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = undefined;
-    }
-  }
-
-  private async pollPartition(
-    pId: number,
-    callback: (data: T) => Promise<void> | void,
-    batchSize: number,
-    controller: { active: boolean },
-    rejoinCallback: () => Promise<void>
-  ) {
-    while ((this.builder as any).conn.isConnected && controller.active) {
-      const offset = this.nextOffsets.get(pId)!;
-
+  private async pollLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
+    while ((this.builder as any).conn.isConnected && this.active) {
       try {
-        // S_FETCH
         const res = await this.builder.reset(Opcode.S_FETCH)
           .writeString(this.name)
-          .writeU32(pId)
-          .writeU64(offset)
+          .writeU64(this.nextOffset)
           .writeU32(batchSize)
           .send();
 
@@ -784,17 +721,15 @@ export class NexoStream<T = any> {
           continue;
         }
 
-        let lastMsgOffset = offset;
-        let processedCount = 0;
+        let lastMsgOffset = this.nextOffset;
 
         for (let i = 0; i < numMsgs; i++) {
           const msgOffset = res.reader.readU64();
           lastMsgOffset = msgOffset;
 
-          const ts = res.reader.readU64();
+          res.reader.readU64(); // timestamp (skip)
           const keyLen = res.reader.readU32();
-          // skip key
-          if (keyLen > 0) res.reader.readBuffer(keyLen);
+          if (keyLen > 0) res.reader.readBuffer(keyLen); // skip key
 
           const payloadLen = res.reader.readU32();
           const payloadBuf = res.reader.readBuffer(payloadLen);
@@ -802,45 +737,27 @@ export class NexoStream<T = any> {
 
           try {
             await callback(data);
-            processedCount++;
           } catch (e) {
             logger.error("Error in stream callback", e);
           }
         }
 
-        if (processedCount > 0 && this.consumerGroup) {
-          const nextOffset = lastMsgOffset + BigInt(1);
-          this.nextOffsets.set(pId, nextOffset);
+        // Commit after processing batch
+        if (this.consumerGroup) {
+          const commitOffset = lastMsgOffset + BigInt(1);
+          this.nextOffset = commitOffset;
 
           await this.builder.reset(Opcode.S_COMMIT)
             .writeString(this.consumerGroup)
             .writeString(this.name)
-            .writeU32(pId)
-            .writeU64(nextOffset)
-            .writeU64(this.generationId)
+            .writeU64(commitOffset)
             .send();
         }
 
       } catch (e) {
-        if (!controller.active) return; // Stopped externally
-
-        if (e instanceof Error && e.message.includes("FENCED")) {
-          // logger.warn(`[SDK] Fenced on P${pId} (Gen ${this.generationId}). Triggering Rejoin...`);
-
-          // CRITICAL: Stop ALL loops for this subscription immediately
-          // because we are in an invalid state for the whole group
-          if (controller.active) {
-            controller.active = false; // Stop current loops
-            // Trigger Rejoin (which creates NEW controller)
-            setTimeout(() => {
-              rejoinCallback();
-            }, 50);
-          }
-          return; // Exit this loop
-        } else {
-          // logger.error("Stream poll error", e);
-          await new Promise(r => setTimeout(r, 1000));
-        }
+        if (!this.active) return;
+        logger.error("Stream poll error", e);
+        await new Promise(r => setTimeout(r, 1000));
       }
     }
   }

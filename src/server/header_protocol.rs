@@ -51,6 +51,8 @@ pub enum Response {
     Null,
     QueueData(uuid::Uuid, Bytes),
     AsyncConsume(tokio::sync::oneshot::Receiver<crate::brokers::queues::Message>),
+    /// Async stream operations (publish, read, join)
+    AsyncStream(tokio::sync::oneshot::Receiver<Result<Bytes, String>>),
 }
 
 // ========================================
@@ -92,6 +94,7 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
         Response::Data(data) => data.len(),
         Response::QueueData(_, data) => 16 + data.len(),
         Response::AsyncConsume(_) => 0, // Should not be called directly
+        Response::AsyncStream(_) => 0,  // Should not be called directly
     };
     
     let mut buf = BytesMut::with_capacity(10 + data_len);
@@ -119,6 +122,7 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
             buf.put_slice(data);
         }
         Response::AsyncConsume(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
+        Response::AsyncStream(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
     }
     buf.freeze()
 }

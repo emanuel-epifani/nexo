@@ -240,89 +240,93 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         }
 
         // ==========================================
-        // STREAM BROKER
+        // STREAM BROKER (MPSC Actor)
         // ==========================================
         
-        // S_CREATE: [Partitions:4][TopicLen:4][Topic]
+        // S_CREATE: [TopicLen:4][Topic]
         OP_S_CREATE => {
-            if body.len() < 4 { return Response::Error("Payload too short".to_string()); }
-            let partitions = u32::from_be_bytes(body[0..4].as_ref().try_into().unwrap());
-            let (topic, _) = match parse_string(&body[4..]) {
+            let (topic, _) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            engine.stream.create_topic(topic.to_string(), partitions);
+            engine.stream.create_topic(topic.to_string());
             Response::Ok
         }
 
         // S_PUB: [KeyLen:4][Key][TopicLen:4][Topic][Data]
         OP_S_PUB => {
-            // 1. Parse Key
             let (key_str, rest1) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
             let key = if key_str.is_empty() { None } else { Some(key_str.to_string()) };
             
-            // 2. Parse Topic
             let (topic, data_ptr) = match parse_string(rest1) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
             
-            // 3. Extract Data (Zero Copy)
-            // body = [KeyLen][Key][TopicLen][Topic][Data]
             let offset = body.len() - data_ptr.len();
+            let payload = body.slice(offset..);
+            let topic_name = topic.to_string();
             
-            match engine.stream.publish(topic, body.slice(offset..), key) {
-                Ok(offset_id) => {
-                    let bytes = offset_id.to_be_bytes();
-                    Response::Data(Bytes::from(bytes.to_vec()))
-                },
-                Err(e) => Response::Error(e),
-            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let stream = engine.stream.clone();
+            
+            tokio::spawn(async move {
+                let result = stream.publish(&topic_name, payload, key).await;
+                let response = match result {
+                    Ok(offset_id) => Ok(Bytes::from(offset_id.to_be_bytes().to_vec())),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(response);
+            });
+            
+            Response::AsyncStream(rx)
         }
         
-        // S_FETCH: [TopicLen:4][Topic][Partition:4][Offset:8][Limit:4]
+        // S_FETCH: [TopicLen:4][Topic][Offset:8][Limit:4]
         OP_S_FETCH => {
             let (topic, rest1) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            if rest1.len() < 16 { return Response::Error("Payload too short for fetch params".to_string()); }
+            if rest1.len() < 12 { return Response::Error("Payload too short for fetch params".to_string()); }
             
-            let partition = u32::from_be_bytes(rest1[0..4].as_ref().try_into().unwrap());
-            let offset = u64::from_be_bytes(rest1[4..12].as_ref().try_into().unwrap());
-            let limit = u32::from_be_bytes(rest1[12..16].as_ref().try_into().unwrap());
+            let offset = u64::from_be_bytes(rest1[0..8].as_ref().try_into().unwrap());
+            let limit = u32::from_be_bytes(rest1[8..12].as_ref().try_into().unwrap());
             
-            let msgs = engine.stream.read(topic, partition, offset, limit as usize, Some(&client_id.0));
+            let topic_name = topic.to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let stream = engine.stream.clone();
             
-            // Serialize messages: [NumMsgs:4] + ([Offset:8][Ts:8][KeyLen:4][Key][Len:4][Payload]...)
-            // This is getting complex for zero-copy.
-            // For now, let's just return JSON or a simplified binary list.
-            // Let's use binary.
-            
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
-            
-            for msg in msgs {
-                buf.extend_from_slice(&msg.offset.to_be_bytes());
-                buf.extend_from_slice(&msg.timestamp.to_be_bytes());
+            tokio::spawn(async move {
+                let msgs = stream.read(&topic_name, offset, limit as usize).await;
                 
-                let k = msg.key.as_deref().unwrap_or("");
-                buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
-                buf.extend_from_slice(k.as_bytes());
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
                 
-                buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                buf.extend_from_slice(&msg.payload);
-            }
+                for msg in msgs {
+                    buf.extend_from_slice(&msg.offset.to_be_bytes());
+                    buf.extend_from_slice(&msg.timestamp.to_be_bytes());
+                    
+                    let k = msg.key.as_deref().unwrap_or("");
+                    buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(k.as_bytes());
+                    
+                    buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                    buf.extend_from_slice(&msg.payload);
+                }
+                
+                let _ = tx.send(Ok(Bytes::from(buf)));
+            });
             
-            Response::Data(Bytes::from(buf))
+            Response::AsyncStream(rx)
         }
 
         // S_JOIN: [GroupLen:4][Group][TopicLen:4][Topic]
         OP_S_JOIN => {
-             let (group, rest1) = match parse_string(&body) {
+            let (group, rest1) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
@@ -331,25 +335,25 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Err(e) => return Response::Error(e),
             };
             
-            match engine.stream.join_group(group, topic, &client_id.0) {
-                Ok((generation_id, assigned)) => {
-                    // Return [GenerationID:8][Num:4][P1:4][Off1:8][P2:4][Off2:8]...
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&generation_id.to_be_bytes());
-
-                    let len_u32 = assigned.len() as u32;
-                    buf.extend_from_slice(&len_u32.to_be_bytes());
-                    for (p_id, start_offset) in assigned {
-                        buf.extend_from_slice(&p_id.to_be_bytes());
-                        buf.extend_from_slice(&start_offset.to_be_bytes());
-                    }
-                    Response::Data(Bytes::from(buf))
-                },
-                Err(e) => Response::Error(e),
-            }
+            let group_id = group.to_string();
+            let topic_name = topic.to_string();
+            let client = client_id.0.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let stream = engine.stream.clone();
+            
+            tokio::spawn(async move {
+                let result = stream.join_group(&group_id, &topic_name, &client).await;
+                let response = match result {
+                    Ok(start_offset) => Ok(Bytes::from(start_offset.to_be_bytes().to_vec())),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(response);
+            });
+            
+            Response::AsyncStream(rx)
         }
 
-        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8][GenerationID:8]
+        // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Offset:8]
         OP_S_COMMIT => {
             let (group, rest1) = match parse_string(&body) {
                 Ok(res) => res,
@@ -359,14 +363,11 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            // 4 + 8 + 8 = 20
-            if rest2.len() < 20 { return Response::Error("Payload too short for commit".to_string()); }
+            if rest2.len() < 8 { return Response::Error("Payload too short for commit".to_string()); }
             
-            let partition = u32::from_be_bytes(rest2[0..4].as_ref().try_into().unwrap());
-            let offset = u64::from_be_bytes(rest2[4..12].as_ref().try_into().unwrap());
-            let generation_id = u64::from_be_bytes(rest2[12..20].as_ref().try_into().unwrap());
+            let offset = u64::from_be_bytes(rest2[0..8].as_ref().try_into().unwrap());
             
-            match engine.stream.commit_offset(group, topic, partition, offset, generation_id, &client_id.0) {
+            match engine.stream.commit_offset(group, topic, offset, &client_id.0) {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

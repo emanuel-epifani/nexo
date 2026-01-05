@@ -30,7 +30,7 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
 }
 
 async fn get_state(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.get_global_snapshot();
+    let snapshot = engine.get_global_snapshot().await;
     axum::Json(snapshot)
 }
 

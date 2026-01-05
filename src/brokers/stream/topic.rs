@@ -1,119 +1,184 @@
-use std::sync::RwLock;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use bytes::Bytes;
+//! Topic Actor: Single-threaded message store with MPSC command channel
+//! Zero locks, maximum cache locality, Tokio-native
+
+use std::collections::VecDeque;
 use std::sync::Arc;
-use crate::brokers::stream::partition::Partition;
-use crate::brokers::stream::group::ConsumerGroup;
-use crate::brokers::stream::snapshot::TopicSummary;
+use std::time::{SystemTime, UNIX_EPOCH};
+use bytes::Bytes;
+use tokio::sync::{mpsc, oneshot, Notify};
+use crate::brokers::stream::message::Message;
 
-#[derive(Clone, Debug)]
-pub struct TopicConfig {
-    pub partitions: u32,
-    // Future: retention_ms, retention_bytes
+/// Commands sent to the Topic Actor
+pub enum TopicCommand {
+    Publish {
+        payload: Bytes,
+        key: Option<String>,
+        reply: oneshot::Sender<u64>,
+    },
+    Read {
+        offset: u64,
+        limit: usize,
+        reply: oneshot::Sender<Vec<Message>>,
+    },
+    /// Register for new data notifications (long-polling)
+    WaitForData {
+        offset: u64,
+        notify: Arc<Notify>,
+    },
+    /// Get current high watermark (next_offset)
+    GetHighWatermark {
+        reply: oneshot::Sender<u64>,
+    },
+    /// Snapshot for dashboard
+    GetStats {
+        reply: oneshot::Sender<(u64, u64)>, // (total_messages, high_watermark)
+    },
 }
 
-impl Default for TopicConfig {
-    fn default() -> Self {
-        Self {
-            partitions: 4,
-        }
-    }
-}
-
-impl TopicConfig {
-    pub fn merge_defaults(&mut self) {
-        if self.partitions == 0 {
-            self.partitions = 4;
-        }
-    }
-}
-
-pub struct Topic {
+/// Handle to communicate with a Topic Actor
+#[derive(Clone)]
+pub struct TopicHandle {
     pub name: String,
-    pub partitions: Vec<RwLock<Partition>>,
-    pub config: TopicConfig,
-    // For round-robin when no key is provided
-    next_partition_idx: AtomicUsize, 
+    tx: mpsc::Sender<TopicCommand>,
 }
 
-impl Topic {
-    pub fn new(name: String, config: TopicConfig) -> Self {
-        let mut partitions = Vec::with_capacity(config.partitions as usize);
-        for i in 0..config.partitions {
-            partitions.push(RwLock::new(Partition::new(i)));
-        }
-
-        // TODO: Start Background Retention Thread here
-        // Spawn a tokio task that periodically checks partitions
-        // and removes messages older than config.retention_ms
-
-        Self {
-            name,
-            partitions,
-            config,
-            next_partition_idx: AtomicUsize::new(0),
-        }
+impl TopicHandle {
+    pub fn new(name: String, buffer_size: usize) -> Self {
+        let (tx, rx) = mpsc::channel(buffer_size);
+        
+        let actor_name = name.clone();
+        tokio::spawn(async move {
+            topic_actor(actor_name, rx).await;
+        });
+        
+        Self { name, tx }
     }
-
-    pub fn publish(&self, payload: Bytes, key: Option<String>) -> u64 {
-        // 1. Choose Partition ID
-        let partition_idx = if let Some(k) = &key {
-            // Hash Key
-            let mut hasher = DefaultHasher::new();
-            k.hash(&mut hasher);
-            (hasher.finish() % self.partitions.len() as u64) as usize
-        } else {
-            // Round Robin
-            self.next_partition_idx.fetch_add(1, Ordering::Relaxed) % self.partitions.len()
-        };
-
-        // 2. Append (Lock scope reduced to single partition)
-        if let Some(part_lock) = self.partitions.get(partition_idx) {
-            let mut part = part_lock.write().unwrap();
-            part.append(payload, key)
-        } else {
-            // Should never happen if logic is correct
-            0
-        }
+    
+    pub async fn publish(&self, payload: Bytes, key: Option<String>) -> Result<u64, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        
+        self.tx.send(TopicCommand::Publish { payload, key, reply: reply_tx })
+            .await
+            .map_err(|_| "Topic actor closed")?;
+        
+        reply_rx.await.map_err(|_| "Topic actor dropped reply".to_string())
     }
-
-    pub fn read(&self, partition_id: u32, offset: u64, limit: usize) -> Option<Vec<crate::brokers::stream::message::Message>> {
-        if let Some(part_lock) = self.partitions.get(partition_id as usize) {
-            let part = part_lock.read().unwrap();
-            Some(part.read(offset, limit))
-        } else {
-            None // Partition not found
+    
+    pub async fn read(&self, offset: u64, limit: usize) -> Vec<Message> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        
+        if self.tx.send(TopicCommand::Read { offset, limit, reply: reply_tx }).await.is_err() {
+            return Vec::new();
         }
+        
+        reply_rx.await.unwrap_or_default()
     }
-
-    pub fn get_snapshot(&self, groups: Vec<Arc<ConsumerGroup>>) -> TopicSummary {
-        let mut total_messages = 0;
-        let mut partition_max_offsets = std::collections::HashMap::new();
-
-        for (i, p) in self.partitions.iter().enumerate() {
-            let part = p.read().unwrap();
-            let count = if part.next_offset >= part.start_offset {
-                part.next_offset - part.start_offset
-            } else {
-                0
-            };
-            total_messages += count;
-            partition_max_offsets.insert(i as u32, part.next_offset);
+    
+    pub async fn wait_for_data(&self, offset: u64, notify: Arc<Notify>) {
+        let _ = self.tx.send(TopicCommand::WaitForData { offset, notify }).await;
+    }
+    
+    pub async fn get_high_watermark(&self) -> u64 {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        
+        if self.tx.send(TopicCommand::GetHighWatermark { reply: reply_tx }).await.is_err() {
+            return 0;
         }
-
-        let group_summaries = groups.into_iter().map(|g| {
-            g.get_snapshot(&partition_max_offsets)
-        }).collect();
-
-        TopicSummary {
-            name: self.name.clone(),
-            partitions_count: self.partitions.len(),
-            retention_ms: 0, 
-            total_messages,
-            consumer_groups: group_summaries,
+        
+        reply_rx.await.unwrap_or(0)
+    }
+    
+    pub async fn get_stats(&self) -> (u64, u64) {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        
+        if self.tx.send(TopicCommand::GetStats { reply: reply_tx }).await.is_err() {
+            return (0, 0);
         }
+        
+        reply_rx.await.unwrap_or((0, 0))
     }
 }
 
+/// The actual Topic Actor loop - runs in a single Tokio task
+async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
+    let mut messages: VecDeque<Message> = VecDeque::new();
+    let mut next_offset: u64 = 0;
+    let start_offset: u64 = 0;
+    
+    // Waiters: (offset_they_want, notifier)
+    let mut waiters: Vec<(u64, Arc<Notify>)> = Vec::new();
+    
+    tracing::debug!(topic = %name, "Topic actor started");
+    
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            TopicCommand::Publish { payload, key, reply } => {
+                let offset = next_offset;
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                
+                messages.push_back(Message {
+                    offset,
+                    timestamp,
+                    payload,
+                    key,
+                });
+                next_offset += 1;
+                
+                // Notify all waiters that were waiting for this offset or earlier
+                waiters.retain(|(wait_offset, notify)| {
+                    if *wait_offset <= offset {
+                        notify.notify_one();
+                        false // Remove from list
+                    } else {
+                        true // Keep waiting
+                    }
+                });
+                
+                let _ = reply.send(offset);
+            }
+            
+            TopicCommand::Read { offset, limit, reply } => {
+                let result = if offset < start_offset {
+                    // Requested offset is before retention window, start from beginning
+                    messages.iter().take(limit).cloned().collect()
+                } else {
+                    let relative_idx = (offset - start_offset) as usize;
+                    if relative_idx >= messages.len() {
+                        Vec::new()
+                    } else {
+                        messages.iter().skip(relative_idx).take(limit).cloned().collect()
+                    }
+                };
+                
+                let _ = reply.send(result);
+            }
+            
+            TopicCommand::WaitForData { offset, notify } => {
+                // If data already available, notify immediately
+                if offset < next_offset {
+                    notify.notify_one();
+                } else {
+                    waiters.push((offset, notify));
+                }
+            }
+            
+            TopicCommand::GetHighWatermark { reply } => {
+                let _ = reply.send(next_offset);
+            }
+            
+            TopicCommand::GetStats { reply } => {
+                let total = if next_offset >= start_offset {
+                    next_offset - start_offset
+                } else {
+                    0
+                };
+                let _ = reply.send((total, next_offset));
+            }
+        }
+    }
+    
+    tracing::debug!(topic = %name, "Topic actor stopped");
+}

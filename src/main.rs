@@ -46,7 +46,7 @@ impl NexoEngine {
         }
     }
 
-    pub fn get_global_snapshot(&self) -> system_snapshot::SystemSnapshot {
+    pub async fn get_global_snapshot(&self) -> system_snapshot::SystemSnapshot {
         system_snapshot::SystemSnapshot {
             uptime_seconds: self.start_time.elapsed().as_secs(),
             server_time: chrono::Local::now().to_rfc3339(),
@@ -54,7 +54,7 @@ impl NexoEngine {
                 store: self.store.get_snapshot(),
                 queue: self.queue.get_snapshot(),
                 pubsub: self.pubsub.get_snapshot(),
-                stream: self.stream.get_snapshot(),
+                stream: self.stream.get_snapshot().await,
             },
         }
     }

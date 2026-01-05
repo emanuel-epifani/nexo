@@ -10,22 +10,13 @@ pub struct StreamBrokerSnapshot {
 #[derive(Serialize)]
 pub struct TopicSummary {
     pub name: String,
-    pub partitions_count: usize,
-    pub retention_ms: u64, // o "Infinite"
-    pub total_messages: u64, // Somma dei messaggi in tutte le partizioni
+    pub total_messages: u64,
     pub consumer_groups: Vec<GroupSummary>,
 }
 
 #[derive(Serialize)]
 pub struct GroupSummary {
     pub name: String,
-    pub pending_messages: u64, // La famosa "LAG": (Total msg - Last Committed)
+    pub pending_messages: u64,
     pub connected_clients: usize,
-    pub members: Vec<MemberDetail>,
-}
-
-#[derive(Serialize)]
-pub struct MemberDetail {
-    pub client_id: String,
-    pub partitions_assigned: Vec<u32>,
 }
