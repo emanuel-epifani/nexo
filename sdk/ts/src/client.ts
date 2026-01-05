@@ -319,10 +319,13 @@ class NexoConnection {
     this.flushScheduled = false;
     if (this.writeQueue.length === 0) return;
 
-    // Concatenate all queued buffers into single write (1 syscall)
-    const combined = Buffer.concat(this.writeQueue);
-    this.writeQueue.length = 0;
-    this.socket.write(combined);
+    // Use cork/uncork for scatter-gather I/O (writev) - zero-copy batching
+    const buffers = this.writeQueue;
+    this.writeQueue = [];
+
+    this.socket.cork();
+    for (const buf of buffers) this.socket.write(buf);
+    this.socket.uncork();
   };
 
   dispatch(
