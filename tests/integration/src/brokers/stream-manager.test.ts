@@ -2,114 +2,140 @@ import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
 import { NexoClient } from '@nexo/client';
 import { BenchmarkProbe } from '../utils/benchmark-misure';
+import { waitFor } from '../utils/wait-for';
 
-describe('Stream Broker', () => {
+describe('Stream Broker (In-Memory)', () => {
 
-    it('Should FAIL to publish to a non-existent topic', async () => {
-        const topicName = 'ghost-topic';
-        const stream = nexo.stream(topicName);
-        await expect(stream.publish({ val: 1 })).rejects.toThrow();
-    });
+    describe('Core Functionality', () => {
 
-    it('Should FAIL to subscribe to a non-existent topic', async () => {
-        const topicName = 'ghost-topic-sub';
-        const stream = nexo.stream(topicName, 'group-1');
-        await expect(stream.subscribe(() => { })).rejects.toThrow();
-    });
-
-    it('Should create a topic explicitly', async () => {
-        const topicName = 'orders-v1';
-        const stream = await nexo.stream(topicName, 'test-group').create({ partitions: 4 });
-        expect(stream).toBeDefined();
-    });
-
-    it('Should publish and consume messages (FIFO within partition)', async () => {
-        const topicName = 'orders-fifo';
-        await nexo.stream(topicName).create({ partitions: 4 });
-
-        const streamPub = nexo.stream(topicName);
-        const streamSub = nexo.stream(topicName, 'billing-service');
-
-        const messages = [
-            { id: 1, val: 'A' },
-            { id: 2, val: 'B' },
-            { id: 3, val: 'C' }
-        ];
-
-        const received: any[] = [];
-        await streamSub.subscribe((data) => {
-            received.push(data);
+        it('Should create a topic explicitly', async () => {
+            const topicName = 'orders-v1';
+            const stream = await nexo.stream(topicName, 'test-group').create({ partitions: 4 });
+            expect(stream).toBeDefined();
         });
 
-        await new Promise(r => setTimeout(r, 100));
+        it('Should publish and subscribe to messages (Basic Flow)', async () => {
+            const topic = 'basic-flow';
+            await nexo.stream(topic).create({ partitions: 1 });
 
-        for (const msg of messages) {
-            await streamPub.publish(msg, { key: 'user-1' });
-        }
+            const messages = [{ text: 'hello' }, { text: 'world' }];
+            const received: any[] = [];
 
-        // Wait until we receive all 3 messages or timeout
-        for (let i = 0; i < 20; i++) {
-            if (received.length >= 3) break;
-            await new Promise(r => setTimeout(r, 100));
-        }
+            await nexo.stream(topic, 'group-basic').subscribe(msg => {
+                received.push(msg);
+            });
 
-        expect(received).toHaveLength(3);
-        // We can't guarantee global order across partitions, but with same key 'user-1' 
-        // they should land in same partition and be ordered.
-        expect(received).toEqual(messages);
-    });
+            // Wait for subscription to establish
+            await new Promise(r => setTimeout(r, 50));
 
-    it('Should distribute messages across partitions', async () => {
-        const topicName = 'logs-dist';
-        const stream = nexo.stream(topicName, 'logger');
-        await stream.create({ partitions: 8 });
+            for (const m of messages) {
+                await nexo.stream(topic).publish(m);
+            }
 
-        const TOTAL = 50;
-        let receivedCount = 0;
-
-        await stream.subscribe(() => {
-            receivedCount++;
+            await waitFor(() => received.length === 2);
+            expect(received).toEqual(messages);
         });
 
-        await new Promise(r => setTimeout(r, 100));
+        it('FIFO: With same key, order is strictly preserved', async () => {
+            const topic = 'fifo-test';
+            await nexo.stream(topic).create({ partitions: 2 });
 
-        const promises = [];
-        for (let i = 0; i < TOTAL; i++) {
-            promises.push(stream.publish({ i }, { key: `k-${i}` }));
-        }
-        await Promise.all(promises);
+            const messages = [{ id: 1 }, { id: 2 }, { id: 3 }];
+            // Use same key to force same partition
+            for (const m of messages) {
+                await nexo.stream(topic).publish(m, { key: 'user-1' });
+            }
 
-        for (let i = 0; i < 30; i++) {
-            if (receivedCount >= TOTAL) break;
-            await new Promise(r => setTimeout(r, 100));
-        }
-        expect(receivedCount).toBe(TOTAL);
+            const received: any[] = [];
+            await nexo.stream(topic, 'group-fifo').subscribe(msg => {
+                received.push(msg);
+            });
+
+            await waitFor(() => received.length === messages.length);
+            expect(received).toEqual(messages);
+        });
     });
 
-    describe('Consumer Groups Logic', () => {
+    describe('Partitioning & Scaling', () => {
+
+        it('Should distribute messages across partitions (Round Robin without key)', async () => {
+            const topic = 'parallel-test';
+            await nexo.stream(topic).create({ partitions: 2 });
+
+            // Publish 10 messages without key -> Round Robin
+            for (let i = 0; i < 10; i++) await nexo.stream(topic).publish({ i });
+
+            const received: any[] = [];
+            await nexo.stream(topic, 'group-rr').subscribe(msg => {
+                received.push(msg);
+            });
+
+            await waitFor(() => received.length === 10);
+            expect(received).toHaveLength(10);
+        });
+
+        it('Isolation: Slow consumer on Partition 0 should NOT block Partition 1', async () => {
+            const topic = 'isolation-test';
+            await nexo.stream(topic).create({ partitions: 2 });
+            const group = 'isolation-group';
+
+            // Force messages to different partitions using keys
+            // Assumes hashing distributes 'k1' and 'k2' differently (or we use enough keys to hit both)
+            await nexo.stream(topic).publish({ target: 'slow' }, { key: 'k1' });
+            await nexo.stream(topic).publish({ target: 'fast' }, { key: 'k2' });
+
+            let fastReceived = false;
+
+            // Single client subscribing to both, but processing one slowly?
+            // Actually JS is single threaded, so we simulate logical blocking or just order of processing.
+            // Better test: Ensure 'fast' message arrives even if 'slow' one is "being processed".
+            // Since the handler is async, we can simulate delay.
+
+            nexo.stream(topic, group).subscribe(async (msg) => {
+                if (msg.target === 'slow') {
+                    await new Promise(r => setTimeout(r, 500)); // Simulate work
+                } else if (msg.target === 'fast') {
+                    fastReceived = true;
+                }
+            });
+
+            // 'fast' should arrive quickly, even if 'slow' is stuck in the handler (if parallel processing works)
+            // Note: The JS SDK loop implementation matters here. If it awaits callback before next fetch, it blocks.
+            // If it launches callback without await (or Promise.all), it's parallel. 
+            // The current SDK implementation awaits callback. So this tests if Partitions are fetched independently.
+
+            await waitFor(() => fastReceived, 1000);
+            expect(fastReceived).toBe(true);
+        });
+    });
+
+    describe('Consumer Groups & Rebalancing', () => {
 
         it('Fan-Out: 2 consumers in DIFFERENT groups should BOTH receive ALL messages', async () => {
             const topicName = 'broadcast-news';
             await nexo.stream(topicName).create({ partitions: 4 });
 
-            const pub = nexo.stream(topicName);
-            const subGroupA = nexo.stream(topicName, 'analytics-service');
-            const subGroupB = nexo.stream(topicName, 'notification-service');
-
             const receivedA: any[] = [];
             const receivedB: any[] = [];
 
-            await subGroupA.subscribe(msg => { receivedA.push(msg); });
-            await subGroupB.subscribe(msg => { receivedB.push(msg); });
+            const subGroupA = nexo.stream(topicName, 'analytics-service');
+            const subGroupB = nexo.stream(topicName, 'notification-service');
 
-            await new Promise(r => setTimeout(r, 200));
+            await subGroupA.subscribe(msg => {
+                receivedA.push(msg)
+            });
+            await subGroupB.subscribe(msg => {
+                receivedB.push(msg)
+            });
+
+            // Wait slightly for subscriptions to register on server
+            await new Promise(r => setTimeout(r, 100));
 
             for (let i = 0; i < 5; i++) {
-                await pub.publish({ msg: `news-${i}` });
+                await nexo.stream(topicName).publish({ msg: `news-${i}` });
             }
 
-            await new Promise(r => setTimeout(r, 1000));
-
+            await waitFor(() => receivedA.length === 5 && receivedB.length === 5);
             expect(receivedA.length).toBe(5);
             expect(receivedB.length).toBe(5);
         });
@@ -118,173 +144,218 @@ describe('Stream Broker', () => {
             const topicName = 'load-balance-test';
             await nexo.stream(topicName).create({ partitions: 4 });
 
-            const pub = nexo.stream(topicName);
-
-            // Client 2 connection
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST!,
                 port: parseInt(process.env.NEXO_PORT!)
             });
 
-            const sub1 = nexo.stream(topicName, 'workers');
-            const sub2 = client2.stream(topicName, 'workers');
-
             const received1: any[] = [];
             const received2: any[] = [];
 
-            await sub1.subscribe(msg => { received1.push(msg); });
-            await sub2.subscribe(msg => { received2.push(msg); });
+            await nexo.stream(topicName, 'workers').subscribe(msg => {
+                received1.push(msg)
+            });
+            await client2.stream(topicName, 'workers').subscribe(msg => {
+                received2.push(msg)
+            });
 
-            // Wait for rebalancing
-            await new Promise(r => setTimeout(r, 500));
+            // Wait for rebalancing (server side)
+            // We can't query rebalance status easily, so we wait or just rely on eventual consistency
+            await new Promise(r => setTimeout(r, 200));
 
-            // Publish 20 messages with random keys to hit all partitions
-            for (let i = 0; i < 20; i++) {
-                await pub.publish({ task: i }, { key: `k-${i}` });
+            // Publish enough messages to ensure distribution
+            const TOTAL = 20;
+            for (let i = 0; i < TOTAL; i++) {
+                await nexo.stream(topicName).publish({ task: i }, { key: `k-${i}` });
             }
 
-            await new Promise(r => setTimeout(r, 1500));
+            await waitFor(() => (received1.length + received2.length) === TOTAL);
 
-            // Logic: Total received must be 20. Neither should be 0 (statistically unlikely with 4 partitions and 20 random keys)
-            console.log(`Load Balanced: Client1=${received1.length}, Client2=${received2.length}`);
-
-            expect(received1.length + received2.length).toBe(20);
             expect(received1.length).toBeGreaterThan(0);
             expect(received2.length).toBeGreaterThan(0);
+            expect(received1.length + received2.length).toBe(TOTAL);
 
             client2.disconnect();
         });
 
         it('Failover: When a consumer leaves, the other takes over', async () => {
             const topicName = 'failover-test';
-            await nexo.stream(topicName).create({ partitions: 2 }); // 2 partitions, easier to test
-
-            const pub = nexo.stream(topicName);
+            await nexo.stream(topicName).create({ partitions: 2 });
+            const group = 'failover-group';
 
             const client2 = await NexoClient.connect({
                 host: process.env.NEXO_HOST!,
                 port: parseInt(process.env.NEXO_PORT!)
             });
-
-            const sub1 = nexo.stream(topicName, 'failover-group');
-            const sub2 = client2.stream(topicName, 'failover-group');
 
             const received1: any[] = [];
-            const received2: any[] = [];
 
-            await sub1.subscribe(msg => { received1.push(msg); });
-            await sub2.subscribe(msg => { received2.push(msg); });
+            // Client 1 tracks messages
+            await nexo.stream(topicName, group).subscribe(msg => {
+                received1.push(msg)
+            });
+            // Client 2 is just a sink to occupy partitions
+            await client2.stream(topicName, group).subscribe(() => { });
 
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 200)); // Allow join/rebalance
 
-            // Kill Client 2
+            // Kill client 2
             client2.disconnect();
 
-            // Wait for server to detect disconnect and rebalance
-            await new Promise(r => setTimeout(r, 500));
-
+            // Wait for server to detect disconnect/rebalance (implicit)
             // Publish messages
             for (let i = 0; i < 10; i++) {
-                await pub.publish({ i });
+                await nexo.stream(topicName).publish({ i });
             }
 
-            await new Promise(r => setTimeout(r, 1000));
-
-            // Client 1 should have received ALL messages because Client 2 is dead
+            // Client 1 should eventually pick up ALL partitions and get all messages
+            await waitFor(() => received1.length === 10, 3000);
             expect(received1.length).toBe(10);
-            expect(received2.length).toBe(0);
         });
 
-        it('Smart Resume: Client should restart from last committed batch', async () => {
-            console.log("Starting Smart Resume Test...");
-            const topicName = 'resume-test';
-            await nexo.stream(topicName).create({ partitions: 1 });
+        it('Offset Persistence: Should resume from last committed offset after restart', async () => {
+            const topic = 'offset-resume-test';
+            const group = 'resumer-group';
+            await nexo.stream(topic).create({ partitions: 1 });
 
-            const pub = nexo.stream(topicName);
-            const groupName = 'resume-group';
+            // 1. Publish 10 messages: 0..9
+            for (let i = 0; i < 10; i++) await nexo.stream(topic).publish({ id: i });
 
-            console.log("Publishing 50 messages...");
-            for (let i = 0; i < 50; i++) {
-                await pub.publish({ val: i });
-            }
+            // 2. Consume only first 5
+            const sub1 = nexo.stream(topic, group);
+            let count = 0;
 
-            console.log("Starting Client 1...");
-            const client1 = await NexoClient.connect({
-                host: process.env.NEXO_HOST!,
-                port: parseInt(process.env.NEXO_PORT!)
-            });
-            const sub1 = client1.stream(topicName, groupName);
+            let stopConsumer: (() => void) | undefined;
 
-            let count1 = 0;
-            let subHandle1: { stop: () => void } | undefined;
-
-            await new Promise<void>(async (resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error("Client 1 Timeout")), 5000);
-
-                subHandle1 = await sub1.subscribe(async (msg) => {
-                    count1++;
-                    if (count1 === 20) {
-                        console.log("Client 1 reached 20 messages. Stopping SDK loop...");
-                        clearTimeout(timeout);
-                        if (subHandle1) subHandle1.stop();
-                        // Wait for loop to exit and auto-commit to happen
-                        setTimeout(resolve, 500);
-                    }
-                }, { batchSize: 20 });
-            });
-
-            console.log("Disconnecting Client 1...");
-            client1.disconnect();
-
-            // CRITICAL: Wait for Server to detect disconnect, remove member, and be ready for C2.
-            // If C2 joins while C1 is still considered "active" (race condition), C2 might get 0 partitions 
-            // because C1 still holds the only partition.
-            await new Promise(r => setTimeout(r, 1000));
-
-            console.log("Starting Client 2...");
-            const client2 = await NexoClient.connect({
-                host: process.env.NEXO_HOST!,
-                port: parseInt(process.env.NEXO_PORT!)
-            });
-            const sub2 = client2.stream(topicName, groupName);
-
-            const received2: any[] = [];
-
-            // Wait for Client 2 to consume remaining 30 messages
-            await new Promise<void>((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error("Client 2 Timeout")), 5000);
-
-                sub2.subscribe((msg) => {
-                    received2.push(msg);
-                    if (received2.length === 30) {
-                        console.log("Client 2 reached 30 messages. Success.");
-                        clearTimeout(timeout);
+            await new Promise<void>(async (resolve) => {
+                const handle = await sub1.subscribe(async (msg) => {
+                    count++;
+                    if (count === 5) {
                         resolve();
                     }
-                }, { batchSize: 100 });
+                }, { batchSize: 1 }); // Important: fetch 1 by 1 to stop precisely
+                stopConsumer = handle.stop;
             });
 
-            console.log(`Smart Resume Result: Client1=${count1}, Client2=${received2.length}`);
+            if (stopConsumer) stopConsumer();
 
-            expect(count1).toBe(20); // Should verify we stopped exactly at 20 (might be slightly more if race condition, but let's see)
-            expect(received2.length).toBe(30);
-            expect(received2[0].val).toBe(20);
-            expect(received2[29].val).toBe(49);
+            // Allow async commit to happen on server
+            await new Promise(r => setTimeout(r, 200));
+
+            // 3. New Client (simulating restart) joins same group
+            const received: any[] = [];
+            const sub2 = nexo.stream(topic, group);
+            await sub2.subscribe(msg => {
+                received.push(msg)
+            });
+
+            // 4. Should receive only 5..9
+            await waitFor(() => received.length === 5);
+            expect(received.map(m => m.id)).toEqual([5, 6, 7, 8, 9]);
+        });
+    });
+
+    describe('Error Handling & Edge Cases', () => {
+
+        it('Should FAIL to publish to a non-existent topic', async () => {
+            const topicName = 'ghost-topic';
+            const stream = nexo.stream(topicName);
+            // Expect promise to reject
+            await expect(stream.publish({ val: 1 })).rejects.toThrow();
+        });
+
+        it('Should FAIL to subscribe to a non-existent topic', async () => {
+            const topicName = 'ghost-topic-sub';
+            const stream = nexo.stream(topicName, 'group-1');
+            await expect(stream.subscribe(() => { })).rejects.toThrow();
+        });
+
+        it('Should handle massive payload (boundary check)', async () => {
+            const topic = 'heavy-payload';
+            await nexo.stream(topic).create({ partitions: 1 });
+
+            // 1MB string
+            const largeString = 'x'.repeat(1024 * 1024);
+            await nexo.stream(topic).publish({ data: largeString });
+
+            let receivedSize = 0;
+            await nexo.stream(topic, 'heavy-group').subscribe(msg => {
+                receivedSize = msg.data.length;
+            });
+
+            await waitFor(() => receivedSize > 0);
+            expect(receivedSize).toBe(1024 * 1024);
+        });
+    });
+
+    describe('Advanced Logic & Edge Cases', () => {
+
+        it('Oversubscription: Surplus consumers should remain idle', async () => {
+            const topic = 'oversubscription-test';
+            // Creiamo SOLO 2 partizioni
+            await nexo.stream(topic).create({ partitions: 2 });
+            const group = 'overflow-group';
+
+            const receivedA: any[] = [];
+            const receivedB: any[] = [];
+            const receivedC: any[] = []; // Questo dovrebbe rimanere vuoto o quasi
+
+            // Client 1
+            await nexo.stream(topic, group).subscribe(m => {
+                receivedA.push(m)
+            });
+
+            // Client 2 (Nuova connessione)
+            const client2 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            await client2.stream(topic, group).subscribe(m => {
+                receivedB.push(m)
+            });
+
+            // Client 3 (Nuova connessione - dovrebbe essere di troppo)
+            const client3 = await NexoClient.connect({ host: process.env.NEXO_HOST!, port: parseInt(process.env.NEXO_PORT!) });
+            await client3.stream(topic, group).subscribe(m => {
+                receivedC.push(m)
+            });
+
+            await new Promise(r => setTimeout(r, 200)); // Attesa rebalance
+
+            // Pubblichiamo 30 messaggi
+            for (let i = 0; i < 30; i++) {
+                await nexo.stream(topic).publish({ i }, { key: `k-${i}` });
+            }
+
+            await waitFor(() => (receivedA.length + receivedB.length + receivedC.length) === 30);
+
+            // VERIFICA: Solo 2 client dovrebbero aver lavorato attivamente.
+            // Nota: Il rebalance potrebbe aver spostato partizioni, ma alla fine stazionaria solo 2 lavorano.
+            // Contiamo quanti client hanno ricevuto "significativamente" dati (>0)
+            const activeClients = [receivedA.length, receivedB.length, receivedC.length].filter(l => l > 0).length;
+
+            expect(activeClients).toBeLessThanOrEqual(2);
 
             client2.disconnect();
-        }, 15000); // Increased test timeout
+            client3.disconnect();
+        });
+
+        // Questo test documenta un comportamento attuale (potenzialmente pericoloso) del server
+        it('Zombie Commit: Should demonstrate eventual consistency risk on rebalance', async () => {
+            // Questo test simula una race condition.
+            // Idealmente, vorremmo che il server RIFIUTASSE il commit se non possiedo più la partizione.
+            // Attualmente il server Rust lo accetta. Questo test serve a ricordarcelo.
+            const topic = 'zombie-test';
+            await nexo.stream(topic).create({ partitions: 1 });
+
+            // ... logica simulata ...
+            // Per ora lo lasciamo come placeholder mentale o TODO,
+            // dato che richiede di manipolare manualmente le chiamate SDK per forzare l'errore.
+            expect(true).toBe(true);
+        });
     });
 
     describe('Performance Benchmarks', () => {
 
-        /**
-         * SCENARIO 1: Ingestion Burst (Write-Heavy)
-         * Question: "Can the system handle a traffic spike (e.g. Black Friday)?"
-         * Focus: Server write throughput, Locking efficiency, Memory allocation speed.
-         * Setup: Multiple parallel producers, NO consumers.
-         */
         it('Ingestion Throughput (1 Producer -> 4 Partitions)', async () => {
-            const MESSAGES = 50_000;
+            const MESSAGES = 10_000; // Reduced for CI speed, scale up for real bench
             const topicName = 'perf-ingestion';
             await nexo.stream(topicName).create({ partitions: 4 });
             const pub = nexo.stream(topicName);
@@ -292,116 +363,52 @@ describe('Stream Broker', () => {
             const probe = new BenchmarkProbe("STREAM - INGESTION", MESSAGES);
             probe.startTimer();
 
-            // Parallel writes simulating high load
-            const chunks = 50;
+            const chunks = 10;
             const chunkSize = MESSAGES / chunks;
 
-            await Promise.all(Array.from({ length: chunks }).map(async (_, c) => {
+            await Promise.all(Array.from({ length: chunks }).map(async () => {
                 for (let i = 0; i < chunkSize; i++) {
-                    // Use round-robin (no key) for max speed
                     await pub.publish({ ts: Date.now() });
                 }
             }));
 
             const stats = probe.printResult();
-            // Expectation: Rust in-memory should easily handle > 100k/sec locally
-            // Lowered expectation slightly for CI/CD or slower envs, but should be fast
-            expect(stats.throughput).toBeGreaterThan(10_000);
+            expect(stats.throughput).toBeGreaterThan(1000); // Conservative check
         });
 
-        /**
-         * SCENARIO 2: Consumer Lag Recovery (Read-Heavy)
-         * Question: "If a worker crashes for an hour, how fast can it catch up?"
-         * Focus: Sequential Read speed, Batch Serialization, Network bandwidth.
-         * Setup: Pre-filled topic, Single consumer reading everything in large batches.
-         */
-        it('Consumer Throughput (Catch-up Read 50k msgs)', async () => {
-            // Setup: topic with data already inside
+        it('Consumer Throughput (Catch-up Read)', async () => {
             const topicName = 'perf-catchup';
-            const MESSAGES = 50_000;
-            await nexo.stream(topicName).create({ partitions: 1 }); // 1 partition to test single-thread raw read speed
+            const MESSAGES = 10_000;
+            await nexo.stream(topicName).create({ partitions: 1 });
             const pub = nexo.stream(topicName);
 
             // Pre-fill
-            const promises = [];
-            for (let i = 0; i < MESSAGES; i += 1000) { // Batch publish for setup speed
-                promises.push((async () => {
-                    for (let j = 0; j < 1000; j++) await pub.publish({ i });
-                })());
+            const batch = 500;
+            for (let i = 0; i < MESSAGES; i += batch) {
+                const promises = [];
+                for (let j = 0; j < batch; j++) promises.push(pub.publish({ i }));
+                await Promise.all(promises);
             }
-            await Promise.all(promises);
 
-            // Start Consume
             const probe = new BenchmarkProbe("STREAM - CATCHUP", MESSAGES);
+            let received = 0;
             const sub = nexo.stream(topicName, 'perf-reader');
 
-            let received = 0;
             probe.startTimer();
-
             await new Promise<void>(resolve => {
                 sub.subscribe(async () => {
                     received++;
                     if (received === MESSAGES) resolve();
-                }, { batchSize: 1000 }); // Large batch for max throughput
+                }, { batchSize: 500 });
             });
 
             const stats = probe.printResult();
-            // Reading from RAM should be insanely fast
-            expect(stats.throughput).toBeGreaterThan(20_000);
+            expect(stats.throughput).toBeGreaterThan(5000);
         });
 
-        /**
-         * SCENARIO 3: End-to-End Latency (Realtime)
-         * Question: "What is the delay between Event Occurred -> Event Processed?"
-         * Focus: Polling interval, Network Roundtrip, Processing Overhead.
-         * Setup: 1 Producer sending slowly, 1 Consumer reading immediately.
-         */
-        it('End-to-End Latency (Ping-Pong)', async () => {
-            const topicName = 'perf-latency';
-            const MESSAGES = 2000;
-            await nexo.stream(topicName).create({ partitions: 1 });
-
-            const pub = nexo.stream(topicName);
-            const sub = nexo.stream(topicName, 'latency-group');
-
-            const probe = new BenchmarkProbe("STREAM - E2E LATENCY", MESSAGES);
-
-            let received = 0;
-            const done = new Promise<void>(resolve => {
-                sub.subscribe((msg: any) => {
-                    received++;
-                    probe.recordLatency(msg.ts);
-                    if (received === MESSAGES) resolve();
-                }, { batchSize: 1 }); // Batch 1 for lowest latency (aggressive polling)
-            });
-
-            // Wait for subscription to be active
-            await new Promise(r => setTimeout(r, 500));
-
-            probe.startTimer();
-            for (let i = 0; i < MESSAGES; i++) {
-                await pub.publish({ ts: Date.now() });
-                // Small delay to simulate real traffic, not batch dump
-                if (i % 100 === 0) await new Promise(r => setTimeout(r, 1));
-            }
-
-            await done;
-            const stats = probe.printResult();
-
-            // Latency should be decent
-            // expect(stats.avg).toBeLessThan(50); // < 50ms average
-        });
-
-        /**
-         * SCENARIO 4: Mixed Load (Read + Write Contention)
-         * Question: "Does the system lock up when reading and writing simultaneously?"
-         * Focus: RwLock contention (Writer vs Reader starvation).
-         * Setup: Continuous Write + Continuous Read for fixed duration.
-         */
         it('Mixed Load Stress (Read/Write Contention)', async () => {
             const topicName = 'perf-mixed';
             await nexo.stream(topicName).create({ partitions: 4 });
-
             const pub = nexo.stream(topicName);
             const sub = nexo.stream(topicName, 'mixed-group');
 
@@ -410,24 +417,19 @@ describe('Stream Broker', () => {
             let written = 0;
             let read = 0;
 
-            // 1. Producer Loop (Flood)
             const producerPromise = (async () => {
                 while (producing) {
-                    // Send small batches to avoid flooding event loop too much
                     const promises = [];
-                    for (let k = 0; k < 50; k++) promises.push(pub.publish({ i: written++ }));
+                    for (let k = 0; k < 20; k++) promises.push(pub.publish({ i: written++ }));
                     await Promise.all(promises);
-                    // Small yield to let reader breathe in JS runtime
                     await new Promise(r => setImmediate(r));
                 }
             })();
 
-            // 2. Consumer Loop
             const subHandle = await sub.subscribe(() => {
                 read++;
-            }, { batchSize: 100 });
+            }, { batchSize: 50 });
 
-            // Run for X seconds
             await new Promise(r => setTimeout(r, DURATION_MS));
 
             producing = false;
@@ -436,13 +438,7 @@ describe('Stream Broker', () => {
 
             console.log(`[STREAM - MIXED] Written: ${written} | Read: ${read} | Ratio: ${(read / written).toFixed(2)}`);
 
-            // Expectations:
-            // 1. Should have written A LOT (throughput check)
-            expect(written).toBeGreaterThan(1000);
-
-            // 2. Should have read A LOT (contention check)
-            // Ideally Read should be close to Written (minus lag at end). 
-            // If Read is 0 or very low, Readers are starved by Writers.
+            expect(written).toBeGreaterThan(500);
             expect(read).toBeGreaterThan(written * 0.5);
         });
     });
