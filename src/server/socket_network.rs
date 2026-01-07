@@ -40,8 +40,11 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Bytes>();
     
-    // Register with PubSub Manager
-    engine.pubsub.connect(client_id.clone(), push_tx);
+    // Register with PubSub Manager & Hold the Guard
+    let _pubsub_guard = engine.pubsub.connect(client_id.clone(), push_tx);
+
+    // Register with Stream Manager & Hold the Guard
+    let _stream_guard = engine.stream.register_session(client_id.0.clone());
     
     // Bridge Task: Forward Pushes to Main Write Loop
     let tx_bridge = tx.clone();
@@ -151,8 +154,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     }
 
     // Cleanup
-    engine.pubsub.disconnect(&client_id);
-    engine.stream.disconnect(&client_id.0);
+    // RAII Guards (_pubsub_guard, _stream_guard) will automatically handle cleanup
+    // when this function returns or panics.
+
     drop(tx);
     let _ = write_task.await;
     Ok(())

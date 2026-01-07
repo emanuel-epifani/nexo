@@ -6,7 +6,7 @@
 //! - Active Push to connected clients
 //! - Retained Messages (Last Value Caching)
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use bytes::{Bytes, BytesMut, BufMut};
@@ -15,6 +15,19 @@ use dashmap::DashMap;
 // ClientId represents a connected client
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientId(pub String);
+
+/// Session Guard for PubSub
+/// Automatically disconnects the client when dropped (RAII pattern)
+pub struct PubSubSession {
+    client_id: ClientId,
+    manager: Arc<PubSubManager>,
+}
+
+impl Drop for PubSubSession {
+    fn drop(&mut self) {
+        self.manager.disconnect(&self.client_id);
+    }
+}
 
 /// A Node in the Radix Tree (Trie) for pub-sub routing
 struct Node {
@@ -55,6 +68,10 @@ pub struct PubSubManager {
     
     // Registry of active client connections to send messages to
     clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
+
+    // Reverse index: ClientId -> Set of subscribed topics
+    // Used for efficient cleanup on disconnect
+    client_subscriptions: DashMap<ClientId, HashSet<String>>,
 }
 
 impl PubSubManager {
@@ -62,22 +79,46 @@ impl PubSubManager {
         Self {
             router: RwLock::new(Node::new()),
             clients: DashMap::new(),
+            client_subscriptions: DashMap::new(),
         }
     }
 
     /// Register a new client connection
-    pub fn connect(&self, client_id: ClientId, sender: mpsc::UnboundedSender<Bytes>) {
-        self.clients.insert(client_id, sender);
+    /// Returns a Session Guard that automatically handles cleanup when dropped.
+    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Bytes>) -> PubSubSession {
+        self.clients.insert(client_id.clone(), sender);
+        
+        PubSubSession {
+            client_id,
+            manager: self.clone(),
+        }
     }
 
-    /// Remove a client connection
+    /// Remove a client connection and cleanup all subscriptions
     pub fn disconnect(&self, client_id: &ClientId) {
         self.clients.remove(client_id);
+
+        // Cleanup subscriptions using reverse index
+        // We acquire the lock ONCE and clean everything (Simpler Single Lock Strategy)
+        if let Some((_, topics)) = self.client_subscriptions.remove(client_id) {
+            let mut root = self.router.write().unwrap();
+            for topic in topics {
+                let parts: Vec<&str> = topic.split('/').collect();
+                // We ignore the return value here because we can't remove the root node
+                Self::remove_recursive(&mut *root, &parts, client_id);
+            }
+        }
     }
 
     /// Subscribe a client to a topic pattern
     /// If the pattern matches existing nodes with retained messages, they are sent immediately.
     pub fn subscribe(&self, topic: &str, client: ClientId) {
+        // 0. Update reverse index
+        self.client_subscriptions
+            .entry(client.clone())
+            .or_insert_with(HashSet::new)
+            .insert(topic.to_string());
+
         let mut root = self.router.write().unwrap();
         let parts: Vec<&str> = topic.split('/').collect();
         
@@ -312,27 +353,53 @@ impl PubSubManager {
         }
     }
 
-    fn remove_recursive(node: &mut Node, parts: &[&str], client: &ClientId) {
+    fn is_node_empty(node: &Node) -> bool {
+        node.subscribers.is_empty()
+            && node.children.is_empty()
+            && node.plus_child.is_none()
+            && node.hash_child.is_none()
+            && node.last_retained.read().unwrap().is_none()
+    }
+
+    fn remove_recursive(node: &mut Node, parts: &[&str], client: &ClientId) -> bool {
         if parts.is_empty() {
             node.subscribers.remove(client);
-            return;
+            return Self::is_node_empty(node);
         }
 
         let head = parts[0];
         let tail = &parts[1..];
+        let mut should_remove_child = false;
 
         if head == "#" {
              if let Some(ref mut hash_node) = node.hash_child {
-                 hash_node.subscribers.remove(client);
+                 if Self::remove_recursive(hash_node, tail, client) {
+                     should_remove_child = true;
+                 }
+             }
+             if should_remove_child {
+                 node.hash_child = None;
              }
         } else if head == "+" {
              if let Some(ref mut plus_node) = node.plus_child {
-                 Self::remove_recursive(plus_node, tail, client);
+                 if Self::remove_recursive(plus_node, tail, client) {
+                     should_remove_child = true;
+                 }
+             }
+             if should_remove_child {
+                 node.plus_child = None;
              }
         } else {
              if let Some(next_node) = node.children.get_mut(head) {
-                 Self::remove_recursive(next_node, tail, client);
+                 if Self::remove_recursive(next_node, tail, client) {
+                     should_remove_child = true;
+                 }
+             }
+             if should_remove_child {
+                 node.children.remove(head);
              }
         }
+        
+        Self::is_node_empty(node)
     }
 }

@@ -1,6 +1,7 @@
 
 
 PROJECT:
+- add all timeout under envs variable and valdiate at start
 - logging sdk e rust
 - dahsboard react exposed on /status with snapshot of all broker status
 - docker image & publish on dockerhub

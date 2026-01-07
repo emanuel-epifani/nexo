@@ -11,6 +11,20 @@ use crate::brokers::stream::snapshot::StreamBrokerSnapshot;
 
 const TOPIC_CHANNEL_BUFFER: usize = 10_000;
 
+/// Session Guard for Stream
+/// Automatically handles cleanup when dropped (RAII pattern)
+pub struct StreamSession {
+    client_id: String,
+    manager: Arc<StreamManager>,
+}
+
+impl Drop for StreamSession {
+    fn drop(&mut self) {
+        // TODO: Implement stream-specific cleanup logic if needed beyond disconnect
+        self.manager.disconnect(&self.client_id);
+    }
+}
+
 pub struct StreamManager {
     /// Topic Name -> Topic Handle (actor communication)
     topics: DashMap<String, TopicHandle>,
@@ -26,6 +40,14 @@ impl StreamManager {
             topics: DashMap::new(),
             groups: DashMap::new(),
             client_groups: DashMap::new(),
+        }
+    }
+    
+    /// Registers a client session for lifecycle management
+    pub fn register_session(self: &Arc<Self>, client_id: String) -> StreamSession {
+        StreamSession {
+            client_id,
+            manager: self.clone(),
         }
     }
     
