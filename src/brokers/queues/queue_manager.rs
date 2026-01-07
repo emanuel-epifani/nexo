@@ -56,7 +56,20 @@ impl QueueManager {
         Ok(queue.consume_batch(max, wait_ms).await)
     }
 
-    pub fn create_queue(&self, queue_name: String, mut config: QueueConfig) -> Arc<Queue> {
+    pub fn declare_queue(&self, queue_name: String, config: QueueConfig, passive: bool) -> Result<(), String> {
+        if passive {
+            if self.exists(&queue_name) {
+                Ok(())
+            } else {
+                Err(format!("Queue '{}' not found", queue_name))
+            }
+        } else {
+            self.create_queue(queue_name, config);
+            Ok(())
+        }
+    }
+
+    fn create_queue(&self, queue_name: String, mut config: QueueConfig) -> Arc<Queue> {
         config.merge_defaults();
         self.queues.entry(queue_name.clone())
             .or_insert_with(|| {
@@ -77,6 +90,10 @@ impl QueueManager {
 
     pub fn get(&self, queue_name: &str) -> Option<Arc<Queue>> {
         self.queues.get(queue_name).map(|q| q.value().clone())
+    }
+
+    pub fn exists(&self, queue_name: &str) -> bool {
+        self.queues.contains_key(queue_name)
     }
 
     // This method should be called after QueueManager is wrapped in an Arc

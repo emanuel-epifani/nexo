@@ -55,6 +55,7 @@ export interface QueueConfig {
   maxRetries?: number;
   ttlMs?: number;
   delayMs?: number;
+  passive?: boolean;
 }
 
 export interface QueueSubscribeOptions {
@@ -508,7 +509,10 @@ export class NexoQueue<T = any> {
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
+    const flags = config.passive ? 0x01 : 0x00;
+
     await this.builder.reset(Opcode.Q_CREATE)
+      .writeU8(flags)
       .writeU64(config.visibilityTimeoutMs ?? 0)
       .writeU32(config.maxRetries ?? 0)
       .writeU64(config.ttlMs ?? 0)
@@ -527,10 +531,15 @@ export class NexoQueue<T = any> {
       .send();
   }
 
-  subscribe(callback: (data: T) => Promise<void> | void, options: QueueSubscribeOptions = {}): { stop: () => void } {
+  async subscribe(callback: (data: T) => Promise<void> | void, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
     const batchSize = options.batchSize ?? 50;
     const waitMs = options.waitMs ?? 20000;
     const concurrency = options.concurrency ?? 1;
+
+    // 1. Check if queue exists (Fail-Fast)
+    // We expect declare_queue in passive mode to throw ERR if queue not found.
+    // .send() throws if ERR is returned.
+    await this.create({ passive: true });
 
     let active = true;
 

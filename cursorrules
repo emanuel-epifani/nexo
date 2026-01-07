@@ -43,11 +43,10 @@ APPROCCIO ALLO SVILUPPO
 PRIORITA' PROGETTO
 nella versione 1 il progetto dovrebbe essere:
 1- cosi wow (in termini di comodità e devexperience) da far dire "lo voglio proprio provare"
-2- cosi stabile in termini di funzionamento, da non far abbandonare chi lo ha provato
-quindi di nuovo: Robustness > Throughput > Latency
+2- cosi stabile in termini di funzionamento senza mai crash, da non far abbandonare chi lo ha provato. quindi di nuovo: Robustness > Throughput > Latency
 
 
 parla in italiano nella chat
-scrivi sempre codice e commenti in inglese (i commenti dovrebbero essere uno snapshot del codice in quel preciso momento, non dovrebbero avere riferimento a spiegazione storica del tipo "non usiamo più la hasmpia qui <--")
+scrivi sempre codice e commenti in inglese (i commenti dovrebbero essere uno snapshot del codice in quel preciso momento, non dovrebbero avere riferimento a spiegazione storica del tipo "non usiamo più la hasmpia qui <--, removed costant, changed function, not yet implemented ecc..")
 
 

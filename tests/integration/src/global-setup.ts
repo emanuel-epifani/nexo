@@ -7,6 +7,7 @@ export default async function setup() {
   const port = parseInt(process.env.NEXO_PORT!, 10);
   const ROOT_DIR = path.resolve(__dirname, '../../../');
 
+
   // If Nexo is already running (e.g. Debugging in IDE), skip build and spawn
   if (await isServerRunning(host, port)) {
     console.log(`[GlobalSetup] Nexo is already running on ${host}:${port}. Reusing instance (Debug Mode).`);

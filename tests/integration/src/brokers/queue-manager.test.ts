@@ -12,7 +12,7 @@ describe('QUEUE broker', () => {
             const payload = { msg: 'hello nexo' };
 
             let received: any = null;
-            const sub = q.subscribe(async (data) => {
+            const sub = await q.subscribe(async (data) => {
                 received = data;
             });
 
@@ -32,6 +32,11 @@ describe('QUEUE broker', () => {
             await expect(q.push('fail')).rejects.toThrow('Queue \'ghost-queue\' not found');
         });
 
+        it('Should FAIL to subscribe to a non-existent queue', async () => {
+            const q = nexo.queue('ghost-queue');
+            await expect(q.subscribe(async () => { })).rejects.toThrow('Queue \'ghost-queue\' not found');
+        });
+
         it('Producer PUSH 1 message -> only ONE of 2 competing consumers receives it', async () => {
             const qName = 'test_q_competing';
             const q1 = await nexo.queue(qName).create();
@@ -43,8 +48,8 @@ describe('QUEUE broker', () => {
             const q2 = client2.queue(qName);
 
             let count = 0;
-            const sub1 = q1.subscribe(async () => { count++; });
-            const sub2 = q2.subscribe(async () => { count++; });
+            const sub1 = await q1.subscribe(async () => { count++; });
+            const sub2 = await q2.subscribe(async () => { count++; });
 
             await new Promise(r => setTimeout(r, 100));
             await q1.push('competing-test');
@@ -70,8 +75,8 @@ describe('QUEUE broker', () => {
             const received1: any[] = [];
             const received2: any[] = [];
 
-            const sub1 = q1.subscribe(async (msg) => { received1.push(msg); }, { batchSize: 1 });
-            const sub2 = q2.subscribe(async (msg) => { received2.push(msg); }, { batchSize: 1 });
+            const sub1 = await q1.subscribe(async (msg) => { received1.push(msg); }, { batchSize: 1 });
+            const sub2 = await q2.subscribe(async (msg) => { received2.push(msg); }, { batchSize: 1 });
 
             await new Promise(r => setTimeout(r, 100));
             const msg1 = 'msg1'
@@ -101,7 +106,7 @@ describe('QUEUE broker', () => {
             for (const m of messages) await q.push(m);
 
             const received: string[] = [];
-            const sub = q.subscribe(async (msg) => {
+            const sub = await q.subscribe(async (msg) => {
                 received.push(msg);
             });
 
@@ -128,7 +133,7 @@ describe('QUEUE broker', () => {
             await q.push(msg_high_priority, { priority: 255 });
 
             const received: string[] = [];
-            const sub = q.subscribe(async (msg) => {
+            const sub = await q.subscribe(async (msg) => {
                 received.push(msg);
             });
 
@@ -157,7 +162,7 @@ describe('QUEUE broker', () => {
             await q.push(l2, { priority: 5 });
 
             const received: string[] = [];
-            const sub = q.subscribe(async (msg) => {
+            const sub = await q.subscribe(async (msg) => {
                 received.push(msg);
             }, { batchSize: 1 });
 
@@ -182,7 +187,7 @@ describe('QUEUE broker', () => {
             await q.push(payloadSent, { delayMs });
 
             let received = false;
-            const sub = q.subscribe(async (data) => { received = true; msgReceived = data; });
+            const sub = await q.subscribe(async (data) => { received = true; msgReceived = data; });
 
             await new Promise(r => setTimeout(r, 200));
             expect(received).toBe(false);
@@ -206,7 +211,7 @@ describe('QUEUE broker', () => {
             await q.push(msg_short_delay, { delayMs: 300 });
 
             const received: string[] = [];
-            const sub = q.subscribe(async (msg) => { received.push(msg); });
+            const sub = await q.subscribe(async (msg) => { received.push(msg); });
 
             await new Promise(r => setTimeout(r, 450));
             expect(received).toEqual([msg_short_delay]);
@@ -227,7 +232,7 @@ describe('QUEUE broker', () => {
             await q.push('timeout-msg');
 
             let receivedCount = 0;
-            const sub = q.subscribe(async () => {
+            const sub = await q.subscribe(async () => {
                 receivedCount++;
                 throw new Error("Force fail to prevent auto ACK");
             });
@@ -252,7 +257,7 @@ describe('QUEUE broker', () => {
             await q.push('poison-pill');
 
             let attempts = 0;
-            const sub = q.subscribe(async () => {
+            const sub = await q.subscribe(async () => {
                 attempts++;
                 throw new Error("fail");
             });
@@ -262,7 +267,7 @@ describe('QUEUE broker', () => {
             expect(attempts).toBe(2);
 
             let dlqReceived = false;
-            const dlqSub = dlq.subscribe(async (data) => {
+            const dlqSub = await dlq.subscribe(async (data) => {
                 if (data === 'poison-pill') dlqReceived = true;
             });
 
@@ -282,7 +287,7 @@ describe('QUEUE broker', () => {
             await new Promise(r => setTimeout(r, 800));
 
             let received = false;
-            const sub = q.subscribe(async () => { received = true; });
+            const sub = await q.subscribe(async () => { received = true; });
 
             await new Promise(r => setTimeout(r, 300));
             sub.stop();
@@ -302,7 +307,7 @@ describe('QUEUE broker', () => {
             await q.push('msg-destined-to-die');
 
             let attempts = 0;
-            const sub = q.subscribe(async () => {
+            const sub = await q.subscribe(async () => {
                 attempts++;
                 throw new Error('fail');
             });
@@ -311,7 +316,7 @@ describe('QUEUE broker', () => {
             sub.stop();
 
             let dlqMessage: any = null;
-            const dlqSub = dlq.subscribe(async (msg) => { dlqMessage = msg; });
+            const dlqSub = await dlq.subscribe(async (msg) => { dlqMessage = msg; });
 
             await new Promise(r => setTimeout(r, 100));
             dlqSub.stop();
@@ -319,7 +324,7 @@ describe('QUEUE broker', () => {
             expect(dlqMessage).toBeNull();
 
             let zombieMessage: any = null;
-            const zombieSub = q.subscribe(async (msg) => { zombieMessage = msg; });
+            const zombieSub = await q.subscribe(async (msg) => { zombieMessage = msg; });
             await new Promise(r => setTimeout(r, 100));
             zombieSub.stop();
 
@@ -337,7 +342,7 @@ describe('QUEUE broker', () => {
             await q.push(data);
 
             let received: Order | null = null;
-            const sub = q.subscribe(async (msg) => {
+            const sub = await q.subscribe(async (msg) => {
                 received = msg;
             });
 
@@ -364,7 +369,7 @@ describe('QUEUE broker', () => {
 
             let received: any = null;
 
-            const sub = q.subscribe(async (msg) => { received = msg; });
+            const sub = await q.subscribe(async (msg) => { received = msg; });
 
             await new Promise(r => setTimeout(r, 200));
             expect(received).toBeNull();
@@ -408,7 +413,7 @@ describe('QUEUE broker', () => {
             await q.push(msgSent);
 
             let received: any = null;
-            const sub = q.subscribe(async (msg) => { received = msg; });
+            const sub = await q.subscribe(async (msg) => { received = msg; });
 
             for (let i = 0; i < 10; i++) {
                 if (received) break;
@@ -429,7 +434,7 @@ describe('QUEUE broker', () => {
             let receivedCount = 0;
             const start = Date.now();
 
-            const sub = q.subscribe(async () => {
+            const sub = await q.subscribe(async () => {
                 receivedCount++;
                 await new Promise(r => setTimeout(r, 2));
             }, { batchSize: 20 });
@@ -452,7 +457,7 @@ describe('QUEUE broker', () => {
 
             const received: number[] = [];
 
-            const sub = q.subscribe(async (val) => {
+            const sub = await q.subscribe(async (val) => {
                 received.push(val);
                 await new Promise(r => setTimeout(r, 50));
             }, { batchSize: 1 });
@@ -487,7 +492,7 @@ describe('QUEUE broker', () => {
                 const sub = q.subscribe(async () => {
                     consumed++;
                     if (consumed >= TOTAL) {
-                        sub.stop();
+                        sub.then(s => s.stop()); // Use then because subscribe is async
                         probe.printResult();
                         resolve();
                     }
@@ -522,7 +527,7 @@ describe('QUEUE broker', () => {
                     
                     consumed++;
                     if (consumed >= TOTAL) {
-                        sub.stop();
+                        sub.then(s => s.stop()); // Use then because subscribe is async
                         const stats = probe.printResult();
                         // Ci aspettiamo throughput molto più alto
                         expect(stats.throughput).toBeGreaterThan(1000); 

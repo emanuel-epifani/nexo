@@ -123,14 +123,19 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // QUEUE BROKER
         // ==========================================
         
-        // Q_DECLARE: [Visibility:8][MaxRetries:4][TTL:8][Delay:8][NameLen:4][Name]
+        // Q_DECLARE: [Flags:1][Visibility:8][MaxRetries:4][TTL:8][Delay:8][NameLen:4][Name]
         OP_Q_CREATE => {
-            if body.len() < 32 { return Response::Error("Payload too short for Q_DECLARE".to_string()); }
-            let visibility = u64::from_be_bytes(body[0..8].as_ref().try_into().unwrap());
-            let max_retries = u32::from_be_bytes(body[8..12].as_ref().try_into().unwrap());
-            let ttl = u64::from_be_bytes(body[12..20].as_ref().try_into().unwrap());
-            let delay = u64::from_be_bytes(body[20..28].as_ref().try_into().unwrap());
-            let (q_name, _) = match parse_string(&body[28..]) {
+            if body.len() < 33 { return Response::Error("Payload too short for Q_DECLARE".to_string()); }
+            
+            let flags = body[0];
+            let passive = (flags & 0x01) != 0;
+
+            let visibility = u64::from_be_bytes(body[1..9].as_ref().try_into().unwrap());
+            let max_retries = u32::from_be_bytes(body[9..13].as_ref().try_into().unwrap());
+            let ttl = u64::from_be_bytes(body[13..21].as_ref().try_into().unwrap());
+            let delay = u64::from_be_bytes(body[21..29].as_ref().try_into().unwrap());
+            
+            let (q_name, _) = match parse_string(&body[29..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
@@ -141,8 +146,10 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 ttl_ms: ttl,
                 default_delay_ms: delay,
             };
-            engine.queue.create_queue(q_name.to_string(), config);
-            Response::Ok
+            match engine.queue.declare_queue(q_name.to_string(), config, passive) {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         
         // Q_PUSH: [Priority:1][Delay:8][NameLen:4][Name][Data]
