@@ -22,7 +22,6 @@ pub const STATUS_OK: u8   = 0x00;
 pub const STATUS_ERR: u8  = 0x01;
 pub const STATUS_NULL: u8 = 0x02;
 pub const STATUS_DATA: u8 = 0x03;
-pub const STATUS_Q_DATA: u8 = 0x04; // New: Queue Data [UUID:16][Payload]
 
 // ========================================
 // TYPES
@@ -49,10 +48,8 @@ pub enum Response {
     Data(Bytes),
     Error(String),
     Null,
-    QueueData(uuid::Uuid, Bytes),
-    AsyncConsume(tokio::sync::oneshot::Receiver<crate::brokers::queues::Message>),
-    /// Async stream operations (publish, read, join)
-    AsyncStream(tokio::sync::oneshot::Receiver<Result<Bytes, String>>),
+    /// Async operations (stream, queue batch consume)
+    Async(tokio::sync::oneshot::Receiver<Result<Bytes, String>>),
 }
 
 // ========================================
@@ -92,9 +89,7 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
         Response::Ok | Response::Null => 0,
         Response::Error(msg) => msg.len(),
         Response::Data(data) => data.len(),
-        Response::QueueData(_, data) => 16 + data.len(),
-        Response::AsyncConsume(_) => 0, // Should not be called directly
-        Response::AsyncStream(_) => 0,  // Should not be called directly
+        Response::Async(_) => 0,  // Should not be called directly
     };
     
     let mut buf = BytesMut::with_capacity(10 + data_len);
@@ -115,14 +110,7 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
             buf.put_u8(STATUS_DATA);
             buf.put_slice(data);
         }
-        Response::QueueData(uuid, data) => {
-            buf.put_u32((1 + 16 + data.len()) as u32);
-            buf.put_u8(STATUS_Q_DATA);
-            buf.put_slice(uuid.as_bytes());
-            buf.put_slice(data);
-        }
-        Response::AsyncConsume(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
-        Response::AsyncStream(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
+        Response::Async(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
     }
     buf.freeze()
 }

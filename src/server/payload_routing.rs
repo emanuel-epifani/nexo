@@ -162,16 +162,41 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             }
         }
         
-        // Q_CONSUME: [NameLen:4][Name]
+        // Q_CONSUME: [MaxBatch:4][WaitMs:8][NameLen:4][Name]
         OP_Q_CONSUME => {
-            let (q_name, _) = match parse_string(&body) {
+            if body.len() < 16 { return Response::Error("Payload too short for Q_CONSUME".to_string()); }
+            let max_batch = u32::from_be_bytes(body[0..4].as_ref().try_into().unwrap()) as usize;
+            let wait_ms = u64::from_be_bytes(body[4..12].as_ref().try_into().unwrap());
+            let (q_name, _) = match parse_string(&body[12..]) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
-            match engine.queue.consume(q_name.to_string()) {
-                Ok(receiver) => Response::AsyncConsume(receiver),
-                Err(e) => Response::Error(e),
-            }
+            
+            let queue_name = q_name.to_string();
+            let queue_manager = engine.queue.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            
+            tokio::spawn(async move {
+                let result = queue_manager.consume(queue_name, max_batch, wait_ms).await;
+                let response = match result {
+                    Ok(messages) => {
+                        // Encode: [Count:4][Msg1][Msg2]...
+                        // Each Msg: [UUID:16][PayloadLen:4][Payload]
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
+                        for msg in messages {
+                            buf.extend_from_slice(msg.id.as_bytes());
+                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(&msg.payload);
+                        }
+                        Ok(Bytes::from(buf))
+                    }
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(response);
+            });
+            
+            Response::Async(rx)
         }
         
         // Q_ACK: [UUID:16][NameLen:4][Name]
@@ -282,7 +307,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 let _ = tx.send(response);
             });
             
-            Response::AsyncStream(rx)
+            Response::Async(rx)
         }
         
         // S_FETCH: [TopicLen:4][Topic][Offset:8][Limit:4]
@@ -321,7 +346,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 let _ = tx.send(Ok(Bytes::from(buf)));
             });
             
-            Response::AsyncStream(rx)
+            Response::Async(rx)
         }
 
         // S_JOIN: [GroupLen:4][Group][TopicLen:4][Topic]
@@ -350,7 +375,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 let _ = tx.send(response);
             });
             
-            Response::AsyncStream(rx)
+            Response::Async(rx)
         }
 
         // S_COMMIT: [GroupLen:4][Group][TopicLen:4][Topic][Offset:8]

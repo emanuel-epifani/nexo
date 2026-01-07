@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::Notify;
 use uuid::Uuid;
 use crate::brokers::queues::QueueManager;
 use crate::brokers::queues::snapshot::QueueSummary;
@@ -84,11 +84,11 @@ struct InternalState {
     /// Messaggi programmati: stanno aspettando il momento giusto (ordinati per Tempo)
     waiting_for_time: BTreeMap<u64, Vec<Uuid>>,
     /// Messaggi inviati: stanno aspettando un ACK o il timeout (ordinati per Scadenza)
-    waiting_for_ack: BTreeMap<u64, Vec<Uuid>>, //BTreeMap<"expired_date"", Vec<"uuid_message_of_registry"">>
+    waiting_for_ack: BTreeMap<u64, Vec<Uuid>>,
     /// Indice TTL: Ordina i messaggi per data di scadenza assoluta (O(1) cleanup)
     waiting_for_ttl: BTreeMap<u64, Vec<Uuid>>,
-    /// Consumatori "parcheggiati": stanno aspettando che arrivi un messaggio
-    waiting_consumers: VecDeque<oneshot::Sender<Message>>,
+    /// Consumatori batch in attesa: vengono notificati quando arriva un messaggio
+    batch_waiters: VecDeque<Arc<Notify>>,
 }
 
 impl InternalState {
@@ -99,7 +99,7 @@ impl InternalState {
             waiting_for_time: BTreeMap::new(),
             waiting_for_ack: BTreeMap::new(),
             waiting_for_ttl: BTreeMap::new(),
-            waiting_consumers: VecDeque::new(),
+            batch_waiters: VecDeque::new(),
         }
     }
 }
@@ -174,35 +174,22 @@ impl Queue {
         expired_map.into_values().flatten().collect()
     }
 
-    /// Logica centrale di smistamento: consegna a un consumatore in attesa o mette in coda ready.
-    fn dispatch(&self, state: &mut InternalState, id: Uuid, now: u64) {
-        // Verifica TTL prima del dispatch
+    /// Aggiunge un messaggio alla coda priorità e notifica eventuali consumer in attesa
+    fn enqueue_and_notify(&self, state: &mut InternalState, id: Uuid, now: u64) {
+        // Verifica TTL prima dell'enqueue
         if let Some(msg) = state.registry.get(&id) {
             let age = now.saturating_sub(msg.created_at);
             if age > self.config.ttl_ms {
                 state.registry.remove(&id);
                 return;
             }
-        } else {
-            return;
-        }
-
-        while let Some(consumer_tx) = state.waiting_consumers.pop_front() {
-            if let Some(msg) = self.move_to_waiting_ack(state, id, now) {
-                if consumer_tx.send(msg).is_ok() {
-                    return;
-                }
-                // Se il consumatore si è disconnesso, ripristiniamo lo stato
-                if let Some(m) = state.registry.get_mut(&id) {
-                    m.attempts -= 1;
-                    m.visible_at = 0;
-                }
-            }
-        }
-
-        // Nessun consumatore pronto, lo mettiamo nel bucket della priorità corrispondente
-        if let Some(msg) = state.registry.get(&id) {
+            // Metti in coda priorità
             state.waiting_for_dispatch.entry(msg.priority).or_default().push_back(id);
+            
+            // Notifica UN consumer in attesa (se c'è)
+            if let Some(waiter) = state.batch_waiters.pop_front() {
+                waiter.notify_one();
+            }
         }
     }
 
@@ -222,7 +209,7 @@ impl Queue {
         if let Some(delay_ts) = msg.delayed_until {
             state.waiting_for_time.entry(delay_ts).or_default().push(id);
         } else {
-            self.dispatch(&mut state, id, now);
+            self.enqueue_and_notify(&mut state, id, now);
         }
     }
 
@@ -250,20 +237,53 @@ impl Queue {
         }
     }
 
-    pub fn consume(&self) -> oneshot::Receiver<Message> {
-        let mut state = self.state.lock();
-        let (tx, rx) = oneshot::channel();
-        let now = current_time_ms();
-
-        if let Some(id) = self.next_available_message_id(&mut state, now) {
-            if let Some(msg) = self.move_to_waiting_ack(&mut state, id, now) {
-                let _ = tx.send(msg);
-                return rx;
+    /// Prende fino a `max` messaggi dalla coda, ordinati per priorità.
+    /// Se la coda è vuota, aspetta fino a `wait_ms` per almeno 1 messaggio.
+    pub async fn consume(&self, max: usize, wait_ms: u64) -> Vec<Message> {
+        // FASE 1: Prendi subito quello che c'è
+        {
+            let mut state = self.state.lock();
+            let now = current_time_ms();
+            let result = self.take_messages(&mut state, max, now);
+            if !result.is_empty() {
+                return result;
             }
         }
 
-        state.waiting_consumers.push_back(tx);
-        rx
+        // FASE 2: Coda vuota, registra waiter e aspetta
+        let notify = Arc::new(Notify::new());
+        {
+            let mut state = self.state.lock();
+            state.batch_waiters.push_back(notify.clone());
+        }
+
+        // Aspetta notifica o timeout
+        let _ = tokio::time::timeout(
+            Duration::from_millis(wait_ms),
+            notify.notified()
+        ).await;
+
+        // FASE 3: Svegliato o timeout, prendi quello che c'è
+        let mut state = self.state.lock();
+        let now = current_time_ms();
+        self.take_messages(&mut state, max, now)
+    }
+
+    /// Helper: estrae fino a `max` messaggi dalla coda, ordinati per priorità
+    fn take_messages(&self, state: &mut InternalState, max: usize, now: u64) -> Vec<Message> {
+        let mut result = Vec::with_capacity(max);
+        
+        while result.len() < max {
+            if let Some(id) = self.next_available_message_id(state, now) {
+                if let Some(msg) = self.move_to_waiting_ack(state, id, now) {
+                    result.push(msg);
+                }
+            } else {
+                break;
+            }
+        }
+        
+        result
     }
 
     pub fn start_reaper(self: Arc<Self>, manager: Arc<QueueManager>) {
@@ -284,25 +304,23 @@ impl Queue {
         let expired_ttl_ids = self.extract_expired_ids(&mut state.waiting_for_ttl, now);
         for id in expired_ttl_ids {
             state.registry.remove(&id);
-            // Non serve pulire gli altri indici (dispatch/ack/time) subito.
-            // La Lazy Cleanup in next_available_message_id e gli altri check gestiranno i riferimenti "morti".
         }
 
-        // 1. Messaggi programmati -> Pronti/Dispatch
+        // 1. Messaggi programmati -> Coda priorità
         let expired_delayed = self.extract_expired_ids(&mut state.waiting_for_time, now);
         for id in expired_delayed {
             if state.registry.contains_key(&id) {
-                self.dispatch(&mut state, id, now);
+                self.enqueue_and_notify(&mut state, id, now);
             }
         }
 
-        // 2. Messaggi in attesa di ACK -> DLQ o Pronti/Dispatch
+        // 2. Messaggi in attesa di ACK -> DLQ o Coda priorità
         let expired_in_flight = self.extract_expired_ids(&mut state.waiting_for_ack, now);
         for id in expired_in_flight {
             let (should_dlq, payload, priority) = match state.registry.get(&id) {
                 Some(msg) if msg.attempts >= self.config.max_retries => (true, msg.payload.clone(), msg.priority),
                 Some(_) => (false, Bytes::new(), 0),
-                None => continue, // Già confermato (ACK) o scaduto (TTL)
+                None => continue,
             };
 
             if should_dlq {
@@ -313,7 +331,7 @@ impl Queue {
                     let _ = manager_clone.push_internal(dlq_name, payload, priority, None);
                 });
             } else {
-                self.dispatch(&mut state, id, now);
+                self.enqueue_and_notify(&mut state, id, now);
             }
         }
     }
@@ -330,7 +348,7 @@ impl Queue {
             pending_count,
             inflight_count,
             scheduled_count,
-            consumers_waiting: state.waiting_consumers.len(),
+            consumers_waiting: state.batch_waiters.len(),
         }
     }
 }

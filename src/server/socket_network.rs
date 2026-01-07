@@ -121,18 +121,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         let response = route(payload, &engine_clone, &client_id_clone);
                         
                         match response {
-                            Response::AsyncConsume(rx) => {
-                                tracing::debug!(req_id = %id, "[Network] Request suspended, waiting for queue data...");
-                                match rx.await {
-                                    Ok(msg) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::QueueData(msg.id, msg.payload))).await;
-                                    }
-                                    Err(_) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Consumer dropped".into()))).await;
-                                    }
-                                }
-                            }
-                            Response::AsyncStream(rx) => {
+                            Response::Async(rx) => {
                                 match rx.await {
                                     Ok(Ok(data)) => {
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Data(data))).await;
@@ -141,7 +130,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Error(e))).await;
                                     }
                                     Err(_) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Stream operation dropped".into()))).await;
+                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Async operation dropped".into()))).await;
                                     }
                                 }
                             }

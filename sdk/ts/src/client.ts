@@ -17,7 +17,6 @@ enum ResponseStatus {
   ERR = 0x01,
   NULL = 0x02,
   DATA = 0x03,
-  Q_DATA = 0x04,
 }
 
 export enum Opcode {
@@ -56,6 +55,12 @@ export interface QueueConfig {
   maxRetries?: number;
   ttlMs?: number;
   delayMs?: number;
+}
+
+export interface QueueSubscribeOptions {
+  batchSize?: number;  // Default 50
+  waitMs?: number;     // Default 20000 (20 seconds)
+  concurrency?: number; // Default 1 (Serial)
 }
 
 export interface StreamConfig {
@@ -218,7 +223,7 @@ class RingDecoder {
     const id = this.buf.readUInt32BE(this.head + 1);
     const payloadLen = this.buf.readUInt32BE(this.head + 5);
     if (this.tail - this.head < 9 + payloadLen) return null;
-    // CRITICAL: Use slice() to create a COPY of the payload (subarray() returns a view that gets corrupted when the ring buffer is reused)
+    // CRITICAL: Use slice() to create a COPY of the payload
     const payload = this.buf.slice(this.head + 9, this.head + 9 + payloadLen);
     this.head += 9 + payloadLen;
     if (this.head === this.tail) { this.head = 0; this.tail = 0; }
@@ -282,7 +287,7 @@ class NexoConnection {
               const h = this.pending.get(frame.id);
               if (h) {
                 this.pending.delete(frame.id);
-                h.resolve({ status: frame.payload[0], data: frame.payload.subarray(1) });
+                h.resolve({ status: frame.payload[0], data: frame.payload.slice(1) });
               }
               break;
             }
@@ -522,43 +527,87 @@ export class NexoQueue<T = any> {
       .send();
   }
 
-  subscribe(callback: (data: T) => Promise<void> | void, prefetch: number = 50): { stop: () => void } {
+  subscribe(callback: (data: T) => Promise<void> | void, options: QueueSubscribeOptions = {}): { stop: () => void } {
+    const batchSize = options.batchSize ?? 50;
+    const waitMs = options.waitMs ?? 20000;
+    const concurrency = options.concurrency ?? 1;
+
     let active = true;
-    let pendingRequests = 0;
 
-    const loop = () => {
-      if (!active) return;
+    const loop = async () => {
+      while (active && (this.builder as any).conn.isConnected) {
+        try {
+          // Request batch of messages
+          const res = await this.builder.reset(Opcode.Q_CONSUME)
+            .writeU32(batchSize)
+            .writeU64(waitMs)
+            .writeString(this.name)
+            .send();
 
-      while (pendingRequests < prefetch && (this.builder as any).conn.isConnected) {
-        pendingRequests++;
+          if (!active) return;
 
-        this.builder.reset(Opcode.Q_CONSUME).writeString(this.name).send()
-          .then(async (res) => {
-            pendingRequests--;
-            if (!active) return;
+          // Parse response: [Count:4][Msg1][Msg2]...
+          // Each Msg: [UUID:16][PayloadLen:4][Payload]
+          const count = res.reader.readU32();
 
-            if (res.status === ResponseStatus.Q_DATA) {
-              loop();
+          if (count === 0) {
+            // Timeout with no messages, continue polling
+            continue;
+          }
 
-              const idHex = res.reader.readUUID();
-              const data = res.reader.readData() as T;
+          // 1. Deserializza tutto subito (CPU Bound)
+          const messages: { id: string; data: T }[] = [];
+          for (let i = 0; i < count; i++) {
+            const idHex = res.reader.readUUID();
+            const payloadLen = res.reader.readU32();
+            const payloadBuf = res.reader.readBuffer(payloadLen);
+            const data = DataCodec.deserialize(payloadBuf) as T;
+            messages.push({ id: idHex, data });
+          }
+
+          // 2. Processa i messaggi (IO Bound)
+          if (concurrency === 1) {
+            // --- MODALITÀ SERIALE (Default) ---
+            // Garantisce l'ordine di completamento
+            for (const msg of messages) {
+              if (!active) break;
               try {
-                await callback(data);
-                await this.ack(idHex);
+                await callback(msg.data);
+                await this.ack(msg.id);
               } catch (e) {
                 logger.error(`Callback error in queue ${this.name}:`, e);
               }
-            } else {
-              setTimeout(loop, 1000);
             }
-          })
-          .catch(() => {
-            pendingRequests--;
-            setTimeout(loop, 1000);
-          });
+          } else {
+            // --- MODALITÀ CONCORRENTE ---
+            // Massimizza il throughput
+            const tasks = messages.map(msg => async () => {
+              if (!active) return;
+              try {
+                await callback(msg.data);
+                await this.ack(msg.id);
+              } catch (e) {
+                logger.error(`Callback error in queue ${this.name}:`, e);
+              }
+            });
+
+            // Esegui a blocchi (Chunking) per rispettare il limite di concorrenza
+            for (let i = 0; i < tasks.length; i += concurrency) {
+              if (!active) break;
+              const chunk = tasks.slice(i, i + concurrency);
+              await Promise.all(chunk.map(t => t()));
+            }
+          }
+
+        } catch (e) {
+          if (!active) return;
+          logger.error(`Queue consume error in ${this.name}:`, e);
+          await new Promise(r => setTimeout(r, 1000));
+        }
       }
     };
 
+    // Start the loop
     loop();
 
     return {

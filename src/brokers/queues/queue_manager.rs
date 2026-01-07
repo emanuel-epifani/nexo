@@ -3,7 +3,6 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use bytes::Bytes;
 use uuid::Uuid;
-use tokio::sync::oneshot;
 
 use once_cell::sync::OnceCell;
 use crate::brokers::queues::{Message, Queue, QueueConfig};
@@ -51,10 +50,10 @@ impl QueueManager {
         false
     }
 
-    pub fn consume(&self, queue_name: String) -> Result<oneshot::Receiver<Message>, String> {
+    pub async fn consume(&self, queue_name: String, max: usize, wait_ms: u64) -> Result<Vec<Message>, String> {
         let queue = self.get(queue_name.as_str())
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
-        Ok(queue.consume())
+        Ok(queue.consume(max, wait_ms).await)
     }
 
     pub fn create_queue(&self, queue_name: String, mut config: QueueConfig) -> Arc<Queue> {

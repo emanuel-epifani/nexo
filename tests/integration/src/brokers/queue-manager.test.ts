@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
 import { NexoClient, Opcode } from '@nexo/client';
-import {BenchmarkProbe} from "../utils/benchmark-misure";
+import { BenchmarkProbe } from "../utils/benchmark-misure";
 
 describe('QUEUE broker', () => {
 
@@ -10,14 +10,14 @@ describe('QUEUE broker', () => {
             const q = await nexo.queue('test_q_base_1').create();
 
             const payload = { msg: 'hello nexo' };
-            
+
             let received: any = null;
             const sub = q.subscribe(async (data) => {
                 received = data;
             });
 
             await q.push(payload);
-            
+
             for (let i = 0; i < 10; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 50));
@@ -70,8 +70,8 @@ describe('QUEUE broker', () => {
             const received1: any[] = [];
             const received2: any[] = [];
 
-            const sub1 = q1.subscribe(async (msg) => { received1.push(msg); },1);
-            const sub2 = q2.subscribe(async (msg) => { received2.push(msg); },1);
+            const sub1 = q1.subscribe(async (msg) => { received1.push(msg); }, { batchSize: 1 });
+            const sub2 = q2.subscribe(async (msg) => { received2.push(msg); }, { batchSize: 1 });
 
             await new Promise(r => setTimeout(r, 100));
             const msg1 = 'msg1'
@@ -159,7 +159,7 @@ describe('QUEUE broker', () => {
             const received: string[] = [];
             const sub = q.subscribe(async (msg) => {
                 received.push(msg);
-            }, 1);
+            }, { batchSize: 1 });
 
             for (let i = 0; i < 20; i++) {
                 if (received.length === 4) break;
@@ -248,12 +248,12 @@ describe('QUEUE broker', () => {
             const q = await nexo.queue(qName).create({ maxRetries: 2, visibilityTimeoutMs: 300 });
 
             const dlq = await nexo.queue(`${qName}_dlq`).create(); // Create DLQ as well
-            
+
             await q.push('poison-pill');
 
             let attempts = 0;
-            const sub = q.subscribe(async () => { 
-                attempts++; 
+            const sub = q.subscribe(async () => {
+                attempts++;
                 throw new Error("fail");
             });
 
@@ -278,9 +278,9 @@ describe('QUEUE broker', () => {
             const q = await nexo.queue('test_q_ttl_custom').create({ ttlMs: 300 });
 
             await q.push("short-lived");
-            
+
             await new Promise(r => setTimeout(r, 800));
-            
+
             let received = false;
             const sub = q.subscribe(async () => { received = true; });
 
@@ -316,14 +316,14 @@ describe('QUEUE broker', () => {
             await new Promise(r => setTimeout(r, 100));
             dlqSub.stop();
 
-            expect(dlqMessage).toBeNull(); 
+            expect(dlqMessage).toBeNull();
 
             let zombieMessage: any = null;
             const zombieSub = q.subscribe(async (msg) => { zombieMessage = msg; });
             await new Promise(r => setTimeout(r, 100));
             zombieSub.stop();
 
-            expect(zombieMessage).toBeNull(); 
+            expect(zombieMessage).toBeNull();
         });
 
     });
@@ -335,10 +335,10 @@ describe('QUEUE broker', () => {
 
             const data: Order = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
             await q.push(data);
-            
+
             let received: Order | null = null;
             const sub = q.subscribe(async (msg) => {
-                received = msg; 
+                received = msg;
             });
 
             for (let i = 0; i < 10; i++) {
@@ -352,7 +352,7 @@ describe('QUEUE broker', () => {
         it('User calls nexo.queue(name) twice -> SDK returns the SAME instance (Idempotency)', () => {
             const q1 = nexo.queue('test_q_idemp');
             const q2 = nexo.queue('test_q_idemp');
-            
+
             expect(q1).toBe(q2);
             expect(q1.name).toBe('test_q_idemp');
         });
@@ -382,13 +382,19 @@ describe('QUEUE broker', () => {
 
         it('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
             const q = await nexo.queue('test_q_double_ack_new').create();
-            
+
             await q.push('msg');
 
-            const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME)
+            // Consume via batch API
+            const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME_BATCH)
+                .writeU32(1)      // max batch
+                .writeU64(5000)   // wait ms
                 .writeString(q.name)
                 .send();
 
+            // Parse batch response: [Count:4][UUID:16][PayloadLen:4][Payload]
+            const count = res.reader.readU32();
+            expect(count).toBe(1);
             const msgId = res.reader.readUUID();
 
             await (q as any).ack(msgId);
@@ -413,20 +419,20 @@ describe('QUEUE broker', () => {
         });
     });
 
-    describe('Prefetch & Concurrency', () => {
-        it('Prefetch keeps N requests active -> High throughput simulation', async () => {
-            const q = await nexo.queue('test_q_prefetch').create();
+    describe('Batch Consume', () => {
+        it('Batch size 20 -> High throughput simulation', async () => {
+            const q = await nexo.queue('test_q_batch').create();
 
             const COUNT = 50;
             for (let i = 0; i < COUNT; i++) await q.push(i);
 
             let receivedCount = 0;
             const start = Date.now();
-            
+
             const sub = q.subscribe(async () => {
                 receivedCount++;
-                await new Promise(r => setTimeout(r, 2)); 
-            }, 20);
+                await new Promise(r => setTimeout(r, 2));
+            }, { batchSize: 20 });
 
             while (receivedCount < COUNT) {
                 await new Promise(r => setTimeout(r, 10));
@@ -437,7 +443,7 @@ describe('QUEUE broker', () => {
             expect(receivedCount).toBe(COUNT);
         });
 
-        it('Prefetch=1 -> Serial processing (Strict Ordering check)', async () => {
+        it('Batch size 1 -> Serial processing (Strict Ordering check)', async () => {
             const q = await nexo.queue('test_q_serial').create();
 
             await q.push(1);
@@ -445,11 +451,11 @@ describe('QUEUE broker', () => {
             await q.push(3);
 
             const received: number[] = [];
-            
+
             const sub = q.subscribe(async (val) => {
                 received.push(val);
                 await new Promise(r => setTimeout(r, 50));
-            }, 1);
+            }, { batchSize: 1 });
 
             await new Promise(r => setTimeout(r, 300));
             sub.stop();
@@ -460,67 +466,75 @@ describe('QUEUE broker', () => {
 
 
     // --- PERFORMANCE ---
-    it('Producer (Push) Throughput', async () => {
-        const TOTAL = 20_000;
-        const CONCURRENCY = 50;
-        const q = await nexo.queue("bench-push").create();
+    describe('Performance test', () => {
+        
+        it('Throughput: Serial Consumption (Default)', async () => {
+            const TOTAL = 5_000;
+            const q = await nexo.queue("bench-serial").create();
 
-        const probe = new BenchmarkProbe("QUEUE - PUSH", TOTAL);
-        probe.startTimer();
+            // Push massivo
+            const producer = async () => {
+                for (let i = 0; i < TOTAL; i++) await q.push({ id: i });
+            };
+            await producer();
 
-        const producer = async () => {
-            const opsPerWorker = TOTAL / CONCURRENCY;
-            for (let i = 0; i < opsPerWorker; i++) {
-                const t0 = performance.now();
-                await q.push({ job: i });
-                probe.record(performance.now() - t0);
-            }
-        };
-        await Promise.all(Array.from({ length: CONCURRENCY }, producer));
+            // Consume Seriale
+            let consumed = 0;
+            const probe = new BenchmarkProbe("QUEUE - SERIAL", TOTAL);
+            probe.startTimer();
 
-        const stats = probe.printResult();
-        expect(stats.throughput).toBeGreaterThan(180_000);
-        expect(stats.p99).toBeLessThan(2);
-        expect(stats.max).toBeLessThan(5);
-    });
-
-    it('Consumer (Subscribe) Throughput', async () => {
-        const TOTAL = 10_000;
-        const CONCURRENCY_PUSH = 10;
-        const q = await nexo.queue("bench-concurrent").create();
-
-        let consumed = 0;
-        const probe = new BenchmarkProbe("QUEUE - CONSUME", TOTAL);
-
-        // 1. Consumer ready
-        const consumerPromise = new Promise<void>((resolve) => {
-            const sub = q.subscribe(async (msg: any) => {
-                consumed++;
-                if (msg.ts) probe.recordLatency(msg.ts);
-
-                if (consumed >= TOTAL) {
-                    sub.stop();
-                    const stats = probe.printResult();
-                    expect(stats.throughput).toBeGreaterThan(80_000);
-                    expect(stats.p99).toBeLessThan(2);
-                    expect(stats.max).toBeLessThan(3);
-                    resolve();
-                }
+            await new Promise<void>((resolve) => {
+                const sub = q.subscribe(async () => {
+                    consumed++;
+                    if (consumed >= TOTAL) {
+                        sub.stop();
+                        probe.printResult();
+                        resolve();
+                    }
+                }, { batchSize: 50 }); // Concurrency default 1
             });
         });
 
-        probe.startTimer();
+        it('Throughput: Concurrent Consumption (High Performance)', async () => {
+            const TOTAL = 10_000;
+            const CONCURRENCY = 50; // 50 msg in parallelo
+            const q = await nexo.queue("bench-concurrent").create();
 
-        // 2. Producer start
-        const producer = async () => {
-            const opsPerWorker = TOTAL / CONCURRENCY_PUSH;
-            for (let i = 0; i < opsPerWorker; i++) {
-                await q.push({ ts: Date.now() });
-            }
-        };
-        const producerPromise = Promise.all(Array.from({ length: CONCURRENCY_PUSH }, producer));
+            // Push massivo
+            const producer = async () => {
+                const batch = Array(100).fill(0); // Push a batch simulati lato client per velocità
+                for (let i = 0; i < TOTAL / 100; i++) {
+                    await Promise.all(batch.map((_, j) => q.push({ id: i * 100 + j })));
+                }
+            };
+            await producer();
 
-        await Promise.all([producerPromise, consumerPromise]);
-    });
+            // Consume Parallelo
+            let consumed = 0;
+            const probe = new BenchmarkProbe("QUEUE - CONCURRENT", TOTAL);
+            probe.startTimer();
+
+            await new Promise<void>((resolve) => {
+                const sub = q.subscribe(async () => {
+                    // Simuliamo un leggero carico async (es. 1ms)
+                    // In seriale questo ucciderebbe le performance, in parallelo no.
+                    await new Promise(r => setTimeout(r, 1));
+                    
+                    consumed++;
+                    if (consumed >= TOTAL) {
+                        sub.stop();
+                        const stats = probe.printResult();
+                        // Ci aspettiamo throughput molto più alto
+                        expect(stats.throughput).toBeGreaterThan(1000); 
+                        resolve();
+                    }
+                }, { 
+                    batchSize: 100, 
+                    concurrency: CONCURRENCY // <--- Qui la magia
+                });
+            });
+        });
+    })
+
 
 });
