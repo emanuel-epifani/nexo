@@ -609,7 +609,10 @@ export class NexoQueue<T = any> {
           }
 
         } catch (e) {
-          if (!active) return;
+          if (!active || !(this.builder as any).conn.isConnected) {
+            // Fail-Fast: Connection lost or stopped, exit loop immediately
+            return;
+          }
           logger.error(`Queue consume error in ${this.name}:`, e);
           await new Promise(r => setTimeout(r, 1000));
         }
@@ -832,7 +835,10 @@ export class NexoStream<T = any> {
         }
 
       } catch (e) {
-        if (!this.active) return;
+        if (!this.active || !(this.builder as any).conn.isConnected) {
+          // Fail-Fast: Connection lost or stopped, exit loop immediately
+          return;
+        }
         logger.error("Stream poll error", e);
         await new Promise(r => setTimeout(r, 1000));
       }
