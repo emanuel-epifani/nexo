@@ -50,10 +50,10 @@ impl QueueManager {
         false
     }
 
-    pub async fn consume(&self, queue_name: String, max: usize, wait_ms: u64) -> Result<Vec<Message>, String> {
+    pub async fn consume_batch(&self, queue_name: String, max: usize, wait_ms: u64) -> Result<Vec<Message>, String> {
         let queue = self.get(queue_name.as_str())
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
-        Ok(queue.consume(max, wait_ms).await)
+        Ok(queue.consume_batch(max, wait_ms).await)
     }
 
     pub fn create_queue(&self, queue_name: String, mut config: QueueConfig) -> Arc<Queue> {
@@ -62,7 +62,8 @@ impl QueueManager {
             .or_insert_with(|| {
                 let queue = Arc::new(Queue::new(queue_name, config));
                 if let Some(manager_arc) = self.self_ref.get() {
-                    queue.clone().start_reaper(manager_arc.clone());
+                    // Start both Scheduler and Cleaner tasks
+                    queue.clone().start_tasks(manager_arc.clone());
                 }
                 queue
             })

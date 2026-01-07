@@ -177,7 +177,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             let (tx, rx) = tokio::sync::oneshot::channel();
             
             tokio::spawn(async move {
-                let result = queue_manager.consume(queue_name, max_batch, wait_ms).await;
+                let result = queue_manager.consume_batch(queue_name, max_batch, wait_ms).await;
                 let response = match result {
                     Ok(messages) => {
                         // Encode: [Count:4][Msg1][Msg2]...

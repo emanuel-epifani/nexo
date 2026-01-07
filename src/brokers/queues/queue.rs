@@ -1,13 +1,14 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 use crate::brokers::queues::QueueManager;
 use crate::brokers::queues::snapshot::QueueSummary;
+
 // ---------- Message ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,7 +240,7 @@ impl Queue {
 
     /// Prende fino a `max` messaggi dalla coda, ordinati per priorità.
     /// Se la coda è vuota, aspetta fino a `wait_ms` per almeno 1 messaggio.
-    pub async fn consume(&self, max: usize, wait_ms: u64) -> Vec<Message> {
+    pub async fn consume_batch(&self, max: usize, wait_ms: u64) -> Vec<Message> {
         // FASE 1: Prendi subito quello che c'è
         {
             let mut state = self.state.lock();
@@ -286,27 +287,32 @@ impl Queue {
         result
     }
 
-    pub fn start_reaper(self: Arc<Self>, manager: Arc<QueueManager>) {
+    // ==========================================
+    // TASK SCHEDULING & CLEANUP
+    // ==========================================
+
+    /// Start both maintenance tasks
+    pub fn start_tasks(self: Arc<Self>, manager: Arc<QueueManager>) {
+        self.clone().start_scheduler(manager.clone());
+        self.clone().start_cleaner();
+    }
+
+    // 1. FAST TASK (100ms) - Scheduler & Retry
+    fn start_scheduler(self: Arc<Self>, manager: Arc<QueueManager>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 interval.tick().await;
-                self.reprocess_expired_messages(&manager);
+                self.run_scheduler_cycle(&manager);
             }
         });
     }
 
-    fn reprocess_expired_messages(&self, manager: &Arc<QueueManager>) {
+    fn run_scheduler_cycle(&self, manager: &Arc<QueueManager>) {
         let mut state = self.state.lock();
         let now = current_time_ms();
 
-        // 0. Cleanup dei messaggi scaduti (TTL)
-        let expired_ttl_ids = self.extract_expired_ids(&mut state.waiting_for_ttl, now);
-        for id in expired_ttl_ids {
-            state.registry.remove(&id);
-        }
-
-        // 1. Messaggi programmati -> Coda priorità
+        // 1. Messaggi programmati (Delay) -> Coda priorità
         let expired_delayed = self.extract_expired_ids(&mut state.waiting_for_time, now);
         for id in expired_delayed {
             if state.registry.contains_key(&id) {
@@ -320,7 +326,7 @@ impl Queue {
             let (should_dlq, payload, priority) = match state.registry.get(&id) {
                 Some(msg) if msg.attempts >= self.config.max_retries => (true, msg.payload.clone(), msg.priority),
                 Some(_) => (false, Bytes::new(), 0),
-                None => continue,
+                None => continue, // Già confermato (ACK) o scaduto (TTL)
             };
 
             if should_dlq {
@@ -334,6 +340,50 @@ impl Queue {
                 self.enqueue_and_notify(&mut state, id, now);
             }
         }
+    }
+
+    // 2. SLOW TASK (60s) - Cleaner & Vacuum
+    fn start_cleaner(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                self.run_cleaner_cycle();
+            }
+        });
+    }
+
+    fn run_cleaner_cycle(&self) {
+        let mut state = self.state.lock();
+        let now = current_time_ms();
+
+        // 1. Cleanup dei messaggi scaduti (TTL)
+        let expired_ttl_ids = self.extract_expired_ids(&mut state.waiting_for_ttl, now);
+        
+        if expired_ttl_ids.is_empty() {
+            return;
+        }
+
+        // Rimuovi dal registry (libera memoria pesante)
+        for id in expired_ttl_ids {
+            state.registry.remove(&id);
+        }
+
+        // 2. VACUUM: Rimuovi UUID orfani dagli indici secondari
+        // Creiamo un set degli ID validi per evitare il conflitto di borrow con state.registry
+        let valid_ids: HashSet<_> = state.registry.keys().cloned().collect();
+
+        for bucket in state.waiting_for_dispatch.values_mut() {
+            bucket.retain(|id| valid_ids.contains(id));
+        }
+
+        state.waiting_for_ack.iter_mut().for_each(|(_, list)| {
+            list.retain(|id| valid_ids.contains(id));
+        });
+
+        state.waiting_for_time.iter_mut().for_each(|(_, list)| {
+            list.retain(|id| valid_ids.contains(id));
+        });
     }
 
     pub fn get_snapshot(&self) -> QueueSummary {

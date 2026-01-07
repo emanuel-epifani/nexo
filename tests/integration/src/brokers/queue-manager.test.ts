@@ -386,7 +386,7 @@ describe('QUEUE broker', () => {
             await q.push('msg');
 
             // Consume via batch API
-            const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME_BATCH)
+            const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME)
                 .writeU32(1)      // max batch
                 .writeU64(5000)   // wait ms
                 .writeString(q.name)
