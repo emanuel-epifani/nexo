@@ -39,13 +39,8 @@ describe('QUEUE broker', () => {
 
         it('Producer PUSH 1 message -> only ONE of 2 competing consumers receives it', async () => {
             const qName = 'test_q_competing';
-            const q1 = await nexo.queue(qName).create();
-
-            const client2 = await NexoClient.connect({
-                host: process.env.NEXO_HOST,
-                port: parseInt(process.env.NEXO_PORT!)
-            });
-            const q2 = client2.queue(qName);
+            const q1 = nexo.queue(qName);
+            const q2 = nexo.queue(qName);
 
             let count = 0;
             const sub1 = await q1.subscribe(async () => { count++; });
@@ -59,18 +54,12 @@ describe('QUEUE broker', () => {
             sub2.stop();
 
             expect(count).toBe(1);
-            client2.disconnect();
         });
 
         it('Producer PUSH 2 messages -> 2 consumers receive ONE message each (Fair Distribution)', async () => {
             const qName = 'test_q_fair';
             const q1 = await nexo.queue(qName).create();
-
-            const client2 = await NexoClient.connect({
-                host: process.env.NEXO_HOST,
-                port: parseInt(process.env.NEXO_PORT!)
-            });
-            const q2 = client2.queue(qName);
+            const q2 = nexo.queue(qName);
 
             const received1: any[] = [];
             const received2: any[] = [];
@@ -94,8 +83,6 @@ describe('QUEUE broker', () => {
 
             const allReceived = [...received1, ...received2].sort();
             expect(allReceived).toEqual([msg1, msg2]);
-
-            client2.disconnect();
         });
 
         it('Producer PUSH 3 messages -> Consumer receives them in FIFO order', async () => {
@@ -490,6 +477,7 @@ describe('QUEUE broker', () => {
 
             await new Promise<void>((resolve) => {
                 const sub = q.subscribe(async () => {
+                    await new Promise(r => setTimeout(r, 5)); // Simulate work
                     consumed++;
                     if (consumed >= TOTAL) {
                         sub.then(s => s.stop()); // Use then because subscribe is async
@@ -521,6 +509,7 @@ describe('QUEUE broker', () => {
 
             await new Promise<void>((resolve) => {
                 const sub = q.subscribe(async () => {
+                    await new Promise(r => setTimeout(r, 5)); // Simulate work
                     consumed++;
                     if (consumed >= TOTAL) {
                         sub.then(s => s.stop()); // Use then because subscribe is async

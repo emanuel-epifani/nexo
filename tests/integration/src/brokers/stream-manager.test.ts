@@ -105,20 +105,16 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             const topicName = 'competing-test';
             await nexo.stream(topicName).create();
 
-            const client2 = await NexoClient.connect({
-                host: process.env.NEXO_HOST!,
-                port: parseInt(process.env.NEXO_PORT!)
-            });
-
             const received1: any[] = [];
             const received2: any[] = [];
             const allReceived = new Set<number>();
 
+            // Two consumers on same connection (No Singleton allows this)
             await nexo.stream(topicName, 'workers').subscribe(msg => {
                 received1.push(msg);
                 allReceived.add(msg.task);
             });
-            await client2.stream(topicName, 'workers').subscribe(msg => {
+            await nexo.stream(topicName, 'workers').subscribe(msg => {
                 received2.push(msg);
                 allReceived.add(msg.task);
             });
@@ -134,8 +130,6 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             // (competing for the same offset)
             await waitFor(() => allReceived.size === TOTAL, 5000);
             expect(allReceived.size).toBe(TOTAL);
-
-            client2.disconnect();
         });
 
         it('Offset Persistence: Should resume from last committed offset', async () => {
