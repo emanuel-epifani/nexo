@@ -780,10 +780,13 @@ export class NexoStream<T = any> {
         }
 
         let lastMsgOffset = this.nextOffset;
+        let batchError = false;
 
         for (let i = 0; i < numMsgs; i++) {
           const msgOffset = res.reader.readU64();
-          lastMsgOffset = msgOffset;
+
+          // Only update lastMsgOffset if we succeed later
+          // lastMsgOffset = msgOffset; <-- REMOVED
 
           res.reader.readU64(); // timestamp (skip)
           const keyLen = res.reader.readU32();
@@ -795,13 +798,29 @@ export class NexoStream<T = any> {
 
           try {
             await callback(data);
+            lastMsgOffset = msgOffset; // Success: mark this offset as done
           } catch (e) {
-            logger.error("Error in stream callback", e);
+            logger.error(`Stream callback error at offset ${msgOffset}. Retrying in 1s and set ${this.nextOffset} as offset on remote broker.`, e);
+
+            // Strategy: Stop, Commit progress up to here, Backoff, Retry
+            this.nextOffset = msgOffset; // Set next fetch to start from this failed message
+            batchError = true;
+
+            if (this.consumerGroup) {
+              await this.builder.reset(Opcode.S_COMMIT)
+                .writeString(this.consumerGroup)
+                .writeString(this.name)
+                .writeU64(this.nextOffset)
+                .send();
+            }
+
+            await new Promise(r => setTimeout(r, 1000));
+            break; // Exit batch loop
           }
         }
 
-        // Commit after processing batch
-        if (this.consumerGroup) {
+        // Commit after processing batch (only if no error occurred)
+        if (!batchError && this.consumerGroup) {
           const commitOffset = lastMsgOffset + BigInt(1);
           this.nextOffset = commitOffset;
 
