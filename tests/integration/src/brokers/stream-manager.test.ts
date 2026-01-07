@@ -169,7 +169,9 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             // 3. New subscription should resume from offset 5
             const received: any[] = [];
             const sub2 = nexo.stream(topic, group);
-            await sub2.subscribe(msg => received.push(msg));
+            await sub2.subscribe(msg => {
+                received.push(msg)
+            });
 
             await waitFor(() => received.length === 5);
             expect(received.map(m => m.id)).toEqual([5, 6, 7, 8, 9]);
@@ -212,7 +214,9 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             // Verify topic still works
             await nexo.stream(topic).publish({ test: 1 });
             const received: any[] = [];
-            await nexo.stream(topic, 'idem-group').subscribe(msg => received.push(msg));
+            await nexo.stream(topic, 'idem-group').subscribe(msg => {
+                received.push(msg)
+            });
             await waitFor(() => received.length === 1);
             expect(received[0].test).toBe(1);
         });
@@ -332,12 +336,16 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             const received1: any[] = [];
             const received2: any[] = [];
 
-            await nexo.stream(topic1, group).subscribe(msg => received1.push(msg));
+            await nexo.stream(topic1, group).subscribe(msg => {
+                received1.push(msg)
+            });
 
             // This should fail or create a separate group
             // because the group is bound to topic1
             try {
-                await nexo.stream(topic2, group).subscribe(msg => received2.push(msg));
+                await nexo.stream(topic2, group).subscribe(msg => {
+                    received2.push(msg)
+                });
             } catch (e) {
                 // Expected: group is for different topic
                 expect((e as Error).message).toContain('topic');
