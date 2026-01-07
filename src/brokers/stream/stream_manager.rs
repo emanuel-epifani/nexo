@@ -20,7 +20,6 @@ pub struct StreamSession {
 
 impl Drop for StreamSession {
     fn drop(&mut self) {
-        // TODO: Implement stream-specific cleanup logic if needed beyond disconnect
         self.manager.disconnect(&self.client_id);
     }
 }
@@ -136,17 +135,6 @@ impl StreamManager {
                     group.remove_member(client_id);
                 }
             }
-        }
-    }
-    
-    /// Leaves a specific group
-    pub fn leave_group(&self, group_id: &str, client_id: &str) {
-        if let Some(group) = self.groups.get(group_id) {
-            group.remove_member(client_id);
-        }
-        
-        if let Some(mut groups) = self.client_groups.get_mut(client_id) {
-            groups.retain(|g| g != group_id);
         }
     }
     

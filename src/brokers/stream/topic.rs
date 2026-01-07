@@ -2,7 +2,7 @@
 //! Zero locks, maximum cache locality, Tokio-native
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -105,8 +105,10 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
     let mut next_offset: u64 = 0;
     let start_offset: u64 = 0;
     
-    // Waiters: (offset_they_want, notifier)
-    let mut waiters: Vec<(u64, Arc<Notify>)> = Vec::new();
+    // Waiters: (offset_they_want, weak_notifier)
+    // We use Weak references to avoid holding the client connection alive if they disconnect.
+    // If the client drops their Arc<Notify>, our Weak pointer becomes invalid, and we cleanup lazily.
+    let mut waiters: Vec<(u64, Weak<Notify>)> = Vec::new();
     
     tracing::debug!(topic = %name, "Topic actor started");
     
@@ -128,12 +130,18 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
                 next_offset += 1;
                 
                 // Notify all waiters that were waiting for this offset or earlier
-                waiters.retain(|(wait_offset, notify)| {
+                waiters.retain(|(wait_offset, weak_notify)| {
                     if *wait_offset <= offset {
-                        notify.notify_one();
-                        false // Remove from list
+                        // Condition met: Try to notify if client is still alive
+                        if let Some(notify) = weak_notify.upgrade() {
+                            notify.notify_one();
+                        }
+                        false // Remove from list (task done)
                     } else {
-                        true // Keep waiting
+                        // Condition NOT met yet:
+                        // Only keep waiting if the client is still alive (upgrade succeeds).
+                        // If upgrade fails (None), it means client disconnected -> remove (cleanup).
+                        weak_notify.upgrade().is_some()
                     }
                 });
                 
@@ -161,7 +169,7 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
                 if offset < next_offset {
                     notify.notify_one();
                 } else {
-                    waiters.push((offset, notify));
+                    waiters.push((offset, Arc::downgrade(&notify)));
                 }
             }
             
