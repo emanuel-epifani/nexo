@@ -273,7 +273,7 @@ class NexoConnection {
           req.reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
         }
       }
-    }, 1000);
+    }, 2000);
     this.timeoutTimer.unref();
   }
 
@@ -574,39 +574,20 @@ export class NexoQueue<T = any> {
             messages.push({ id: idHex, data });
           }
 
-          // 2. Processa i messaggi (IO Bound)
-          if (concurrency === 1) {
-            // --- MODALITÀ SERIALE (Default) ---
-            // Garantisce l'ordine di completamento
-            for (const msg of messages) {
-              if (!active) break;
-              try {
-                await callback(msg.data);
-                await this.ack(msg.id);
-              } catch (e) {
-                logger.error(`Callback error in queue ${this.name}:`, e);
+          // 2. Processa i messaggi (Concurrency managed by helper)
+          await runConcurrent(messages, concurrency, async (msg) => {
+            if (!active) return;
+            try {
+              await callback(msg.data);
+              await this.ack(msg.id);
+            } catch (e) {
+              if (!active || !(this.builder as any).conn.isConnected) {
+                // Fail-Fast: Connection lost or stopped
+                return;
               }
+              logger.error(`Callback error in queue ${this.name}:`, e);
             }
-          } else {
-            // --- MODALITÀ CONCORRENTE ---
-            // Massimizza il throughput
-            const tasks = messages.map(msg => async () => {
-              if (!active) return;
-              try {
-                await callback(msg.data);
-                await this.ack(msg.id);
-              } catch (e) {
-                logger.error(`Callback error in queue ${this.name}:`, e);
-              }
-            });
-
-            // Esegui a blocchi (Chunking) per rispettare il limite di concorrenza
-            for (let i = 0; i < tasks.length; i += concurrency) {
-              if (!active) break;
-              const chunk = tasks.slice(i, i + concurrency);
-              await Promise.all(chunk.map(t => t()));
-            }
-          }
+          });
 
         } catch (e) {
           if (!active || !(this.builder as any).conn.isConnected) {
@@ -872,6 +853,39 @@ export class NexoTopic<T = any> {
 // ========================================
 // NEXO CLIENT - Main Entry Point
 // ========================================
+
+// Helper for concurrent processing with limited workers
+async function runConcurrent<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+
+  // Optimized path for serial execution (FIFO guaranteed)
+  if (concurrency === 1) {
+    for (const item of items) {
+      await fn(item);
+    }
+    return;
+  }
+
+  // Parallel execution with worker pool pattern
+  const queue = [...items];
+  const workers = [];
+  const limit = Math.min(concurrency, items.length);
+
+  for (let i = 0; i < limit; i++) {
+    workers.push(async () => {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        if (item) await fn(item);
+      }
+    });
+  }
+
+  await Promise.all(workers.map(w => w()));
+}
 
 export class NexoClient {
   private conn: NexoConnection;

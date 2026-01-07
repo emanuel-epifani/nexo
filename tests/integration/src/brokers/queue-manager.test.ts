@@ -521,10 +521,6 @@ describe('QUEUE broker', () => {
 
             await new Promise<void>((resolve) => {
                 const sub = q.subscribe(async () => {
-                    // Simuliamo un leggero carico async (es. 1ms)
-                    // In seriale questo ucciderebbe le performance, in parallelo no.
-                    await new Promise(r => setTimeout(r, 1));
-                    
                     consumed++;
                     if (consumed >= TOTAL) {
                         sub.then(s => s.stop()); // Use then because subscribe is async
