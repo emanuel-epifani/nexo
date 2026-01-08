@@ -3,30 +3,25 @@ import { nexo } from '../nexo';
 
 describe('NEXO Dashboard Prefill', () => {
 
-    it('dsds',async () => {
-        await nexo.store.kv.set('config:app_name', 434342);
+    it('POpulate store',async () => {
+        // STORE
+        for (let i = 0; i < 1000; i++) await nexo.store.kv.set(`user:sess${i}`, '{"user_id": 123, "role":"admin"}'); // 1h TTL
+
+        // QUEUE
+        const emailQ = await nexo.queue('email_notifications').create({ maxRetries: 3 });
+        for (let i = 0; i < 5; i++) await emailQ.push({ to: `user${i}@example.com`, subject: "Welcome" });
+
+        // STREAM
+        // 3. STREAM
+        const ordersTopic = await nexo.stream("orders").create();
+        for (let i = 0; i < 100; i++) await ordersTopic.publish({ order_id: i, amount: 100 }, { key: `user_${i}` })
+
+
+        // PUBSUB
     })
 
     it('Should populate all brokers with demo data for dashboard visualization', async () => {
         console.log("🚀 Starting Data Population for Dashboard...");
-
-        // 1. STORE (KV) - 100 Keys
-        console.log("📦 Populating Store...");
-        // Syntax: nexo.store.kv.set(key, value, ttl?)
-        await nexo.store.kv.set('config:app_name', 'NexoSuperApp');
-        await nexo.store.kv.set('config:version', '1.0.0');
-        await nexo.store.kv.set('user:session:123', '{"user_id": 123, "role": "admin"}', 3600); // 1h TTL
-        await nexo.store.kv.set('cache:home_page', '<html>...</html>', 300); // 5m TTL
-
-        // Batch insert for volume
-        const promises = [];
-        for (let i = 0; i < 50; i++) {
-            promises.push(nexo.store.kv.set(`sensor:temp:${i}`, `${20 + Math.random() * 10}`));
-        }
-        await Promise.all(promises);
-
-        // Expiring keys
-        await nexo.store.kv.set('otp:9999', '123456', 10); // 10s TTL (watch it expire!)
 
         // 2. QUEUES
         console.log("📥 Populating Queues...");
@@ -37,7 +32,7 @@ describe('NEXO Dashboard Prefill', () => {
 
         // Queue 2: Transcoding (Backlog)
         const videoQ = await nexo.queue('video_transcode').create({ visibilityTimeoutMs: 5000 });
-        for (let i = 0; i < 20; i++) await videoQ.push({ file: `vid_${i}.mp4` });
+        for (let i = 0; i < 5; i++) await videoQ.push({ file: `vid_${i}.mp4` });
 
         // Queue 3: DLQ Simulation
         const webhookQ = await nexo.queue('webhooks').create({ maxRetries: 1, visibilityTimeoutMs: 100 });
@@ -51,7 +46,9 @@ describe('NEXO Dashboard Prefill', () => {
         // Topic 1: Orders (Partitions & Consumers)
         // Syntax: await nexo.stream(topic).create({ partitions })
         const ordersTopicName = 'orders.v1';
+        const ordersTopicName2 = 'orders.v2';
         await nexo.stream(ordersTopicName).create({ partitions: 4 });
+        await nexo.stream(ordersTopicName2).create({ partitions: 4 });
         const ordersPub = nexo.stream(ordersTopicName);
 
         // Publish events

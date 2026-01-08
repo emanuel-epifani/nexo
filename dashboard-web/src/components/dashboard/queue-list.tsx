@@ -1,3 +1,18 @@
+import { useState, useMemo, useEffect } from "react"
+import { QueueBrokerSnapshot, QueueSummary } from "@/lib/types"
+import { Input } from "@/components/ui/input"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { 
+    Search, 
+    MessageSquare,
+    RefreshCw,
+    Clock,
+    AlertCircle,
+    Box,
+    AlertTriangle,
+    Ban,
+} from "lucide-react"
+import { Badge } from "@/components/ui/badge"
 import {
   Table,
   TableBody,
@@ -6,121 +21,294 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { QueueBrokerSnapshot, QueueSummary } from "@/lib/types"
-import { useState } from "react"
-import { ChevronRight, Box } from "lucide-react"
 
 interface Props {
   data: QueueBrokerSnapshot
 }
 
 export function QueueList({ data }: Props) {
-  if (data.queues.length === 0) {
-     return (
-      <div className="border border-dashed border-slate-800 rounded p-8 text-center text-sm text-slate-500 font-mono">
-        NO_ACTIVE_QUEUES
-      </div>
-    )
-  }
+  const [activeTab, setActiveTab] = useState<'active' | 'dlq'>('active')
+  const [filter, setFilter] = useState("")
+  const [selectedQueueName, setSelectedQueueName] = useState<string | null>(null)
+  
+  // Message Filter State
+  const [messageFilter, setMessageFilter] = useState<'All' | 'Pending' | 'InFlight' | 'Scheduled'>('All')
+
+  // Reset selection when switching Main Tabs
+  useEffect(() => {
+      setSelectedQueueName(null)
+  }, [activeTab])
+
+  // Split queues into Active vs DLQ
+  const { activeQueues, dlqQueues } = useMemo(() => {
+      const active: QueueSummary[] = []
+      const dlq: QueueSummary[] = []
+
+      data.queues.forEach(q => {
+          if (q.name.endsWith('_dlq')) {
+              if (q.pending_count > 0 || q.inflight_count > 0 || q.scheduled_count > 0) {
+                  dlq.push(q)
+              }
+          } else {
+              active.push(q)
+          }
+      })
+      
+      return { activeQueues: active, dlqQueues: dlq }
+  }, [data.queues])
+
+  const currentList = activeTab === 'active' ? activeQueues : dlqQueues
+
+  const filteredQueues = useMemo(() => {
+      return currentList.filter(q => q.name.toLowerCase().includes(filter.toLowerCase()))
+  }, [currentList, filter])
+
+  const selectedQueue = useMemo(() => 
+      data.queues.find(q => q.name === selectedQueueName),
+  [data.queues, selectedQueueName])
+
+  // Filter Messages inside selected queue
+  const filteredMessages = useMemo(() => {
+      if (!selectedQueue) return []
+      if (messageFilter === 'All') return selectedQueue.messages
+      return selectedQueue.messages.filter(m => m.state === messageFilter)
+  }, [selectedQueue, messageFilter])
 
   return (
-    <div className="space-y-4">
-        {data.queues.map(queue => (
-            <QueueCard key={queue.name} queue={queue} />
-        ))}
-    </div>
-  )
-}
+      <div className="flex h-[calc(100vh-280px)] gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+          
+          {/* SIDEBAR: Queues List */}
+          <div className="w-[320px] flex flex-col border-r border-slate-800 bg-slate-950/50">
+              {/* TABS */}
+              <div className="flex border-b border-slate-800">
+                  <button 
+                      onClick={() => setActiveTab('active')}
+                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'active' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                  >
+                      Active ({activeQueues.length})
+                  </button>
+                  <div className="w-[1px] bg-slate-800" />
+                  <button 
+                      onClick={() => setActiveTab('dlq')}
+                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 ${activeTab === 'dlq' ? 'bg-rose-950/30 text-rose-400' : 'text-slate-500 hover:text-slate-300'}`}
+                  >
+                      DLQ / Errors ({dlqQueues.length})
+                      {dlqQueues.length > 0 && <AlertTriangle className="h-3 w-3 text-rose-500" />}
+                  </button>
+              </div>
 
-function QueueCard({ queue }: { queue: QueueSummary }) {
-    const [expanded, setExpanded] = useState(false)
+              {/* SEARCH */}
+              <div className="p-3 border-b border-slate-800">
+                  <div className="relative">
+                      <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                      <Input 
+                          placeholder={activeTab === 'active' ? "FILTER_QUEUES..." : "FILTER_DLQ..."}
+                          value={filter}
+                          onChange={(e) => setFilter(e.target.value)}
+                          className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700"
+                      />
+                  </div>
+              </div>
 
-    return (
-        <div className="rounded border border-slate-800 bg-slate-900/30 overflow-hidden">
-            <div 
-                className="flex items-center justify-between p-3 cursor-pointer hover:bg-slate-800/50 transition-colors" 
-                onClick={() => setExpanded(!expanded)}
-            >
-                <div className="flex items-center gap-3">
-                        <div className={`text-slate-500 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`}>
-                            <ChevronRight className="h-4 w-4" />
-                        </div>
-                        <div className="font-mono font-medium text-sm text-slate-200">{queue.name}</div>
-                </div>
-                
-                <div className="flex items-center gap-6 text-xs font-mono">
-                        <div className="flex items-center gap-2">
-                            <span className="text-slate-500">PENDING:</span>
-                            <span className={queue.pending_count > 0 ? "text-amber-400 font-bold" : "text-slate-400"}>
-                                {queue.pending_count}
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className="text-slate-500">IN_FLIGHT:</span>
-                            <span className="text-slate-400">{queue.inflight_count}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className="text-slate-500">SCHEDULED:</span>
-                            <span className="text-slate-400">{queue.scheduled_count}</span>
-                        </div>
-                </div>
-            </div>
+              {/* LIST */}
+              <ScrollArea className="flex-1">
+                  <div className="p-0">
+                      {filteredQueues.length === 0 ? (
+                          <div className="py-8 text-center text-xs text-slate-600 italic">
+                              {activeTab === 'active' ? 'NO_ACTIVE_QUEUES' : 'NO_ERRORS_FOUND'}
+                          </div>
+                      ) : (
+                          filteredQueues.map((q) => (
+                              <div
+                                  key={q.name}
+                                  onClick={() => setSelectedQueueName(q.name)}
+                                  className={`
+                                      group flex items-center justify-between px-4 py-3 border-b border-slate-800/50 cursor-pointer transition-all
+                                      ${selectedQueueName === q.name ? 'bg-slate-800' : 'hover:bg-slate-900/50'}
+                                  `}
+                              >
+                                  <div className="flex items-center gap-3 overflow-hidden">
+                                      <div className={`p-1.5 rounded ${
+                                          selectedQueueName === q.name 
+                                            ? (activeTab === 'dlq' ? 'bg-rose-900 text-rose-200' : 'bg-slate-700 text-white') 
+                                            : 'bg-slate-900 text-slate-500'
+                                      }`}>
+                                          {activeTab === 'dlq' ? <Ban className="h-3.5 w-3.5" /> : <MessageSquare className="h-3.5 w-3.5" />}
+                                      </div>
+                                      <span className={`font-mono text-xs truncate ${selectedQueueName === q.name ? 'text-white font-bold' : 'text-slate-300'}`}>
+                                          {q.name}
+                                      </span>
+                                  </div>
 
-            {expanded && (
-                <div className="border-t border-slate-800 bg-slate-950/50 p-4">
-                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2">
-                        <Box className="h-3 w-3" /> Messages ({queue.messages.length})
-                    </h4>
-                    {queue.messages.length === 0 ? (
-                        <div className="text-xs text-slate-600 font-mono italic">QUEUE_EMPTY</div>
-                    ) : (
-                        <div className="rounded border border-slate-800 overflow-hidden">
+                                  <div className="flex items-center gap-2">
+                                      {q.pending_count > 0 && (
+                                          <Badge variant="outline" className={`h-4 px-1.5 text-[9px] rounded-sm border ${activeTab === 'dlq' ? 'border-rose-900 bg-rose-950/30 text-rose-500' : 'border-amber-900 bg-amber-950/30 text-amber-500'}`}>
+                                              {q.pending_count}
+                                          </Badge>
+                                      )}
+                                  </div>
+                              </div>
+                          ))
+                      )}
+                  </div>
+              </ScrollArea>
+          </div>
+
+          {/* MAIN AREA: Messages Table */}
+          <div className="flex-1 bg-slate-950/30 flex flex-col min-w-0">
+             {selectedQueue ? (
+                 <div className="flex flex-col h-full">
+                     {/* Header Stats */}
+                     <div className="p-4 border-b border-slate-800 bg-slate-900/20">
+                         <div className="flex justify-between items-center mb-4">
+                             <div className="flex items-center gap-2">
+                                 <h2 className={`text-sm font-bold ${activeTab === 'dlq' ? 'text-rose-400' : 'text-slate-100'}`}>{selectedQueue.name}</h2>
+                                 <div className="h-4 w-[1px] bg-slate-800 mx-2" />
+                                 <span className="text-[10px] text-slate-500 uppercase">
+                                     CONSUMERS: {selectedQueue.consumers_waiting}
+                                 </span>
+                             </div>
+                             <div className="flex gap-4">
+                                 <StatBadge label="PENDING" value={selectedQueue.pending_count} color="text-amber-500" />
+                                 <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight_count} color="text-blue-400" />
+                                 <StatBadge label="SCHEDULED" value={selectedQueue.scheduled_count} color="text-slate-400" />
+                             </div>
+                         </div>
+
+                         {/* MESSAGE FILTERS TABS */}
+                         <div className="flex gap-1">
+                             <FilterButton label="All" count={selectedQueue.messages.length} active={messageFilter === 'All'} onClick={() => setMessageFilter('All')} />
+                             <FilterButton label="Pending" count={selectedQueue.messages.filter(m => m.state === 'Pending').length} active={messageFilter === 'Pending'} onClick={() => setMessageFilter('Pending')} />
+                             <FilterButton label="InFlight" count={selectedQueue.messages.filter(m => m.state === 'InFlight').length} active={messageFilter === 'InFlight'} onClick={() => setMessageFilter('InFlight')} />
+                             <FilterButton label="Scheduled" count={selectedQueue.messages.filter(m => m.state === 'Scheduled').length} active={messageFilter === 'Scheduled'} onClick={() => setMessageFilter('Scheduled')} />
+                         </div>
+                     </div>
+
+                     {/* Messages List */}
+                     <div className="flex-1 overflow-auto bg-slate-950/10">
+                        {filteredMessages.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-700">
+                                <Box className="h-12 w-12 opacity-20 mb-4" />
+                                <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_MESSAGES_FOUND</p>
+                            </div>
+                        ) : (
                             <Table>
-                                <TableHeader className="bg-slate-900 border-b border-slate-800">
+                                <TableHeader className="bg-slate-900 border-b border-slate-800 sticky top-0 z-10">
                                     <TableRow className="hover:bg-transparent">
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500">ID</TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500">Payload</TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[100px]">State</TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[60px]">Pri</TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[60px]">Att</TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[140px]">Next Run</TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[240px]">
+                                            Message ID
+                                        </TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500">
+                                            Payload Preview
+                                        </TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[100px]">
+                                            State
+                                        </TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[80px] text-center" title="Priority (Higher = Sooner)">
+                                            Priority
+                                        </TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[80px] text-center" title="Delivery Attempts">
+                                            Attempts
+                                        </TableHead>
+                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[160px] text-right" title="Scheduled Time or Visibility Timeout">
+                                            Deliver At
+                                        </TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                    {queue.messages.map(msg => (
-                                        <TableRow key={msg.id} className="text-xs border-slate-800 hover:bg-slate-900">
-                                            <TableCell className="font-mono text-[10px] text-slate-500" title={msg.id}>
-                                                {msg.id.slice(0, 8)}
+                                    {filteredMessages.map(msg => (
+                                        <TableRow key={msg.id} className="text-xs border-slate-800 hover:bg-slate-900/50 transition-colors group/row">
+                                            <TableCell className="py-2 font-mono text-[10px] text-slate-500 select-all">
+                                                {msg.id}
                                             </TableCell>
-                                            <TableCell>
-                                                <code className="text-[10px] text-slate-300">
+                                            <TableCell className="py-2 max-w-[400px]">
+                                                <div 
+                                                    className="truncate font-mono text-[10px] text-slate-300 bg-slate-900/50 px-2 py-1 rounded border border-slate-800 cursor-help"
+                                                    title={msg.payload_preview}
+                                                >
                                                     {msg.payload_preview}
-                                                </code>
+                                                </div>
                                             </TableCell>
-                                            <TableCell>
-                                                <Badge variant="outline" className={`
-                                                    rounded-sm text-[10px] px-1.5 py-0 h-4 border-0 font-mono uppercase font-normal
-                                                    ${msg.state === 'Pending' ? 'bg-slate-800 text-slate-400' : ''}
-                                                    ${msg.state === 'InFlight' ? 'bg-amber-950/30 text-amber-500' : ''}
-                                                    ${msg.state === 'Scheduled' ? 'bg-blue-950/30 text-blue-400' : ''}
-                                                `}>
-                                                    {msg.state}
-                                                </Badge>
+                                            <TableCell className="py-2">
+                                                <StatusBadge state={msg.state} />
                                             </TableCell>
-                                            <TableCell className="font-mono text-slate-400">{msg.priority}</TableCell>
-                                            <TableCell className="font-mono text-slate-400">{msg.attempts}</TableCell>
-                                            <TableCell className="text-slate-500 text-[10px] font-mono">
-                                                {msg.next_delivery_at ? new Date(msg.next_delivery_at).toLocaleTimeString() : '-'}
+                                            <TableCell className="font-mono text-slate-400 text-center py-2">
+                                                {msg.priority > 0 ? <span className="text-amber-500 font-bold">{msg.priority}</span> : 0}
+                                            </TableCell>
+                                            <TableCell className="font-mono text-slate-400 text-center py-2">
+                                                {msg.attempts > 0 ? <span className="text-rose-400 font-bold">{msg.attempts}</span> : 0}
+                                            </TableCell>
+                                            <TableCell className="text-slate-500 text-[10px] font-mono text-right py-2">
+                                                {msg.next_delivery_at ? (
+                                                    <span className="text-slate-300">{new Date(msg.next_delivery_at).toLocaleTimeString()}</span>
+                                                ) : (
+                                                    <span className="text-slate-700">-</span>
+                                                )}
                                             </TableCell>
                                         </TableRow>
                                     ))}
                                 </TableBody>
                             </Table>
-                        </div>
-                    )}
+                        )}
+                     </div>
+                 </div>
+             ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                    <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_QUEUE</p>
                 </div>
-            )}
+             )}
+          </div>
+
+      </div>
+  )
+}
+
+function StatBadge({ label, value, color }: any) {
+    return (
+        <div className="flex items-center gap-2 text-[10px] font-mono">
+            <span className="text-slate-600">{label}:</span>
+            <span className={`font-bold ${value > 0 ? color : 'text-slate-600'}`}>{value}</span>
+        </div>
+    )
+}
+
+function FilterButton({ label, count, active, onClick }: any) {
+    return (
+        <button 
+            onClick={onClick}
+            className={`
+                px-3 py-1 text-[10px] font-mono uppercase rounded-sm border transition-all flex items-center gap-2
+                ${active 
+                    ? 'bg-slate-800 border-slate-600 text-slate-200' 
+                    : 'bg-transparent border-transparent text-slate-500 hover:bg-slate-900 hover:text-slate-400'
+                }
+            `}
+        >
+            {label}
+            {count > 0 && <span className={`opacity-60 ${active ? 'text-white' : ''}`}>({count})</span>}
+        </button>
+    )
+}
+
+function StatusBadge({ state }: { state: string }) {
+    let color = "bg-slate-800 text-slate-400 border-slate-700"
+    let icon = <Clock className="h-3 w-3" />
+
+    if (state === 'InFlight') {
+        color = "bg-blue-950/30 text-blue-400 border-blue-900/50"
+        icon = <RefreshCw className="h-3 w-3 animate-spin duration-[3s]" />
+    } else if (state === 'Pending') {
+        color = "bg-amber-950/30 text-amber-500 border-amber-900/50"
+        icon = <AlertCircle className="h-3 w-3" />
+    } else if (state === 'Scheduled') {
+        color = "bg-slate-800 text-slate-300 border-slate-700"
+        icon = <Clock className="h-3 w-3" />
+    }
+
+    return (
+        <div className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-sm border ${color} w-fit`}>
+            {icon}
+            <span className="text-[9px] uppercase font-bold">{state}</span>
         </div>
     )
 }
