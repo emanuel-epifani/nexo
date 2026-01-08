@@ -38,7 +38,6 @@ export function StreamList({ data }: Props) {
           <TableHeader>
             <TableRow>
               <TableHead>Topic Name</TableHead>
-              <TableHead>Partitions</TableHead>
               <TableHead>Total Messages</TableHead>
               <TableHead>Consumer Groups</TableHead>
             </TableRow>
@@ -47,7 +46,6 @@ export function StreamList({ data }: Props) {
             {data.topics.map((topic) => (
               <TableRow key={topic.name}>
                 <TableCell className="font-medium">{topic.name}</TableCell>
-                <TableCell>{topic.partitions_count}</TableCell>
                 <TableCell>{topic.total_messages.toLocaleString()}</TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-2">
@@ -56,7 +54,7 @@ export function StreamList({ data }: Props) {
                     ) : (
                       topic.consumer_groups.map(g => (
                         <Badge key={g.name} variant="secondary" className="text-xs">
-                          {g.name} (Lag: {g.pending_messages})
+                          {g.name} (Members: {g.members.length})
                         </Badge>
                       ))
                     )}
@@ -70,4 +68,3 @@ export function StreamList({ data }: Props) {
     </Card>
   )
 }
-

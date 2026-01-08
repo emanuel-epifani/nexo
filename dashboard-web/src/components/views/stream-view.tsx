@@ -6,9 +6,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { StreamBrokerSnapshot, TopicSummary } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
+import { StreamBrokerSnapshot, TopicSummary } from "@/lib/types"
 import { Users, HardDrive } from "lucide-react"
 
 interface Props {
@@ -17,8 +16,7 @@ interface Props {
 
 export function StreamView({ data }: Props) {
   return (
-    <div className="space-y-6">
-       <h2 className="text-2xl font-bold tracking-tight">Event Streaming</h2>
+    <div className="grid grid-cols-1 gap-6">
       {data.topics.map(topic => (
           <TopicDetail key={topic.name} topic={topic} />
       ))}
@@ -28,75 +26,78 @@ export function StreamView({ data }: Props) {
 
 function TopicDetail({ topic }: { topic: TopicSummary }) {
     return (
-        <Card>
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-                <div className="space-y-1">
-                    <CardTitle className="text-xl font-mono">{topic.name}</CardTitle>
-                    <div className="flex gap-2 text-sm text-muted-foreground">
-                        <span className="flex items-center gap-1"><HardDrive className="h-3 w-3" /> {topic.partitions_count} Partitions</span>
-                        <span>•</span>
-                        <span>{topic.total_messages.toLocaleString()} msgs</span>
+        <div className="rounded border border-slate-800 bg-slate-900/30">
+            {/* Header */}
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                    <div className="p-1.5 rounded bg-slate-800 text-slate-400">
+                        <HardDrive className="h-4 w-4" />
+                    </div>
+                    <div>
+                        <h3 className="text-sm font-bold font-mono text-slate-200">{topic.name}</h3>
+                        <div className="text-[10px] font-mono text-slate-500 uppercase mt-0.5">
+                            HIGH_WATERMARK: {topic.total_messages.toLocaleString()}
+                        </div>
                     </div>
                 </div>
-            </CardHeader>
-            <CardContent>
-                <h4 className="mb-2 text-sm font-semibold flex items-center gap-2">
-                    <Users className="h-4 w-4" /> Consumer Groups ({topic.consumer_groups.length})
-                </h4>
+                <div className="flex items-center gap-2">
+                    <Users className="h-3 w-3 text-slate-600" />
+                    <span className="text-xs font-mono text-slate-400">{topic.consumer_groups.length} GROUPS</span>
+                </div>
+            </div>
+
+            {/* Content */}
+            <div className="p-4">
                 {topic.consumer_groups.length === 0 ? (
-                    <div className="text-sm text-muted-foreground italic">No active consumer groups.</div>
+                    <div className="text-xs font-mono text-slate-600 italic">NO_CONSUMER_GROUPS</div>
                 ) : (
                     <div className="space-y-4">
                         {topic.consumer_groups.map(group => (
-                            <div key={group.name} className="border rounded-md p-4 bg-muted/10">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="flex items-center gap-2">
-                                        <span className="font-semibold">{group.name}</span>
-                                        {group.pending_messages > 0 ? (
-                                            <Badge variant="destructive">Lag: {group.pending_messages}</Badge>
-                                        ) : (
-                                            <Badge variant="outline" className="text-green-600 bg-green-50 border-green-200">Synced</Badge>
-                                        )}
-                                    </div>
-                                    <span className="text-xs text-muted-foreground">{group.connected_clients} clients connected</span>
+                            <div key={group.name} className="space-y-2">
+                                <div className="flex items-center justify-between text-xs">
+                                    <span className="font-mono font-bold text-slate-400">{group.name}</span>
+                                    <span className="font-mono text-[10px] text-slate-600">{group.members.length} MEMBERS</span>
                                 </div>
                                 
-                                <Table>
-                                    <TableHeader>
-                                        <TableRow className="bg-muted/50">
-                                            <TableHead className="h-8">Client ID</TableHead>
-                                            <TableHead className="h-8">Assigned Partitions</TableHead>
-                                        </TableRow>
-                                    </TableHeader>
-                                    <TableBody>
-                                        {group.members.length === 0 ? (
-                                             <TableRow>
-                                                <TableCell colSpan={2} className="text-center text-xs text-muted-foreground py-2">No members connected (Group inactive)</TableCell>
+                                <div className="rounded border border-slate-800 overflow-hidden">
+                                    <Table>
+                                        <TableHeader className="bg-slate-900 border-b border-slate-800">
+                                            <TableRow className="hover:bg-transparent h-7">
+                                                <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500">Client ID</TableHead>
+                                                <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500 text-right">Offset</TableHead>
+                                                <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500 text-right w-[100px]">Lag</TableHead>
                                             </TableRow>
-                                        ) : (
-                                            group.members.map(member => (
-                                                <TableRow key={member.client_id}>
-                                                    <TableCell className="font-mono text-xs">{member.client_id}</TableCell>
-                                                    <TableCell className="text-xs">
-                                                        <div className="flex gap-1">
-                                                            {member.partitions_assigned.map(p => (
-                                                                <span key={p} className="inline-block px-1.5 py-0.5 bg-secondary rounded border text-[10px]">
-                                                                    P-{p}
-                                                                </span>
-                                                            ))}
-                                                        </div>
-                                                    </TableCell>
+                                        </TableHeader>
+                                        <TableBody>
+                                            {group.members.length === 0 ? (
+                                                 <TableRow className="hover:bg-transparent border-0">
+                                                    <TableCell colSpan={3} className="text-center text-[10px] text-slate-600 py-2 font-mono italic">INACTIVE_GROUP</TableCell>
                                                 </TableRow>
-                                            ))
-                                        )}
-                                    </TableBody>
-                                </Table>
+                                            ) : (
+                                                group.members.map(member => (
+                                                    <TableRow key={member.client_id} className="border-slate-800 hover:bg-slate-900 h-8">
+                                                        <TableCell className="font-mono text-[10px] text-slate-400 py-1">{member.client_id}</TableCell>
+                                                        <TableCell className="font-mono text-[10px] text-slate-300 text-right py-1">{member.current_offset}</TableCell>
+                                                        <TableCell className="text-right py-1">
+                                                            {member.lag > 0 ? (
+                                                                <Badge variant="destructive" className="rounded-sm h-4 px-1.5 text-[10px] font-mono border-0 bg-rose-950 text-rose-500 hover:bg-rose-900">
+                                                                    -{member.lag}
+                                                                </Badge>
+                                                            ) : (
+                                                                <span className="text-[10px] font-mono text-emerald-600">SYNCED</span>
+                                                            )}
+                                                        </TableCell>
+                                                    </TableRow>
+                                                ))
+                                            )}
+                                        </TableBody>
+                                    </Table>
+                                </div>
                             </div>
                         ))}
                     </div>
                 )}
-            </CardContent>
-        </Card>
+            </div>
+        </div>
     )
 }
-

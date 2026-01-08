@@ -769,9 +769,6 @@ export class NexoStream<T = any> {
         for (let i = 0; i < numMsgs; i++) {
           const msgOffset = res.reader.readU64();
 
-          // Only update lastMsgOffset if we succeed later
-          // lastMsgOffset = msgOffset; <-- REMOVED
-
           res.reader.readU64(); // timestamp (skip)
           const keyLen = res.reader.readU32();
           if (keyLen > 0) res.reader.readBuffer(keyLen); // skip key
@@ -890,6 +887,9 @@ async function runConcurrent<T>(
 export class NexoClient {
   private conn: NexoConnection;
   private builder: RequestBuilder;
+  private queues = new Map<string, NexoQueue<any>>();
+  private streams = new Map<string, NexoStream<any>>();
+  private topics = new Map<string, NexoTopic<any>>();
 
   /** Store broker - access data structures (kv, hash) */
   public readonly store: NexoStore;
@@ -920,17 +920,33 @@ export class NexoClient {
 
   /** Queue broker - get or create a queue by name */
   public queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {
-    return new NexoQueue<T>(this.builder, name, config);
+    let q = this.queues.get(name);
+    if (!q) {
+      q = new NexoQueue<T>(this.builder, name, config);
+      this.queues.set(name, q);
+    }
+    return q as NexoQueue<T>;
   }
 
   /** Stream broker - get or create a stream handle */
   public stream<T = any>(name: string, consumerGroup?: string): NexoStream<T> {
-    return new NexoStream<T>(this.builder, name, consumerGroup);
+    const key = consumerGroup ? `${name}:${consumerGroup}` : name;
+    let s = this.streams.get(key);
+    if (!s) {
+      s = new NexoStream<T>(this.builder, name, consumerGroup);
+      this.streams.set(key, s);
+    }
+    return s as NexoStream<T>;
   }
 
   /** PubSub broker - get or create a typed topic handle */
   public pubsub<T = any>(name: string): NexoTopic<T> {
-    return new NexoTopic<T>(this.pubsubBroker, name);
+    let t = this.topics.get(name);
+    if (!t) {
+      t = new NexoTopic<T>(this.pubsubBroker, name);
+      this.topics.set(name, t);
+    }
+    return t as NexoTopic<T>;
   }
 
   /** @internal Debug utilities */

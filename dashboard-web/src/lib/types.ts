@@ -1,21 +1,18 @@
 // --- STREAM BROKER ---
 
-export interface MemberDetail {
+export interface MemberSummary {
     client_id: string;
-    partitions_assigned: number[];
+    current_offset: number;
+    lag: number;
 }
 
 export interface GroupSummary {
     name: string;
-    pending_messages: number;
-    connected_clients: number;
-    members: MemberDetail[];
+    members: MemberSummary[];
 }
 
 export interface TopicSummary {
     name: string;
-    partitions_count: number;
-    retention_ms: number;
     total_messages: number;
     consumer_groups: GroupSummary[];
 }
@@ -28,12 +25,22 @@ export interface StreamBrokerSnapshot {
 
 // --- QUEUE BROKER ---
 
+export interface MessageSummary {
+    id: string;
+    payload_preview: string;
+    state: string;
+    priority: number;
+    attempts: number;
+    next_delivery_at: string | null;
+}
+
 export interface QueueSummary {
     name: string;
     pending_count: number;
     inflight_count: number;
     scheduled_count: number;
     consumers_waiting: number;
+    messages: MessageSummary[];
 }
 
 export interface QueueBrokerSnapshot {
@@ -57,16 +64,23 @@ export interface StoreBrokerSnapshot {
 
 // --- PUB/SUB BROKER ---
 
+export interface WildcardSubscription {
+    pattern: string;
+    client_id: string;
+}
+
 export interface TopicNodeSnapshot {
     name: string;
+    full_path: string;
     subscribers: number;
-    retained_msg: boolean;
+    retained_value: string | null;
     children: TopicNodeSnapshot[];
 }
 
 export interface PubSubBrokerSnapshot {
     active_clients: number;
     topic_tree: TopicNodeSnapshot;
+    wildcard_subscriptions: WildcardSubscription[];
 }
 
 // --- SYSTEM ---

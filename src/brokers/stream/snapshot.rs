@@ -17,6 +17,12 @@ pub struct TopicSummary {
 #[derive(Serialize)]
 pub struct GroupSummary {
     pub name: String,
-    pub pending_messages: u64,
-    pub connected_clients: usize,
+    pub members: Vec<MemberSummary>,
+}
+
+#[derive(Serialize)]
+pub struct MemberSummary {
+    pub client_id: String,
+    pub current_offset: u64,
+    pub lag: u64,
 }

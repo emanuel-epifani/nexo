@@ -3,6 +3,10 @@ import { nexo } from '../nexo';
 
 describe('NEXO Dashboard Prefill', () => {
 
+    it('dsds',async () => {
+        await nexo.store.kv.set('config:app_name', 434342);
+    })
+
     it('Should populate all brokers with demo data for dashboard visualization', async () => {
         console.log("🚀 Starting Data Population for Dashboard...");
 

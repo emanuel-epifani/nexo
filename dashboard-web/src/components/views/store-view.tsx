@@ -1,90 +1,228 @@
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { useState, useMemo } from "react"
+import { StoreBrokerSnapshot, KeyDetail } from "@/lib/types"
 import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { StoreBrokerSnapshot } from "@/lib/types"
-import { useState } from "react"
-import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { 
+    Database, 
+    Search, 
+    Clock, 
+    Trash2, 
+    Calendar,
+    List,
+    Layers,
+    FileJson,
+    Binary
+} from "lucide-react"
 
 interface Props {
   data: StoreBrokerSnapshot
 }
 
-export function StoreView({ data }: Props) {
-  const [filter, setFilter] = useState("")
+type StructureType = 'hashmap' | 'list' | 'set' 
 
-  const filteredKeys = data.keys.filter(k => 
-    k.key.toLowerCase().includes(filter.toLowerCase())
-  )
+export function StoreView({ data }: Props) {
+  const [activeStructure, setActiveStructure] = useState<StructureType>('hashmap')
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold tracking-tight">Key-Value Store</h2>
-        <div className="flex items-center space-x-2">
-            <Input 
-                placeholder="Filter keys..." 
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                className="w-[300px]"
-            />
+      <div className="flex h-[calc(100vh-280px)] gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+          
+          {/* SIDEBAR: Navigation */}
+          <div className="w-48 flex flex-col border-r border-slate-800 bg-slate-950/50">
+              <div className="p-3 border-b border-slate-800 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                  DATA_TYPES
+              </div>
+              <div className="p-2 space-y-0.5">
+                  <NavButton 
+                      label="HASH_MAP" 
+                      icon={<Database className="h-3.5 w-3.5" />} 
+                      count={data.total_keys}
+                      active={activeStructure === 'hashmap'}
+                      onClick={() => setActiveStructure('hashmap')}
+                  />
+                  <NavButton 
+                      label="LIST" 
+                      icon={<List className="h-3.5 w-3.5" />} 
+                      count={0}
+                      active={activeStructure === 'list'}
+                      onClick={() => setActiveStructure('list')}
+                      disabled
+                  />
+                  <NavButton 
+                      label="SET" 
+                      icon={<Layers className="h-3.5 w-3.5" />} 
+                      count={0}
+                      active={activeStructure === 'set'}
+                      onClick={() => setActiveStructure('set')}
+                      disabled
+                  />
+              </div>
+          </div>
+
+          {/* MAIN AREA: Browser */}
+          <div className="flex-1 min-w-0">
+             <StoreBrowser data={data} structure={activeStructure} />
+          </div>
+
+      </div>
+  )
+}
+
+function NavButton({ label, icon, count, active, onClick, disabled }: any) {
+    return (
+        <button
+            onClick={onClick}
+            disabled={disabled}
+            className={`
+                flex items-center justify-between w-full px-3 py-2 rounded-sm transition-all duration-200 group text-xs
+                ${active 
+                    ? 'bg-slate-800 text-white font-medium' 
+                    : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+                }
+                ${disabled && 'opacity-40 cursor-not-allowed hover:bg-transparent'}
+            `}
+        >
+            <div className="flex items-center gap-2.5">
+                {icon}
+                <span>{label}</span>
+            </div>
+            {count > 0 && (
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-sm ${active ? 'bg-slate-700 text-white' : 'bg-slate-900 text-slate-500'}`}>
+                    {count}
+                </span>
+            )}
+        </button>
+    )
+}
+
+function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structure: StructureType }) {
+  const [filter, setFilter] = useState("")
+  const [selectedKey, setSelectedKey] = useState<KeyDetail | null>(null)
+
+  // Quick filter logic
+  const filteredKeys = useMemo(() => {
+    return data.keys.filter(k => 
+        k.key.toLowerCase().includes(filter.toLowerCase())
+    )
+  }, [data.keys, filter])
+
+  useMemo(() => {
+    if (!selectedKey && filteredKeys.length > 0) {
+        setSelectedKey(filteredKeys[0])
+    }
+  }, [filteredKeys, selectedKey])
+
+  return (
+    <div className="flex h-full">
+      {/* COLUMN 1: Key List */}
+      <div className="w-[320px] flex flex-col border-r border-slate-800 bg-slate-900/10">
+        {/* Search Bar */}
+        <div className="p-3 border-b border-slate-800">
+            <div className="relative">
+                <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                <Input 
+                    placeholder={`FILTER ${structure.toUpperCase()}...`}
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700 focus-visible:border-slate-700"
+                />
+            </div>
+        </div>
+
+        {/* List Container */}
+        <ScrollArea className="flex-1">
+            <div className="p-0">
+                {filteredKeys.map((k) => (
+                    <button
+                        key={k.key}
+                        onClick={() => setSelectedKey(k)}
+                        className={`w-full text-left px-4 py-2 text-xs border-b border-slate-800/50 transition-colors truncate font-mono ${
+                            selectedKey?.key === k.key 
+                            ? "bg-slate-800 text-white" 
+                            : "hover:bg-slate-900/50 text-slate-400 hover:text-slate-200"
+                        }`}
+                    >
+                        {k.key}
+                    </button>
+                ))}
+                {filteredKeys.length === 0 && (
+                        <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                        <Search className="h-6 w-6 text-slate-800 mb-3" />
+                        <p className="text-xs text-slate-600">NO_MATCHES</p>
+                    </div>
+                )}
+            </div>
+        </ScrollArea>
+        
+        {/* Footer Count */}
+        <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
+            {filteredKeys.length} / {data.total_keys} KEYS
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-           <CardTitle>Keys ({filteredKeys.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-[300px]">Key</TableHead>
-                  <TableHead>Value Preview</TableHead>
-                  <TableHead className="w-[200px]">Expires At</TableHead>
-                  <TableHead className="w-[100px]">Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredKeys.length === 0 ? (
-                    <TableRow>
-                        <TableCell colSpan={4} className="h-24 text-center">
-                            No keys found.
-                        </TableCell>
-                    </TableRow>
-                ) : (
-                    filteredKeys.map((k) => (
-                    <TableRow key={k.key}>
-                        <TableCell className="font-mono font-medium">{k.key}</TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[300px]">
-                            {k.value_preview}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                            {k.expires_at ? new Date(k.expires_at).toLocaleString() : "Never"}
-                        </TableCell>
-                        <TableCell>
-                            {k.expires_at ? (
-                                <Badge variant="secondary">TTL</Badge>
-                            ) : (
-                                <Badge variant="outline">Persistent</Badge>
+      {/* COLUMN 2: Value Inspector */}
+      <div className="flex-1 flex flex-col bg-slate-950/30">
+        {selectedKey ? (
+            <>
+                <div className="p-4 border-b border-slate-800 flex justify-between items-start bg-slate-900/20">
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                            <h2 className="text-sm font-bold text-slate-100">{selectedKey.key}</h2>
+                        </div>
+                        <div className="flex gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
+                            {selectedKey.created_at && (
+                                <span className="flex items-center gap-1.5">
+                                    <Calendar className="h-3 w-3" /> 
+                                    {new Date(selectedKey.created_at).toLocaleTimeString()}
+                                </span>
                             )}
-                        </TableCell>
-                    </TableRow>
-                    ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+                            <span className="flex items-center gap-1.5">
+                                <Clock className="h-3 w-3" /> 
+                                {selectedKey.expires_at ? new Date(selectedKey.expires_at).toLocaleString() : "PERSISTENT"}
+                            </span>
+                        </div>
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-rose-500 hover:text-rose-400 hover:bg-rose-950/30 rounded-sm">
+                        <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                </div>
+
+                <div className="flex-1 relative group">
+                     <div className="absolute inset-0 overflow-auto p-6 scrollbar-thin">
+                        <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
+                            {tryFormatJson(selectedKey.value_preview)}
+                        </pre>
+                     </div>
+                </div>
+                
+                 {/* Footer Metadata */}
+                <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/20 text-[10px] text-slate-500 flex justify-between font-mono uppercase">
+                    <div className="flex items-center gap-2">
+                        <Binary className="h-3 w-3" />
+                        <span>SIZE: {new Blob([selectedKey.value_preview]).size} BYTES</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <FileJson className="h-3 w-3" />
+                        <span>UTF-8 TEXT</span>
+                    </div>
+                </div>
+            </>
+        ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                <Database className="h-12 w-12 opacity-20 mb-4" />
+                <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_KEY_SELECTED</p>
+            </div>
+        )}
+      </div>
     </div>
   )
 }
 
+function tryFormatJson(str: string) {
+    try {
+        if (str.startsWith("{") || str.startsWith("[")) {
+            return JSON.stringify(JSON.parse(str), null, 2)
+        }
+    } catch (e) {}
+    return str
+}

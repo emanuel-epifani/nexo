@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
+use crate::brokers::pub_sub::snapshot::WildcardSubscription;
 
 // ClientId represents a connected client
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -244,36 +245,57 @@ impl PubSubManager {
 
     pub fn get_snapshot(&self) -> crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
         let root = self.router.read().unwrap();
+        
+        let mut wildcards = Vec::new();
+        for kv in self.client_subscriptions.iter() {
+            let client_id = kv.key().0.clone();
+            for pattern in kv.value() {
+                if pattern.contains('+') || pattern.contains('#') {
+                    wildcards.push(WildcardSubscription {
+                        pattern: pattern.clone(),
+                        client_id: client_id.clone(),
+                    });
+                }
+            }
+        }
+        
         crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
             active_clients: self.clients.len(),
-            topic_tree: Self::build_tree_snapshot("root", &root),
+            topic_tree: Self::build_tree_snapshot("root", "", &root),
+            wildcard_subscriptions: wildcards,
         }
     }
 
-    fn build_tree_snapshot(name: &str, node: &Node) -> crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
+    fn build_tree_snapshot(name: &str, path: &str, node: &Node) -> crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
         let mut children = Vec::new();
 
         // 1. Regular Children
         for (key, child) in &node.children {
-            children.push(Self::build_tree_snapshot(key, child));
+            let next_path = if path.is_empty() { key.clone() } else { format!("{}/{}", path, key) };
+            children.push(Self::build_tree_snapshot(key, &next_path, child));
         }
 
         // 2. Plus Child
         if let Some(plus) = &node.plus_child {
-            children.push(Self::build_tree_snapshot("+", plus));
+            let next_path = if path.is_empty() { "+".to_string() } else { format!("{}/+", path) };
+            children.push(Self::build_tree_snapshot("+", &next_path, plus));
         }
 
         // 3. Hash Child
         if let Some(hash) = &node.hash_child {
-            children.push(Self::build_tree_snapshot("#", hash));
+            let next_path = if path.is_empty() { "#".to_string() } else { format!("{}/#", path) };
+            children.push(Self::build_tree_snapshot("#", &next_path, hash));
         }
 
-        let has_retained = node.last_retained.read().unwrap().is_some();
+        let retained_val = node.last_retained.read().unwrap()
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).to_string());
 
         crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
             name: name.to_string(),
+            full_path: path.to_string(),
             subscribers: node.subscribers.len(),
-            retained_msg: has_retained,
+            retained_value: retained_val,
             children,
         }
     }

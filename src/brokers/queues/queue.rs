@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 use crate::brokers::queues::QueueManager;
-use crate::brokers::queues::snapshot::QueueSummary;
+use crate::brokers::queues::snapshot::{QueueSummary, MessageSummary};
+use chrono::{DateTime, Utc};
 
 // ---------- Message ----------
 
@@ -111,6 +112,12 @@ pub struct Queue {
     pub name: String,
     pub config: QueueConfig,
     state: Mutex<InternalState>,
+}
+
+fn format_time(ts: u64) -> String {
+    let d = UNIX_EPOCH + Duration::from_millis(ts);
+    let datetime = DateTime::<Utc>::from(d);
+    datetime.to_rfc3339()
 }
 
 impl Queue {
@@ -393,12 +400,63 @@ impl Queue {
         let inflight_count: usize = state.waiting_for_ack.values().map(|v| v.len()).sum();
         let scheduled_count: usize = state.waiting_for_time.values().map(|v| v.len()).sum();
         
+        let mut messages = Vec::new();
+
+        // 1. Pending (Waiting for dispatch)
+        for (priority, queue) in &state.waiting_for_dispatch {
+            for id in queue {
+                if let Some(msg) = state.registry.get(id) {
+                    messages.push(MessageSummary {
+                        id: msg.id,
+                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        state: "Pending".to_string(),
+                        priority: *priority,
+                        attempts: msg.attempts,
+                        next_delivery_at: None,
+                    });
+                }
+            }
+        }
+
+        // 2. InFlight (Waiting for ACK)
+        for (expiry, list) in &state.waiting_for_ack {
+            for id in list {
+                if let Some(msg) = state.registry.get(id) {
+                     messages.push(MessageSummary {
+                        id: msg.id,
+                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        state: "InFlight".to_string(),
+                        priority: msg.priority,
+                        attempts: msg.attempts,
+                        next_delivery_at: Some(format_time(*expiry)),
+                    });
+                }
+            }
+        }
+
+        // 3. Scheduled (Waiting for time)
+        for (time, list) in &state.waiting_for_time {
+            for id in list {
+                if let Some(msg) = state.registry.get(id) {
+                     messages.push(MessageSummary {
+                        id: msg.id,
+                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        state: "Scheduled".to_string(),
+                        priority: msg.priority,
+                        attempts: msg.attempts,
+                        next_delivery_at: Some(format_time(*time)),
+                    });
+                }
+            }
+        }
+
         QueueSummary {
             name: self.name.clone(),
             pending_count,
             inflight_count,
             scheduled_count,
             consumers_waiting: state.batch_waiters.len(),
+            messages,
         }
     }
 }

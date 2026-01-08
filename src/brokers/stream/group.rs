@@ -3,14 +3,19 @@
 
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::brokers::stream::snapshot::GroupSummary;
+use crate::brokers::stream::snapshot::{GroupSummary, MemberSummary};
 
 pub struct ConsumerGroup {
     pub id: String,
     pub topic: String,
     /// Single committed offset for the entire group
     pub committed_offset: AtomicU64,
-    /// Connected clients (for tracking/dashboard)
+    /// Connected clients and their local offset (if we were tracking per-client, but we track group offset)
+    /// Actually, for the simplified view "Members", we just track who is connected.
+    /// In a real Kafka group, all members share the group offset.
+    /// But if we want to show lag PER MEMBER, we need to know where each member is.
+    /// In this simplified architecture, all members of a group consume from the same shared offset.
+    /// So they all effectively have the same offset (the group offset).
     pub members: DashMap<String, ()>,
 }
 
@@ -43,16 +48,24 @@ impl ConsumerGroup {
     
     pub fn get_snapshot(&self, high_watermark: u64) -> GroupSummary {
         let committed = self.get_committed_offset();
-        let pending = if high_watermark > committed {
+        let lag = if high_watermark > committed {
             high_watermark - committed
         } else {
             0
         };
         
+        // In this simple model, all members share the same group offset
+        let members_summary: Vec<MemberSummary> = self.members.iter().map(|kv| {
+            MemberSummary {
+                client_id: kv.key().clone(),
+                current_offset: committed,
+                lag,
+            }
+        }).collect();
+        
         GroupSummary {
             name: self.id.clone(),
-            pending_messages: pending,
-            connected_clients: self.members.len(),
+            members: members_summary,
         }
     }
 }
