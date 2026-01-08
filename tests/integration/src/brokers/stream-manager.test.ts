@@ -55,20 +55,6 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             expect(received).toEqual(messages);
         });
 
-        it('Key is preserved in messages', async () => {
-            const topic = 'key-test';
-            await nexo.stream(topic).create();
-
-            await nexo.stream(topic).publish({ data: 'test' }, { key: 'my-key' });
-
-            const received: any[] = [];
-            await nexo.stream(topic, 'group-key').subscribe(msg => {
-                received.push(msg);
-            });
-
-            await waitFor(() => received.length === 1);
-            expect(received[0].data).toBe('test');
-        });
     });
 
     describe('Consumer Groups', () => {
@@ -240,16 +226,18 @@ describe('Stream Broker (MPSC Actor - No Partitions)', () => {
             await nexo.stream(topic).publish({ id: 3 });
 
             const received: any[] = [];
+            let failedOnce = false;
             await nexo.stream(topic, 'error-group').subscribe(msg => {
-                if (msg.id === 2) {
+                if (msg.id === 2 && !failedOnce) {
+                    failedOnce = true;
                     throw new Error('Simulated callback error');
                 }
                 received.push(msg);
             });
 
-            // Should still receive msg 1 and 3 (msg 2 throws but loop continues)
-            await waitFor(() => received.length === 2);
-            expect(received.map(m => m.id)).toEqual([1, 3]);
+            // Should eventually receive all messages (msg 2 succeeds on retry)
+            await waitFor(() => received.length === 3);
+            expect(received.map(m => m.id)).toEqual([1, 2, 3]);
         });
 
         it('Stop and Restart: Subscription can be stopped and restarted', async () => {

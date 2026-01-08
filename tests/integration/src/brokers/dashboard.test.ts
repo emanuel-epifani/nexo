@@ -1,34 +1,18 @@
 import { describe, it } from 'vitest';
-import { nexo } from '../nexo';
+import {fetchSnapshot, nexo} from '../nexo';
 
 describe('NEXO Dashboard Prefill', () => {
 
-    it('POpulate store',async () => {
-        // STORE
-        for (let i = 0; i < 1000; i++) await nexo.store.kv.set(`user:sess${i}`, '{"user_id": 123, "role":"admin"}'); // 1h TTL
-
-        // QUEUE
-        const emailQ = await nexo.queue('email_notifications').create({ maxRetries: 3 });
-        for (let i = 0; i < 5; i++) await emailQ.push({ to: `user${i}@example.com`, subject: "Welcome" });
-
-        // STREAM
-        // 3. STREAM
-        const ordersTopic = await nexo.stream("orders").create();
-        for (let i = 0; i < 100; i++) await ordersTopic.publish({ order_id: i, amount: 100 }, { key: `user_${i}` })
-
-
-        // PUBSUB
-    })
-
     it('Should populate all brokers with demo data for dashboard visualization', async () => {
-        console.log("🚀 Starting Data Population for Dashboard...");
+        console.log("📥 Populating Store...");
+        //1. STORE
+        for (let i = 0; i < 250; i++) await nexo.store.kv.set(`user:${i}`, { name: `User ${i}`, role: "user" }, 3600)
 
         // 2. QUEUES
         console.log("📥 Populating Queues...");
-        // Queue 1: Email (Healthy)
         // Syntax: await nexo.queue(name).create(config?) -> Queue Instance
         const emailQ = await nexo.queue('email_notifications').create({ maxRetries: 3 });
-        for (let i = 0; i < 5; i++) await emailQ.push({ to: `user${i}@example.com`, subject: "Welcome" });
+        for (let i = 0; i < 5; i++) await emailQ.push({ to: `user${i}@example.com`, subject: "xxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsdsxxxsdsdsdssdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsdsddsdsdsds" });
 
         // Queue 2: Transcoding (Backlog)
         const videoQ = await nexo.queue('video_transcode').create({ visibilityTimeoutMs: 5000 });
@@ -43,22 +27,16 @@ describe('NEXO Dashboard Prefill', () => {
 
         // 3. STREAM
         console.log("🌊 Populating Streams...");
-        // Topic 1: Orders (Partitions & Consumers)
-        // Syntax: await nexo.stream(topic).create({ partitions })
-        const ordersTopicName = 'orders.v1';
-        const ordersTopicName2 = 'orders.v2';
-        await nexo.stream(ordersTopicName).create({ partitions: 4 });
-        await nexo.stream(ordersTopicName2).create({ partitions: 4 });
-        const ordersPub = nexo.stream(ordersTopicName);
+        const ordersTopicName = 'orders';
+        const ordersTopic = await nexo.stream(ordersTopicName,'finance').create();
+        for (let i = 0; i < 1000; i++) await ordersTopic.publish({ order_id: i })
+        await ordersTopic.subscribe((msg) => { /* ack auto */ }, { batchSize: 50 });
+        await ordersTopic.subscribe((msg) => { /* ack auto */ }, { batchSize: 50 });
 
-        // Publish events
-        for (let i = 0; i < 100; i++) {
-            await ordersPub.publish({ order_id: i, amount: Math.random() * 100 }, { key: `user_${i % 10}` });
-        }
 
         // Consumer Group 1: Fulfillment (Up to date)
-        const fulfillmentGroup = nexo.stream(ordersTopicName, 'fulfillment-service');
-        await fulfillmentGroup.subscribe((msg) => { /* ack auto */ }, { batchSize: 50 });
+        // const fulfillmentGroup = nexo.stream(ordersTopicName, 'fulfillment-service');
+        // await fulfillmentGroup.subscribe((msg) => { /* ack auto */ }, { batchSize: 50 });
         // Let it consume some
         await new Promise(r => setTimeout(r, 500));
 
@@ -76,15 +54,11 @@ describe('NEXO Dashboard Prefill', () => {
 
         // 4. PUBSUB
         console.log("📢 Populating PubSub...");
-        // Syntax: nexo.pubsub(topic).publish(payload, options?)
-        await nexo.pubsub('settings/global/theme').publish('dark', { retain: true });
-        await nexo.pubsub('settings/global/maintenance').publish('false', { retain: true });
-        await nexo.pubsub('sensors/kitchen/temp').publish('24.5', { retain: true });
-        await nexo.pubsub('sensors/livingroom/temp').publish('22.0', { retain: true });
+        await nexo.pubsub('settings/global/theme').publish({ name: `User`, role: "user" }, { retain: true });
+        await nexo.pubsub('settings/global/maintenance').publish({ name: `User`, role: "user" }, { retain: true });
+        await nexo.pubsub('sensors/kitchen/temp').publish({ name: `User`, role: "user" }, { retain: true });
+        await nexo.pubsub('sensors/livingroom/temp').publish({ name: `User`, role: "user" }, { retain: true });
 
-        // Active Clients (Simulate by creating dummy connections)
-        // The test runner itself is a client.
-        await nexo.pubsub('sensors/#').subscribe((msg) => { });
 
         console.log("✅ Data Population Complete! Check Dashboard at http://localhost:8080");
 

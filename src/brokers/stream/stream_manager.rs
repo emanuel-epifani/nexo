@@ -59,11 +59,11 @@ impl StreamManager {
     }
     
     /// Publishes a message to a topic
-    pub async fn publish(&self, topic_name: &str, payload: Bytes, key: Option<String>) -> Result<u64, String> {
+    pub async fn publish(&self, topic_name: &str, payload: Bytes) -> Result<u64, String> {
         let topic = self.topics.get(topic_name)
             .ok_or_else(|| format!("Topic '{}' not found. Create it first.", topic_name))?;
         
-        topic.publish(payload, key).await
+        topic.publish(payload).await
     }
     
     /// Reads messages from a topic starting at offset

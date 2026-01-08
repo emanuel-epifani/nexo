@@ -6,6 +6,5 @@ pub struct Message {
     pub offset: u64,
     pub timestamp: u64,
     pub payload: Bytes,
-    pub key: Option<String>,
 }
 

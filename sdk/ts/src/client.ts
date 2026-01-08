@@ -82,7 +82,7 @@ export interface PublishOptions {
 }
 
 export interface StreamPublishOptions {
-  key?: string;
+  // Reserved for future options
 }
 
 export interface NexoOptions {
@@ -710,9 +710,8 @@ export class NexoStream<T = any> {
     return this;
   }
 
-  async publish(data: T, options?: StreamPublishOptions): Promise<void> {
+  async publish(data: T, _options?: StreamPublishOptions): Promise<void> {
     await this.builder.reset(Opcode.S_PUB)
-      .writeString(options?.key ?? "")
       .writeString(this.name)
       .writeData(data)
       .send();
@@ -770,8 +769,6 @@ export class NexoStream<T = any> {
           const msgOffset = res.reader.readU64();
 
           res.reader.readU64(); // timestamp (skip)
-          const keyLen = res.reader.readU32();
-          if (keyLen > 0) res.reader.readBuffer(keyLen); // skip key
 
           const payloadLen = res.reader.readU32();
           const payloadBuf = res.reader.readBuffer(payloadLen);

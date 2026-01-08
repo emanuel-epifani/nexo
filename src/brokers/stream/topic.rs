@@ -12,7 +12,6 @@ use crate::brokers::stream::message::Message;
 pub enum TopicCommand {
     Publish {
         payload: Bytes,
-        key: Option<String>,
         reply: oneshot::Sender<u64>,
     },
     Read {
@@ -54,10 +53,10 @@ impl TopicHandle {
         Self { name, tx }
     }
     
-    pub async fn publish(&self, payload: Bytes, key: Option<String>) -> Result<u64, String> {
+    pub async fn publish(&self, payload: Bytes) -> Result<u64, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         
-        self.tx.send(TopicCommand::Publish { payload, key, reply: reply_tx })
+        self.tx.send(TopicCommand::Publish { payload, reply: reply_tx })
             .await
             .map_err(|_| "Topic actor closed")?;
         
@@ -114,7 +113,7 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
     
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            TopicCommand::Publish { payload, key, reply } => {
+            TopicCommand::Publish { payload, reply } => {
                 let offset = next_offset;
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -125,7 +124,6 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
                     offset,
                     timestamp,
                     payload,
-                    key,
                 });
                 next_offset += 1;
                 

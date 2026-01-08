@@ -285,15 +285,9 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             Response::Ok
         }
 
-        // S_PUB: [KeyLen:4][Key][TopicLen:4][Topic][Data]
+        // S_PUB: [TopicLen:4][Topic][Data]
         OP_S_PUB => {
-            let (key_str, rest1) = match parse_string(&body) {
-                Ok(res) => res,
-                Err(e) => return Response::Error(e),
-            };
-            let key = if key_str.is_empty() { None } else { Some(key_str.to_string()) };
-            
-            let (topic, data_ptr) = match parse_string(rest1) {
+            let (topic, data_ptr) = match parse_string(&body) {
                 Ok(res) => res,
                 Err(e) => return Response::Error(e),
             };
@@ -306,7 +300,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
             let stream = engine.stream.clone();
             
             tokio::spawn(async move {
-                let result = stream.publish(&topic_name, payload, key).await;
+                let result = stream.publish(&topic_name, payload).await;
                 let response = match result {
                     Ok(offset_id) => Ok(Bytes::from(offset_id.to_be_bytes().to_vec())),
                     Err(e) => Err(e),
@@ -341,10 +335,6 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
                 for msg in msgs {
                     buf.extend_from_slice(&msg.offset.to_be_bytes());
                     buf.extend_from_slice(&msg.timestamp.to_be_bytes());
-                    
-                    let k = msg.key.as_deref().unwrap_or("");
-                    buf.extend_from_slice(&(k.len() as u32).to_be_bytes());
-                    buf.extend_from_slice(k.as_bytes());
                     
                     buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
                     buf.extend_from_slice(&msg.payload);
