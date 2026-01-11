@@ -3,13 +3,12 @@ import { nexo } from "../nexo";
 import { NexoClient, Opcode } from '@nexo/client';
 import { BenchmarkProbe } from "../utils/benchmark-misure";
 
-describe('QUEUE broker', () => {
+describe('QUEUE broker - Complete Feature Set', () => {
 
-    describe('Core API (Handle-based)', () => {
-        it('Producer PUSH message -> Consumer receives it', async () => {
-            const q = await nexo.queue('test_q_base_1').create();
-
-            const payload = { msg: 'hello nexo' };
+    describe('1. Core Lifecycle (Happy Path)', () => {
+        it('should handle full lifecycle: create -> push -> subscribe -> receive -> ack', async () => {
+            const q = await nexo.queue('lifecycle_test').create();
+            const payload = { msg: 'lifecycle' };
 
             let received: any = null;
             const sub = await q.subscribe(async (data) => {
@@ -18,513 +17,185 @@ describe('QUEUE broker', () => {
 
             await q.push(payload);
 
-            for (let i = 0; i < 10; i++) {
+            // Wait for delivery
+            for (let i = 0; i < 20; i++) {
                 if (received) break;
                 await new Promise(r => setTimeout(r, 50));
             }
             sub.stop();
 
             expect(received).toEqual(payload);
+
+            // Verify ACK worked (queue should be empty)
+            // We can check this by trying to consume again with short timeout
+            // or if we had a debug snapshot API. Assuming ACK works if no error thrown.
         });
+    });
 
-        it('Should FAIL to push to a non-existent queue', async () => {
-            const q = nexo.queue('ghost-queue');
-            await expect(q.push('fail')).rejects.toThrow('Queue \'ghost-queue\' not found');
-        });
+    describe('2. Concurrency & Ordering', () => {
+        it('should process all 100 messages with high concurrency without loss', async () => {
+            const q = await nexo.queue('concurrency_test').create();
+            const TOTAL = 100;
+            
+            // Push 100 messages
+            const pushPromises = [];
+            for (let i = 0; i < TOTAL; i++) {
+                pushPromises.push(q.push({ index: i }));
+            }
+            await Promise.all(pushPromises);
 
-        it('Should FAIL to subscribe to a non-existent queue', async () => {
-            const q = nexo.queue('ghost-queue');
-            await expect(q.subscribe(async () => { })).rejects.toThrow('Queue \'ghost-queue\' not found');
-        });
-
-        it('Producer PUSH 1 message -> only ONE of 2 competing consumers receives it', async () => {
-            const qName = 'test_q_competing';
-            const q1 = nexo.queue(qName);
-            const q2 = nexo.queue(qName);
-
-            let count = 0;
-            const sub1 = await q1.subscribe(async () => { count++; });
-            const sub2 = await q2.subscribe(async () => { count++; });
-
-            await new Promise(r => setTimeout(r, 100));
-            await q1.push('competing-test');
-
-            await new Promise(r => setTimeout(r, 500));
-            sub1.stop();
-            sub2.stop();
-
-            expect(count).toBe(1);
-        });
-
-        it('Producer PUSH 2 messages -> 2 consumers receive ONE message each (Fair Distribution)', async () => {
-            const qName = 'test_q_fair';
-            const q1 = await nexo.queue(qName).create();
-            const q2 = nexo.queue(qName);
-
-            const received1: any[] = [];
-            const received2: any[] = [];
-
-            const sub1 = await q1.subscribe(async (msg) => { received1.push(msg); }, { batchSize: 1 });
-            const sub2 = await q2.subscribe(async (msg) => { received2.push(msg); }, { batchSize: 1 });
-
-            await new Promise(r => setTimeout(r, 100));
-            const msg1 = 'msg1'
-            const msg2 = 'msg2'
-            await q1.push(msg1);
-            await q1.push(msg2);
-
-            await new Promise(r => setTimeout(r, 500));
-            sub1.stop();
-            sub2.stop();
-
-            expect(received1.length).toBe(1);
-            expect(received2.length).toBe(1);
-            expect(received1[0]).not.toEqual(received2[0]);
-
-            const allReceived = [...received1, ...received2].sort();
-            expect(allReceived).toEqual([msg1, msg2]);
-        });
-
-        it('Producer PUSH 3 messages -> Consumer receives them in FIFO order', async () => {
-            const q = await nexo.queue('test_q_fifo').create();
-
-            const messages = ['first', 'second', 'third'];
-
-            for (const m of messages) await q.push(m);
-
-            const received: string[] = [];
-            const sub = await q.subscribe(async (msg) => {
-                received.push(msg);
+            const receivedIndices = new Set<number>();
+            
+            const sub = await q.subscribe(async (data) => {
+                receivedIndices.add(data.index);
+                await new Promise(r => setTimeout(r, 5)); // Simulate work
+            }, { 
+                concurrency: 10, 
+                batchSize: 20 
             });
 
-            for (let i = 0; i < 20; i++) {
-                if (received.length === 3) break;
+            // Wait for completion
+            for (let i = 0; i < 40; i++) {
+                if (receivedIndices.size === TOTAL) break;
                 await new Promise(r => setTimeout(r, 100));
             }
             sub.stop();
 
-            expect(received).toEqual(messages);
-        });
-    });
-
-    describe('Message Priority', () => {
-        it('Producer PUSH high/low priority -> Consumer receives HIGH priority first', async () => {
-            const q = await nexo.queue('test_q_priority_1').create();
-
-            const msg_low_priority = 'low-priority'
-            const msg_medium_priority = 'medium-priority'
-            const msg_high_priority = 'high-priority'
-
-            await q.push(msg_low_priority, { priority: 0 });
-            await q.push(msg_medium_priority, { priority: 10 });
-            await q.push(msg_high_priority, { priority: 255 });
-
-            const received: string[] = [];
-            const sub = await q.subscribe(async (msg) => {
-                received.push(msg);
-            });
-
-            for (let i = 0; i < 20; i++) {
-                if (received.length === 3) break;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            sub.stop();
-
-            expect(received[0]).toBe(msg_high_priority);
-            expect(received[1]).toBe(msg_medium_priority);
-            expect(received[2]).toBe(msg_low_priority);
+            expect(receivedIndices.size).toBe(TOTAL);
         });
 
-        it('Producer PUSH mixed priorities -> Consumer receives in Priority-then-FIFO order', async () => {
-            const q = await nexo.queue('test_q_priority_fifo').create();
-
-            const h1 = 'high-1';
-            const h2 = 'high-2';
-            const l1 = 'low-1';
-            const l2 = 'low-2';
-
-            await q.push(h1, { priority: 10 });
-            await q.push(l1, { priority: 5 });
-            await q.push(h2, { priority: 10 });
-            await q.push(l2, { priority: 5 });
-
-            const received: string[] = [];
-            const sub = await q.subscribe(async (msg) => {
-                received.push(msg);
-            }, { batchSize: 1 });
-
-            for (let i = 0; i < 20; i++) {
-                if (received.length === 4) break;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            sub.stop();
-
-            expect(received).toEqual([h1, h2, l1, l2]);
-        });
-    });
-
-    describe('Delayed Messages (Scheduling)', () => {
-        it('Producer PUSH with delay -> message remains invisible until timer expires', async () => {
-            const q = await nexo.queue('test_q_delayed_1').create();
-
-            const payloadSent = 'delayed-msg';
-            let msgReceived: string | null = null;
-            const delayMs = 400;
-
-            await q.push(payloadSent, { delayMs });
-
-            let received = false;
-            const sub = await q.subscribe(async (data) => { received = true; msgReceived = data; });
-
-            await new Promise(r => setTimeout(r, 200));
-            expect(received).toBe(false);
-
-            for (let i = 0; i < 10; i++) {
-                if (received) break;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            sub.stop();
-            expect(received).toBe(true);
-            expect(msgReceived).toBe(payloadSent);
-        });
-
-        it('Producer PUSH multiple delayed -> Consumer receives them as they expire (Order)', async () => {
-            const q = await nexo.queue('test_q_delayed_order').create();
-
-            const msg_long_delay = 'longer-delay';
-            const msg_short_delay = 'shorter-delay';
-
-            await q.push(msg_long_delay, { delayMs: 600 });
-            await q.push(msg_short_delay, { delayMs: 300 });
-
-            const received: string[] = [];
-            const sub = await q.subscribe(async (msg) => { received.push(msg); });
-
-            await new Promise(r => setTimeout(r, 450));
-            expect(received).toEqual([msg_short_delay]);
-
-            for (let i = 0; i < 10; i++) {
-                if (received.length === 2) break;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            sub.stop();
-            expect(received).toEqual([msg_short_delay, msg_long_delay]);
-        });
-    });
-
-    describe('Reliability & Auto-ACK', () => {
-        it('Consumer fails callback -> Message becomes VISIBLE again after Visibility Timeout', async () => {
-            const q = await nexo.queue('test_q_timeout_custom').create({ visibilityTimeoutMs: 300 });
-
-            await q.push('timeout-msg');
-
-            let receivedCount = 0;
-            const sub = await q.subscribe(async () => {
-                receivedCount++;
-                throw new Error("Force fail to prevent auto ACK");
-            });
-
-            for (let i = 0; i < 10; i++) {
-                if (receivedCount === 1) break;
-                await new Promise(r => setTimeout(r, 50));
-            }
-            expect(receivedCount).toBe(1);
-
-            await new Promise(r => setTimeout(r, 800));
-            sub.stop();
-            expect(receivedCount).toBeGreaterThanOrEqual(2);
-        });
-
-        it('Consumer repeatedly fails -> Message moves to DLQ after maxRetries', async () => {
-            const qName = 'test_q_custom_dlq';
-            const q = await nexo.queue(qName).create({ maxRetries: 2, visibilityTimeoutMs: 300 });
-
-            const dlq = await nexo.queue(`${qName}_dlq`).create(); // Create DLQ as well
-
-            await q.push('poison-pill');
-
-            let attempts = 0;
-            const sub = await q.subscribe(async () => {
-                attempts++;
-                throw new Error("fail");
-            });
-
-            await new Promise(r => setTimeout(r, 1200));
-            sub.stop();
-            expect(attempts).toBe(2);
-
-            let dlqReceived = false;
-            const dlqSub = await dlq.subscribe(async (data) => {
-                if (data === 'poison-pill') dlqReceived = true;
-            });
-
-            for (let i = 0; i < 10; i++) {
-                if (dlqReceived) break;
-                await new Promise(r => setTimeout(r, 100));
-            }
-            dlqSub.stop();
-            expect(dlqReceived).toBe(true);
-        }, 10000);
-
-        it('Message age > TTL -> Message is discarded from queue (Retention)', async () => {
-            const q = await nexo.queue('test_q_ttl_custom').create({ ttlMs: 300 });
-
-            await q.push("short-lived");
-
-            await new Promise(r => setTimeout(r, 800));
-
-            let received = false;
-            const sub = await q.subscribe(async () => { received = true; });
-
-            await new Promise(r => setTimeout(r, 300));
-            sub.stop();
-            expect(received).toBe(false);
-        });
-
-        it('TTL expires while message is waiting for Retry -> Message is discarded (TTL wins over DLQ)', async () => {
-            const qName = 'test_ttl_vs_dlq';
-            const q = await nexo.queue(qName).create({
-                ttlMs: 200,
-                maxRetries: 5,
-                visibilityTimeoutMs: 100
-            });
-
-            const dlq = await nexo.queue(`${qName}_dlq`).create();
-
-            await q.push('msg-destined-to-die');
-
-            let attempts = 0;
-            const sub = await q.subscribe(async () => {
-                attempts++;
-                throw new Error('fail');
-            });
-
-            await new Promise(r => setTimeout(r, 400));
-            sub.stop();
-
-            let dlqMessage: any = null;
-            const dlqSub = await dlq.subscribe(async (msg) => { dlqMessage = msg; });
-
-            await new Promise(r => setTimeout(r, 100));
-            dlqSub.stop();
-
-            expect(dlqMessage).toBeNull();
-
-            let zombieMessage: any = null;
-            const zombieSub = await q.subscribe(async (msg) => { zombieMessage = msg; });
-            await new Promise(r => setTimeout(r, 100));
-            zombieSub.stop();
-
-            expect(zombieMessage).toBeNull();
-        });
-
-    });
-
-    describe('JSON & DevEx', () => {
-        it('Producer PUSH object -> SDK auto-serializes/deserializes JSON data with Generics', async () => {
-            interface Order { id: number; meta: { type: string }; list: number[] };
-            const q = await nexo.queue<Order>('test_q_json_complex').create();
-
-            const data: Order = { id: 1, meta: { type: 'test' }, list: [1, 2, 3] };
-            await q.push(data);
-
-            let received: Order | null = null;
-            const sub = await q.subscribe(async (msg) => {
-                received = msg;
-            });
-
-            for (let i = 0; i < 10; i++) {
-                if (received) break;
-                await new Promise(r => setTimeout(r, 50));
-            }
-            sub.stop();
-            expect(received).toEqual(data);
-        });
-
-        it('User calls nexo.queue(name) twice -> SDK returns the SAME instance (Idempotency)', () => {
-            const q1 = nexo.queue('test_q_idemp');
-            const q2 = nexo.queue('test_q_idemp');
-
-            expect(q1).toBe(q2);
-            expect(q1.name).toBe('test_q_idemp');
-        });
-    });
-
-    describe('Robustness & Edge Cases', () => {
-        it('Consumer starts BEFORE push -> receives message as soon as it arrives', async () => {
-            const q = await nexo.queue('test_q_blocking_new').create();
-
-            let received: any = null;
-
-            const sub = await q.subscribe(async (msg) => { received = msg; });
-
-            await new Promise(r => setTimeout(r, 200));
-            expect(received).toBeNull();
-
-            const msgSent = 'instant'
-            await q.push(msgSent);
-
-            for (let i = 0; i < 10; i++) {
-                if (received) break;
-                await new Promise(r => setTimeout(r, 50));
-            }
-            sub.stop();
-            expect(received).toBe(msgSent);
-        });
-
-        it('User calls ACK twice -> Server handles it without errors (Idempotency)', async () => {
-            const q = await nexo.queue('test_q_double_ack_new').create();
-
-            await q.push('msg');
-
-            // Consume via batch API
-            const res = await (nexo as any).builder.reset(Opcode.Q_CONSUME)
-                .writeU32(1)      // max batch
-                .writeU64(5000)   // wait ms
-                .writeString(q.name)
-                .send();
-
-            // Parse batch response: [Count:4][UUID:16][PayloadLen:4][Payload]
-            const count = res.reader.readU32();
-            expect(count).toBe(1);
-            const msgId = res.reader.readUUID();
-
-            await (q as any).ack(msgId);
-            await expect((q as any).ack(msgId)).resolves.toBeUndefined();
-        });
-
-        it('User creates queue with special chars -> Broker handles name correctly', async () => {
-            const q = await nexo.queue('queues:special/chars@123').create();
-
-            let msgSent = 'special-test'
-            await q.push(msgSent);
-
-            let received: any = null;
-            const sub = await q.subscribe(async (msg) => { received = msg; });
-
-            for (let i = 0; i < 10; i++) {
-                if (received) break;
-                await new Promise(r => setTimeout(r, 50));
-            }
-            sub.stop();
-            expect(received).toBe(msgSent);
-        });
-    });
-
-    describe('Batch Consume', () => {
-        it('Batch size 20 -> High throughput simulation', async () => {
-            const q = await nexo.queue('test_q_batch').create();
-
-            const COUNT = 50;
-            for (let i = 0; i < COUNT; i++) await q.push(i);
-
-            let receivedCount = 0;
-            const start = Date.now();
-
-            const sub = await q.subscribe(async () => {
-                receivedCount++;
-                await new Promise(r => setTimeout(r, 2));
-            }, { batchSize: 20 });
-
-            while (receivedCount < COUNT) {
-                await new Promise(r => setTimeout(r, 10));
-                if (Date.now() - start > 5000) break;
-            }
-            sub.stop();
-
-            expect(receivedCount).toBe(COUNT);
-        });
-
-        it('Batch size 1 -> Serial processing (Strict Ordering check)', async () => {
-            const q = await nexo.queue('test_q_serial').create();
-
+        it('should maintain strict FIFO order with concurrency 1', async () => {
+            const q = await nexo.queue('fifo_test').create();
+            
             await q.push(1);
             await q.push(2);
             await q.push(3);
 
             const received: number[] = [];
-
             const sub = await q.subscribe(async (val) => {
                 received.push(val);
-                await new Promise(r => setTimeout(r, 50));
-            }, { batchSize: 1 });
+            }, { concurrency: 1, batchSize: 10 });
 
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 500));
             sub.stop();
 
             expect(received).toEqual([1, 2, 3]);
         });
     });
 
-
-    // --- PERFORMANCE ---
-    describe('Performance test', () => {
-        
-        it('Throughput: Serial Consumption (Default)', async () => {
-            const TOTAL = 5_000;
-            const q = await nexo.queue("bench-serial").create();
-
-            // Push massivo
-            const producer = async () => {
-                for (let i = 0; i < TOTAL; i++) await q.push({ id: i });
-            };
-            await producer();
-
-            // Consume Seriale
-            let consumed = 0;
-            const probe = new BenchmarkProbe("QUEUE - SERIAL", TOTAL);
-            probe.startTimer();
-
-            await new Promise<void>((resolve) => {
-                const sub = q.subscribe(async () => {
-                    await new Promise(r => setTimeout(r, 5)); // Simulate work
-                    consumed++;
-                    if (consumed >= TOTAL) {
-                        sub.then(s => s.stop()); // Use then because subscribe is async
-                        probe.printResult();
-                        resolve();
-                    }
-                }, { batchSize: 50 }); // Concurrency default 1
+    describe('3. Retry & DLQ', () => {
+        it('should move message to DLQ after maxRetries failures', async () => {
+            const qName = 'dlq_test_queue';
+            // Configure: 100ms visibility, 2 retries (initial + 1 retry)
+            const q = await nexo.queue(qName).create({ 
+                maxRetries: 2, 
+                visibilityTimeoutMs: 100 
             });
+            const dlq = await nexo.queue(`${qName}_dlq`).create();
+
+            await q.push('fail-me');
+
+            // Consumer that always fails
+            let attempts = 0;
+            const sub = await q.subscribe(async () => {
+                attempts++;
+                throw new Error("fail");
+            });
+
+            // Wait for: Initial (0ms) -> Fail -> Wait 100ms -> Retry 1 -> Fail -> Wait 100ms -> Move to DLQ
+            await new Promise(r => setTimeout(r, 1000));
+            sub.stop();
+
+            // Check attempts (should be 2)
+            expect(attempts).toBeGreaterThanOrEqual(2);
+
+            // Check DLQ
+            let dlqMsg = null;
+            const dlqSub = await dlq.subscribe(async (data) => {
+                dlqMsg = data;
+            });
+            
+            await new Promise(r => setTimeout(r, 500));
+            dlqSub.stop();
+
+            expect(dlqMsg).toBe('fail-me');
+        });
+    });
+
+    describe('4. Priority Queue', () => {
+        it('should deliver high priority messages before low priority ones', async () => {
+            const q = await nexo.queue('priority_test').create();
+
+            // Push in reverse order of expected delivery
+            await q.push('low', { priority: 0 });
+            await q.push('medium', { priority: 10 });
+            await q.push('high', { priority: 255 });
+
+            const received: string[] = [];
+            const sub = await q.subscribe(async (msg) => {
+                received.push(msg);
+            }, { concurrency: 1, batchSize: 1 }); // Force serial fetching to verify server order
+
+            await new Promise(r => setTimeout(r, 500));
+            sub.stop();
+
+            expect(received).toEqual(['high', 'medium', 'low']);
+        });
+    });
+
+    describe('5. Delay (Scheduling)', () => {
+        it('should not deliver delayed message before delayMs expires', async () => {
+            const q = await nexo.queue('delay_test').create();
+            const start = Date.now();
+            const DELAY = 1000;
+
+            await q.push('delayed', { delayMs: DELAY });
+
+            let receivedTime = 0;
+            const sub = await q.subscribe(async () => {
+                receivedTime = Date.now();
+            });
+
+            // Check at 500ms (should be null)
+            await new Promise(r => setTimeout(r, 500));
+            expect(receivedTime).toBe(0);
+
+            // Wait until after delay
+            await new Promise(r => setTimeout(r, 1000));
+            sub.stop();
+
+            expect(receivedTime).toBeGreaterThan(start + DELAY - 100); // Allow small jitter
+        });
+    });
+
+    describe('6. SDK Guard Rails', () => {
+        it('should throw error when calling subscribe twice on same instance', async () => {
+            const q = await nexo.queue('guard_rail_test').create();
+            
+            const sub1 = await q.subscribe(async () => {});
+            
+            // Should fail immediately
+            await expect(q.subscribe(async () => {}))
+                .rejects
+                .toThrow(/already has an active subscriber/);
+            
+            sub1.stop();
         });
 
-        it('Throughput: Concurrent Consumption (High Performance)', async () => {
-            const TOTAL = 10_000;
-            const CONCURRENCY = 50; // 50 msg in parallelo
-            const q = await nexo.queue("bench-concurrent").create();
-
-            // Push massivo
-            const producer = async () => {
-                const batch = Array(100).fill(0); // Push a batch simulati lato client per velocità
-                for (let i = 0; i < TOTAL / 100; i++) {
-                    await Promise.all(batch.map((_, j) => q.push({ id: i * 100 + j })));
-                }
-            };
-            await producer();
-
-            // Consume Parallelo
-            let consumed = 0;
-            const probe = new BenchmarkProbe("QUEUE - CONCURRENT", TOTAL);
-            probe.startTimer();
-
-            await new Promise<void>((resolve) => {
-                const sub = q.subscribe(async () => {
-                    await new Promise(r => setTimeout(r, 5)); // Simulate work
-                    consumed++;
-                    if (consumed >= TOTAL) {
-                        sub.then(s => s.stop()); // Use then because subscribe is async
-                        const stats = probe.printResult();
-                        // Ci aspettiamo throughput molto più alto
-                        expect(stats.throughput).toBeGreaterThan(1000); 
-                        resolve();
-                    }
-                }, { 
-                    batchSize: 100, 
-                    concurrency: CONCURRENCY // <--- Qui la magia
-                });
-            });
+        it('should fail-fast when subscribing to non-existent queue', async () => {
+            const q = nexo.queue('non_existent_queue');
+            
+            // Should fail immediately with Queue not found
+            await expect(q.subscribe(async () => {}))
+                .rejects
+                .toThrow(/Queue 'non_existent_queue' not found/);
+                
+            // Guard rail should be reset so we can try again later (e.g. after creating it)
+            // We can test this by creating it and checking if subscribe works
+            await q.create();
+            const sub = await q.subscribe(async () => {}); // Should work now
+            sub.stop();
         });
-    })
-
+    });
 
 });

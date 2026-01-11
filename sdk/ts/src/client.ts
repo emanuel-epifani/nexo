@@ -501,6 +501,7 @@ export class NexoStore {
 export class NexoQueue<T = any> {
   private isDeclared = false;
   private declarePromise: Promise<void> | null = null;
+  private isSubscribed = false;
 
   constructor(
     private builder: RequestBuilder,
@@ -532,6 +533,11 @@ export class NexoQueue<T = any> {
   }
 
   async subscribe(callback: (data: T) => Promise<void> | void, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
+    if (this.isSubscribed) {
+      throw new Error(`Queue '${this.name}' already has an active subscriber on this client connection.`);
+    }
+    this.isSubscribed = true;
+
     const batchSize = options.batchSize ?? 50;
     const waitMs = options.waitMs ?? 20000;
     const concurrency = options.concurrency ?? 1;
@@ -539,7 +545,12 @@ export class NexoQueue<T = any> {
     // 1. Check if queue exists (Fail-Fast)
     // We expect declare_queue in passive mode to throw ERR if queue not found.
     // .send() throws if ERR is returned.
-    await this.create({ passive: true });
+    try {
+      await this.create({ passive: true });
+    } catch (e) {
+      this.isSubscribed = false;
+      throw e;
+    }
 
     let active = true;
 
@@ -598,6 +609,7 @@ export class NexoQueue<T = any> {
           await new Promise(r => setTimeout(r, 1000));
         }
       }
+      this.isSubscribed = false;
     };
 
     // Start the loop
@@ -606,6 +618,7 @@ export class NexoQueue<T = any> {
     return {
       stop: () => {
         active = false;
+        // Flag will be reset when loop exits
       }
     };
   }
@@ -696,6 +709,7 @@ class NexoPubSub {
 export class NexoStream<T = any> {
   private nextOffset = BigInt(0);
   private active = false;
+  private isSubscribed = false;
 
   constructor(
     private builder: RequestBuilder,
@@ -718,31 +732,46 @@ export class NexoStream<T = any> {
   }
 
   async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<{ stop: () => void }> {
+    if (this.isSubscribed) {
+      throw new Error(`Stream '${this.name}' (Group: ${this.consumerGroup || 'none'}) already has an active subscriber on this client.`);
+    }
+    this.isSubscribed = true;
+
     if (!this.consumerGroup) {
+      this.isSubscribed = false;
       throw new Error("Consumer Group is required for subscription. Use nexo.stream(name, group) to create a consumer handle.");
     }
 
-    // Stop any previous subscription
+    // Stop any previous subscription (Redundant with check above, but safe)
     this.active = false;
     await new Promise(r => setTimeout(r, 10)); // Let previous loop exit
     this.active = true;
 
     const batchSize = options.batchSize || 100;
 
-    // Join group and get starting offset
-    const res = await this.builder.reset(Opcode.S_JOIN)
-      .writeString(this.consumerGroup)
-      .writeString(this.name)
-      .send();
+    try {
+      // Join group and get starting offset
+      const res = await this.builder.reset(Opcode.S_JOIN)
+        .writeString(this.consumerGroup)
+        .writeString(this.name)
+        .send();
 
-    // New simplified response: just [StartOffset:8]
-    this.nextOffset = res.reader.readU64();
+      // New simplified response: just [StartOffset:8]
+      this.nextOffset = res.reader.readU64();
+    } catch (e) {
+      this.isSubscribed = false;
+      this.active = false;
+      throw e;
+    }
 
     // Start single polling loop
     this.pollLoop(callback, batchSize);
 
     return {
-      stop: () => { this.active = false; }
+      stop: () => {
+        this.active = false;
+        // Flag reset handled in pollLoop exit
+      }
     };
   }
 
@@ -812,12 +841,13 @@ export class NexoStream<T = any> {
       } catch (e) {
         if (!this.active || !(this.builder as any).conn.isConnected) {
           // Fail-Fast: Connection lost or stopped, exit loop immediately
-          return;
+          break;
         }
         logger.error("Stream poll error", e);
         await new Promise(r => setTimeout(r, 1000));
       }
     }
+    this.isSubscribed = false;
   }
 }
 
