@@ -1,7 +1,7 @@
 //! Topic Actor: Single-threaded message store with MPSC command channel
 //! Zero locks, maximum cache locality, Tokio-native
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, BTreeMap};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
@@ -104,10 +104,10 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
     let mut next_offset: u64 = 0;
     let start_offset: u64 = 0;
     
-    // Waiters: (offset_they_want, weak_notifier)
-    // We use Weak references to avoid holding the client connection alive if they disconnect.
-    // If the client drops their Arc<Notify>, our Weak pointer becomes invalid, and we cleanup lazily.
-    let mut waiters: Vec<(u64, Weak<Notify>)> = Vec::new();
+    // Waiters: BTreeMap maps offset -> List of waiting clients
+    // This allows O(log N) lookup and O(K) notification where K is the number of waiters ready.
+    // It's much more efficient than linear scan for large number of connected clients.
+    let mut waiters: BTreeMap<u64, Vec<Weak<Notify>>> = BTreeMap::new();
     
     tracing::debug!(topic = %name, "Topic actor started");
     
@@ -127,21 +127,29 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
                 });
                 next_offset += 1;
                 
-                // Notify all waiters that were waiting for this offset or earlier
-                waiters.retain(|(wait_offset, weak_notify)| {
-                    if *wait_offset <= offset {
-                        // Condition met: Try to notify if client is still alive
+                // Wake up waiters:
+                // Extract all waiters waiting for an offset <= current offset.
+                // split_off returns keys >= key. So we split at offset + 1 to keep [..=offset] in `waiters`.
+                // Actually, split_off returns the RIGHT part. We want to process the LEFT part (<= offset).
+                // So we split at offset + 1. The returned map is "future waiters".
+                // We process "current waiters", then swap them back.
+                
+                let mut future_waiters = waiters.split_off(&(offset + 1));
+                
+                // Now `waiters` contains only keys <= offset (READY to be notified)
+                // `future_waiters` contains keys > offset (NOT READY)
+                
+                // Process ready waiters
+                for (_, batch) in waiters.iter() {
+                    for weak_notify in batch {
                         if let Some(notify) = weak_notify.upgrade() {
                             notify.notify_one();
                         }
-                        false // Remove from list (task done)
-                    } else {
-                        // Condition NOT met yet:
-                        // Only keep waiting if the client is still alive (upgrade succeeds).
-                        // If upgrade fails (None), it means client disconnected -> remove (cleanup).
-                        weak_notify.upgrade().is_some()
                     }
-                });
+                }
+                
+                // Clear the processed waiters and restore the map
+                waiters = future_waiters;
                 
                 let _ = reply.send(offset);
             }
@@ -167,7 +175,9 @@ async fn topic_actor(name: String, mut rx: mpsc::Receiver<TopicCommand>) {
                 if offset < next_offset {
                     notify.notify_one();
                 } else {
-                    waiters.push((offset, Arc::downgrade(&notify)));
+                    waiters.entry(offset)
+                        .or_default()
+                        .push(Arc::downgrade(&notify));
                 }
             }
             
