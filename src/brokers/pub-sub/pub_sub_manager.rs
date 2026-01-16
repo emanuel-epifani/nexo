@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
-use crate::brokers::pub_sub::snapshot::WildcardSubscription;
+use crate::dashboard::models::pubsub::WildcardSubscription;
 
 // ClientId represents a connected client
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -243,7 +243,7 @@ impl PubSubManager {
 
     // --- Helper Methods ---
 
-    pub fn get_snapshot(&self) -> crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
+    pub fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
         let root = self.router.read().unwrap();
         
         let mut wildcards = Vec::new();
@@ -259,14 +259,14 @@ impl PubSubManager {
             }
         }
         
-        crate::brokers::pub_sub::snapshot::PubSubBrokerSnapshot {
+        crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
             active_clients: self.clients.len(),
             topic_tree: Self::build_tree_snapshot("root", "", &root),
             wildcard_subscriptions: wildcards,
         }
     }
 
-    fn build_tree_snapshot(name: &str, path: &str, node: &Node) -> crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
+    fn build_tree_snapshot(name: &str, path: &str, node: &Node) -> crate::dashboard::models::pubsub::TopicNodeSnapshot {
         let mut children = Vec::new();
 
         // 1. Regular Children
@@ -291,7 +291,7 @@ impl PubSubManager {
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
 
-        crate::brokers::pub_sub::snapshot::TopicNodeSnapshot {
+        crate::dashboard::models::pubsub::TopicNodeSnapshot {
             name: name.to_string(),
             full_path: path.to_string(),
             subscribers: node.subscribers.len(),

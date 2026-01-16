@@ -3,7 +3,7 @@
 //! Handles Partition Assignment Logic (Rebalancing).
 
 use std::collections::HashMap;
-use crate::brokers::stream::snapshot::{GroupSummary, MemberSummary};
+use crate::dashboard::models::stream::{GroupSummary, MemberSummary};
 
 #[derive(Clone, Debug)]
 pub struct MemberInfo {

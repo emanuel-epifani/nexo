@@ -131,7 +131,7 @@ impl StoreManager {
     // pub fn sadd(&self, key: &str, member: Bytes) -> Result<bool, String>
     // pub fn sismember(&self, key: &str, member: &Bytes) -> Result<bool, String>
 
-    pub fn get_snapshot(&self) -> crate::brokers::store::snapshot::StoreBrokerSnapshot {
+    pub fn get_snapshot(&self) -> crate::dashboard::models::store::StoreBrokerSnapshot {
         let mut keys_detail = Vec::new();
         let mut expiring = 0;
         
@@ -171,7 +171,7 @@ impl StoreManager {
                     }
                 });
 
-            keys_detail.push(crate::brokers::store::snapshot::KeyDetail {
+            keys_detail.push(crate::dashboard::models::store::KeyDetail {
                 key: entry.key().clone(),
                 value_preview,
                 created_at: None, // We don't track creation time yet in Entry
@@ -179,7 +179,7 @@ impl StoreManager {
             });
         }
         
-        crate::brokers::store::snapshot::StoreBrokerSnapshot {
+        crate::dashboard::models::store::StoreBrokerSnapshot {
             total_keys: self.store.len(),
             expiring_keys: expiring,
             keys: keys_detail,

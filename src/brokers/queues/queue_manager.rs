@@ -101,13 +101,13 @@ impl QueueManager {
         // Queues created at runtime automatically start their reaper in declare_queue
     }
 
-    pub fn get_snapshot(&self) -> crate::brokers::queues::snapshot::QueueBrokerSnapshot {
+    pub fn get_snapshot(&self) -> crate::dashboard::models::queues::QueueBrokerSnapshot {
         let mut summaries = Vec::new();
         for entry in self.queues.iter() {
             summaries.push(entry.value().get_snapshot());
         }
         
-        crate::brokers::queues::snapshot::QueueBrokerSnapshot {
+        crate::dashboard::models::queues::QueueBrokerSnapshot {
             queues: summaries,
         }
     }

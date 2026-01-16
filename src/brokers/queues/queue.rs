@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 use uuid::Uuid;
 use crate::brokers::queues::QueueManager;
-use crate::brokers::queues::snapshot::{QueueSummary, MessageSummary};
+use crate::dashboard::models::queues::{QueueSummary, MessageSummary};
 use chrono::{DateTime, Utc};
 use hashlink::LinkedHashSet;
 

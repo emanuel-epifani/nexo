@@ -1,9 +1,9 @@
 use axum::{
     routing::get,
     Router,
-    response::{IntoResponse, Response},
+    response::{IntoResponse},
     extract::State,
-    http::{StatusCode, header, Uri},
+    http::{header, Uri, StatusCode},
     body::Body,
 };
 use rust_embed::RustEmbed;
@@ -25,7 +25,6 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind dashboard port");
     
-    // Axum 0.8+ serve syntax
     axum::serve(listener, app).await.expect("Failed to start dashboard server");
 }
 
@@ -59,4 +58,3 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
         }
     }
 }
-

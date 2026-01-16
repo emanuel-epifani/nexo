@@ -1,9 +1,9 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
 mod server;
-mod brokers;
+pub mod brokers;
 mod utils;
-mod system_snapshot;
+pub mod dashboard;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,6 +12,8 @@ use crate::brokers::store::StoreManager;
 use crate::brokers::queues::QueueManager;
 use crate::brokers::pub_sub::PubSubManager;
 use crate::brokers::stream::StreamManager;
+use crate::dashboard::models::system::SystemSnapshot;
+use crate::dashboard::models::system::BrokersSnapshot;
 
 // ========================================
 // ENGINE (The Singleton)
@@ -46,11 +48,11 @@ impl NexoEngine {
         }
     }
 
-    pub async fn get_global_snapshot(&self) -> system_snapshot::SystemSnapshot {
-        system_snapshot::SystemSnapshot {
+    pub async fn get_global_snapshot(&self) -> SystemSnapshot {
+        SystemSnapshot {
             uptime_seconds: self.start_time.elapsed().as_secs(),
             server_time: chrono::Local::now().to_rfc3339(),
-            brokers: system_snapshot::BrokersSnapshot {
+            brokers: BrokersSnapshot {
                 store: self.store.get_snapshot(),
                 queue: self.queue.get_snapshot(),
                 pubsub: self.pubsub.get_snapshot(),
@@ -98,7 +100,7 @@ async fn main() {
 
     let engine_clone_for_dashboard = engine.clone();
     tokio::spawn(async move {
-        server::dashboard_api::start_dashboard_server(engine_clone_for_dashboard, dashboard_port).await;
+        dashboard::server::start_dashboard_server(engine_clone_for_dashboard, dashboard_port).await;
     });
 
     tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");

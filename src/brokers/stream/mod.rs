@@ -2,7 +2,6 @@ pub mod stream_manager;
 pub mod topic;
 pub mod group;
 pub mod message;
-pub mod snapshot;
 pub mod commands;
 
 pub use stream_manager::StreamManager;

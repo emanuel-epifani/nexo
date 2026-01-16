@@ -12,7 +12,7 @@ use bytes::Bytes;
 use crate::brokers::stream::topic::TopicState;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
-use crate::brokers::stream::snapshot::StreamBrokerSnapshot;
+use crate::dashboard::models::stream::StreamBrokerSnapshot;
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -51,7 +51,7 @@ pub enum TopicCommand {
         reply: oneshot::Sender<()>, // Ack needed for clean shutdown
     },
     GetSnapshot {
-        reply: oneshot::Sender<crate::brokers::stream::snapshot::TopicSummary>,
+        reply: oneshot::Sender<crate::dashboard::models::stream::TopicSummary>,
     }
 }
 
@@ -176,19 +176,19 @@ impl TopicActor {
                      }
                      let _ = reply.send(());
                 },
-                TopicCommand::GetSnapshot { reply } => {
-                    let mut hw_marks = HashMap::new();
-                    for i in 0..self.state.get_partitions_count() {
-                        hw_marks.insert(i as u32, self.state.get_high_watermark(i as u32));
+                    TopicCommand::GetSnapshot { reply } => {
+                        let mut hw_marks = HashMap::new();
+                        for i in 0..self.state.get_partitions_count() {
+                            hw_marks.insert(i as u32, self.state.get_high_watermark(i as u32));
+                        }
+                        let summary = crate::dashboard::models::stream::TopicSummary {
+                             name: self.state.name.clone(),
+                             partitions: self.state.get_partitions_count() as u32,
+                             size_bytes: 0, 
+                             groups: self.groups.values().map(|g| g.get_snapshot(&hw_marks)).collect(),
+                        };
+                        let _ = reply.send(summary);
                     }
-                    let summary = crate::brokers::stream::snapshot::TopicSummary {
-                         name: self.state.name.clone(),
-                         partitions: self.state.get_partitions_count() as u32,
-                         size_bytes: 0, 
-                         groups: self.groups.values().map(|g| g.get_snapshot(&hw_marks)).collect(),
-                    };
-                    let _ = reply.send(summary);
-                }
             }
         }
     }
