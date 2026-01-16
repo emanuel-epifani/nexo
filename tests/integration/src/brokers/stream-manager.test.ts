@@ -1,153 +1,184 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NexoClient } from '../../../../sdk/ts/src/client';
 import { waitFor } from '../utils/wait-for';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 const PORT = 8080;
 
 describe('Stream Manager & Rebalancing Integration', () => {
     let clientA: NexoClient;
     let clientB: NexoClient;
+    let clientProducer: NexoClient;
 
     beforeEach(async () => {
         clientA = await NexoClient.connect({ port: PORT });
         clientB = await NexoClient.connect({ port: PORT });
+        clientProducer = await NexoClient.connect({ port: PORT });
     });
 
     afterEach(async () => {
-        // Pulizia sicura
         try { if (clientA?.connected) clientA.disconnect(); } catch {}
         try { if (clientB?.connected) clientB.disconnect(); } catch {}
+        try { if (clientProducer?.connected) clientProducer.disconnect(); } catch {}
     });
 
     // 1. BASE: Pub/Sub Sequenziale
     it('should publish and consume messages in order within a partition', async () => {
-        const topicName = `test-topic-${uuidv4()}`;
+        const topicName = `test-topic-${randomUUID()}`;
         const group = 'group-1';
-
+        
+        // Setup: Create Stream
         await clientA.stream(topicName, group).create();
 
-        const producer = clientA.stream(topicName);
+        // Publish
+        const producer = clientProducer.stream(topicName);
         await producer.publish({ msg: 1 });
         await producer.publish({ msg: 2 });
         await producer.publish({ msg: 3 });
 
+        // Consume
         const received: any[] = [];
         const consumer = clientA.stream(topicName, group);
-
-        // CORREZIONE QUI: Salviamo l'handle restituito dalla subscribe
-        const subHandle = await consumer.subscribe(async (data) => {
+        
+        await consumer.subscribe(async (data) => {
             received.push(data);
         });
 
-        await waitFor(() => expect(received.length).toBe(3));
-        expect(received).toMatchObject([{ msg: 1 }, { msg: 2 }, { msg: 3 }]);
-
-        // CORREZIONE QUI: Chiamiamo stop sull'handle
-        subHandle.stop();
+        // Verify
+        await waitFor(() => {
+            expect(received.length).toBe(3);
+            expect(received).toMatchObject([{ msg: 1 }, { msg: 2 }, { msg: 3 }]);
+        });
+        
+        consumer.stop();
     });
 
     // 2. RESUME: Offset Consistency
     it('should resume from last committed offset after restart', async () => {
-        const topicName = `test-resume-${uuidv4()}`;
+        const topicName = `test-resume-${randomUUID()}`;
         const group = 'group-persistence';
 
         await clientA.stream(topicName, group).create();
-        const producer = clientA.stream(topicName);
+        const producer = clientProducer.stream(topicName);
 
+        // Publish 10 messages
         for (let i = 0; i < 10; i++) await producer.publish({ i });
 
+        // CONSUMER A: Read only 5 and stop
         const receivedA: any[] = [];
         const consumerA = clientA.stream(topicName, group);
-
-        const subA = await consumerA.subscribe(async (data) => {
+        
+        await consumerA.subscribe(async (data) => {
             receivedA.push(data);
             if (receivedA.length === 5) {
-                // Stop controllato dopo 5 messaggi
-                subA.stop();
+                consumerA.stop(); // Stop -> Trigger Commit of last processed
             }
         });
 
         await waitFor(() => expect(receivedA.length).toBe(5));
-        await new Promise(r => setTimeout(r, 200)); // Wait for commit
+        
+        // Wait briefly for commit to reach server
+        await new Promise(r => setTimeout(r, 200));
 
-        // CONSUMER B (Nuova istanza)
+        // CONSUMER B (New instance, same group): Should read from 6 to 10
         const receivedB: any[] = [];
         const consumerB = clientB.stream(topicName, group);
-
-        const subB = await consumerB.subscribe(async (data) => {
+        
+        await consumerB.subscribe(async (data) => {
             receivedB.push(data);
         });
 
-        await waitFor(() => expect(receivedB.length).toBe(5));
-        expect(receivedB[0].i).toBe(5);
-        expect(receivedB[4].i).toBe(9);
-
-        subB.stop();
+        // Should receive the remaining 5
+        await waitFor(() => {
+            expect(receivedB.length).toBe(5);
+            expect(receivedB[0].i).toBe(5); // Index 5 = 6th message
+            expect(receivedB[4].i).toBe(9); // Index 9 = 10th message
+        });
+        
+        consumerB.stop();
     });
 
-    // 3. SCALE UP: Rebalancing da 1 a 2 Consumer
+    // 3. SCALE UP: Rebalancing from 1 to 2 Consumers
     it('should rebalance partitions when a new consumer joins', async () => {
-        const topicName = `test-scale-up-${uuidv4()}`;
+        const topicName = `test-scale-up-${randomUUID()}`;
         const group = 'group-scale';
 
+        // Create topic (Server creates default partitions)
         await clientA.stream(topicName, group).create();
-        const producer = clientA.stream(topicName);
-
+        
+        const producer = clientProducer.stream(topicName);
+        // Publish enough messages to saturate partitions
         for (let i = 0; i < 50; i++) await producer.publish({ id: i });
 
         const receivedA: any[] = [];
         const receivedB: any[] = [];
 
-        // Consumer A parte
-        const subA = await clientA.stream(topicName, group).subscribe((data) => receivedA.push(data));
+        // 1. Start Consumer A
+        const streamA = clientA.stream(topicName, group);
+        await streamA.subscribe((data) => {
+            receivedA.push(data)
+        });
 
+        // Let A start working
         await new Promise(r => setTimeout(r, 500));
+        
+        // 2. Start Consumer B (Join -> Trigger Rebalance -> A gets "Rebalance needed" -> A re-joins)
+        const streamB = clientB.stream(topicName, group);
+        await streamB.subscribe((data) => {
+            receivedB.push(data)
+        });
 
-        // Consumer B parte -> Trigger Rebalance
-        const subB = await clientB.stream(topicName, group).subscribe((data) => receivedB.push(data));
-
-        await waitFor(() => expect(receivedA.length + receivedB.length).toBe(50), { timeout: 8000 });
+        // Eventually, both should have processed everything together
+        await waitFor(() => {
+            const total = receivedA.length + receivedB.length;
+            expect(total).toBe(50);
+            
+            // Check that load was distributed (both did work)
+            expect(receivedA.length).toBeGreaterThan(0);
+            expect(receivedB.length).toBeGreaterThan(0);
+        }, { timeout: 8000 });
 
         console.log(`Split stats -> A: ${receivedA.length}, B: ${receivedB.length}`);
 
-        expect(receivedA.length).toBeGreaterThan(0);
-        expect(receivedB.length).toBeGreaterThan(0);
-
-        subA.stop();
-        subB.stop();
+        streamA.stop();
+        streamB.stop();
     });
 
-    // 4. SCALE DOWN: Rebalancing da 2 a 1 (Fault Tolerance)
+    // 4. SCALE DOWN: Rebalancing from 2 to 1 (Fault Tolerance)
     it('should reassign orphaned partitions when a consumer leaves', async () => {
-        const topicName = `test-scale-down-${uuidv4()}`;
+        const topicName = `test-scale-down-${randomUUID()}`;
         const group = 'group-fault';
 
         await clientA.stream(topicName, group).create();
-        const producer = clientA.stream(topicName);
+        const producer = clientProducer.stream(topicName);
 
         const receivedTotal: any[] = [];
         const collect = (d: any) => receivedTotal.push(d);
 
-        // Due consumer attivi
-        // Nota: non salvo subA perché simulerò un crash brutale del client
-        await clientA.stream(topicName, group).subscribe(collect);
-        const subB = await clientB.stream(topicName, group).subscribe(collect);
+        // Two active consumers
+        const streamA = clientA.stream(topicName, group);
+        const streamB = clientB.stream(topicName, group);
+        
+        await streamA.subscribe(collect);
+        await streamB.subscribe(collect);
 
+        // Wait for stabilization
         await new Promise(r => setTimeout(r, 500));
 
-        // Batch 1: consumato da entrambi
+        // Batch 1
         for (let i = 0; i < 20; i++) await producer.publish({ batch: 1, id: i });
         await waitFor(() => expect(receivedTotal.length).toBe(20));
 
-        // CRASH CONSUMER A
-        clientA.disconnect();
+        // KILL CONSUMER A (Simulate brutal crash/disconnect)
+        clientA.disconnect(); 
 
-        // Batch 2: dovrebbe essere consumato tutto da B (dopo che il server rileva il crash)
+        // Batch 2 (Published while A is dead)
+        // Server should detect A is gone and reassign its partitions to B
         for (let i = 0; i < 20; i++) await producer.publish({ batch: 2, id: i });
 
+        // B should receive all of batch 2 (including partitions previously owned by A)
         await waitFor(() => expect(receivedTotal.length).toBe(40), { timeout: 10000 });
-
-        subB.stop();
+        
+        streamB.stop();
     });
 });

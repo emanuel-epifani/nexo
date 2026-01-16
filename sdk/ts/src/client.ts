@@ -214,7 +214,7 @@ class NexoConnection {
   constructor(private host: string, private port: number, options: NexoOptions = {}) {
     this.socket = new net.Socket();
     this.socket.setNoDelay(true); // Low latency
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 30000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
     this.setupListeners();
   }
 
@@ -565,7 +565,7 @@ export class NexoStream<T = any> {
     await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
   }
 
-  async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<{ stop: () => void }> {
+  async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<void> {
     if (this.isSubscribed) throw new Error("Stream already subscribed.");
     if (!this.consumerGroup) throw new Error("Consumer Group required.");
 
@@ -575,15 +575,15 @@ export class NexoStream<T = any> {
     this.active = true;
 
     // Start Main Loop (Manages Joins and Rebalances)
-    this.mainLoop(callback, options.batchSize || 100);
-
-    return {
-      stop: () => {
+    this.mainLoop(callback, options.batchSize || 100).catch(err => {
+        logger.error("Stream main loop crashed", err);
         this.active = false;
-        // Also send LeaveGroup for polite exit
-        // (Fire and forget, we don't await because stop() is usually sync)
-      }
-    };
+        this.isSubscribed = false;
+    });
+  }
+
+  stop() {
+    this.active = false;
   }
 
   private async mainLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
@@ -632,7 +632,7 @@ export class NexoStream<T = any> {
     this.isSubscribed = false;
   }
 
-  private async partitionLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
+  private async partitionLoop(callback: (data: T) => Promise<any> | any, batchSize: number) {
     // Loop while active and NOT rebalancing
     while (this.active && this.conn.isConnected) {
       if (this.assignedPartitions.length === 0) {
@@ -663,6 +663,8 @@ export class NexoStream<T = any> {
 
         // Process Batch
         for (let i = 0; i < numMsgs; i++) {
+          if (!this.active) break; // Check active flag
+          
           const msgOffset = res.cursor.readU64();
           res.cursor.readU64(); // timestamp
           const payloadLen = res.cursor.readU32();
