@@ -10,8 +10,9 @@ pub struct StreamBrokerSnapshot {
 #[derive(Serialize)]
 pub struct TopicSummary {
     pub name: String,
-    pub total_messages: u64,
-    pub consumer_groups: Vec<GroupSummary>,
+    pub partitions: u32,
+    pub size_bytes: u64,
+    pub groups: Vec<GroupSummary>,
 }
 
 #[derive(Serialize)]

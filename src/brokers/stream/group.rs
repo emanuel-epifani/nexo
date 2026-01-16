@@ -1,22 +1,25 @@
-//! Consumer Group: Tracks committed offset and connected clients
-//! Simplified: No partitions, no rebalancing, just offset tracking
+//! Consumer Group: Pure Logic (No Arc/Mutex)
+//! Tracks members and offsets.
+//! Handles Partition Assignment Logic (Rebalancing).
 
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 use crate::brokers::stream::snapshot::{GroupSummary, MemberSummary};
+
+#[derive(Clone, Debug)]
+pub struct MemberInfo {
+    pub client_id: String,
+    // Partitions assigned to this member
+    pub partitions: Vec<u32>,
+}
 
 pub struct ConsumerGroup {
     pub id: String,
     pub topic: String,
-    /// Single committed offset for the entire group
-    pub committed_offset: AtomicU64,
-    /// Connected clients and their local offset (if we were tracking per-client, but we track group offset)
-    /// Actually, for the simplified view "Members", we just track who is connected.
-    /// In a real Kafka group, all members share the group offset.
-    /// But if we want to show lag PER MEMBER, we need to know where each member is.
-    /// In this simplified architecture, all members of a group consume from the same shared offset.
-    /// So they all effectively have the same offset (the group offset).
-    pub members: DashMap<String, ()>,
+    pub members: HashMap<String, MemberInfo>,
+    // Generation ID (Epoch) - Monotonically increasing on every rebalance
+    pub generation_id: u64,
+    // Last committed offsets per partition (PartitionID -> Offset)
+    pub committed_offsets: HashMap<u32, u64>,
 }
 
 impl ConsumerGroup {
@@ -24,45 +27,118 @@ impl ConsumerGroup {
         Self {
             id,
             topic,
-            committed_offset: AtomicU64::new(0),
-            members: DashMap::new(),
+            members: HashMap::new(),
+            generation_id: 0,
+            committed_offsets: HashMap::new(),
         }
     }
-    
-    pub fn add_member(&self, client_id: String) {
-        self.members.insert(client_id, ());
+
+    pub fn add_member(&mut self, client_id: String) {
+        if !self.members.contains_key(&client_id) {
+            self.members.insert(client_id.clone(), MemberInfo {
+                client_id,
+                partitions: Vec::new(),
+            });
+            // Trigger implicit rebalance logic later (caller must call rebalance)
+        }
     }
-    
-    pub fn remove_member(&self, client_id: &str) {
-        self.members.remove(client_id);
+
+    pub fn remove_member(&mut self, client_id: &str) -> bool {
+        if self.members.remove(client_id).is_some() {
+            // Trigger implicit rebalance logic later (caller must call rebalance)
+            return true;
+        }
+        false
     }
-    
-    pub fn commit(&self, offset: u64) {
-        // Only advance forward (prevent regression)
-        self.committed_offset.fetch_max(offset, Ordering::SeqCst);
+
+    pub fn commit(&mut self, partition: u32, offset: u64) {
+        // Monotonic commit: only increase
+        let current = self.committed_offsets.entry(partition).or_insert(0);
+        if offset > *current {
+            *current = offset;
+        }
     }
-    
-    pub fn get_committed_offset(&self) -> u64 {
-        self.committed_offset.load(Ordering::SeqCst)
+
+    pub fn get_committed_offset(&self, partition: u32) -> u64 {
+        *self.committed_offsets.get(&partition).unwrap_or(&0)
     }
-    
-    pub fn get_snapshot(&self, high_watermark: u64) -> GroupSummary {
-        let committed = self.get_committed_offset();
-        let lag = if high_watermark > committed {
-            high_watermark - committed
-        } else {
-            0
-        };
-        
-        // In this simple model, all members share the same group offset
-        let members_summary: Vec<MemberSummary> = self.members.iter().map(|kv| {
+
+    /// REBALANCE ALGORITHM (Round Robin / Range)
+    /// Redistributes partitions among current members.
+    /// Increments generation_id.
+    pub fn rebalance(&mut self, total_partitions: u32) {
+        if self.members.is_empty() {
+            self.generation_id += 1;
+            return;
+        }
+
+        // 1. Sort members to ensure deterministic assignment
+        let mut member_ids: Vec<String> = self.members.keys().cloned().collect();
+        member_ids.sort();
+
+        let member_count = member_ids.len() as u32;
+        let partitions_per_member = total_partitions / member_count;
+        let remainder = total_partitions % member_count;
+
+        // 2. Clear current assignments
+        for m in self.members.values_mut() {
+            m.partitions.clear();
+        }
+
+        // 3. Distribute
+        let mut current_partition = 0;
+        for (i, member_id) in member_ids.iter().enumerate() {
+            // Give extra partition to the first 'remainder' members
+            let extra = if (i as u32) < remainder { 1 } else { 0 };
+            let count = partitions_per_member + extra;
+
+            if let Some(member) = self.members.get_mut(member_id) {
+                for _ in 0..count {
+                    member.partitions.push(current_partition);
+                    current_partition += 1;
+                }
+            }
+        }
+
+        // 4. New Era
+        self.generation_id += 1;
+    }
+
+    pub fn is_member(&self, client_id: &str) -> bool {
+        self.members.contains_key(client_id)
+    }
+
+    pub fn get_assignments(&self, client_id: &str) -> Option<&Vec<u32>> {
+        self.members.get(client_id).map(|m| &m.partitions)
+    }
+
+    pub fn validate_epoch(&self, generation_id: u64) -> bool {
+        self.generation_id == generation_id
+    }
+
+    pub fn get_snapshot(&self, high_watermarks: &HashMap<u32, u64>) -> GroupSummary {
+        let members_summary = self.members.values().map(|m| {
+            // Sum lag of all assigned partitions
+            let mut current_offset_sum = 0;
+            let mut lag_sum = 0;
+            
+            for &p_id in &m.partitions {
+                let committed = self.get_committed_offset(p_id);
+                let hw = *high_watermarks.get(&p_id).unwrap_or(&0);
+                
+                current_offset_sum += committed;
+                if hw > committed {
+                    lag_sum += hw - committed;
+                }
+            }
+
             MemberSummary {
-                client_id: kv.key().clone(),
-                current_offset: committed,
-                lag,
+                client_id: m.client_id.clone(),
+                current_offset: current_offset_sum,
+                lag: lag_sum,
             }
         }).collect();
-        
+
         GroupSummary {
             name: self.id.clone(),
             members: members_summary,
