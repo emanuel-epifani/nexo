@@ -33,11 +33,34 @@ pub enum ParseError {
     Invalid(String),
 }
 
+/// Fixed-size Header (9 bytes): [FrameType: 1] [CorrelationID: 4] [PayloadLen: 4]
+#[derive(Debug, Clone, Copy)]
+pub struct RequestHeader {
+    pub frame_type: u8,
+    pub id: u32,
+    pub payload_len: u32,
+}
+
+impl RequestHeader {
+    pub const SIZE: usize = 9;
+
+    /// Parse header from bytes without consuming
+    pub fn parse(buf: &[u8]) -> Result<Option<Self>, ParseError> {
+        if buf.len() < Self::SIZE {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            frame_type: buf[0],
+            id: u32::from_be_bytes(buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?),
+            payload_len: u32::from_be_bytes(buf[5..9].try_into().map_err(|_| ParseError::Incomplete)?),
+        }))
+    }
+}
+
 /// Represents a parsed frame (Header + Body slice)
 #[derive(Debug)]
 pub struct Frame<'a> {
-    pub frame_type: u8,
-    pub id: u32,
+    pub header: RequestHeader,
     pub payload: &'a [u8],
 }
 
@@ -60,23 +83,23 @@ pub enum Response {
 const MAX_PAYLOAD_SIZE: usize = 512 * 1024 * 1024;
 
 pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError> {
-    if buf.len() < 9 { return Ok(None); }
-    let frame_type = buf[0];
-    let id = u32::from_be_bytes(buf[1..5].try_into().map_err(|_| ParseError::Incomplete)?);
-    let payload_len = u32::from_be_bytes(buf[5..9].try_into().map_err(|_| ParseError::Incomplete)?) as usize;
+    let header = match RequestHeader::parse(buf)? {
+        Some(h) => h,
+        None => return Ok(None),
+    };
     
     // Security Check: Hard Limit
-    if payload_len > MAX_PAYLOAD_SIZE {
+    if header.payload_len as usize > MAX_PAYLOAD_SIZE {
         return Err(ParseError::Invalid(format!(
             "Payload too large: {} bytes (Limit: {} bytes)", 
-            payload_len, MAX_PAYLOAD_SIZE
+            header.payload_len, MAX_PAYLOAD_SIZE
         )));
     }
 
-    let total_len = 9 + payload_len;
+    let total_len = RequestHeader::SIZE + header.payload_len as usize;
     if buf.len() < total_len { return Ok(None); }
-    let payload = &buf[9..total_len];
-    Ok(Some((Frame { frame_type, id, payload }, total_len)))
+    let payload = &buf[RequestHeader::SIZE..total_len];
+    Ok(Some((Frame { header, payload }, total_len)))
 }
 
 // ========================================
@@ -85,38 +108,48 @@ pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError>
 
 pub fn encode_response(id: u32, response: &Response) -> Bytes {
     // Pre-calculate exact size
-    let data_len = match response {
+    let extra_len = match response {
         Response::Ok | Response::Null => 0,
-        Response::Error(msg) => msg.len(),
+        Response::Error(msg) => 4 + msg.len(), // MsgLen(4) + Msg
         Response::Data(data) => data.len(),
-        Response::Async(_) => 0,  // Should not be called directly
+        Response::Async(_) => 0,
     };
     
-    let mut buf = BytesMut::with_capacity(10 + data_len);
+    // Header (9) + Status (1) + optional extra
+    let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + 1 + extra_len);
     
     buf.put_u8(TYPE_RESPONSE);
     buf.put_u32(id);
     match response {
-        Response::Ok => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
+        Response::Ok => { 
+            buf.put_u32(1); // Payload len: 1 byte status
+            buf.put_u8(STATUS_OK); 
+        }
         Response::Error(msg) => {
-            buf.put_u32((1 + 4 + msg.len()) as u32);
+            buf.put_u32((1 + 4 + msg.len()) as u32); // Status(1) + MsgLen(4) + Msg
             buf.put_u8(STATUS_ERR);
             buf.put_u32(msg.len() as u32);
             buf.put_slice(msg.as_bytes());
         }
-        Response::Null => { buf.put_u32(1); buf.put_u8(STATUS_NULL); }
+        Response::Null => { 
+            buf.put_u32(1); 
+            buf.put_u8(STATUS_NULL); 
+        }
         Response::Data(data) => {
             buf.put_u32((1 + data.len()) as u32);
             buf.put_u8(STATUS_DATA);
             buf.put_slice(data);
         }
-        Response::Async(_) => { buf.put_u32(1); buf.put_u8(STATUS_OK); }
+        Response::Async(_) => { 
+            buf.put_u32(1); 
+            buf.put_u8(STATUS_OK); 
+        }
     }
     buf.freeze()
 }
 
 pub fn encode_push(id: u32, payload: &[u8]) -> Bytes {
-    let mut buf = BytesMut::with_capacity(9 + payload.len());
+    let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + payload.len());
     buf.put_u8(TYPE_PUSH);
     buf.put_u32(id);
     buf.put_u32(payload.len() as u32);

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::server::header_protocol::{
     encode_response, encode_push, parse_frame, ParseError, Response,
-    TYPE_REQUEST, TYPE_PING
+    TYPE_REQUEST, TYPE_PING, RequestHeader
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
@@ -104,8 +104,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             },
             Err(ParseError::Incomplete) => None,
         } {
-            let id = frame_ref.id;
-            let frame_type = frame_ref.frame_type;
+            let id = frame_ref.header.id;
+            let frame_type = frame_ref.header.frame_type;
 
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
             let frame_data = buffer.split_to(consumed).freeze();
@@ -118,8 +118,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             tokio::spawn(async move {
                 match frame_type {
                     TYPE_REQUEST => {
-                        // Extract payload from the frozen frame_data (offset 9)
-                        let payload = frame_data.slice(9..);
+                        // Extract payload from the frozen frame_data
+                        let payload = frame_data.slice(RequestHeader::SIZE..);
                         // Pass client_id to route so SUB can use it
                         let response = route(payload, &engine_clone, &client_id_clone);
                         
