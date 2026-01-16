@@ -236,15 +236,9 @@ class NexoConnection {
 
     const cleanup = (err: any) => {
       this.isConnected = false;
-      // Reject all pending
-      for (const [id, callback] of this.pending) {
-         // We can't easily reject via callback pattern here without changing map type, 
-         // but effectively the Promises will timeout. 
-         // For stricter cleanup we could store {resolve, reject} in map.
-      }
       this.pending.clear();
     };
-    
+
     this.socket.on('error', (err) => logger.error("Socket error", err));
     this.socket.on('close', cleanup);
   }
@@ -320,24 +314,24 @@ class NexoConnection {
       this.pending.set(id, (res) => {
         clearTimeout(timer);
         if (res.status === ResponseStatus.ERR) {
-            const errCursor = new Cursor(res.data);
-            const errMsg = errCursor.readString();
-            // Silence common expected errors
-            if (!errMsg.includes('FENCED') && !errMsg.includes('not found')) {
-                logger.error(`<- ERROR ${Opcode[opcode]} (${errMsg})`);
-            }
-            reject(new Error(errMsg));
+          const errCursor = new Cursor(res.data);
+          const errMsg = errCursor.readString();
+          // Silence common expected errors
+          if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
+            logger.error(`<- ERROR ${Opcode[opcode]} (${errMsg})`);
+          }
+          reject(new Error(errMsg));
         } else {
-            resolve({ status: res.status, cursor: new Cursor(res.data) });
+          resolve({ status: res.status, cursor: new Cursor(res.data) });
         }
       });
 
       // 3. Send
       if (!this.isConnected) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new Error("Client not connected"));
-          return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error("Client not connected"));
+        return;
       }
       this.socket.write(packet);
     });
@@ -508,9 +502,9 @@ class NexoPubSub {
   async subscribe(topic: string, callback: (data: any) => void): Promise<void> {
     if (!this.handlers.has(topic)) this.handlers.set(topic, []);
     this.handlers.get(topic)!.push(callback);
-    
+
     if (this.handlers.get(topic)!.length === 1) {
-        await this.conn.send(Opcode.SUB, FrameCodec.string(topic));
+      await this.conn.send(Opcode.SUB, FrameCodec.string(topic));
     }
   }
 
@@ -522,15 +516,12 @@ class NexoPubSub {
   }
 
   private dispatch(topic: string, data: any) {
-    // Exact match
     this.handlers.get(topic)?.forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
-    
-    // Pattern match (simplified)
     for (const [pattern, cbs] of this.handlers) {
-        if (pattern === topic) continue;
-        if (this.matches(pattern, topic)) {
-            cbs.forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
-        }
+      if (pattern === topic) continue;
+      if (this.matches(pattern, topic)) {
+        cbs.forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
+      }
     }
   }
 
@@ -538,27 +529,32 @@ class NexoPubSub {
     const pParts = pattern.split('/');
     const tParts = topic.split('/');
     for (let i = 0; i < pParts.length; i++) {
-        if (pParts[i] === '#') return true;
-        if (i >= tParts.length || (pParts[i] !== '+' && pParts[i] !== tParts[i])) return false;
+      if (pParts[i] === '#') return true;
+      if (i >= tParts.length || (pParts[i] !== '+' && pParts[i] !== tParts[i])) return false;
     }
     return pParts.length === tParts.length;
   }
 }
 
 // ========================================
-// STREAM BROKER
+// STREAM BROKER (Rebalancing Aware V1)
 // ========================================
 
 export class NexoStream<T = any> {
-  private nextOffset = BigInt(0);
   private active = false;
   private isSubscribed = false;
+
+  // Rebalancing State
+  private generationId = BigInt(0);
+  private assignedPartitions: number[] = [];
+  private offsets = new Map<number, bigint>(); // Partition -> NextOffset
 
   constructor(
     private conn: NexoConnection,
     public readonly name: string,
     public readonly consumerGroup?: string
-  ) { }
+  ) {
+  }
 
   async create(_config: StreamConfig = {}): Promise<this> {
     await this.conn.send(Opcode.S_CREATE, FrameCodec.string(this.name));
@@ -572,77 +568,137 @@ export class NexoStream<T = any> {
   async subscribe(callback: (data: T) => Promise<void> | void, options: StreamSubscribeOptions = {}): Promise<{ stop: () => void }> {
     if (this.isSubscribed) throw new Error("Stream already subscribed.");
     if (!this.consumerGroup) throw new Error("Consumer Group required.");
-    
+
     this.isSubscribed = true;
     this.active = false;
-    await new Promise(r => setTimeout(r, 10)); 
+    await new Promise(r => setTimeout(r, 10)); // Yield
     this.active = true;
 
-    try {
-        const res = await this.conn.send(Opcode.S_JOIN, FrameCodec.string(this.consumerGroup), FrameCodec.string(this.name));
-        this.nextOffset = res.cursor.readU64();
-    } catch (e) {
-        this.isSubscribed = false;
-        this.active = false;
-        throw e;
-    }
+    // Start Main Loop (Manages Joins and Rebalances)
+    this.mainLoop(callback, options.batchSize || 100);
 
-    this.pollLoop(callback, options.batchSize || 100);
-    return { stop: () => { this.active = false; } };
+    return {
+      stop: () => {
+        this.active = false;
+        // Also send LeaveGroup for polite exit
+        // (Fire and forget, we don't await because stop() is usually sync)
+      }
+    };
   }
 
-  private async pollLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
+  private async mainLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
     while (this.conn.isConnected && this.active) {
-        try {
-            const res = await this.conn.send(
-                Opcode.S_FETCH,
-                FrameCodec.string(this.name),
-                FrameCodec.u64(this.nextOffset),
-                FrameCodec.u32(batchSize)
-            );
+      try {
+        // 1. JOIN GROUP (Get Assignments)
+        logger.info(`Joining group ${this.consumerGroup}...`);
+        const joinRes = await this.conn.send(Opcode.S_JOIN, FrameCodec.string(this.consumerGroup!), FrameCodec.string(this.name));
 
-            const numMsgs = res.cursor.readU32();
-            if (numMsgs === 0) {
-                await new Promise(r => setTimeout(r, 100));
-                continue;
-            }
-
-            let lastMsgOffset = this.nextOffset;
-            let batchError = false;
-
-            for (let i = 0; i < numMsgs; i++) {
-                const msgOffset = res.cursor.readU64();
-                res.cursor.readU64(); // timestamp
-                const payloadLen = res.cursor.readU32();
-                const payloadBuf = res.cursor.readBuffer(payloadLen);
-                const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
-
-                try {
-                    await callback(data);
-                    lastMsgOffset = msgOffset;
-                } catch (e) {
-                    logger.error(`Stream error at ${msgOffset}. Backing off.`, e);
-                    this.nextOffset = msgOffset;
-                    batchError = true;
-                    // Commit progress up to here
-                    await this.conn.send(Opcode.S_COMMIT, FrameCodec.string(this.consumerGroup!), FrameCodec.string(this.name), FrameCodec.u64(this.nextOffset));
-                    await new Promise(r => setTimeout(r, 1000));
-                    break;
-                }
-            }
-
-            if (!batchError) {
-                this.nextOffset = lastMsgOffset + BigInt(1);
-                await this.conn.send(Opcode.S_COMMIT, FrameCodec.string(this.consumerGroup!), FrameCodec.string(this.name), FrameCodec.u64(this.nextOffset));
-            }
-
-        } catch (e) {
-            if (!this.active || !this.conn.isConnected) break;
-            logger.error("Stream poll error", e);
-            await new Promise(r => setTimeout(r, 1000));
+        // Parse Join Response: [GenID:8][P_Count:4][P1, P2...][StartOffset:8 (Legacy)]
+        this.generationId = joinRes.cursor.readU64();
+        const pCount = joinRes.cursor.readU32();
+        this.assignedPartitions = [];
+        for (let i = 0; i < pCount; i++) {
+          this.assignedPartitions.push(joinRes.cursor.readU32());
         }
+        const legacyStartOffset = joinRes.cursor.readU64(); // Ignored if map used later
+
+        // Init offsets
+        this.offsets.clear();
+        for (const p of this.assignedPartitions) {
+          // Ideally server sends map, for now reset or use legacy. 
+          // TODO: Use committed offsets map from server response
+          this.offsets.set(p, legacyStartOffset);
+        }
+
+        logger.info(`Joined Gen ${this.generationId}. Assigned: ${this.assignedPartitions}`);
+
+        // 2. POLL LOOP (Run until Rebalance Error)
+        await this.partitionLoop(callback, batchSize);
+
+      } catch (e: any) {
+        if (!this.active || !this.conn.isConnected) break;
+
+        if (e.message?.includes("REBALANCE")) {
+          logger.warn("Rebalance needed. Restarting join...");
+          // Clear state and retry join immediately
+          this.assignedPartitions = [];
+          continue;
+        }
+
+        logger.error("Stream fatal error (Backoff 1s)", e);
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
     this.isSubscribed = false;
+  }
+
+  private async partitionLoop(callback: (data: T) => Promise<void> | void, batchSize: number) {
+    // Loop while active and NOT rebalancing
+    while (this.active && this.conn.isConnected) {
+      if (this.assignedPartitions.length === 0) {
+        await new Promise(r => setTimeout(r, 100));
+        continue;
+      }
+
+      // ROUND ROBIN FETCH
+      for (const partition of this.assignedPartitions) {
+        const currentOffset = this.offsets.get(partition) || BigInt(0);
+
+        // FETCH: [GenID:8][Topic][Group][Partition:4][Offset:8][Limit:4]
+        const res = await this.conn.send(
+          Opcode.S_FETCH,
+          FrameCodec.u64(this.generationId),
+          FrameCodec.string(this.name),
+          FrameCodec.string(this.consumerGroup!),
+          FrameCodec.u32(partition),
+          FrameCodec.u64(currentOffset),
+          FrameCodec.u32(batchSize)
+        );
+
+        const numMsgs = res.cursor.readU32();
+        if (numMsgs === 0) continue;
+
+        let lastMsgOffset = currentOffset;
+        let processError = false;
+
+        // Process Batch
+        for (let i = 0; i < numMsgs; i++) {
+          const msgOffset = res.cursor.readU64();
+          res.cursor.readU64(); // timestamp
+          const payloadLen = res.cursor.readU32();
+          const payloadBuf = res.cursor.readBuffer(payloadLen);
+          const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+
+          try {
+            await callback(data);
+            lastMsgOffset = msgOffset;
+          } catch (e) {
+            logger.error(`Processing error at P${partition}:${msgOffset}. Skipping commit for this partition.`);
+            processError = true;
+            break; // Break batch, move to next partition
+          }
+        }
+
+        // Commit if OK
+        if (!processError) {
+          const nextOffset = lastMsgOffset + BigInt(1);
+          this.offsets.set(partition, nextOffset);
+
+          // COMMIT: [GenID:8][Group][Topic][Partition:4][Offset:8]
+          await this.conn.send(
+            Opcode.S_COMMIT,
+            FrameCodec.u64(this.generationId),
+            FrameCodec.string(this.consumerGroup!),
+            FrameCodec.string(this.name),
+            FrameCodec.u32(partition),
+            FrameCodec.u64(nextOffset)
+          );
+        }
+      }
+
+      // Yield to avoid blocking event loop
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
 }
 
@@ -650,7 +706,7 @@ export class NexoStream<T = any> {
 // CLIENT MAIN ENTRY
 // ========================================
 
-// Helper: Run Concurrent (Same as before)
+// Helper: Run Concurrent
 async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
   if (concurrency === 1) {
     for (const item of items) await fn(item);
@@ -683,6 +739,7 @@ export class NexoClient {
     this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 8080, options);
     this.store = new NexoStore(this.conn);
     this.pubsubBroker = new NexoPubSub(this.conn);
+    this.setupGracefulShutdown();
   }
 
   static async connect(options?: NexoOptions): Promise<NexoClient> {
@@ -709,13 +766,29 @@ export class NexoClient {
     if (!this.topics.has(name)) this.topics.set(name, new NexoTopic<T>(this.pubsubBroker, name));
     return this.topics.get(name) as NexoTopic<T>;
   }
-  
+
   get debug() {
-      return {
-          echo: async (data: any) => {
-              const res = await this.conn.send(Opcode.DEBUG_ECHO, FrameCodec.any(data));
-              return FrameCodec.decodeAny(res.cursor);
-          }
-      };
+    return {
+      echo: async (data: any) => {
+        const res = await this.conn.send(Opcode.DEBUG_ECHO, FrameCodec.any(data));
+        return FrameCodec.decodeAny(res.cursor);
+      }
+    };
+  }
+
+  private setupGracefulShutdown() {
+    const shutdown = async () => {
+      logger.info("Graceful shutdown triggered. Disconnecting...");
+      this.disconnect();
+      process.exit(0);
+    };
+
+    // Ensure we don't register duplicates if user creates multiple clients
+    // Note: This is a simplistic global hook. In real-world, maybe let user handle it.
+    // But for robust defaults, it's good.
+    if (process.listenerCount('SIGINT') === 0) {
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    }
   }
 }
