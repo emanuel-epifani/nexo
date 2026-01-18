@@ -65,14 +65,24 @@ impl ConsumerGroup {
 
     /// REBALANCE ALGORITHM (Round Robin / Range)
     /// Redistributes partitions among current members.
-    /// Increments generation_id.
+    /// IMPORTANT: Increments generation_id FIRST to invalidate all in-flight requests.
     pub fn rebalance(&mut self, total_partitions: u32) {
+        log::info!("[Group:{}] REBALANCE TRIGGERED (Members: {})", self.id, self.members.len());
+
+        // 1. FIRST: Bump generation to invalidate all in-flight FETCH/COMMIT
+        self.generation_id += 1;
+
         if self.members.is_empty() {
-            self.generation_id += 1;
+            log::info!("[Group:{}] Rebalanced Gen {} (No members)", self.id, self.generation_id);
             return;
         }
 
-        // 1. Sort members to ensure deterministic assignment
+        // 2. Clear current assignments
+        for m in self.members.values_mut() {
+            m.partitions.clear();
+        }
+
+        // 3. Sort members to ensure deterministic assignment
         let mut member_ids: Vec<String> = self.members.keys().cloned().collect();
         member_ids.sort();
 
@@ -80,15 +90,9 @@ impl ConsumerGroup {
         let partitions_per_member = total_partitions / member_count;
         let remainder = total_partitions % member_count;
 
-        // 2. Clear current assignments
-        for m in self.members.values_mut() {
-            m.partitions.clear();
-        }
-
-        // 3. Distribute
+        // 4. Distribute partitions
         let mut current_partition = 0;
         for (i, member_id) in member_ids.iter().enumerate() {
-            // Give extra partition to the first 'remainder' members
             let extra = if (i as u32) < remainder { 1 } else { 0 };
             let count = partitions_per_member + extra;
 
@@ -99,9 +103,11 @@ impl ConsumerGroup {
                 }
             }
         }
-
-        // 4. New Era
-        self.generation_id += 1;
+        
+        log::info!("[Group:{}] REBALANCE COMPLETE -> Gen {}. Ownership:", self.id, self.generation_id);
+        for m in self.members.values() {
+            log::info!("[Group:{}]   -> Client {}: {:?}", self.id, m.client_id, m.partitions);
+        }
     }
 
     pub fn is_member(&self, client_id: &str) -> bool {

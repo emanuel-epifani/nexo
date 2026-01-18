@@ -83,6 +83,7 @@ struct TopicActor {
     groups: HashMap<String, ConsumerGroup>,
     client_map: HashMap<String, Vec<String>>, 
     rx: mpsc::Receiver<TopicCommand>,
+    last_partition: u32,
 }
 
 impl TopicActor {
@@ -92,6 +93,7 @@ impl TopicActor {
             groups: HashMap::new(),
             client_map: HashMap::new(),
             rx,
+            last_partition: 0,
         }
     }
 
@@ -99,19 +101,20 @@ impl TopicActor {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 TopicCommand::Publish { key: _, payload, reply } => {
-                    let partition = 0; // TODO: Hashing
+                    let p_count = self.state.get_partitions_count() as u32;
+                    let partition = self.last_partition % p_count;
+                    self.last_partition = (self.last_partition + 1) % p_count;
+                    
                     let offset = self.state.publish(partition, payload);
                     let _ = reply.send(Ok(offset));
                 },
                 TopicCommand::Fetch { group_id, client_id, generation_id, partition, offset, limit, reply } => {
                     if let (Some(gid), Some(cid), Some(gen_id)) = (group_id, client_id, generation_id) {
                         if let Some(group) = self.groups.get(&gid) {
-                            // UNIFIED CHECK
                             if !group.validate_epoch(gen_id) || !group.is_member(&cid) {
                                 let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
                                 continue;
                             }
-                            // Assignment Check
                             if let Some(assignments) = group.get_assignments(&cid) {
                                 if !assignments.contains(&partition) {
                                     let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
@@ -127,21 +130,37 @@ impl TopicActor {
                         }
                     }
                     let msgs = self.state.read(partition, offset, limit);
+                    log::debug!("[TopicActor:{}] Fetch: P{} off={} lim={} -> got {} msgs", self.state.name, partition, offset, limit, msgs.len());
                     let _ = reply.send(Ok(msgs));
                 },
                 TopicCommand::JoinGroup { group_id, client_id, reply } => {
+                    log::info!("[TopicActor:{}] JoinGroup: Group={}, Client={}", self.state.name, group_id, client_id);
                     let g = self.groups.entry(group_id.clone())
                         .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.state.name.clone()));
                     
+                    let is_new = !g.is_member(&client_id);
                     g.add_member(client_id.clone());
-                    self.client_map.entry(client_id.clone()).or_default().push(group_id);
-                    g.rebalance(self.state.get_partitions_count() as u32);
+                    
+                    let groups_list = self.client_map.entry(client_id.clone()).or_default();
+                    if !groups_list.contains(&group_id) {
+                        groups_list.push(group_id.clone());
+                    }
+                    
+                    if is_new {
+                        log::info!("[TopicActor:{}] NEW member. Triggering rebalance.", self.state.name);
+                        g.rebalance(self.state.get_partitions_count() as u32);
+                    } else {
+                        log::info!("[TopicActor:{}] EXISTING member. Current Gen: {}", self.state.name, g.generation_id);
+                    }
 
                     let assigned = g.get_assignments(&client_id).cloned().unwrap_or_default();
                     let mut start_offsets = HashMap::new();
                     for &pid in &assigned {
-                        start_offsets.insert(pid, g.get_committed_offset(pid));
+                        let off = g.get_committed_offset(pid);
+                        start_offsets.insert(pid, off);
+                        log::info!("[TopicActor:{}]   -> Assignment: P{} start_at={}", self.state.name, pid, off);
                     }
+                    
                     let _ = reply.send(Ok((g.generation_id, assigned, start_offsets)));
                 },
                 TopicCommand::Commit { group_id, partition, offset, client_id, generation_id, reply } => {
@@ -165,14 +184,21 @@ impl TopicActor {
                     }
                 },
                 TopicCommand::LeaveGroup { client_id, reply } => {
+                     log::info!("[TopicActor:{}] LeaveGroup Req: Client={}", self.state.name, client_id);
                      if let Some(g_ids) = self.client_map.remove(&client_id) {
+                         log::info!("[TopicActor:{}] Found client in groups: {:?}", self.state.name, g_ids);
                          for gid in g_ids {
                              if let Some(g) = self.groups.get_mut(&gid) {
                                  if g.remove_member(&client_id) {
+                                     log::info!("[TopicActor:{}] Client {} removed from Group {}. Triggering rebalance.", self.state.name, client_id, gid);
                                      g.rebalance(self.state.get_partitions_count() as u32);
+                                 } else {
+                                     log::warn!("[TopicActor:{}] Client {} NOT found in Group members {}", self.state.name, client_id, gid);
                                  }
                              }
                          }
+                     } else {
+                         log::warn!("[TopicActor:{}] Client {} NOT found in client_map", self.state.name, client_id);
                      }
                      let _ = reply.send(());
                 },
@@ -215,6 +241,7 @@ impl StreamManager {
                     ManagerCommand::CreateTopic { name, partitions, reply } => {
                         if !actors.contains_key(&name) {
                             let (t_tx, t_rx) = mpsc::channel(10_000); 
+                            log::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
                             let actor = TopicActor::new(name.clone(), partitions, t_rx);
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
@@ -225,14 +252,19 @@ impl StreamManager {
                         let _ = reply.send(actors.get(&topic).cloned());
                     },
                     ManagerCommand::DisconnectClient { client_id, reply } => {
-                        // Broadcast disconnect with ack
+                        log::info!("[StreamManager] Disconnecting client: {}", client_id);
+                        let mut waits = Vec::new();
                         for actor in actors.values() {
                             let (tx, rx) = oneshot::channel();
-                            // We don't await individual leaves to speed up loop, 
-                            // but we could join them if strict ordering needed.
-                            let _ = actor.send(TopicCommand::LeaveGroup { client_id: client_id.clone(), reply: tx }).await;
-                            // Fire and forget waiting for sub-actors for now
+                            if actor.send(TopicCommand::LeaveGroup { client_id: client_id.clone(), reply: tx }).await.is_ok() {
+                                waits.push(rx);
+                            }
                         }
+                        // Wait for all rebalances to complete
+                        for rx in waits {
+                            let _ = rx.await;
+                        }
+                        log::info!("[StreamManager] Client {} fully disconnected and groups rebalanced", client_id);
                         let _ = reply.send(());
                     },
                     ManagerCommand::GetSnapshot { reply } => {
@@ -268,7 +300,8 @@ impl StreamManager {
 
     pub async fn create_topic(&self, name: String) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::CreateTopic { name, partitions: 1, reply: tx }).await.map_err(|_| "Server closed")?;
+        // Use 4 partitions to allow distribution in tests
+        self.tx.send(ManagerCommand::CreateTopic { name, partitions: 4, reply: tx }).await.map_err(|_| "Server closed")?;
         rx.await.map_err(|_| "No reply")?
     }
 
@@ -328,12 +361,12 @@ impl StreamManager {
         rx.await.map_err(|_| "No reply")?
     }
 
-    pub async fn commit_offset(&self, group: &str, topic: &str, offset: u64, client: &str, gen_id: u64) -> Result<(), String> {
+    pub async fn commit_offset(&self, group: &str, topic: &str, partition: u32, offset: u64, client: &str, gen_id: u64) -> Result<(), String> {
         let actor = self.get_actor(topic).await.ok_or("Topic not found")?;
         let (tx, rx) = oneshot::channel();
         actor.send(TopicCommand::Commit { 
             group_id: group.to_string(), 
-            partition: 0, 
+            partition, 
             offset, 
             client_id: client.to_string(), 
             generation_id: gen_id, 
@@ -358,17 +391,11 @@ impl StreamManager {
 }
 
 pub struct StreamSession {
+    #[allow(dead_code)]
     client_id: String,
+    #[allow(dead_code)]
     manager: StreamManager,
 }
 
-impl Drop for StreamSession {
-    fn drop(&mut self) {
-        // Fire and forget disconnect on drop (cannot await in drop)
-        let m = self.manager.clone();
-        let c = self.client_id.clone();
-        tokio::spawn(async move {
-            m.disconnect(c).await;
-        });
-    }
-}
+// Note: Disconnect is now called explicitly in socket_network.rs before drop.
+// This ensures rebalance completes synchronously before the connection handler returns.

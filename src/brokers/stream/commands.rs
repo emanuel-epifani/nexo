@@ -47,11 +47,13 @@ impl StreamCommand {
         match opcode {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
+                log::debug!("Parsed S_CREATE: topic={}", topic);
                 Ok(Self::Create { topic })
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
                 let payload = cursor.read_remaining();
+                log::debug!("Parsed S_PUB: topic={}, len={}", topic, payload.len());
                 Ok(Self::Publish { topic, payload })
             }
             OP_S_FETCH => {
@@ -61,11 +63,13 @@ impl StreamCommand {
                 let partition = cursor.read_u32()?;
                 let offset = cursor.read_u64()?;
                 let limit = cursor.read_u32()?;
+                log::debug!("Parsed S_FETCH: topic={} group={} p={} off={} lim={} gen={}", topic, group, partition, offset, limit, gen_id);
                 Ok(Self::Fetch { gen_id, topic, group, partition, offset, limit })
             }
             OP_S_JOIN => {
                 let group = cursor.read_string()?;
                 let topic = cursor.read_string()?;
+                log::debug!("Parsed S_JOIN: topic={} group={}", topic, group);
                 Ok(Self::Join { group, topic })
             }
             OP_S_COMMIT => {
@@ -74,6 +78,7 @@ impl StreamCommand {
                 let topic = cursor.read_string()?;
                 let partition = cursor.read_u32()?;
                 let offset = cursor.read_u64()?;
+                log::debug!("Parsed S_COMMIT: topic={} group={} p={} off={} gen={}", topic, group, partition, offset, gen_id);
                 Ok(Self::Commit { gen_id, group, topic, partition, offset })
             }
             _ => Err(format!("Unknown Stream opcode: 0x{:02X}", opcode)),

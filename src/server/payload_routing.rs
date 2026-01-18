@@ -203,9 +203,9 @@ fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) 
                         buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
                         for p in partitions {
                             buf.extend_from_slice(&p.to_be_bytes());
+                            let start_offset = start_offsets.get(&p).cloned().unwrap_or(0);
+                            buf.extend_from_slice(&start_offset.to_be_bytes());
                         }
-                        let start_offset = start_offsets.get(&0).cloned().unwrap_or(0);
-                        buf.extend_from_slice(&start_offset.to_be_bytes());
                         Ok(Bytes::from(buf))
                     },
                     Err(e) => Err(e),
@@ -215,7 +215,7 @@ fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) 
         }
         StreamCommand::Commit { gen_id, group, topic, partition, offset } => {
             tokio::spawn(async move {
-                let res = stream.commit_offset(&group, &topic, offset, &client, gen_id).await;
+                let res = stream.commit_offset(&group, &topic, partition, offset, &client, gen_id).await;
                 let response = match res { Ok(_) => Ok(Bytes::new()), Err(e) => Err(e) };
                 let _ = tx.send(response);
             });

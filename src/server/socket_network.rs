@@ -94,15 +94,21 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
         if n == 0 { break; } // EOF
 
+
         while let Some((frame_ref, consumed)) = match parse_frame(&buffer) {
-            Ok(Some(res)) => Some(res),
-            Ok(None) => None,
+            Ok(Some(res)) => {
+                Some(res)
+            },
+            Ok(None) => {
+                None
+            },
             Err(ParseError::Invalid(e)) => {
                 let _ = tx.send(WriteMessage::Response(0, Response::Error(format!("Proto err: {}", e)))).await;
-                // We might want to close connection on protocol error, but for now just skip
                 return Err(format!("Protocol error: {}", e));
             },
-            Err(ParseError::Incomplete) => None,
+            Err(ParseError::Incomplete) => {
+                None
+            },
         } {
             let id = frame_ref.header.id;
             let frame_type = frame_ref.header.frame_type;
@@ -116,6 +122,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
             // Parallel execution: One task per request
             tokio::spawn(async move {
+                // DEBUG: Print captured values (Safe, no reparsing)
+
                 match frame_type {
                     TYPE_REQUEST => {
                         // Extract payload from the frozen frame_data
@@ -153,10 +161,13 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         }
     }
 
-    // Cleanup
-    // RAII Guards (_pubsub_guard, _stream_guard) will automatically handle cleanup
-    // when this function returns or panics.
-
+    // Cleanup: Explicitly disconnect from stream manager (synchronous)
+    // This ensures rebalance happens before the connection handler returns
+    engine.stream.disconnect(client_id.0.clone()).await;
+    
+    // Drop guards and wait for write task
+    drop(_stream_guard);
+    drop(_pubsub_guard);
     drop(tx);
     let _ = write_task.await;
     Ok(())
