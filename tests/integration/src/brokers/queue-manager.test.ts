@@ -177,8 +177,8 @@ describe('QUEUE broker - Complete Feature Set', () => {
             // Should fail immediately
             await expect(q.subscribe(async () => {}))
                 .rejects
-                .toThrow(/already has an active subscriber/);
-            
+                .toThrow(/Queue guard_rail_test already subscribed/);
+
             sub1.stop();
         });
 

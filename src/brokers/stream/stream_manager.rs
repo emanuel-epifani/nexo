@@ -13,6 +13,7 @@ use crate::brokers::stream::topic::TopicState;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
+use crate::config::StreamConfig;
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -227,11 +228,13 @@ impl TopicActor {
 #[derive(Clone)]
 pub struct StreamManager {
     tx: mpsc::Sender<ManagerCommand>,
+    config: StreamConfig,
 }
 
 impl StreamManager {
-    pub fn new() -> Self {
+    pub fn new(config: StreamConfig) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
+        let actor_capacity = config.actor_channel_capacity;
 
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
@@ -240,7 +243,7 @@ impl StreamManager {
                 match cmd {
                     ManagerCommand::CreateTopic { name, partitions, reply } => {
                         if !actors.contains_key(&name) {
-                            let (t_tx, t_rx) = mpsc::channel(10_000); 
+                            let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
                             log::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
                             let actor = TopicActor::new(name.clone(), partitions, t_rx);
                             tokio::spawn(actor.run());
@@ -286,7 +289,7 @@ impl StreamManager {
             }
         });
 
-        Self { tx }
+        Self { tx, config }
     }
 
     // --- Public API ---
@@ -300,8 +303,8 @@ impl StreamManager {
 
     pub async fn create_topic(&self, name: String) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        // Use 4 partitions to allow distribution in tests
-        self.tx.send(ManagerCommand::CreateTopic { name, partitions: 4, reply: tx }).await.map_err(|_| "Server closed")?;
+        let partitions = self.config.default_partitions;
+        self.tx.send(ManagerCommand::CreateTopic { name, partitions, reply: tx }).await.map_err(|_| "Server closed")?;
         rx.await.map_err(|_| "No reply")?
     }
 

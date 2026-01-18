@@ -4,6 +4,7 @@ mod server;
 pub mod brokers;
 mod utils;
 pub mod dashboard;
+pub mod config;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,6 +15,7 @@ use crate::brokers::pub_sub::PubSubManager;
 use crate::brokers::stream::StreamManager;
 use crate::dashboard::models::system::SystemSnapshot;
 use crate::dashboard::models::system::BrokersSnapshot;
+use crate::config::Config;
 
 // ========================================
 // ENGINE (The Singleton)
@@ -21,6 +23,7 @@ use crate::dashboard::models::system::BrokersSnapshot;
 
 #[derive(Clone)]
 pub struct NexoEngine {
+    pub config: Arc<Config>,
     pub store: Arc<StoreManager>,
     pub queue: Arc<QueueManager>,
     pub pubsub: Arc<PubSubManager>,
@@ -28,23 +31,17 @@ pub struct NexoEngine {
     pub start_time: Instant,
 }
 
-impl Default for NexoEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl NexoEngine {
-    pub fn new() -> Self {
-        let queue_manager = Arc::new(QueueManager::new());
-        queue_manager.set_self(queue_manager.clone());
+    pub fn new(config: Config) -> Self {
+        let config = Arc::new(config);
         
         Self {
-            store: Arc::new(StoreManager::new()),
-            queue: queue_manager,
-            pubsub: Arc::new(PubSubManager::new()),
-            stream: Arc::new(StreamManager::new()),
+            store: Arc::new(StoreManager::new(config.store.clone())),
+            queue: Arc::new(QueueManager::new(config.queue.clone())),
+            pubsub: Arc::new(PubSubManager::new(config.pubsub.clone())),
+            stream: Arc::new(StreamManager::new(config.stream.clone())),
             start_time: Instant::now(),
+            config,
         }
     }
 
@@ -54,7 +51,7 @@ impl NexoEngine {
             server_time: chrono::Local::now().to_rfc3339(),
             brokers: BrokersSnapshot {
                 store: self.store.get_snapshot(),
-                queue: self.queue.get_snapshot(),
+                queue: self.queue.get_snapshot().await,
                 pubsub: self.pubsub.get_snapshot().await,
                 stream: self.stream.get_snapshot().await,
             },
@@ -68,42 +65,30 @@ impl NexoEngine {
 
 #[tokio::main]
 async fn main() {
-    dotenv::dotenv().ok();
+    let config = Config::load();
 
     // Init Tracing (logging)
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_env("NEXO_LOG")
-        )
+        .with_env_filter(&config.server.log_level)
         .compact()
         .with_target(false)
         .without_time()
         .init();
-    // -- LOGGING CONFIGURATION --
-    match std::env::var("NEXO_LOG") {
-        Ok(val) => tracing::info!("NEXO_LOG found: '{}'", val),
-        Err(_) => tracing::warn!("NEXO_LOG NOT FOUND!"),
-    }
 
+    tracing::info!("--- CONFIGURATION LOADED ---");
+    tracing::info!("{:#?}", config);
+    tracing::info!("----------------------------");
 
-
-    let engine = NexoEngine::new();
+    let engine = NexoEngine::new(config.clone());
     
-    let host = std::env::var("NEXO_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("NEXO_PORT").unwrap_or_else(|_| "7654".to_string());
-    let dashboard_port = std::env::var("NEXO_DASHBOARD_PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse::<u16>()
-        .unwrap_or(8080);
-
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{}:{}", config.server.host, config.server.port);
 
     let engine_clone_for_dashboard = engine.clone();
     tokio::spawn(async move {
-        dashboard::server::start_dashboard_server(engine_clone_for_dashboard, dashboard_port).await;
+        dashboard::server::start_dashboard_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
     });
 
-    tracing::info!(host = %host, port = %port, "🚀 Nexo Server v0.2 Starting...");
+    tracing::info!(host = %config.server.host, port = %config.server.port, "🚀 Nexo Server v0.2 Starting...");
 
     let listener = TcpListener::bind(&addr)
         .await

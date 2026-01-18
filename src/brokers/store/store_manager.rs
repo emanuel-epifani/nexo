@@ -8,18 +8,21 @@ use tokio::time;
 
 use crate::brokers::store::types::{Entry, Value};
 use crate::brokers::store::structures::kv::{KvOperations, KvValue};
+use crate::config::StoreConfig;
 
 pub struct StoreManager {
     store: Arc<DashMap<String, Entry>>,
+    config: StoreConfig,
 }
 
 impl StoreManager {
-    pub fn new() -> Self {
+    pub fn new(config: StoreConfig) -> Self {
         let store = Arc::new(DashMap::new());
         
         let store_cleanup = Arc::clone(&store);
+        let cleanup_interval = config.cleanup_interval_secs;
         tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(60));
+            let mut interval = time::interval(Duration::from_secs(cleanup_interval));
             loop {
                 interval.tick().await;
                 let now = Instant::now();
@@ -32,11 +35,19 @@ impl StoreManager {
             }
         });
 
-        Self { store }
+        Self { store, config }
     }
 
     pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
-        KvOperations::set(&self.store, key, value, ttl);
+        let expires_at = match ttl {
+            Some(0) | None => {
+                // Use default TTL from config
+                Some(Instant::now() + Duration::from_secs(self.config.default_ttl_secs))
+            }
+            Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
+        };
+
+        KvOperations::set(&self.store, key, value, expires_at);
         Ok(())
     }
 

@@ -92,22 +92,31 @@ fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
 }
 
 fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
+    let queue_manager = engine.queue.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
     match cmd {
         QueueCommand::Create { passive, config, q_name } => {
-            match engine.queue.declare_queue(q_name, config, passive) {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
+            tokio::spawn(async move {
+                let result = queue_manager.declare_queue(q_name, config, passive).await;
+                let response = match result {
+                    Ok(_) => Ok(Bytes::new()),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(response);
+            });
         }
         QueueCommand::Push { priority, delay, q_name, payload } => {
-            match engine.queue.push(q_name, payload, priority, delay) {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
+            tokio::spawn(async move {
+                let result = queue_manager.push(q_name, payload, priority, delay).await;
+                let response = match result {
+                    Ok(_) => Ok(Bytes::new()),
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(response);
+            });
         }
         QueueCommand::Consume { max_batch, wait_ms, q_name } => {
-            let queue_manager = engine.queue.clone();
-            let (tx, rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let result = queue_manager.consume_batch(q_name, max_batch, wait_ms).await;
                 let response = match result {
@@ -125,12 +134,20 @@ fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 };
                 let _ = tx.send(response);
             });
-            Response::Async(rx)
         }
         QueueCommand::Ack { id, q_name } => {
-            if engine.queue.ack(&q_name, id) { Response::Ok } else { Response::Error("ACK failed".to_string()) }
+            tokio::spawn(async move {
+                let result = queue_manager.ack(&q_name, id).await;
+                let response = if result {
+                    Ok(Bytes::new())
+                } else {
+                    Err("ACK failed".to_string())
+                };
+                let _ = tx.send(response);
+            });
         }
     }
+    Response::Async(rx)
 }
 
 fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {

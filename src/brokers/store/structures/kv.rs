@@ -9,10 +9,7 @@ pub struct KvValue(pub Bytes);
 pub struct KvOperations;
 
 impl KvOperations {
-    pub fn set(store: &DashMap<String, Entry>, key: String, value: Bytes, ttl: Option<u64>) {
-        let ttl_secs = ttl.unwrap_or(3600);
-        let expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
-        
+    pub fn set(store: &DashMap<String, Entry>, key: String, value: Bytes, expires_at: Option<Instant>) {
         let entry = Entry { 
             value: Value::Kv(KvValue(value)), 
             expires_at 

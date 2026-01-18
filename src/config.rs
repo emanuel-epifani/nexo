@@ -1,0 +1,121 @@
+use std::env;
+
+// --- CONFIG AGGREGATOR ---
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub server: ServerConfig,
+    pub store: StoreConfig,
+    pub queue: QueueConfig,
+    pub pubsub: PubSubConfig,
+    pub stream: StreamConfig,
+}
+
+impl Config {
+    pub fn load() -> Self {
+        dotenv::dotenv().ok();
+        Self {
+            server: ServerConfig::load(),
+            store: StoreConfig::load(),
+            queue: QueueConfig::load(),
+            pubsub: PubSubConfig::load(),
+            stream: StreamConfig::load(),
+        }
+    }
+}
+
+// --- MODULES ---
+
+// SERVER
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+    pub dashboard_port: u16,
+    pub log_level: String,
+}
+
+impl ServerConfig {
+    fn load() -> Self {
+        Self {
+            host:           get_env("SERVER_HOST", "127.0.0.1"),
+            port:           get_env("SERVER_PORT", "7654"),
+            dashboard_port: get_env("DASHBOARD_PORT", "8080"),
+            log_level:      get_env("LOG_LEVEL", "info"),
+        }
+    }
+}
+
+// STORE
+#[derive(Debug, Clone)]
+pub struct StoreConfig {
+    pub cleanup_interval_secs: u64,
+    pub default_ttl_secs: u64,
+}
+
+impl StoreConfig {
+    fn load() -> Self {
+        Self {
+            cleanup_interval_secs: get_env("STORE_CLEANUP_INTERVAL_SECS", "60"),
+            default_ttl_secs:      get_env("STORE_DEFAULT_TTL_SECS", "3600"),
+        }
+    }
+}
+
+// QUEUE
+#[derive(Debug, Clone)]
+pub struct QueueConfig {
+    pub visibility_timeout_ms: u64,
+    pub max_retries: u32,
+    pub ttl_ms: u64,
+}
+
+impl QueueConfig {
+    fn load() -> Self {
+        Self {
+            visibility_timeout_ms: get_env("QUEUE_DEF_VISIBILITY_MS", "30000"),
+            max_retries:           get_env("QUEUE_DEF_MAX_RETRIES", "5"),
+            ttl_ms:                get_env("QUEUE_DEF_TTL_MS", "604800000"),
+        }
+    }
+}
+
+// PUBSUB
+#[derive(Debug, Clone)]
+pub struct PubSubConfig {
+    pub actor_channel_capacity: usize,
+}
+
+impl PubSubConfig {
+    fn load() -> Self {
+        Self {
+            actor_channel_capacity: get_env("PUBSUB_ACTOR_CHAN_CAP", "10000"),
+        }
+    }
+}
+
+// STREAM
+#[derive(Debug, Clone)]
+pub struct StreamConfig {
+    pub default_partitions: u32,
+    pub actor_channel_capacity: usize,
+}
+
+impl StreamConfig {
+    fn load() -> Self {
+        Self {
+            default_partitions:     get_env("STREAM_DEF_PARTITIONS", "4"),
+            actor_channel_capacity: get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
+        }
+    }
+}
+
+// --- PRIVATE HELPER ---
+
+fn get_env<T: std::str::FromStr>(key: &str, default: &str) -> T {
+    env::var(key)
+        .unwrap_or_else(|_| default.to_string())
+        .parse()
+        .map_err(|_| format!("Config error: {} must be valid", key))
+        .unwrap()
+}
