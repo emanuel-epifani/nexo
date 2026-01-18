@@ -3,7 +3,7 @@ import { NexoClient } from '../../../../sdk/ts/src/client';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
-const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
+const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
 
 describe('Stream Manager', () => {
     let clientA: NexoClient;

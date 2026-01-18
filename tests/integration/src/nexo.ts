@@ -5,8 +5,8 @@ import { NexoClient } from '@nexo/client';
  * Guaranteed to be connected and validated by Vitest Config.
  */
 export const nexo = await NexoClient.connect({ 
-  host: process.env.NEXO_HOST!, 
-  port: parseInt(process.env.NEXO_PORT!, 10) 
+  host: process.env.SERVER_HOST!, 
+  port: parseInt(process.env.SERVER_PORT!, 10) 
 });
 
 /**
@@ -15,7 +15,7 @@ export const nexo = await NexoClient.connect({
  * Useful for black-box validation of side effects (e.g. queue size, consumer lag).
  */
 export async function fetchSnapshot() {
-  const host = process.env.NEXO_HOST || 'localhost';
+  const host = process.env.SERVER_HOST || 'localhost';
   // Dashboard is typically on 8080, but we could make it configurable if needed
   const port = 8080; 
   

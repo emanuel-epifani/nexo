@@ -11,8 +11,8 @@ loadEnvFile(resolve(__dirname, '../../.env'));
 
 // 2. Define Env Schema
 const envSchema = z.object({
-  NEXO_HOST: z.string().min(1, "NEXO_HOST is required"),
-  NEXO_PORT: z.string().min(4, "SENTINEL_PORT è richiesta"),
+  SERVER_HOST: z.string().min(1, "SERVER_HOST is required"),
+  SERVER_PORT: z.string().min(4, "SENTINEL_PORT è richiesta"),
 });
 
 // 3. Validate

@@ -3,8 +3,8 @@ import path from 'node:path';
 import { runNexoServer, killServer, isServerRunning } from './utils/server';
 
 export default async function setup() {
-  const host = process.env.NEXO_HOST!;
-  const port = parseInt(process.env.NEXO_PORT!, 10);
+  const host = process.env.SERVER_HOST!;
+  const port = parseInt(process.env.SERVER_PORT!, 10);
   const ROOT_DIR = path.resolve(__dirname, '../../../');
 
 

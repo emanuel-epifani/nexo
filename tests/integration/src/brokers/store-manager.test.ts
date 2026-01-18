@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
-import {BenchmarkProbe} from "../utils/benchmark-misure";
 
 
 describe('STORE.KV broker', () => {

@@ -3,7 +3,7 @@ import { NexoClient } from '../../../../sdk/ts/src/client';
 import { nexo } from '../nexo';
 import { BenchmarkProbe } from "../utils/benchmark-misure";
 
-const SERVER_PORT = parseInt(process.env.NEXO_PORT!);
+const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
 
 describe('PubSub Broker (MQTT-Style)', () => {
 
