@@ -55,7 +55,7 @@ impl NexoEngine {
             brokers: BrokersSnapshot {
                 store: self.store.get_snapshot(),
                 queue: self.queue.get_snapshot(),
-                pubsub: self.pubsub.get_snapshot(),
+                pubsub: self.pubsub.get_snapshot().await,
                 stream: self.stream.get_snapshot().await,
             },
         }

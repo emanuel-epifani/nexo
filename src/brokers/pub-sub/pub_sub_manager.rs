@@ -1,4 +1,11 @@
 //! PubSub Manager: MQTT-style Publish/Subscribe with wildcard routing
+//! 
+//! Architecture: Actor per Root
+//! - Each root topic (first segment) has its own actor with a radix tree
+//! - Actors process commands sequentially (no internal locking)
+//! - Parallelism between different root topics
+//! - Global "#" subscribers handled separately
+//!
 //! Supports:
 //! - Exact matching: "home/kitchen/temp"
 //! - Single-level wildcard: "home/+/temp"
@@ -6,19 +13,20 @@
 //! - Active Push to connected clients
 //! - Retained Messages (Last Value Caching)
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
-use crate::dashboard::models::pubsub::WildcardSubscription;
 
-// ClientId represents a connected client
+// ==========================================
+// PUBLIC TYPES
+// ==========================================
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientId(pub String);
 
-/// Session Guard for PubSub
-/// Automatically disconnects the client when dropped (RAII pattern)
+/// Session Guard for PubSub - RAII cleanup on drop
 pub struct PubSubSession {
     client_id: ClientId,
     manager: Arc<PubSubManager>,
@@ -26,11 +34,44 @@ pub struct PubSubSession {
 
 impl Drop for PubSubSession {
     fn drop(&mut self) {
-        self.manager.disconnect(&self.client_id);
+        let manager = self.manager.clone();
+        let client_id = self.client_id.clone();
+        tokio::spawn(async move {
+            manager.disconnect(&client_id).await;
+        });
     }
 }
 
-/// A Node in the Radix Tree (Trie) for pub-sub routing
+// ==========================================
+// ACTOR COMMANDS
+// ==========================================
+
+enum RootCommand {
+    Subscribe {
+        pattern: Vec<String>,  // Path segments after root (e.g., ["kitchen", "temp"])
+        client: ClientId,
+        reply: oneshot::Sender<Vec<(String, Bytes)>>,  // Retained messages to send
+    },
+    Unsubscribe {
+        pattern: Vec<String>,
+        client: ClientId,
+    },
+    Publish {
+        parts: Vec<String>,  // Path segments after root
+        full_topic: String,  // Full topic for push payload
+        data: Bytes,
+        retain: bool,
+        reply: oneshot::Sender<HashSet<ClientId>>,  // Matched clients
+    },
+    Disconnect {
+        client: ClientId,
+    },
+}
+
+// ==========================================
+// RADIX TREE NODE
+// ==========================================
+
 struct Node {
     // Exact match children: "kitchen" -> Node
     children: HashMap<String, Node>,
@@ -44,11 +85,8 @@ struct Node {
     hash_child: Option<Box<Node>>,
     
     // Clients subscribed exactly to the path ending at this node
-    subscribers: HashSet<ClientId>, 
-    
-    // Last Retained Message for this pub-sub node
-    // Protected by RwLock to allow updates during publish without locking the whole tree structure
-    last_retained: RwLock<Option<Bytes>>,
+    subscribers: HashSet<ClientId>,
+    retained: Option<Bytes>,
 }
 
 impl Node {
@@ -58,250 +96,157 @@ impl Node {
             plus_child: None,
             hash_child: None,
             subscribers: HashSet::new(),
-            last_retained: RwLock::new(None),
+            retained: None,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subscribers.is_empty()
+            && self.children.is_empty()
+            && self.plus_child.is_none()
+            && self.hash_child.is_none()
+            && self.retained.is_none()
     }
 }
 
-pub struct PubSubManager {
-    // RwLock allows concurrent reads (publish) while protecting writes (subscribe)
-    router: RwLock<Node>,
-    
-    // Registry of active client connections to send messages to
-    clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
+// ==========================================
+// ROOT ACTOR
+// ==========================================
 
-    // Reverse index: ClientId -> Set of subscribed topics
-    // Used for efficient cleanup on disconnect
-    client_subscriptions: DashMap<ClientId, HashSet<String>>,
+struct RootActor {
+    name: String,
+    tree: Node,
+    client_patterns: HashMap<ClientId, HashSet<String>>,  // Reverse index for cleanup
+    rx: mpsc::Receiver<RootCommand>,
 }
 
-impl PubSubManager {
-    pub fn new() -> Self {
+impl RootActor {
+    fn new(name: String, rx: mpsc::Receiver<RootCommand>) -> Self {
         Self {
-            router: RwLock::new(Node::new()),
-            clients: DashMap::new(),
-            client_subscriptions: DashMap::new(),
+            name,
+            tree: Node::new(),
+            client_patterns: HashMap::new(),
+            rx,
         }
     }
 
-    /// Register a new client connection
-    /// Returns a Session Guard that automatically handles cleanup when dropped.
-    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Bytes>) -> PubSubSession {
-        self.clients.insert(client_id.clone(), sender);
-        
-        PubSubSession {
-            client_id,
-            manager: self.clone(),
-        }
-    }
-
-    /// Remove a client connection and cleanup all subscriptions
-    pub fn disconnect(&self, client_id: &ClientId) {
-        self.clients.remove(client_id);
-
-        // Cleanup subscriptions using reverse index
-        // We acquire the lock ONCE and clean everything (Simpler Single Lock Strategy)
-        if let Some((_, topics)) = self.client_subscriptions.remove(client_id) {
-            let mut root = self.router.write().unwrap();
-            for topic in topics {
-                let parts: Vec<&str> = topic.split('/').collect();
-                // We ignore the return value here because we can't remove the root node
-                Self::remove_recursive(&mut *root, &parts, client_id);
+    async fn run(mut self) {
+        while let Some(cmd) = self.rx.recv().await {
+            match cmd {
+                RootCommand::Subscribe { pattern, client, reply } => {
+                    let retained = self.subscribe(&pattern, &client);
+                    let _ = reply.send(retained);
+                }
+                RootCommand::Unsubscribe { pattern, client } => {
+                    self.unsubscribe(&pattern, &client);
+                }
+                RootCommand::Publish { parts, full_topic, data, retain, reply } => {
+                    let clients = self.publish(&parts, &full_topic, data, retain);
+                    let _ = reply.send(clients);
+                }
+                RootCommand::Disconnect { client } => {
+                    self.disconnect(&client);
+                }
             }
         }
     }
 
-    /// Subscribe a client to a topic pattern
-    /// If the pattern matches existing nodes with retained messages, they are sent immediately.
-    pub fn subscribe(&self, topic: &str, client: ClientId) {
-        // 0. Update reverse index
-        self.client_subscriptions
+    // --- SUBSCRIBE ---
+    fn subscribe(&mut self, pattern: &[String], client: &ClientId) -> Vec<(String, Bytes)> {
+        // Track pattern for cleanup
+        let pattern_str = pattern.join("/");
+        self.client_patterns
             .entry(client.clone())
-            .or_insert_with(HashSet::new)
-            .insert(topic.to_string());
+            .or_default()
+            .insert(pattern_str);
 
-        let mut root = self.router.write().unwrap();
-        let parts: Vec<&str> = topic.split('/').collect();
-        
-        // 1. Add subscription to the tree
-        let mut current = &mut *root;
-        for part in parts.iter() {
-            if *part == "#" {
+        // Navigate/create path for subscription
+        let mut current = &mut self.tree;
+        for (i, part) in pattern.iter().enumerate() {
+            if part == "#" {
                 if current.hash_child.is_none() {
                     current.hash_child = Some(Box::new(Node::new()));
                 }
-                let hash_node = current.hash_child.as_mut().unwrap();
-                hash_node.subscribers.insert(client.clone());
+                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone());
                 
-                // For '#' subscription, we need to traverse everything below 'current'
-                // to find retained messages.
-                break; // '#' is terminal
-            } else if *part == "+" {
-                 if current.plus_child.is_none() {
+                // Collect retained from current node down (not from root!)
+                // Navigate to the correct position first for collection
+                let mut collect_node = &self.tree;
+                for j in 0..i {
+                    if let Some(child) = collect_node.children.get(&pattern[j]) {
+                        collect_node = child;
+                    } else {
+                        // Path doesn't exist in tree, no retained to collect
+                        return Vec::new();
+                    }
+                }
+                
+                let prefix = if i == 0 { 
+                    self.name.clone() 
+                } else { 
+                    format!("{}/{}", self.name, pattern[..i].join("/"))
+                };
+                let mut retained = Vec::new();
+                Self::collect_all_retained(collect_node, &prefix, &mut retained);
+                return retained;
+            } else if part == "+" {
+                if current.plus_child.is_none() {
                     current.plus_child = Some(Box::new(Node::new()));
                 }
                 current = current.plus_child.as_mut().unwrap();
             } else {
-                current = current.children.entry(part.to_string()).or_insert_with(Node::new);
+                current = current.children.entry(part.clone()).or_insert_with(Node::new);
             }
         }
-        
-        // If not ended with '#', add to current node
-        if parts.last() != Some(&"#") {
-            current.subscribers.insert(client.clone());
-        }
 
-        // 2. Send Retained Messages matching this subscription
-        // We need to traverse the tree finding nodes that match the 'topic' pattern.
-        // If 'topic' is "a/+/b", we find nodes "a/x/b", "a/y/b" etc.
-        // If 'topic' is "a/#", we find "a", "a/x", "a/x/y" etc.
-        // Since we hold the lock (write lock on router), we can pass 'root' to helper.
-        // Note: collect_retained expects immutable ref, which we have (downgrade logic or just ref).
-        let mut retained_msgs = Vec::new();
-        // We construct the "topic so far" to rebuild the topic string for the PUSH message
-        Self::collect_retained(&*root, &parts, "", &mut retained_msgs);
+        current.subscribers.insert(client.clone());
 
-        // Release lock before sending
-        drop(root);
-
-        if !retained_msgs.is_empty() {
-            if let Some(sender) = self.clients.get(&client) {
-                for (topic_str, payload) in retained_msgs {
-                    // Re-package as PUSH frame
-                    let topic_len = topic_str.len();
-                    let mut push_payload = BytesMut::with_capacity(4 + topic_len + payload.len());
-                    push_payload.put_u32(topic_len as u32);
-                    push_payload.put_slice(topic_str.as_bytes());
-                    push_payload.put_slice(&payload);
-                    let _ = sender.send(push_payload.freeze());
-                }
-            }
-        }
+        // Collect retained matching this exact pattern
+        let mut retained = Vec::new();
+        Self::collect_retained_for_pattern(&self.tree, pattern, &self.name, &mut retained);
+        retained
     }
 
-    /// Unsubscribe a client from a specific topic pattern
-    pub fn unsubscribe(&self, topic: &str, client: &ClientId) {
-        let mut root = self.router.write().unwrap();
-        let parts: Vec<&str> = topic.split('/').collect();
-        Self::remove_recursive(&mut *root, &parts, client);
+    // --- UNSUBSCRIBE ---
+    fn unsubscribe(&mut self, pattern: &[String], client: &ClientId) {
+        let pattern_str = pattern.join("/");
+        if let Some(patterns) = self.client_patterns.get_mut(client) {
+            patterns.remove(&pattern_str);
+        }
+        Self::remove_recursive(&mut self.tree, pattern, client);
     }
 
-    /// Publish a message to all matching subscribers
-    /// flags: Bit 0 = RETAIN
-    pub fn publish(&self, topic: &str, data: Bytes, flags: u8) -> usize {
-        let retain = (flags & 0x01) != 0;
-
-        // 1. Find target clients (Read lock on Trie) & Update Retained if needed
-        let targets = {
-            let mut matched_clients = HashSet::new();
-            let parts: Vec<&str> = topic.split('/').collect();
-
+    // --- PUBLISH ---
+    fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool) -> HashSet<ClientId> {
+        // Update retained if needed
             if retain {
-                let mut root = self.router.write().unwrap();
-                // Update retained value in a scope to drop mutable references to 'current'
-                {
-                    let mut current = &mut *root;
-                    for part in parts.iter() {
-                        current = current.children.entry(part.to_string()).or_insert_with(Node::new);
-                    }
-                    let mut val_lock = current.last_retained.write().unwrap();
-                    *val_lock = Some(data.clone());
-                }
-                
-                // Now we can reuse 'root' for matching (reborrow as immutable)
-                Self::match_recursive(&*root, &parts, &mut matched_clients);
-            } else {
-                let root = self.router.read().unwrap();
-                Self::match_recursive(&root, &parts, &mut matched_clients);
+            let mut current = &mut self.tree;
+            for part in parts {
+                current = current.children.entry(part.clone()).or_insert_with(Node::new);
             }
-            matched_clients
-        };
-
-        if targets.is_empty() {
-            return 0;
+            current.retained = Some(data.clone());
         }
 
-        // 2. Prepare PUSH Payload
-        let topic_len = topic.len();
-        let mut push_payload = BytesMut::with_capacity(4 + topic_len + data.len());
-        push_payload.put_u32(topic_len as u32);
-        push_payload.put_slice(topic.as_bytes());
-        push_payload.put_slice(&data);
-        let push_payload = push_payload.freeze();
-
-        // 3. Dispatch messages
-        let mut sent_count = 0;
-        for client_id in targets {
-            if let Some(sender) = self.clients.get(&client_id) {
-                if sender.send(push_payload.clone()).is_ok() {
-                    sent_count += 1;
-                }
-            }
-        }
-        sent_count
+        // Match subscribers
+        let mut matched = HashSet::new();
+        Self::match_recursive(&self.tree, parts, &mut matched);
+        matched
     }
 
-    // --- Helper Methods ---
-
-    pub fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
-        let root = self.router.read().unwrap();
-        
-        let mut wildcards = Vec::new();
-        for kv in self.client_subscriptions.iter() {
-            let client_id = kv.key().0.clone();
-            for pattern in kv.value() {
-                if pattern.contains('+') || pattern.contains('#') {
-                    wildcards.push(WildcardSubscription {
-                        pattern: pattern.clone(),
-                        client_id: client_id.clone(),
-                    });
-                }
+    // --- DISCONNECT ---
+    fn disconnect(&mut self, client: &ClientId) {
+        if let Some(patterns) = self.client_patterns.remove(client) {
+            for pattern_str in patterns {
+                let parts: Vec<String> = pattern_str.split('/').map(|s| s.to_string()).collect();
+                Self::remove_recursive(&mut self.tree, &parts, client);
             }
-        }
-        
-        crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
-            active_clients: self.clients.len(),
-            topic_tree: Self::build_tree_snapshot("root", "", &root),
-            wildcard_subscriptions: wildcards,
         }
     }
 
-    fn build_tree_snapshot(name: &str, path: &str, node: &Node) -> crate::dashboard::models::pubsub::TopicNodeSnapshot {
-        let mut children = Vec::new();
+    // --- HELPERS ---
 
-        // 1. Regular Children
-        for (key, child) in &node.children {
-            let next_path = if path.is_empty() { key.clone() } else { format!("{}/{}", path, key) };
-            children.push(Self::build_tree_snapshot(key, &next_path, child));
-        }
-
-        // 2. Plus Child
-        if let Some(plus) = &node.plus_child {
-            let next_path = if path.is_empty() { "+".to_string() } else { format!("{}/+", path) };
-            children.push(Self::build_tree_snapshot("+", &next_path, plus));
-        }
-
-        // 3. Hash Child
-        if let Some(hash) = &node.hash_child {
-            let next_path = if path.is_empty() { "#".to_string() } else { format!("{}/#", path) };
-            children.push(Self::build_tree_snapshot("#", &next_path, hash));
-        }
-
-        let retained_val = node.last_retained.read().unwrap()
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).to_string());
-
-        crate::dashboard::models::pubsub::TopicNodeSnapshot {
-            name: name.to_string(),
-            full_path: path.to_string(),
-            subscribers: node.subscribers.len(),
-            retained_value: retained_val,
-            children,
-        }
-    }
-
-    // Finds subscribers whose patterns match the published topic
-    fn match_recursive(node: &Node, parts: &[&str], results: &mut HashSet<ClientId>) {
+    fn match_recursive(node: &Node, parts: &[String], results: &mut HashSet<ClientId>) {
+        // "#" matches everything from here
         if let Some(hash_node) = &node.hash_child {
             results.extend(hash_node.subscribers.iter().cloned());
         }
@@ -311,117 +256,344 @@ impl PubSubManager {
             return;
         }
 
-        let head = parts[0];
+        let head = &parts[0];
         let tail = &parts[1..];
 
-        if let Some(next_node) = node.children.get(head) {
-            Self::match_recursive(next_node, tail, results);
+        // Exact match
+        if let Some(child) = node.children.get(head) {
+            Self::match_recursive(child, tail, results);
         }
 
+        // "+" matches any single level
         if let Some(plus_node) = &node.plus_child {
             Self::match_recursive(plus_node, tail, results);
         }
     }
 
-    // Traverses the tree to find retained messages that match the subscription pattern
-    // pattern: ["sensors", "+", "temp"]
-    // current_path: accumulator for the topic string (e.g. "sensors/kitchen/temp")
-    fn collect_retained(node: &Node, pattern: &[&str], current_path: &str, results: &mut Vec<(String, Bytes)>) {
+    fn collect_retained_for_pattern(node: &Node, pattern: &[String], current_path: &str, results: &mut Vec<(String, Bytes)>) {
         if pattern.is_empty() {
-            // End of pattern. If this node has a retained value, collect it.
-            // Note: If pattern ended, we matched an exact path.
-            if let Some(val) = &*node.last_retained.read().unwrap() {
+            if let Some(val) = &node.retained {
                 results.push((current_path.to_string(), val.clone()));
             }
             return;
         }
 
-        let head = pattern[0];
+        let head = &pattern[0];
         let tail = &pattern[1..];
 
-        if head == "#" {
-            // Match EVERYTHING below this node recursively
-            Self::collect_all_retained_below(node, current_path, results);
-            return;
-        }
-
         if head == "+" {
-            // Match all immediate children
+            // Single-level wildcard: match any single level
             for (key, child) in &node.children {
-                let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
-                Self::collect_retained(child, tail, &next_path, results);
+                let next_path = format!("{}/{}", current_path, key);
+                Self::collect_retained_for_pattern(child, tail, &next_path, results);
             }
+        } else if head == "#" {
+            // Multi-level wildcard: collect all retained from here down
+            Self::collect_all_retained(node, current_path, results);
         } else {
             // Exact match
             if let Some(child) = node.children.get(head) {
-                let next_path = if current_path.is_empty() { head.to_string() } else { format!("{}/{}", current_path, head) };
-                Self::collect_retained(child, tail, &next_path, results);
+                let next_path = format!("{}/{}", current_path, head);
+                Self::collect_retained_for_pattern(child, tail, &next_path, results);
             }
         }
     }
 
-    fn collect_all_retained_below(node: &Node, current_path: &str, results: &mut Vec<(String, Bytes)>) {
-        // 1. Check current node
-        if let Some(val) = &*node.last_retained.read().unwrap() {
-            if !current_path.is_empty() {
+    fn collect_all_retained(node: &Node, current_path: &str, results: &mut Vec<(String, Bytes)>) {
+        if let Some(val) = &node.retained {
                 results.push((current_path.to_string(), val.clone()));
-            }
         }
-
-        // 2. Recurse children
         for (key, child) in &node.children {
-            let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
-            Self::collect_all_retained_below(child, &next_path, results);
+            let next_path = format!("{}/{}", current_path, key);
+            Self::collect_all_retained(child, &next_path, results);
         }
     }
 
-    fn is_node_empty(node: &Node) -> bool {
-        node.subscribers.is_empty()
-            && node.children.is_empty()
-            && node.plus_child.is_none()
-            && node.hash_child.is_none()
-            && node.last_retained.read().unwrap().is_none()
-    }
-
-    fn remove_recursive(node: &mut Node, parts: &[&str], client: &ClientId) -> bool {
+    fn remove_recursive(node: &mut Node, parts: &[String], client: &ClientId) -> bool {
         if parts.is_empty() {
             node.subscribers.remove(client);
-            return Self::is_node_empty(node);
+            return node.is_empty();
         }
 
-        let head = parts[0];
+        let head = &parts[0];
         let tail = &parts[1..];
-        let mut should_remove_child = false;
+        let mut should_remove = false;
 
         if head == "#" {
              if let Some(ref mut hash_node) = node.hash_child {
-                 if Self::remove_recursive(hash_node, tail, client) {
-                     should_remove_child = true;
+                hash_node.subscribers.remove(client);
+                if hash_node.is_empty() {
+                    should_remove = true;
                  }
              }
-             if should_remove_child {
+            if should_remove {
                  node.hash_child = None;
              }
         } else if head == "+" {
              if let Some(ref mut plus_node) = node.plus_child {
                  if Self::remove_recursive(plus_node, tail, client) {
-                     should_remove_child = true;
+                    should_remove = true;
                  }
              }
-             if should_remove_child {
+            if should_remove {
                  node.plus_child = None;
              }
         } else {
-             if let Some(next_node) = node.children.get_mut(head) {
-                 if Self::remove_recursive(next_node, tail, client) {
-                     should_remove_child = true;
-                 }
-             }
-             if should_remove_child {
+            if let Some(child) = node.children.get_mut(head) {
+                if Self::remove_recursive(child, tail, client) {
+                    should_remove = true;
+                }
+            }
+            if should_remove {
                  node.children.remove(head);
              }
         }
         
-        Self::is_node_empty(node)
+        node.is_empty()
+    }
+}
+
+// ==========================================
+// PUBSUB MANAGER
+// ==========================================
+
+pub struct PubSubManager {
+    actors: DashMap<String, mpsc::Sender<RootCommand>>,
+    clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
+    client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
+    global_hash_subscribers: RwLock<HashSet<ClientId>>,  // Subscribers to "#"
+}
+
+impl PubSubManager {
+    pub fn new() -> Self {
+        Self {
+            actors: DashMap::new(),
+            clients: DashMap::new(),
+            client_subscriptions: DashMap::new(),
+            global_hash_subscribers: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Register a new client connection
+    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Bytes>) -> PubSubSession {
+        self.clients.insert(client_id.clone(), sender);
+        PubSubSession {
+            client_id,
+            manager: self.clone(),
+        }
+    }
+
+    /// Subscribe to a topic pattern
+    pub async fn subscribe(&self, topic: &str, client: ClientId) {
+        // Track subscription globally
+        self.client_subscriptions
+            .entry(client.clone())
+            .or_default()
+            .insert(topic.to_string());
+
+        let parts: Vec<&str> = topic.split('/').collect();
+
+        // Handle global "#" subscription
+        if parts.len() == 1 && parts[0] == "#" {
+            self.global_hash_subscribers.write().await.insert(client);
+            return;
+        }
+
+        let root = parts[0].to_string();
+        let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+        let actor = self.get_or_create_actor(&root);
+        let (tx, rx) = oneshot::channel();
+        
+        if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), reply: tx }).await.is_ok() {
+            // Send retained messages
+            if let Ok(retained) = rx.await {
+                if let Some(sender) = self.clients.get(&client) {
+                    for (topic_str, payload) in retained {
+                        let push = Self::build_push_payload(&topic_str, &payload);
+                        let _ = sender.send(push);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unsubscribe from a topic pattern
+    pub async fn unsubscribe(&self, topic: &str, client: &ClientId) {
+        // Remove from global tracking
+        if let Some(mut subs) = self.client_subscriptions.get_mut(client) {
+            subs.remove(topic);
+        }
+
+        let parts: Vec<&str> = topic.split('/').collect();
+
+        // Handle global "#"
+        if parts.len() == 1 && parts[0] == "#" {
+            self.global_hash_subscribers.write().await.remove(client);
+            return;
+        }
+
+        let root = parts[0];
+        let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+        if let Some(actor) = self.actors.get(root) {
+            let _ = actor.send(RootCommand::Unsubscribe { pattern, client: client.clone() }).await;
+        }
+    }
+
+    /// Publish a message
+    pub async fn publish(&self, topic: &str, data: Bytes, flags: u8) -> usize {
+        let retain = (flags & 0x01) != 0;
+        let parts: Vec<&str> = topic.split('/').collect();
+        
+        if parts.is_empty() {
+            return 0;
+        }
+
+        let root = parts[0];
+        let sub_parts: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+        // 1. Get matched clients from actor
+        let matched_clients = if let Some(actor) = self.actors.get(root) {
+            let (tx, rx) = oneshot::channel();
+            if actor.send(RootCommand::Publish {
+                parts: sub_parts,
+                full_topic: topic.to_string(),
+                data: data.clone(),
+                retain,
+                reply: tx,
+            }).await.is_ok() {
+                rx.await.unwrap_or_default()
+            } else {
+                HashSet::new()
+            }
+        } else if retain {
+            // Create actor for retained message even if no subscribers yet
+            let actor = self.get_or_create_actor(root);
+            let (tx, rx) = oneshot::channel();
+            if actor.send(RootCommand::Publish {
+                parts: sub_parts,
+                full_topic: topic.to_string(),
+                data: data.clone(),
+                retain,
+                reply: tx,
+            }).await.is_ok() {
+                rx.await.unwrap_or_default()
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
+        // 2. Add global "#" subscribers
+        let global_subs = self.global_hash_subscribers.read().await;
+        let all_clients: HashSet<_> = matched_clients.iter()
+            .chain(global_subs.iter())
+            .cloned()
+            .collect();
+
+        // 3. Dispatch to all matched clients
+        let push_payload = Self::build_push_payload(topic, &data);
+        let mut sent = 0;
+
+        for client_id in all_clients {
+            if let Some(sender) = self.clients.get(&client_id) {
+                if sender.send(push_payload.clone()).is_ok() {
+                    sent += 1;
+                }
+            }
+        }
+
+        sent
+    }
+
+    /// Disconnect a client and cleanup subscriptions
+    pub async fn disconnect(&self, client_id: &ClientId) {
+        self.clients.remove(client_id);
+
+        // Remove from global "#" subscribers
+        self.global_hash_subscribers.write().await.remove(client_id);
+
+        // Get all subscriptions for this client
+        if let Some((_, topics)) = self.client_subscriptions.remove(client_id) {
+            // Group by root
+            let mut roots: HashSet<String> = HashSet::new();
+            for topic in &topics {
+                let parts: Vec<&str> = topic.split('/').collect();
+                if !parts.is_empty() && parts[0] != "#" {
+                    roots.insert(parts[0].to_string());
+                }
+            }
+
+            // Send disconnect to each relevant actor
+            for root in roots {
+                if let Some(actor) = self.actors.get(&root) {
+                    let _ = actor.send(RootCommand::Disconnect { client: client_id.clone() }).await;
+                }
+            }
+        }
+    }
+
+    /// Get snapshot for dashboard
+    pub async fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
+        use crate::dashboard::models::pubsub::{PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription};
+
+        let mut wildcards = Vec::new();
+        for entry in self.client_subscriptions.iter() {
+            let client_id = entry.key().0.clone();
+            for pattern in entry.value().iter() {
+                if pattern.contains('+') || pattern.contains('#') {
+                    wildcards.push(WildcardSubscription {
+                        pattern: pattern.clone(),
+                        client_id: client_id.clone(),
+                    });
+                }
+            }
+        }
+
+        // Build simple tree snapshot (roots only for now)
+        let mut children = Vec::new();
+        for entry in self.actors.iter() {
+            children.push(TopicNodeSnapshot {
+                name: entry.key().clone(),
+                full_path: entry.key().clone(),
+                subscribers: 0,  // Would need to query actor for accurate count
+                retained_value: None,
+                children: vec![],
+            });
+        }
+
+        PubSubBrokerSnapshot {
+            active_clients: self.clients.len(),
+            topic_tree: TopicNodeSnapshot {
+                name: "root".to_string(),
+                full_path: "".to_string(),
+                subscribers: 0,
+                retained_value: None,
+                children,
+            },
+            wildcard_subscriptions: wildcards,
+        }
+    }
+
+    // --- HELPERS ---
+
+    fn get_or_create_actor(&self, root: &str) -> mpsc::Sender<RootCommand> {
+        self.actors.entry(root.to_string()).or_insert_with(|| {
+            let (tx, rx) = mpsc::channel(10_000);
+            let actor = RootActor::new(root.to_string(), rx);
+            tokio::spawn(actor.run());
+            tx
+        }).clone()
+    }
+
+    fn build_push_payload(topic: &str, data: &Bytes) -> Bytes {
+        let topic_len = topic.len();
+        let mut buf = BytesMut::with_capacity(4 + topic_len + data.len());
+        buf.put_u32(topic_len as u32);
+        buf.put_slice(topic.as_bytes());
+        buf.put_slice(data);
+        buf.freeze()
     }
 }

@@ -134,20 +134,31 @@ fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
 }
 
 fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
+    let pubsub = engine.pubsub.clone();
+    let client = client_id.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
     match cmd {
         PubSubCommand::Publish { flags, topic, payload } => {
-            let _count = engine.pubsub.publish(&topic, payload, flags);
-            Response::Ok
+            tokio::spawn(async move {
+                let _count = pubsub.publish(&topic, payload, flags).await;
+                let _ = tx.send(Ok(Bytes::new()));
+            });
         }
         PubSubCommand::Subscribe { topic } => {
-            engine.pubsub.subscribe(&topic, client_id.clone());
-            Response::Ok
+            tokio::spawn(async move {
+                pubsub.subscribe(&topic, client).await;
+                let _ = tx.send(Ok(Bytes::new()));
+            });
         }
         PubSubCommand::Unsubscribe { topic } => {
-            engine.pubsub.unsubscribe(&topic, client_id);
-            Response::Ok
+            tokio::spawn(async move {
+                pubsub.unsubscribe(&topic, &client).await;
+                let _ = tx.send(Ok(Bytes::new()));
+            });
         }
     }
+    Response::Async(rx)
 }
 
 fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {

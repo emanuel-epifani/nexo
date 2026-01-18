@@ -63,6 +63,31 @@ describe('PubSub Broker (MQTT-Style)', () => {
         expect(received).not.toContainEqual(4);
     });
 
+    it('Should support global wildcard (#) at root level', async () => {
+        const received: any[] = [];
+
+        // Subscribe to "#" - should receive ALL messages
+        await nexo.pubsub('#').subscribe((data) => {
+            received.push(data);
+        });
+
+        // Publish to various topics
+        await nexo.pubsub('a').publish({ topic: 'a' });
+        await nexo.pubsub('a/b').publish({ topic: 'a/b' });
+        await nexo.pubsub('x/y/z').publish({ topic: 'x/y/z' });
+        await nexo.pubsub('deep/nested/path/here').publish({ topic: 'deep' });
+
+        await new Promise(r => setTimeout(r, 200));
+
+        expect(received).toHaveLength(4);
+        expect(received).toContainEqual({ topic: 'a' });
+        expect(received).toContainEqual({ topic: 'a/b' });
+        expect(received).toContainEqual({ topic: 'x/y/z' });
+        expect(received).toContainEqual({ topic: 'deep' });
+
+        nexo.disconnect();
+    });
+
     it('Should support UNSUBSCRIBE', async () => {
         const topic = 'chat/global';
         let count = 0;
