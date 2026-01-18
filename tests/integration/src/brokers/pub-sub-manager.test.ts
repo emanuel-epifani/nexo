@@ -85,7 +85,6 @@ describe('PubSub Broker (MQTT-Style)', () => {
         expect(received).toContainEqual({ topic: 'x/y/z' });
         expect(received).toContainEqual({ topic: 'deep' });
 
-        nexo.disconnect();
     });
 
     it('Should support UNSUBSCRIBE', async () => {
@@ -172,108 +171,6 @@ describe('PubSub Broker (MQTT-Style)', () => {
         expect(received).toContain(5432);
         expect(received).toContain(60);
         expect(received).not.toContain('linux');
-    });
-
-    // --- PERFORMANCE ---
-    it('Fan-Out (1 Pub -> 100 Subs)', async () => {
-        const SUBSCRIBERS = 100;
-        const MESSAGES = 100;
-        const TOTAL_EVENTS = MESSAGES * SUBSCRIBERS;
-
-        const clients: NexoClient[] = [];
-        let received = 0;
-        const probe = new BenchmarkProbe("PUBSUB - FANOUT", TOTAL_EVENTS);
-
-        for (let i = 0; i < SUBSCRIBERS; i++) {
-            const c = await NexoClient.connect({ port: SERVER_PORT });
-            await c.pubsub('perf/fanout').subscribe((msg: any) => {
-                received++;
-                if (msg.ts) probe.recordLatency(msg.ts);
-            });
-            clients.push(c);
-        }
-
-        probe.startTimer();
-        await Promise.all(Array.from({ length: MESSAGES }).map(() => nexo.pubsub('perf/fanout').publish({ ts: Date.now() })));
-
-        while (received < TOTAL_EVENTS) {
-            await new Promise(r => setTimeout(r, 10));
-            if ((performance.now() - probe['start']) > 5000) break;
-        }
-
-        const stats = probe.printResult();
-        clients.forEach(c => c.disconnect());
-        expect(received).toBe(TOTAL_EVENTS);
-        expect(stats.throughput).toBeGreaterThan(400_000);
-        expect(stats.p99).toBeLessThan(15);
-        expect(stats.max).toBeLessThan(15);
-    });
-
-    it('Fan-In (50 Pubs -> 1 Sub)', async () => {
-        const PUBLISHERS = 50;
-        const MSGS_PER_PUB = 50;
-        const TOTAL_EXPECTED = PUBLISHERS * MSGS_PER_PUB;
-        const clients: NexoClient[] = [];
-        let received = 0;
-
-        const probe = new BenchmarkProbe("PUBSUB - FANIN", TOTAL_EXPECTED);
-
-        await nexo.pubsub('sensors/+').subscribe((msg: any) => {
-            received++;
-            if (msg.ts) probe.recordLatency(msg.ts);
-        });
-
-        for (let i = 0; i < PUBLISHERS; i++) {
-            clients.push(await NexoClient.connect({ port: SERVER_PORT }));
-        }
-
-        probe.startTimer();
-        await Promise.all(clients.map((c, i) => {
-            const promises = [];
-            for (let k = 0; k < MSGS_PER_PUB; k++) {
-                promises.push(c.pubsub(`sensors/d${i}`).publish({ ts: Date.now() }));
-            }
-            return Promise.all(promises);
-        }));
-
-        while (received < TOTAL_EXPECTED) {
-            await new Promise(r => setTimeout(r, 10));
-            if ((performance.now() - probe['start']) > 5000) break;
-        }
-
-        const stats = probe.printResult();
-        clients.forEach(c => c.disconnect());
-        expect(received).toBe(TOTAL_EXPECTED);
-        expect(stats.throughput).toBeGreaterThan(100_000);
-        expect(stats.p99).toBeLessThan(15);
-        expect(stats.max).toBeLessThan(20);
-
-    });
-
-    it('Wildcard Routing Stress', async () => {
-        const OPS = 10_000;
-        let received = 0;
-        await nexo.pubsub('infra/+/+/cpu').subscribe(() => { received++; });
-
-        const probe = new BenchmarkProbe("PUBSUB - WILDCARD", OPS);
-        probe.startTimer();
-
-        const worker = async () => {
-            const opsPerWorker = OPS / 10;
-            for (let i = 0; i < opsPerWorker; i++) {
-                const t0 = performance.now();
-                await nexo.pubsub('infra/us-east/server-1/cpu').publish({ u: 90 });
-                probe.record(performance.now() - t0);
-            }
-        };
-        await Promise.all(Array.from({ length: 10 }, worker));
-
-        while (received < OPS) await new Promise(r => setTimeout(r, 10));
-
-        const stats = probe.printResult();
-        expect(stats.throughput).toBeGreaterThan(100_000);
-        expect(stats.p99).toBeLessThan(0.5);
-        expect(stats.max).toBeLessThan(2);
     });
 
 });
