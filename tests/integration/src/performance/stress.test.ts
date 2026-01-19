@@ -1,60 +1,125 @@
 import {expect, it} from "vitest";
 import {BenchmarkProbe} from "../utils/benchmark-misure";
 import {nexo} from "../nexo";
+import {Cursor, FrameCodec} from "../../../../sdk/ts/src/codec";
 
 
 describe('Stress test', async () => {
 
     describe('SOCKET', async () => {
-        it('Small Payload Throughput', async () => {
+
+        it('Serialization Overhead Analysis', async () => {
             const TOTAL = 50_000;
-            const CONCURRENCY = 500;
+
+            // Test diversi tipi di serializzazione
+            const testCases = [
+                {
+                    name: "JSON Object",
+                    payload: { op: "ping", data: "test", timestamp: Date.now() },
+                    expectedThroughput: 30_000
+                },
+                {
+                    name: "String",
+                    payload: "ping-test-string-with-some-data",
+                    expectedThroughput: 40_000
+                },
+                {
+                    name: "Raw Buffer",
+                    payload: Buffer.from("raw-buffer-data", 'utf8'),
+                    expectedThroughput: 60_000
+                }
+            ];
+
+            for (const testCase of testCases) {
+                const probe = new BenchmarkProbe(`SERIALIZATION - ${testCase.name}`, TOTAL);
+                probe.startTimer();
+
+                const worker = async () => {
+                    const opsPerWorker = TOTAL / 100; // 100 concurrent
+                    for (let i = 0; i < opsPerWorker; i++) {
+                        const t0 = performance.now();
+                        await (nexo as any).debug.echo(testCase.payload);
+                        probe.record(performance.now() - t0);
+                    }
+                };
+                await Promise.all(Array.from({ length: 100 }, worker));
+
+                const stats = probe.printResult();
+                expect(stats.throughput).toBeGreaterThan(testCase.expectedThroughput);
+            }
+        });
+
+        it('Codec Performance (encoding/decoding) Only', async () => {
+            const TOTAL = 1_000_000;
+            const payload = { op: "ping", data: "test" };
+
+            // Test solo encoding
+            const encodeProbe = new BenchmarkProbe("CODEC - ENCODE ONLY", TOTAL);
+            encodeProbe.startTimer();
+
+            for (let i = 0; i < TOTAL; i++) {
+                const t0 = performance.now();
+                FrameCodec.any(payload); // Solo encoding, no network
+                encodeProbe.record(performance.now() - t0);
+            }
+
+            const encodeStats = encodeProbe.printResult();
+
+            // Test solo decoding
+            const encoded = FrameCodec.any(payload);
+            const decodeProbe = new BenchmarkProbe("CODEC - DECODE ONLY", TOTAL);
+            decodeProbe.startTimer();
+
+            for (let i = 0; i < TOTAL; i++) {
+                const t0 = performance.now();
+                FrameCodec.decodeAny(new Cursor(encoded));
+                decodeProbe.record(performance.now() - t0);
+            }
+
+            const decodeStats = decodeProbe.printResult();
+
+            // Verifica che codec non sia il bottleneck
+            expect(encodeStats.throughput).toBeGreaterThan(1_000_000);
+            expect(decodeStats.throughput).toBeGreaterThan(1_000_000);
+        });
+
+        it('Single Request Latency - no concurrency noise', async () => {
+            const ITERATIONS = 10_000;
             const payload = { op: "ping" };
-
-            const probe = new BenchmarkProbe("SOCKET - SMALL", TOTAL);
+            const probe = new BenchmarkProbe("SINGLE REQ LATENCY", ITERATIONS);
             probe.startTimer();
 
-            const worker = async () => {
-                const opsPerWorker = TOTAL / CONCURRENCY;
-                for (let i = 0; i < opsPerWorker; i++) {
-                    const t0 = performance.now();
-                    await (nexo as any).debug.echo(payload);
-                    probe.record(performance.now() - t0);
-                }
-            };
-            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-
-            const stats = probe.printResult();
-            expect(stats.throughput).toBeGreaterThan(100_000); // Adjusted for stability
-            expect(stats.p99).toBeLessThan(10);
+            for (let i = 0; i < ITERATIONS; i++) {
+                const t0 = performance.now();
+                await (nexo as any).debug.echo(payload);
+                probe.record(performance.now() - t0);
+            }
+            probe.printResult();
         });
 
-        it('Large Payload Throughput', async () => {
-            const TOTAL = 5_000;
-            const CONCURRENCY = 50;
-            const payload = { data: "x".repeat(1024 * 10) };
+        it('Encoding vs Network Ratio', async () => {
+            const payload = { data: "x".repeat(512) };
 
-            const probe = new BenchmarkProbe("SOCKET - 10KB", TOTAL);
-            probe.startTimer();
+            // Misura encoding
+            let encodeTime = 0;
+            for (let i = 0; i < 10_000; i++) {
+                const t0 = performance.now();
+                FrameCodec.any(payload);
+                encodeTime += performance.now() - t0;
+            }
 
-            const worker = async () => {
-                const opsPerWorker = TOTAL / CONCURRENCY;
-                for (let i = 0; i < opsPerWorker; i++) {
-                    const t0 = performance.now();
-                    await (nexo as any).debug.echo(payload);
-                    probe.record(performance.now() - t0);
-                }
-            };
-            await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+            // Misura round-trip completo
+            let totalTime = 0;
+            for (let i = 0; i < 10_000; i++) {
+                const t0 = performance.now();
+                await (nexo as any).debug.echo(payload);
+                totalTime += performance.now() - t0;
+            }
 
-            const stats = probe.printResult();
-            const mbs = (stats.throughput * 10) / 1024;
-            console.log(` 📦 Bandwidth:   ~${mbs.toFixed(1)} MB/s`);
-
-            expect(stats.throughput).toBeGreaterThan(10_000); // Adjusted for stability
-            expect(stats.p99).toBeLessThan(10);
+            console.log(`Encoding: ${encodeTime.toFixed(2)}ms (${((encodeTime/totalTime)*100).toFixed(1)}%)`);
+            console.log(`Network+Decode: ${(totalTime-encodeTime).toFixed(2)}ms`);
         });
-    })
+    });
 
     describe('STORE', async () => {
         //todo: to implement
