@@ -66,13 +66,13 @@ impl ConsumerGroup {
     /// Redistributes partitions among current members.
     /// IMPORTANT: Increments generation_id FIRST to invalidate all in-flight requests.
     pub fn rebalance(&mut self, total_partitions: u32) {
-        log::info!("[Group:{}] REBALANCE TRIGGERED (Members: {})", self.id, self.members.len());
+        tracing::info!("[Group:{}] REBALANCE TRIGGERED (Members: {})", self.id, self.members.len());
 
         // 1. FIRST: Bump generation to invalidate all in-flight FETCH/COMMIT
         self.generation_id += 1;
 
         if self.members.is_empty() {
-            log::info!("[Group:{}] Rebalanced Gen {} (No members)", self.id, self.generation_id);
+            tracing::info!("[Group:{}] Rebalanced Gen {} (No members)", self.id, self.generation_id);
             return;
         }
 
@@ -103,9 +103,9 @@ impl ConsumerGroup {
             }
         }
         
-        log::info!("[Group:{}] REBALANCE COMPLETE -> Gen {}. Ownership:", self.id, self.generation_id);
+        tracing::info!("[Group:{}] REBALANCE COMPLETE -> Gen {}. Ownership:", self.id, self.generation_id);
         for m in self.members.values() {
-            log::info!("[Group:{}]   -> Client {}: {:?}", self.id, m.client_id, m.partitions);
+            tracing::info!("[Group:{}]   -> Client {}: {:?}", self.id, m.client_id, m.partitions);
         }
     }
 

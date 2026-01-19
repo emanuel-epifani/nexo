@@ -1,0 +1,12 @@
+target/
+**/*.rs.bk
+.git
+.gitignore
+.env
+dashboard-web/node_modules
+dashboard-web/dist
+Dockerfile
+README.md
+debug/*
+examples/*
+.idea/*

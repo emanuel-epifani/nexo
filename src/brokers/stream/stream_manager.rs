@@ -131,11 +131,11 @@ impl TopicActor {
                         }
                     }
                     let msgs = self.state.read(partition, offset, limit);
-                    log::debug!("[TopicActor:{}] Fetch: P{} off={} lim={} -> got {} msgs", self.state.name, partition, offset, limit, msgs.len());
+                    tracing::debug!("[TopicActor:{}] Fetch: P{} off={} lim={} -> got {} msgs", self.state.name, partition, offset, limit, msgs.len());
                     let _ = reply.send(Ok(msgs));
                 },
                 TopicCommand::JoinGroup { group_id, client_id, reply } => {
-                    log::info!("[TopicActor:{}] JoinGroup: Group={}, Client={}", self.state.name, group_id, client_id);
+                    tracing::info!("[TopicActor:{}] JoinGroup: Group={}, Client={}", self.state.name, group_id, client_id);
                     let g = self.groups.entry(group_id.clone())
                         .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.state.name.clone()));
                     
@@ -148,10 +148,10 @@ impl TopicActor {
                     }
                     
                     if is_new {
-                        log::info!("[TopicActor:{}] NEW member. Triggering rebalance.", self.state.name);
+                        tracing::info!("[TopicActor:{}] NEW member. Triggering rebalance.", self.state.name);
                         g.rebalance(self.state.get_partitions_count() as u32);
                     } else {
-                        log::info!("[TopicActor:{}] EXISTING member. Current Gen: {}", self.state.name, g.generation_id);
+                        tracing::info!("[TopicActor:{}] EXISTING member. Current Gen: {}", self.state.name, g.generation_id);
                     }
 
                     let assigned = g.get_assignments(&client_id).cloned().unwrap_or_default();
@@ -159,7 +159,7 @@ impl TopicActor {
                     for &pid in &assigned {
                         let off = g.get_committed_offset(pid);
                         start_offsets.insert(pid, off);
-                        log::info!("[TopicActor:{}]   -> Assignment: P{} start_at={}", self.state.name, pid, off);
+                        tracing::info!("[TopicActor:{}]   -> Assignment: P{} start_at={}", self.state.name, pid, off);
                     }
                     
                     let _ = reply.send(Ok((g.generation_id, assigned, start_offsets)));
@@ -185,21 +185,21 @@ impl TopicActor {
                     }
                 },
                 TopicCommand::LeaveGroup { client_id, reply } => {
-                     log::info!("[TopicActor:{}] LeaveGroup Req: Client={}", self.state.name, client_id);
+                     tracing::info!("[TopicActor:{}] LeaveGroup Req: Client={}", self.state.name, client_id);
                      if let Some(g_ids) = self.client_map.remove(&client_id) {
-                         log::info!("[TopicActor:{}] Found client in groups: {:?}", self.state.name, g_ids);
+                         tracing::info!("[TopicActor:{}] Found client in groups: {:?}", self.state.name, g_ids);
                          for gid in g_ids {
                              if let Some(g) = self.groups.get_mut(&gid) {
                                  if g.remove_member(&client_id) {
-                                     log::info!("[TopicActor:{}] Client {} removed from Group {}. Triggering rebalance.", self.state.name, client_id, gid);
+                                     tracing::info!("[TopicActor:{}] Client {} removed from Group {}. Triggering rebalance.", self.state.name, client_id, gid);
                                      g.rebalance(self.state.get_partitions_count() as u32);
                                  } else {
-                                     log::warn!("[TopicActor:{}] Client {} NOT found in Group members {}", self.state.name, client_id, gid);
+                                     tracing::warn!("[TopicActor:{}] Client {} NOT found in Group members {}", self.state.name, client_id, gid);
                                  }
                              }
                          }
                      } else {
-                         log::warn!("[TopicActor:{}] Client {} NOT found in client_map", self.state.name, client_id);
+                         tracing::warn!("[TopicActor:{}] Client {} NOT found in client_map", self.state.name, client_id);
                      }
                      let _ = reply.send(());
                 },
@@ -280,7 +280,7 @@ impl StreamManager {
                     ManagerCommand::CreateTopic { name, partitions, reply } => {
                         if !actors.contains_key(&name) {
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
-                            log::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
+                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
                             let actor = TopicActor::new(name.clone(), partitions, t_rx);
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
@@ -291,7 +291,7 @@ impl StreamManager {
                         let _ = reply.send(actors.get(&topic).cloned());
                     },
                     ManagerCommand::DisconnectClient { client_id, reply } => {
-                        log::info!("[StreamManager] Disconnecting client: {}", client_id);
+                        tracing::info!("[StreamManager] Disconnecting client: {}", client_id);
                         let mut waits = Vec::new();
                         for actor in actors.values() {
                             let (tx, rx) = oneshot::channel();
@@ -303,7 +303,7 @@ impl StreamManager {
                         for rx in waits {
                             let _ = rx.await;
                         }
-                        log::info!("[StreamManager] Client {} fully disconnected and groups rebalanced", client_id);
+                        tracing::info!("[StreamManager] Client {} fully disconnected and groups rebalanced", client_id);
                         let _ = reply.send(());
                     },
                     ManagerCommand::GetSnapshot { reply } => {
