@@ -204,15 +204,51 @@ impl TopicActor {
                      let _ = reply.send(());
                 },
                     TopicCommand::GetSnapshot { reply } => {
-                        let mut hw_marks = HashMap::new();
-                        for i in 0..self.state.get_partitions_count() {
-                            hw_marks.insert(i as u32, self.state.get_high_watermark(i as u32));
+                        let mut partitions_info = Vec::new();
+                        
+                        for (i, partition) in self.state.partitions.iter().enumerate() {
+                            let current_consumers: Vec<String> = self.groups
+                                .values()
+                                .filter_map(|g| {
+                                    // Check if this group has a member assigned to this partition
+                                    g.members.values().find(|m| {
+                                        // TODO: Add partition assignment tracking in GroupMember
+                                        // For now, show all consumers for all partitions
+                                        true
+                                    }).map(|m| m.client_id.clone())
+                                })
+                                .collect();
+                            
+                            let messages_preview: Vec<crate::dashboard::models::stream::MessagePreview> = partition
+                                .log
+                                .iter()
+                                .rev()
+                                .take(50) // Limit preview to last 50 messages
+                                .map(|msg| {
+                                    crate::dashboard::models::stream::MessagePreview {
+                                        offset: msg.offset,
+                                        timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
+                                            .unwrap_or_default()
+                                            .to_rfc3339(),
+                                        payload_preview: String::from_utf8_lossy(&msg.payload)
+                                            .chars()
+                                            .take(200) // Limit preview length
+                                            .collect::<String>(),
+                                    }
+                                })
+                                .collect();
+                            
+                            partitions_info.push(crate::dashboard::models::stream::PartitionInfo {
+                                id: i as u32,
+                                messages: messages_preview,
+                                current_consumers,
+                                last_offset: partition.next_offset,
+                            });
                         }
+                        
                         let summary = crate::dashboard::models::stream::TopicSummary {
                              name: self.state.name.clone(),
-                             partitions: self.state.get_partitions_count() as u32,
-                             size_bytes: 0, 
-                             groups: self.groups.values().map(|g| g.get_snapshot(&hw_marks)).collect(),
+                             partitions: partitions_info,
                         };
                         let _ = reply.send(summary);
                     }

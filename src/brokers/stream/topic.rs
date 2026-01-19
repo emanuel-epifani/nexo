@@ -54,8 +54,8 @@ impl TopicState {
 
 pub struct PartitionState {
     pub id: u32,
-    log: VecDeque<Message>,
-    next_offset: u64,
+    pub log: VecDeque<Message>,
+    pub next_offset: u64,
     start_offset: u64,
     // Note: Notify is hard to keep in pure state if we want to be serializable,
     // but for now it's fine as runtime state.
@@ -90,7 +90,7 @@ impl PartitionState {
         // Wake waiters logic
         // (In pure state we might return a "WaitersToNotify" list to the actor,
         // but keeping it here for simplicity is okay for now)
-        let mut future_waiters = self.waiters.split_off(&(offset + 1));
+        let future_waiters = self.waiters.split_off(&(offset + 1));
         
         for (_, batch) in self.waiters.iter() {
             for weak in batch {

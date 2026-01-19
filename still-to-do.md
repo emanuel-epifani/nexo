@@ -1,13 +1,12 @@
 
 
 PROJECT:
-- add all timeout under envs variable and valdiate at start
 - logging sdk e rust
-- dahsboard react exposed on /status with snapshot of all broker status
+- dahsboard react
 - docker image & publish on dockerhub
-- publish sdk ts on npm
+- clean sdk to expose just statefull methods and publish on npm
 
-KV:
+STORE:
 
 
 QUEUE:

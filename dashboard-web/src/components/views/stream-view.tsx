@@ -7,7 +7,6 @@ import {
     Activity,
     HardDrive,
     Users,
-    ArrowRight
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -88,9 +87,9 @@ export function StreamView({ data }: Props) {
                               </div>
 
                               <div className="flex items-center gap-2">
-                                  {t.consumer_groups.length > 0 && (
+                                  {t.partitions.length > 0 && (
                                       <Badge variant="outline" className="h-4 px-1.5 text-[9px] border-slate-700 bg-slate-800 text-slate-400 rounded-sm">
-                                          {t.consumer_groups.length} GRP
+                                          {t.partitions.length} PART
                                       </Badge>
                                   )}
                               </div>
@@ -113,63 +112,61 @@ export function StreamView({ data }: Props) {
                              <div className="flex items-center gap-2 text-[10px] font-mono bg-slate-900 border border-slate-800 px-2 py-1 rounded">
                                  <HardDrive className="h-3 w-3 text-slate-500" />
                                  <span className="text-slate-400">OFFSET:</span>
-                                 <span className="text-slate-200 font-bold">{selectedTopic.total_messages.toLocaleString()}</span>
+                                 <span className="text-slate-200 font-bold">
+                                    {selectedTopic.partitions.reduce((sum, p) => sum + p.messages.length, 0).toLocaleString()}
+                                </span>
                              </div>
                          </div>
                      </div>
 
                      {/* Groups List */}
                      <div className="flex-1 overflow-auto bg-slate-950/10 p-6">
-                        {selectedTopic.consumer_groups.length === 0 ? (
+                        {selectedTopic.partitions.length === 0 ? (
                             <div className="h-full flex flex-col items-center justify-center text-slate-700">
                                 <Users className="h-12 w-12 opacity-20 mb-4" />
-                                <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_CONSUMER_GROUPS</p>
+                                <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_PARTITIONS</p>
                             </div>
                         ) : (
                             <div className="space-y-6">
-                                {selectedTopic.consumer_groups.map(group => (
-                                    <div key={group.name} className="border border-slate-800 rounded bg-slate-900/20 overflow-hidden">
+                                {selectedTopic.partitions.map(partition => (
+                                    <div key={partition.id} className="border border-slate-800 rounded bg-slate-900/20 overflow-hidden">
                                         <div className="px-4 py-2 bg-slate-900/50 border-b border-slate-800 flex justify-between items-center">
                                             <div className="flex items-center gap-2">
-                                                <Users className="h-3.5 w-3.5 text-indigo-400" />
-                                                <span className="font-mono text-xs font-bold text-slate-300">{group.name}</span>
+                                                <Activity className="h-3.5 w-3.5 text-indigo-400" />
+                                                <span className="font-mono text-xs font-bold text-slate-300">Partition {partition.id}</span>
                                             </div>
-                                            <span className="text-[10px] text-slate-500 uppercase">{group.members.length} MEMBERS</span>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-[10px] text-slate-500 uppercase">{partition.messages.length} MSGS</span>
+                                                {partition.last_offset > 0 && (
+                                                    <span className="text-[10px] text-slate-500 uppercase">OFFSET: {partition.last_offset}</span>
+                                                )}
+                                            </div>
                                         </div>
                                         
                                         <Table>
                                             <TableHeader className="bg-slate-900/30 border-b border-slate-800">
                                                 <TableRow className="hover:bg-transparent">
-                                                    <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500">Client ID</TableHead>
-                                                    <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500 text-right">Offset</TableHead>
-                                                    <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500 text-right w-[120px]">Lag</TableHead>
+                                                    <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500">Offset</TableHead>
+                                                    <TableHead className="h-7 font-mono text-[10px] uppercase text-slate-500">Message</TableHead>
                                                 </TableRow>
                                             </TableHeader>
                                             <TableBody>
-                                                {group.members.map(member => (
-                                                    <TableRow key={member.client_id} className="border-slate-800 hover:bg-slate-900/30">
+                                                {partition.messages.map((message, idx) => (
+                                                    <TableRow key={idx} className="border-slate-800 hover:bg-slate-900/30">
                                                         <TableCell className="font-mono text-[10px] text-slate-400 py-1.5">
-                                                            {member.client_id}
+                                                            OFFSET: {message.offset}
                                                         </TableCell>
-                                                        <TableCell className="font-mono text-[10px] text-slate-300 text-right py-1.5">
-                                                            {member.current_offset.toLocaleString()}
-                                                        </TableCell>
-                                                        <TableCell className="text-right py-1.5">
-                                                            {member.lag > 0 ? (
-                                                                <div className="inline-flex items-center gap-1.5 text-rose-500 font-mono text-[10px]">
-                                                                    <span>-{member.lag}</span>
-                                                                    <ArrowRight className="h-3 w-3" />
-                                                                </div>
-                                                            ) : (
-                                                                <span className="text-[10px] font-mono text-emerald-600 bg-emerald-950/20 px-1.5 py-0.5 rounded border border-emerald-900/30">SYNCED</span>
-                                                            )}
+                                                        <TableCell className="font-mono text-[10px] text-slate-300 py-1.5">
+                                                            <div className="truncate max-w-md">
+                                                                {message.payload_preview}
+                                                            </div>
                                                         </TableCell>
                                                     </TableRow>
                                                 ))}
-                                                {group.members.length === 0 && (
+                                                {partition.messages.length === 0 && (
                                                     <TableRow className="hover:bg-transparent">
-                                                        <TableCell colSpan={3} className="text-center py-4 text-[10px] text-slate-600 italic">
-                                                            NO_ACTIVE_MEMBERS
+                                                        <TableCell colSpan={2} className="text-center py-4 text-[10px] text-slate-600 italic">
+                                                            NO_MESSAGES
                                                         </TableCell>
                                                     </TableRow>
                                                 )}

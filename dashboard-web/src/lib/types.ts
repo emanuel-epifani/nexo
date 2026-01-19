@@ -1,20 +1,21 @@
 // --- STREAM BROKER ---
 
-export interface MemberSummary {
-    client_id: string;
-    current_offset: number;
-    lag: number;
+export interface MessagePreview {
+    offset: number;
+    timestamp: string;
+    payload_preview: string;
 }
 
-export interface GroupSummary {
-    name: string;
-    members: MemberSummary[];
+export interface PartitionInfo {
+    id: number;
+    messages: MessagePreview[];
+    current_consumers: string[];
+    last_offset: number;
 }
 
 export interface TopicSummary {
     name: string;
-    total_messages: number;
-    consumer_groups: GroupSummary[];
+    partitions: PartitionInfo[];
 }
 
 export interface StreamBrokerSnapshot {

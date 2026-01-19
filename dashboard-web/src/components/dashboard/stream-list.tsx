@@ -38,30 +38,44 @@ export function StreamList({ data }: Props) {
           <TableHeader>
             <TableRow>
               <TableHead>Topic Name</TableHead>
+              <TableHead>Partitions</TableHead>
               <TableHead>Total Messages</TableHead>
-              <TableHead>Consumer Groups</TableHead>
+              <TableHead>Active Consumers</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.topics.map((topic) => (
-              <TableRow key={topic.name}>
-                <TableCell className="font-medium">{topic.name}</TableCell>
-                <TableCell>{topic.total_messages.toLocaleString()}</TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-2">
-                    {topic.consumer_groups.length === 0 ? (
-                      <span className="text-muted-foreground text-xs italic">None</span>
-                    ) : (
-                      topic.consumer_groups.map(g => (
-                        <Badge key={g.name} variant="secondary" className="text-xs">
-                          {g.name} (Members: {g.members.length})
-                        </Badge>
-                      ))
-                    )}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
+            {data.topics.map((topic) => {
+              // Calculate total messages across all partitions
+              const totalMessages = topic.partitions.reduce((sum, partition) => sum + partition.messages.length, 0);
+              // Collect all unique consumers across all partitions
+              const allConsumers = new Set<string>();
+              topic.partitions.forEach(partition => {
+                partition.current_consumers.forEach(consumer => allConsumers.add(consumer));
+              });
+
+              return (
+                <TableRow key={topic.name}>
+                  <TableCell className="font-medium">{topic.name}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{topic.partitions.length}</Badge>
+                  </TableCell>
+                  <TableCell>{totalMessages.toLocaleString()}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {allConsumers.size === 0 ? (
+                        <span className="text-muted-foreground text-xs italic">None</span>
+                      ) : (
+                        Array.from(allConsumers).map(consumer => (
+                          <Badge key={consumer} variant="secondary" className="text-xs">
+                            {consumer}
+                          </Badge>
+                        ))
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </CardContent>

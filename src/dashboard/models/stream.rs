@@ -10,20 +10,20 @@ pub struct StreamBrokerSnapshot {
 #[derive(Serialize)]
 pub struct TopicSummary {
     pub name: String,
-    pub partitions: u32,
-    pub size_bytes: u64,
-    pub groups: Vec<GroupSummary>,
+    pub partitions: Vec<PartitionInfo>,
 }
 
 #[derive(Serialize)]
-pub struct GroupSummary {
-    pub name: String,
-    pub members: Vec<MemberSummary>,
+pub struct PartitionInfo {
+    pub id: u32,
+    pub messages: Vec<MessagePreview>,
+    pub current_consumers: Vec<String>,
+    pub last_offset: u64,
 }
 
 #[derive(Serialize)]
-pub struct MemberSummary {
-    pub client_id: String,
-    pub current_offset: u64,
-    pub lag: u64,
+pub struct MessagePreview {
+    pub offset: u64,
+    pub timestamp: String,
+    pub payload_preview: String,
 }

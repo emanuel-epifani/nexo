@@ -3,7 +3,6 @@
 //! Handles Partition Assignment Logic (Rebalancing).
 
 use std::collections::HashMap;
-use crate::dashboard::models::stream::{GroupSummary, MemberSummary};
 
 #[derive(Clone, Debug)]
 pub struct MemberInfo {
@@ -122,32 +121,4 @@ impl ConsumerGroup {
         self.generation_id == generation_id
     }
 
-    pub fn get_snapshot(&self, high_watermarks: &HashMap<u32, u64>) -> GroupSummary {
-        let members_summary = self.members.values().map(|m| {
-            // Sum lag of all assigned partitions
-            let mut current_offset_sum = 0;
-            let mut lag_sum = 0;
-            
-            for &p_id in &m.partitions {
-                let committed = self.get_committed_offset(p_id);
-                let hw = *high_watermarks.get(&p_id).unwrap_or(&0);
-                
-                current_offset_sum += committed;
-                if hw > committed {
-                    lag_sum += hw - committed;
-                }
-            }
-
-            MemberSummary {
-                client_id: m.client_id.clone(),
-                current_offset: current_offset_sum,
-                lag: lag_sum,
-            }
-        }).collect();
-
-        GroupSummary {
-            name: self.id.clone(),
-            members: members_summary,
-        }
-    }
 }
