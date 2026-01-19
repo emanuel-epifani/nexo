@@ -57,7 +57,7 @@ impl StoreConfig {
     fn load() -> Self {
         Self {
             cleanup_interval_secs: get_env("STORE_CLEANUP_INTERVAL_SECS", "60"),
-            default_ttl_secs:      get_env("STORE_DEFAULT_TTL_SECS", "3600"),
+            default_ttl_secs:      get_env("STORE_TTL_SECS", "3600"),
         }
     }
 }
@@ -73,9 +73,9 @@ pub struct QueueConfig {
 impl QueueConfig {
     fn load() -> Self {
         Self {
-            visibility_timeout_ms: get_env("QUEUE_DEF_VISIBILITY_MS", "30000"),
-            max_retries:           get_env("QUEUE_DEF_MAX_RETRIES", "5"),
-            ttl_ms:                get_env("QUEUE_DEF_TTL_MS", "604800000"),
+            visibility_timeout_ms: get_env("QUEUE_VISIBILITY_MS", "30000"),
+            max_retries:           get_env("QUEUE_MAX_RETRIES", "5"),
+            ttl_ms:                get_env("QUEUE_TTL_MS", "604800000"),
         }
     }
 }
@@ -104,7 +104,7 @@ pub struct StreamConfig {
 impl StreamConfig {
     fn load() -> Self {
         Self {
-            default_partitions:     get_env("STREAM_DEF_PARTITIONS", "4"),
+            default_partitions:     get_env("STREAM_PARTITIONS", "4"),
             actor_channel_capacity: get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
         }
     }
