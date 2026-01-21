@@ -129,26 +129,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         // Extract payload from the frozen frame_data
                         let payload = frame_data.slice(RequestHeader::SIZE..);
                         // Pass client_id to route so SUB can use it
-                        let response = route(payload, &engine_clone, &client_id_clone);
+                        let response = route(payload, &engine_clone, &client_id_clone).await;
                         
-                        match response {
-                            Response::Async(rx) => {
-                                match rx.await {
-                                    Ok(Ok(data)) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Data(data))).await;
-                                    }
-                                    Ok(Err(e)) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error(e))).await;
-                                    }
-                                    Err(_) => {
-                                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Async operation dropped".into()))).await;
-                                    }
-                                }
-                            }
-                            _ => {
-                                let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
-                            }
-                        }
+                        let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
                     }
                     TYPE_PING => {
                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Ok)).await;

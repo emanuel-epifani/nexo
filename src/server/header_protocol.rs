@@ -71,8 +71,6 @@ pub enum Response {
     Data(Bytes),
     Error(String),
     Null,
-    /// Async operations (stream, queue batch consume)
-    Async(tokio::sync::oneshot::Receiver<Result<Bytes, String>>),
 }
 
 // ========================================
@@ -101,7 +99,6 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
         Response::Ok | Response::Null => 0,
         Response::Error(msg) => 4 + msg.len(), // MsgLen(4) + Msg
         Response::Data(data) => data.len(),
-        Response::Async(_) => 0,
     };
     
     // Header (9) + Status (1) + optional extra
@@ -128,10 +125,6 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
             buf.put_u32((1 + data.len()) as u32);
             buf.put_u8(STATUS_DATA);
             buf.put_slice(data);
-        }
-        Response::Async(_) => { 
-            buf.put_u32(1); 
-            buf.put_u8(STATUS_OK); 
         }
     }
     buf.freeze()

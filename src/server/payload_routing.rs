@@ -22,7 +22,7 @@ pub const OP_DEBUG_ECHO: u8 = 0x00;
 // ROUTING
 // ========================================
 
-pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
+pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
     if payload.is_empty() { return Response::Error("Empty payload".to_string()); }
     let opcode = payload[0];
     let mut cursor = PayloadCursor::new(payload.slice(1..));
@@ -42,7 +42,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // QUEUE (0x10 - 0x1F)
         0x10..=0x1F => {
             match QueueCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_queue(cmd, engine),
+                Ok(cmd) => handle_queue(cmd, engine).await,
                 Err(e) => Response::Error(e),
             }
         }
@@ -50,7 +50,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // PUBSUB (0x21 - 0x2F)
         0x21..=0x2F => {
             match PubSubCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_pubsub(cmd, engine, client_id),
+                Ok(cmd) => handle_pubsub(cmd, engine, client_id).await,
                 Err(e) => Response::Error(e),
             }
         }
@@ -58,7 +58,7 @@ pub fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Respo
         // STREAM (0x30 - 0x3F)
         0x30..=0x3F => {
             match StreamCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_stream(cmd, engine, client_id),
+                Ok(cmd) => handle_stream(cmd, engine, client_id).await,
                 Err(e) => Response::Error(e),
             }
         }
@@ -91,163 +91,120 @@ fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
     }
 }
 
-fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
-    let queue_manager = engine.queue.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
+async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
+    let queue_manager = &engine.queue;
 
     match cmd {
         QueueCommand::Create { passive, config, q_name } => {
-            tokio::spawn(async move {
-                let result = queue_manager.declare_queue(q_name, config, passive).await;
-                let response = match result {
-                    Ok(_) => Ok(Bytes::new()),
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+            match queue_manager.declare_queue(q_name, config, passive).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         QueueCommand::Push { priority, delay, q_name, payload } => {
-            tokio::spawn(async move {
-                let result = queue_manager.push(q_name, payload, priority, delay).await;
-                let response = match result {
-                    Ok(_) => Ok(Bytes::new()),
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+            match queue_manager.push(q_name, payload, priority, delay).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         QueueCommand::Consume { max_batch, wait_ms, q_name } => {
-            tokio::spawn(async move {
-                let result = queue_manager.consume_batch(q_name, max_batch, wait_ms).await;
-                let response = match result {
-                    Ok(messages) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
-                        for msg in messages {
-                            buf.extend_from_slice(msg.id.as_bytes());
-                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&msg.payload);
-                        }
-                        Ok(Bytes::from(buf))
+            match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
+                Ok(messages) => {
+                    let mut buf = Vec::new();
+                    buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
+                    for msg in messages {
+                        buf.extend_from_slice(msg.id.as_bytes());
+                        buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(&msg.payload);
                     }
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+                    Response::Data(Bytes::from(buf))
+                }
+                Err(e) => Response::Error(e),
+            }
         }
         QueueCommand::Ack { id, q_name } => {
-            tokio::spawn(async move {
-                let result = queue_manager.ack(&q_name, id).await;
-                let response = if result {
-                    Ok(Bytes::new())
-                } else {
-                    Err("ACK failed".to_string())
-                };
-                let _ = tx.send(response);
-            });
+            match queue_manager.ack(&q_name, id).await {
+                true => Response::Ok,
+                false => Response::Error("ACK failed".to_string()),
+            }
         }
     }
-    Response::Async(rx)
 }
 
-fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    let pubsub = engine.pubsub.clone();
+async fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
+    let pubsub = &engine.pubsub;
     let client = client_id.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
 
     match cmd {
         PubSubCommand::Publish { flags, topic, payload } => {
-            tokio::spawn(async move {
-                let _count = pubsub.publish(&topic, payload, flags).await;
-                let _ = tx.send(Ok(Bytes::new()));
-            });
+            let _count = pubsub.publish(&topic, payload, flags).await;
+            Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {
-            tokio::spawn(async move {
-                pubsub.subscribe(&topic, client).await;
-                let _ = tx.send(Ok(Bytes::new()));
-            });
+            pubsub.subscribe(&topic, client).await;
+            Response::Ok
         }
         PubSubCommand::Unsubscribe { topic } => {
-            tokio::spawn(async move {
-                pubsub.unsubscribe(&topic, &client).await;
-                let _ = tx.send(Ok(Bytes::new()));
-            });
+            pubsub.unsubscribe(&topic, &client).await;
+            Response::Ok
         }
     }
-    Response::Async(rx)
 }
 
-fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    let stream = engine.stream.clone();
+async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
+    let stream = &engine.stream;
     let client = client_id.0.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
 
     match cmd {
         StreamCommand::Create { topic } => {
-            tokio::spawn(async move {
-                let res = stream.create_topic(topic).await;
-                let response = match res { Ok(_) => Ok(Bytes::new()), Err(e) => Err(e) };
-                let _ = tx.send(response);
-            });
+            match stream.create_topic(topic).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
         StreamCommand::Publish { topic, payload } => {
-            tokio::spawn(async move {
-                let result = stream.publish(&topic, payload).await;
-                let response = match result {
-                    Ok(offset_id) => Ok(Bytes::from(offset_id.to_be_bytes().to_vec())),
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+            match stream.publish(&topic, payload).await {
+                Ok(offset_id) => Response::Data(Bytes::from(offset_id.to_be_bytes().to_vec())),
+                Err(e) => Response::Error(e),
+            }
         }
         StreamCommand::Fetch { gen_id, topic, group, partition, offset, limit } => {
-            tokio::spawn(async move {
-                let result = stream.fetch_group(&group, &client, gen_id, partition, offset, limit as usize, &topic).await;
-                let response = match result {
-                    Ok(msgs) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
-                        for msg in msgs {
-                            buf.extend_from_slice(&msg.offset.to_be_bytes());
-                            buf.extend_from_slice(&msg.timestamp.to_be_bytes());
-                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&msg.payload);
-                        }
-                        Ok(Bytes::from(buf))
-                    },
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+            match stream.fetch_group(&group, &client, gen_id, partition, offset, limit as usize, &topic).await {
+                Ok(msgs) => {
+                    let mut buf = Vec::new();
+                    buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
+                    for msg in msgs {
+                        buf.extend_from_slice(&msg.offset.to_be_bytes());
+                        buf.extend_from_slice(&msg.timestamp.to_be_bytes());
+                        buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(&msg.payload);
+                    }
+                    Response::Data(Bytes::from(buf))
+                }
+                Err(e) => Response::Error(e),
+            }
         }
         StreamCommand::Join { group, topic } => {
-            tokio::spawn(async move {
-                let result = stream.join_group(&group, &topic, &client).await;
-                let response = match result {
-                    Ok((gen_id, partitions, start_offsets)) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&gen_id.to_be_bytes());
-                        buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
-                        for p in partitions {
-                            buf.extend_from_slice(&p.to_be_bytes());
-                            let start_offset = start_offsets.get(&p).cloned().unwrap_or(0);
-                            buf.extend_from_slice(&start_offset.to_be_bytes());
-                        }
-                        Ok(Bytes::from(buf))
-                    },
-                    Err(e) => Err(e),
-                };
-                let _ = tx.send(response);
-            });
+            match stream.join_group(&group, &topic, &client).await {
+                Ok((gen_id, partitions, start_offsets)) => {
+                    let mut buf = Vec::new();
+                    buf.extend_from_slice(&gen_id.to_be_bytes());
+                    buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
+                    for p in partitions {
+                        buf.extend_from_slice(&p.to_be_bytes());
+                        let start_offset = start_offsets.get(&p).cloned().unwrap_or(0);
+                        buf.extend_from_slice(&start_offset.to_be_bytes());
+                    }
+                    Response::Data(Bytes::from(buf))
+                }
+                Err(e) => Response::Error(e),
+            }
         }
         StreamCommand::Commit { gen_id, group, topic, partition, offset } => {
-            tokio::spawn(async move {
-                let res = stream.commit_offset(&group, &topic, partition, offset, &client, gen_id).await;
-                let response = match res { Ok(_) => Ok(Bytes::new()), Err(e) => Err(e) };
-                let _ = tx.send(response);
-            });
+            match stream.commit_offset(&group, &topic, partition, offset, &client, gen_id).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
         }
     }
-    Response::Async(rx)
 }
