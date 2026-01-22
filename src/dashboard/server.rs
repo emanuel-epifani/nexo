@@ -16,7 +16,10 @@ struct Assets;
 
 pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     let app = Router::new()
-        .route("/api/state", get(get_state))
+        .route("/api/store", get(get_store))
+        .route("/api/queue", get(get_queue))
+        .route("/api/stream", get(get_stream))
+        .route("/api/pubsub", get(get_pubsub))
         .fallback(static_handler)
         .with_state(engine);
 
@@ -28,8 +31,23 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     axum::serve(listener, app).await.expect("Failed to start dashboard server");
 }
 
-async fn get_state(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.get_global_snapshot().await;
+async fn get_store(State(engine): State<NexoEngine>) -> impl IntoResponse {
+    let snapshot = engine.store.get_snapshot();
+    axum::Json(snapshot)
+}
+
+async fn get_queue(State(engine): State<NexoEngine>) -> impl IntoResponse {
+    let snapshot = engine.queue.get_snapshot().await;
+    axum::Json(snapshot)
+}
+
+async fn get_stream(State(engine): State<NexoEngine>) -> impl IntoResponse {
+    let snapshot = engine.stream.get_snapshot().await;
+    axum::Json(snapshot)
+}
+
+async fn get_pubsub(State(engine): State<NexoEngine>) -> impl IntoResponse {
+    let snapshot = engine.pubsub.get_snapshot().await;
     axum::Json(snapshot)
 }
 

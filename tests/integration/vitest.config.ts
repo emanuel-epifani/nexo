@@ -34,6 +34,11 @@ Object.entries(result.data).forEach(([key, value]) => {
 
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@nexo/client': resolve(__dirname, '../../sdk/ts/src/index.ts'),
+    },
+  },
   test: {
     globals: true,
     testTimeout: 100000,

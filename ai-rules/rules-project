@@ -1,0 +1,52 @@
+NEXO - all in one broker high performance for scale up
+
+partiamo col dire che la priorità assoluta di questo progetto è fornire un broker all in one che magari non scalerà a livelli di netflix, ma sia "enough" per il 90% dei progetto che si presentano nella vita di tutti i giorni lato backend ai comuni mortali/aziende di consulenza ecc (un pò come nodejs, non ottimo per niente, ma enough per quasi tutto, e  infatti proprio per questo voglio fare l'sdk per node, primo perchè lo usano in scaleup che secondo me è il mio target, secondo perchè è abbastanza lento da poter giovare di una cosa del genere come il mio broker).
+nexo nasce per non essere distribuito su più nodi, quindi tutto in un unica istanza che deve sfruttare l'hardware fino all'ultimo nanosecondo per "posticipare" quanto più il momento in cui "serve qualcos'altro". se sai già che nel best scenario scalerai stile netflix probabilmente non prenderai nexo, ma se sai già che il worst scenario di carico è per esempio 10000device iot, conosci già quanto ti serve (e fin li secondo me un backend serio in rust fa miracoli), e se ti absta nexo parti direttamente con quello che può fare tutto.
+per ottimizzare fin da subito questa vision estrema ho puntato ovunque potessi a maggior throughput (multithread ovunque) rispetto alla minor latenza.
+ulteriore priorità assoluta (forse ancora più delle performance) deve essere la developer experience di chi usa questo sdk. 1 broker che fa tutto "super comodo ma comunque abbastanza performante", con una sdk super super intuitivo e flessibile. questo è il motivo per cui nasce nexo.
+e infatti la mia idea è 1 broker qualunque funzionalità con 1 sola configutazione:
+
+- STORE → cache in memory stile redis con n strutture dati (x ora c’è solo hashmap x in futuro vedremo
+- QUEUE → FIFO message queues per work/job con consistenza
+- PUBSUB → Pub/Sub with hierarchical topics stile mqtt/nats realtime fanin fanout (Volatile, Fan-out, Realtime)
+- STREAM → Append-only event-logs stile kafka con consistenza (Persistente, Log, Replay)
+- DASHBOARD react che runna automaticamente su una porta quando avvii il container docker che fa una request ed ogni broker ritorna una snaphsto a quell'istante dello stato di tutti i broker (lo store, le queue, topics ecc) super comodo per debuggare in locale mentre sviluppi (non da usare in produzione come met) anche senza dover installare mille tool diversi stile datagrip, plugin vscode o altro ecc. scarichi il container, 1 sdk  e hai tutto, cache, queue, mqtt, topic, e una dashboard web per vedere stato dati esposto automaticamente.
+
+
+SERVER RUST (Robustness > Throughput > latency)
+- tutta la logica di connessioni/socket/parsing ecc dentro -> src/server
+- tutta la logica di business dentro -> src/brokers (ogni broker deve avere logica di business quanto più isolato all'interno di se stesso)
+- safety first
+- se posso usare una struttura dati che lock ma permette multithread, e sacrificando magari un pelo di latenza ci fa stare 10k ops/sec in più, è la direzioen da preferire
+- quando non compromette performance, prediligi codice pulito (match anzichè molti if else if ecc)
+
+SDK TYPESCRIPT (devexperience over all)
+- max develoepr experience (senza leggere la docs deve essere super intuitivo capire come si usa e cosa può fare)
+- facade con un paio di classi di export (1 per tipo di broker), e tutta la logica di socket/parse ecc centralizzata nella send o pochi altri metodi estranei alla logica di business (all'interno dei quali poter fare ottimizzazioni estreme anche poco comprensibili)
+- quando non compromette performance, prediligi codice pulito (switch anzichè molti if else if ecc)
+
+TEST VITEST (business logic first)
+- ogni file di test deve contenere solo logia di business, tutto cio da fare prima e dopo ogni file configurato in global-setup (in pratica nel beforeaall x ogni file build binario in --release mode, run server, e alla fine di ogni tet kill server per pulizia massima) quindi basta runnare il singolo file di test che automaticamente fa la builde runna prima il server, non runnare il server prima con comandi indipendenti
+- la connessione di nexo viene già istanziata in nexo.ts, dopodichè riusiamo quel'istanza per testare i broker per avere i fiel di test super puliti
+- i test dei broker dovrebbero seguire questo patter, 1 macro describe per runnare tutto, e poi N describe dentro (uno x ogni feature), e n it() all'interno di ogni describe per testare ogni angolo diverso della stessa fetures. l'ordine dovrebbe essere: tutte le features ovvie con test semplici/happy path, edge case improbabili, edge case possibili dovuti a race condition con multithread ecc, edge case possibili dovuti a connection/reconnct strane. no test di performance, quelli in un altro file (tutti i performance raggruppati per describe che riflette il broker)
+- i nomi dei test describe/it dovrebbero essere molto descrittivi e chiarire esattamente cosa stanno testando (raggruppati per macrofunzionalità, con parole maisucolo che fanno subito capire la key features testate)
+- a meno che connect e disconnect non facciano parte della logica di dusines necessaria a testare la features (es reconnect automatica ecc) evita disconnect dentro i test e riutiliza la stessa istanza di nexo già configurato in nexo.ts
+
+APPROCCIO ALLO SVILUPPO
+- facciamo brainstorming su strutture dati/design pattern da poter seguire per esppletare tutte le features
+- scegliamo inizialmente la strada più facile da implemetnare/debuggare/manutenere
+- scriviamo i test vitest in tests/integration/src/brokers (usando l'sdk ts di nexo) coprendo quanti più edge case possibili
+- procediamo eventualmente a refactorizzare broker con stesse funzionalità ma sfruttando più ottimizzazioni possibili e vediamo se test continuano a passare
+
+
+
+PRIORITA' PROGETTO
+nella versione 1 il progetto dovrebbe essere:
+1- cosi wow (in termini di comodità e devexperience) da far dire "lo voglio proprio provare"
+2- cosi stabile in termini di funzionamento senza mai crash, da non far abbandonare chi lo ha provato. quindi di nuovo: Robustness > Throughput > Latency
+
+
+parla in italiano nella chat
+scrivi sempre codice e commenti in inglese (i commenti dovrebbero essere uno snapshot del codice in quel preciso momento, non dovrebbero avere riferimento a spiegazione storica del tipo "non usiamo più la hasmpia qui <--, removed costant, changed function, not yet implemented ecc..")
+
+

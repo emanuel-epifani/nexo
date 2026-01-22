@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { useSystemState } from '@/hooks/use-system-state'
+import { QueryClient, QueryClientProvider, useQueries } from '@tanstack/react-query'
 import { StoreView } from '@/components/views/store-view'
 import { StreamView } from '@/components/views/stream-view'
 import { PubSubView } from '@/components/views/pubsub-view'
@@ -11,9 +10,9 @@ import {
     Database, 
     MessageSquare, 
     Radio, 
-    Activity
+    Activity,
+    RefreshCw
 } from 'lucide-react'
-import { SystemSnapshot } from '@/lib/types'
 
 const queryClient = new QueryClient()
 
@@ -26,20 +25,47 @@ export default function App() {
 }
 
 function Dashboard() {
-  const { data: serverData, isLoading, error } = useSystemState()
   const [activeTab, setActiveTab] = useState<'store' | 'queue' | 'stream' | 'pubsub'>('store')
 
-  // MOCK DATA for preview
-  const mockData: SystemSnapshot = {
-      brokers: {
-          store: { total_keys: 1542, expiring_keys: 120, keys: [] },
-          queue: { queues: [{ name: "email_notif", pending_count: 42, inflight_count: 5, scheduled_count: 0, consumers_waiting: 2, messages: [] }] },
-          stream: { total_topics: 5, total_active_groups: 2, topics: [] },
-          pubsub: { active_clients: 89, wildcard_subscriptions: [], topic_tree: { name: "root", full_path: "", subscribers: 0, retained_value: null, children: [] } }
-      }
-  }
+  const [storeQuery, queueQuery, streamQuery, pubsubQuery] = useQueries({
+    queries: [
+      {
+        queryKey: ['store-snapshot'],
+        queryFn: async () => {
+          const response = await fetch('/api/store')
+          if (!response.ok) throw new Error('Failed to fetch store')
+          return response.json()
+        },
+      },
+      {
+        queryKey: ['queue-snapshot'],
+        queryFn: async () => {
+          const response = await fetch('/api/queue')
+          if (!response.ok) throw new Error('Failed to fetch queue')
+          return response.json()
+        },
+      },
+      {
+        queryKey: ['stream-snapshot'],
+        queryFn: async () => {
+          const response = await fetch('/api/stream')
+          if (!response.ok) throw new Error('Failed to fetch stream')
+          return response.json()
+        },
+      },
+      {
+        queryKey: ['pubsub-snapshot'],
+        queryFn: async () => {
+          const response = await fetch('/api/pubsub')
+          if (!response.ok) throw new Error('Failed to fetch pubsub')
+          return response.json()
+        },
+      },
+    ],
+  })
 
-  const data = serverData || mockData
+  const isLoading = storeQuery.isLoading || queueQuery.isLoading || streamQuery.isLoading || pubsubQuery.isLoading
+  const hasError = storeQuery.error || queueQuery.error || streamQuery.error || pubsubQuery.error
 
   if (isLoading) {
     return (
@@ -52,7 +78,7 @@ function Dashboard() {
     )
   }
 
-  if (error && !data) {
+  if (hasError) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4 bg-slate-950 text-slate-200">
         <ServerCrash className="h-12 w-12 text-rose-500" />
@@ -74,6 +100,8 @@ function Dashboard() {
                 active={activeTab === 'store'}
                 onClick={() => setActiveTab('store')}
                 icon={<Database className="h-5 w-5" />}
+                onRefresh={() => storeQuery.refetch()}
+                isRefreshing={storeQuery.isFetching}
             />
             <NavCard 
                 label="QUEUE" 
@@ -81,6 +109,8 @@ function Dashboard() {
                 active={activeTab === 'queue'}
                 onClick={() => setActiveTab('queue')}
                 icon={<MessageSquare className="h-5 w-5" />}
+                onRefresh={() => queueQuery.refetch()}
+                isRefreshing={queueQuery.isFetching}
             />
             <NavCard 
                 label="STREAM" 
@@ -88,6 +118,8 @@ function Dashboard() {
                 active={activeTab === 'stream'}
                 onClick={() => setActiveTab('stream')}
                 icon={<Activity className="h-5 w-5" />}
+                onRefresh={() => streamQuery.refetch()}
+                isRefreshing={streamQuery.isFetching}
             />
             <NavCard 
                 label="PUBSUB" 
@@ -95,25 +127,27 @@ function Dashboard() {
                 active={activeTab === 'pubsub'}
                 onClick={() => setActiveTab('pubsub')}
                 icon={<Radio className="h-5 w-5" />}
+                onRefresh={() => pubsubQuery.refetch()}
+                isRefreshing={pubsubQuery.isFetching}
             />
         </div>
 
         {/* CONTENT AREA */}
         <main className="flex-1 border-t border-slate-800/50 pt-6 pb-6 pr-6 overflow-hidden">
-            {activeTab === 'store' && <StoreView data={data.brokers.store} />}
-            {activeTab === 'queue' && (
+            {activeTab === 'store' && storeQuery.data && <StoreView data={storeQuery.data} />}
+            {activeTab === 'queue' && queueQuery.data && (
                 <div className="h-full space-y-4 overflow-auto">
-                    <QueueList data={data.brokers.queue} />
+                    <QueueList data={queueQuery.data} />
                 </div>
             )}
-            {activeTab === 'stream' && (
+            {activeTab === 'stream' && streamQuery.data && (
                 <div className="h-full space-y-4 overflow-auto">
-                    <StreamView data={data.brokers.stream} />
+                    <StreamView data={streamQuery.data} />
                 </div>
             )}
-            {activeTab === 'pubsub' && (
+            {activeTab === 'pubsub' && pubsubQuery.data && (
                 <div className="h-full space-y-4 overflow-auto">
-                    <PubSubView data={data.brokers.pubsub} />
+                    <PubSubView data={pubsubQuery.data} />
                 </div>
             )}
         </main>
@@ -122,41 +156,60 @@ function Dashboard() {
   )
 }
 
-function NavCard({ label, desc, active, onClick, icon }: any) {
+function NavCard({ label, desc, active, onClick, icon, onRefresh, isRefreshing }: any) {
     return (
-        <button 
+        <div
             onClick={onClick}
             className={`
-                group relative flex items-center gap-4 px-6 rounded-sm border transition-all duration-200 h-20 w-full
-                ${active 
-                    ? 'bg-slate-800 border-slate-600 shadow-md' 
-                    : 'bg-slate-900/40 border-slate-800 hover:bg-slate-800/40 hover:border-slate-700'
-                }
+                group relative flex items-center h-20 w-full rounded-sm border transition-all duration-200 cursor-pointer overflow-hidden
+                ${active
+                ? 'bg-slate-800 border-slate-600 shadow-md'
+                : 'bg-slate-900/40 border-slate-800 hover:bg-slate-800/40 hover:border-slate-700'
+            }
             `}
         >
-            {/* ICONA A SINISTRA (OVALE) */}
-            <div className={`
-                p-2.5 rounded-full transition-colors shrink-0
-                ${active ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-900 text-slate-600 group-hover:text-slate-500'}
-            `}>
-                {icon}
-            </div>
-            
-            {/* TESTO A DESTRA (allineato a sinistra) */}
-            <div className="flex flex-col items-start text-left min-w-0">
-                <span className={`text-base font-mono font-bold tracking-tight leading-tight ${active ? 'text-white' : 'text-slate-400'}`}>
-                    {label}
-                </span>
-                <span className="text-[10px] font-mono text-slate-600 uppercase tracking-wider truncate w-full">
-                    {desc}
-                </span>
+            {/* CONTENT AREA */}
+            <div className="flex flex-1 items-center gap-4 px-6 h-full">
+                <div className={`
+                    p-2.5 rounded-full transition-colors shrink-0
+                    ${active ? 'bg-indigo-500/10 text-indigo-400' : 'bg-slate-900 text-slate-600 group-hover:text-slate-500'}
+                `}>
+                    {icon}
+                </div>
+
+                <div className="flex flex-col items-start text-left min-w-0">
+                    <span className={`text-base font-mono font-bold tracking-tight leading-tight ${active ? 'text-white' : 'text-slate-400'}`}>
+                        {label}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-600 uppercase tracking-wider truncate">
+                        {desc}
+                    </span>
+                </div>
             </div>
 
-            {/* Active Indicator (Barra inferiore centrata) */}
+            {/* REFRESH STRIP (Vertical button) */}
+            <button
+                onClick={(e) => {
+                    e.stopPropagation()
+                    onRefresh()
+                }}
+                disabled={isRefreshing}
+                className={`
+                    h-full w-12 flex items-center justify-center border-l transition-colors outline-none
+                    ${active
+                    ? 'border-slate-700 hover:bg-slate-700 text-slate-400 hover:text-white'
+                    : 'border-slate-800 hover:bg-slate-800 text-slate-600 hover:text-slate-400'
+                }
+                `}
+            >
+                <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            </button>
+
+            {/* Active Indicator */}
             {active && (
-                <div className="absolute bottom-0 left-6 right-6 h-[2px] bg-indigo-500 rounded-b-sm" />
+                <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-indigo-500" />
             )}
-        </button>
+        </div>
     )
 }
 

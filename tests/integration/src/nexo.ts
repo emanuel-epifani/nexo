@@ -15,16 +15,36 @@ export const nexo = await NexoClient.connect({
  * Useful for black-box validation of side effects (e.g. queue size, consumer lag).
  */
 export async function fetchSnapshot() {
-  const host = process.env.SERVER_HOST || 'localhost';
-  // Dashboard is typically on 8080, but we could make it configurable if needed
-  const port = 8080; 
+  const host = process.env.SERVER_HOST;
+  const port = process.env.SERVER_DASHBOARD_PORT;
   
   try {
-    const response = await fetch(`http://${host}:${port}/api/state`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch snapshot: ${response.status} ${response.statusText}`);
+    const [storeRes, queueRes, streamRes, pubsubRes] = await Promise.all([
+      fetch(`http://${host}:${port}/api/store`),
+      fetch(`http://${host}:${port}/api/queue`),
+      fetch(`http://${host}:${port}/api/stream`),
+      fetch(`http://${host}:${port}/api/pubsub`),
+    ]);
+
+    if (!storeRes.ok || !queueRes.ok || !streamRes.ok || !pubsubRes.ok) {
+      throw new Error('Failed to fetch one or more broker snapshots');
     }
-    return await response.json();
+
+    const [store, queue, stream, pubsub] = await Promise.all([
+      storeRes.json(),
+      queueRes.json(),
+      streamRes.json(),
+      pubsubRes.json(),
+    ]);
+
+    return {
+      brokers: {
+        store,
+        queue,
+        stream,
+        pubsub,
+      },
+    };
   } catch (err) {
     console.error("Failed to connect to Dashboard API for snapshot:", err);
     throw err;
