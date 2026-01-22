@@ -133,7 +133,7 @@ function Dashboard() {
         </div>
 
         {/* CONTENT AREA */}
-        <main className="flex-1 border-t border-slate-800/50 pt-6 pb-6 pr-6 overflow-hidden">
+        <main className="flex-1 border-t border-slate-800/50 pt-6 pb-6 overflow-hidden">
             {activeTab === 'store' && storeQuery.data && <StoreView data={storeQuery.data} />}
             {activeTab === 'queue' && queueQuery.data && (
                 <div className="h-full space-y-4 overflow-auto">
