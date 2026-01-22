@@ -15,6 +15,6 @@ pub struct MapStructure {
 #[derive(Serialize)]
 pub struct KeyDetail {
     pub key: String,
-    pub value_preview: String, // Truncated or "[Binary]"
+    pub value: String,
     pub expires_at: Option<String>, // ISO8601
 }

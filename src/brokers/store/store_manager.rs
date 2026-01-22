@@ -69,7 +69,7 @@ impl StoreManager {
                 expiring += 1;
             }
             
-            let value_preview = match &val.value {
+            let value = match &val.value {
                 Value::Kv(KvValue(b)) => {
                     if b.is_empty() {
                         "[Empty]".to_string()
@@ -102,7 +102,7 @@ impl StoreManager {
 
             keys_detail.push(crate::dashboard::models::store::KeyDetail {
                 key: entry.key().clone(),
-                value_preview,
+                value,
                 expires_at: expires_at_str,
             });
         }

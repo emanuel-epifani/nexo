@@ -222,7 +222,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 <div className="flex-1 overflow-y-auto">
                     <div className="p-6">
                         <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
-                            {tryFormatJson(selectedKey.value_preview)}
+                            {tryFormatJson(selectedKey.value)}
                         </pre>
                     </div>
                 </div>
@@ -231,11 +231,11 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/20 text-[10px] text-slate-500 flex justify-between font-mono uppercase">
                     <div className="flex items-center gap-2">
                         <Binary className="h-3 w-3" />
-                        <span>SIZE: {new Blob([selectedKey.value_preview]).size} BYTES</span>
+                        <span>SIZE: {new Blob([selectedKey.value]).size} BYTES</span>
                     </div>
                     <div className="flex items-center gap-2">
                         <FileJson className="h-3 w-3" />
-                        <span>{selectedKey.value_preview.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
+                        <span>{selectedKey.value.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
                     </div>
                 </div>
             </>

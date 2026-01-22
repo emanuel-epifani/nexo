@@ -10,6 +10,6 @@ export interface MapStructure {
 
 export interface KeyDetail {
   key: string;
-  value_preview: string;
+  value: string;
   expires_at: string | null; // ISO8601
 }

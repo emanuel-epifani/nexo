@@ -88,40 +88,40 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             // STRING type should be plain text
             const textPlain = storeSnapshot.map.keys.find(k => k.key === 'text:plain');
             expect(textPlain).toBeDefined();
-            expect(textPlain.value_preview).toBe('This is plain text');
-            expect(textPlain.value_preview).not.toMatch(/^0x/);
+            expect(textPlain.value).toBe('This is plain text');
+            expect(textPlain.value).not.toMatch(/^0x/);
 
             const textLogo = storeSnapshot.map.keys.find(k => k.key === 'text:logo');
             expect(textLogo).toBeDefined();
-            expect(textLogo.value_preview).toBe('binary-image-data-here'); // STRING type → text
-            expect(textLogo.value_preview).not.toMatch(/^0x/);
+            expect(textLogo.value).toBe('binary-image-data-here'); // STRING type → text
+            expect(textLogo.value).not.toMatch(/^0x/);
 
             // JSON type should be readable text
             const jsonConfig = storeSnapshot.map.keys.find(k => k.key === 'json:config');
             expect(jsonConfig).toBeDefined();
-            expect(jsonConfig.value_preview).toContain('debug');
-            expect(jsonConfig.value_preview).toContain('true');
-            expect(jsonConfig.value_preview).not.toMatch(/^0x/);
+            expect(jsonConfig.value).toContain('debug');
+            expect(jsonConfig.value).toContain('true');
+            expect(jsonConfig.value).not.toMatch(/^0x/);
 
             // RAW type should be hex
             const binaryPdf = storeSnapshot.map.keys.find(k => k.key === 'binary:pdf');
             expect(binaryPdf).toBeDefined();
-            expect(binaryPdf.value_preview).toBe('0x255044462d312e34'); // RAW type → hex
-            expect(binaryPdf.value_preview).toMatch(/^0x/);
+            expect(binaryPdf.value).toBe('0x255044462d312e34'); // RAW type → hex
+            expect(binaryPdf.value).toMatch(/^0x/);
 
             const binaryJson = storeSnapshot.map.keys.find(k => k.key === 'binary:json');
             expect(binaryJson).toBeDefined();
-            expect(binaryJson.value_preview).toBe('0x7b2274657374223a3132337d'); // RAW type → hex
-            expect(binaryJson.value_preview).toMatch(/^0x/);
+            expect(binaryJson.value).toBe('0x7b2274657374223a3132337d'); // RAW type → hex
+            expect(binaryJson.value).toMatch(/^0x/);
 
             const binaryLarge = storeSnapshot.map.keys.find(k => k.key === 'binary:large');
             expect(binaryLarge).toBeDefined();
-            expect(binaryLarge.value_preview).toMatch(/^0x[ff]+$/); // RAW type → hex of 0xFF repeated
-            expect(binaryLarge.value_preview).toMatch(/^0x/);
+            expect(binaryLarge.value).toMatch(/^0x[ff]+$/); // RAW type → hex of 0xFF repeated
+            expect(binaryLarge.value).toMatch(/^0x/);
 
             const binaryEmpty = storeSnapshot.map.keys.find(k => k.key === 'binary:empty');
             expect(binaryEmpty).toBeDefined();
-            expect(binaryEmpty.value_preview).toBe('0x'); // Empty data
+            expect(binaryEmpty.value).toBe('0x'); // Empty data
 
             // ========================================
             // 5. VALIDATE STRUCTURE CHANGES
@@ -141,20 +141,20 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             // Validate regular text data
             const userName = storeSnapshot.map.keys.find(k => k.key === 'user:123:name');
             expect(userName).toBeDefined();
-            expect(userName.value_preview).toBe('Alice Johnson');
-            expect(userName.value_preview).not.toMatch(/^0x/);
+            expect(userName.value).toBe('Alice Johnson');
+            expect(userName.value).not.toMatch(/^0x/);
 
             // Validate JSON cache data
             const cacheKey = storeSnapshot.map.keys.find(k => k.key === 'cache:product:1');
             expect(cacheKey).toBeDefined();
-            expect(cacheKey.value_preview).toContain('Laptop');
-            expect(cacheKey.value_preview).not.toMatch(/^0x/);
+            expect(cacheKey.value).toContain('Laptop');
+            expect(cacheKey.value).not.toMatch(/^0x/);
         });
 
         it('',async() => {
-            // for(let i = 0; i < 1000000; i++) {
-            for(let i = 0; i < 100; i++) {
-                await nexo.store.kv.set(`user:${i}`, `Alice Johnson ${i}`);
+            for(let i = 0; i < 10; i++) {
+            // for(let i = 0; i < 1e9; i++) {
+                await nexo.store.kv.set(`user:${1000000+i}`, ``);
             }
         })
     });
