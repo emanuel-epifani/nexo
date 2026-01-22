@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription } from "@/lib/types"
+import { PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 

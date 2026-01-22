@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { StreamBrokerSnapshot, TopicSummary, PartitionInfo, MessagePreview } from "@/lib/types"
+import { StreamBrokerSnapshot, TopicSummary, PartitionInfo, MessagePreview } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react"
-import { QueueBrokerSnapshot, QueueSummary, MessageSummary } from "@/lib/types"
+import { QueueBrokerSnapshot, QueueSummary, MessageSummary } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -26,7 +26,7 @@ interface Props {
   data: QueueBrokerSnapshot
 }
 
-export function QueueList({ data }: Props) {
+export function QueueView({ data }: Props) {
   const [activeTab, setActiveTab] = useState<'active' | 'dlq'>('active')
   const [filter, setFilter] = useState("")
   const [selectedQueueName, setSelectedQueueName] = useState<string | null>(null)

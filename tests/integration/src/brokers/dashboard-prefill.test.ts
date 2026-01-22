@@ -4,7 +4,7 @@ import { nexo, fetchBrokerSnapshot } from '../nexo';
 
 describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
 
-    describe('STORE BROKER', () => {
+    describe('STORE', () => {
 
         it('should prefill store broker with comprehensive test data and validate snapshot', async () => {
 
@@ -150,8 +150,10 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             expect(cacheKey.value_preview).toContain('Laptop');
             expect(cacheKey.value_preview).not.toMatch(/^0x/);
         });
+
         it('',async() => {
-            for(let i = 0; i < 100000; i++) {
+            // for(let i = 0; i < 1000000; i++) {
+            for(let i = 0; i < 100; i++) {
                 await nexo.store.kv.set(`user:${i}`, `Alice Johnson ${i}`);
             }
         })

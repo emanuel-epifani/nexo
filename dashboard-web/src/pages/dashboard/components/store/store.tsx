@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { StoreBrokerSnapshot, KeyDetail } from "@/lib/types"
+import { StoreBrokerSnapshot, KeyDetail } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -127,7 +127,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         </div>
 
         {/* List Container */}
-        <ScrollArea className="flex-1">
+        <div className="flex-1 overflow-y-auto">
             <div className="p-0">
                 {filteredKeys.map((k: KeyDetail) => (
                     <button
@@ -149,7 +149,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     </div>
                 )}
             </div>
-        </ScrollArea>
+        </div>
         
         {/* Footer Count */}
         <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
@@ -173,12 +173,12 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     </div>
                 </div>
 
-                <div className="flex-1 relative group">
-                     <div className="absolute inset-0 overflow-auto p-6 scrollbar-thin">
+                <div className="flex-1 overflow-y-auto">
+                    <div className="p-6">
                         <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
                             {tryFormatJson(selectedKey.value_preview)}
                         </pre>
-                     </div>
+                    </div>
                 </div>
                 
                  {/* Footer Metadata */}
