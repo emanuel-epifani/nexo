@@ -204,8 +204,9 @@ const Status = { IDLE: 'idle' } as const // Use enum
 - Single responsibility per component
 - Props drilling avoided using Zustand for shared state
 - Custom hooks for reusable logic
+- For component with single props usa direct approach without interfact Props (ex. export function QueueList({ data }: { data: QueueBrokerSnapshot }) { ... })
 
-### Performance (when needed)
+### Performance (only when real needed, not alwsy and complicate code)
 - `React.memo()` for frequently re-rendering components
 - `useMemo()` for expensive calculations
 - `useCallback()` for event handlers passed as props

@@ -150,7 +150,11 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             expect(cacheKey.value_preview).toContain('Laptop');
             expect(cacheKey.value_preview).not.toMatch(/^0x/);
         });
-
+        it('',async() => {
+            for(let i = 0; i < 100000; i++) {
+                await nexo.store.kv.set(`user:${i}`, `Alice Johnson ${i}`);
+            }
+        })
     });
 
     // TODO: Add other brokers tests here

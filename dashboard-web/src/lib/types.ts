@@ -1,101 +1,95 @@
-// --- STREAM BROKER ---
-
-export interface MessagePreview {
-    offset: number;
-    timestamp: string;
-    payload_preview: string;
+export interface SystemSnapshot {
+  brokers: BrokersSnapshot;
 }
 
-export interface PartitionInfo {
-    id: number;
-    messages: MessagePreview[];
-    current_consumers: string[];
-    last_offset: number;
+export interface BrokersSnapshot {
+  store: StoreBrokerSnapshot;
+  queue: QueueBrokerSnapshot;
+  pubsub: PubSubBrokerSnapshot;
+  stream: StreamBrokerSnapshot;
 }
 
-export interface TopicSummary {
-    name: string;
-    partitions: PartitionInfo[];
-}
-
-export interface StreamBrokerSnapshot {
-    total_topics: number;
-    total_active_groups: number;
-    topics: TopicSummary[];
-}
-
-// --- QUEUE BROKER ---
-
-export interface MessageSummary {
-    id: string;
-    payload_preview: string;
-    state: string;
-    priority: number;
-    attempts: number;
-    next_delivery_at: string | null;
+// --- Queue Broker ---
+export interface QueueBrokerSnapshot {
+  queues: QueueSummary[];
 }
 
 export interface QueueSummary {
-    name: string;
-    pending_count: number;
-    inflight_count: number;
-    scheduled_count: number;
-    consumers_waiting: number;
-    messages: MessageSummary[];
+  name: string;
+  pending_count: number;
+  inflight_count: number;
+  scheduled_count: number;
+  consumers_waiting: number;
+  messages: MessageSummary[];
 }
 
-export interface QueueBrokerSnapshot {
-    queues: QueueSummary[];
+export interface MessageSummary {
+  id: string; // UUID
+  payload_preview: string;
+  state: string; // "Pending", "InFlight", "Scheduled"
+  priority: number; // u8
+  attempts: number; // u32
+  next_delivery_at: string | null;
 }
 
-// --- STORE BROKER ---
-
-export interface KeyDetail {
-    key: string;
-    value_preview: string;
-    expires_at: string | null;
+// --- Stream Broker ---
+export interface StreamBrokerSnapshot {
+  total_topics: number;
+  total_active_groups: number;
+  topics: TopicSummary[];
 }
 
-export interface MapStructure {
-    keys: KeyDetail[];
+export interface TopicSummary {
+  name: string;
+  partitions: PartitionInfo[];
 }
 
-export interface StoreBrokerSnapshot {
-    total_keys: number;
-    expiring_keys: number;
-    map: MapStructure;
+export interface PartitionInfo {
+  id: number; // u32
+  messages: MessagePreview[];
+  current_consumers: string[];
+  last_offset: number; // u64
 }
 
-// --- PUB/SUB BROKER ---
+export interface MessagePreview {
+  offset: number; // u64
+  timestamp: string;
+  payload_preview: string;
+}
+
+// --- PubSub Broker ---
+export interface PubSubBrokerSnapshot {
+  active_clients: number;
+  topic_tree: TopicNodeSnapshot;
+  wildcard_subscriptions: WildcardSubscription[];
+}
 
 export interface WildcardSubscription {
-    pattern: string;
-    client_id: string;
+  pattern: string;
+  client_id: string;
 }
 
 export interface TopicNodeSnapshot {
-    name: string;
-    full_path: string;
-    subscribers: number;
-    retained_value: string | null;
-    children: TopicNodeSnapshot[];
+  name: string;
+  full_path: string;
+  subscribers: number;
+  retained_value: string | null;
+  children: TopicNodeSnapshot[];
 }
 
-export interface PubSubBrokerSnapshot {
-    active_clients: number;
-    topic_tree: TopicNodeSnapshot;
-    wildcard_subscriptions: WildcardSubscription[];
+// --- Store Broker ---
+export interface StoreBrokerSnapshot {
+  total_keys: number;
+  expiring_keys: number;
+  map: MapStructure;
 }
 
-// --- SYSTEM ---
-
-export interface BrokersSnapshot {
-    stream: StreamBrokerSnapshot;
-    queue: QueueBrokerSnapshot;
-    store: StoreBrokerSnapshot;
-    pubsub: PubSubBrokerSnapshot;
+export interface MapStructure {
+  keys: KeyDetail[];
 }
 
-export interface SystemSnapshot {
-    brokers: BrokersSnapshot;
+export interface KeyDetail {
+  key: string;
+  value_preview: string;
+  expires_at: string | null; // ISO8601
 }

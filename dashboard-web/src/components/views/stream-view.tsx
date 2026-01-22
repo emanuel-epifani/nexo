@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { StreamBrokerSnapshot } from "@/lib/types"
+import { StreamBrokerSnapshot, TopicSummary, PartitionInfo, MessagePreview } from "@/lib/types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -34,11 +34,11 @@ export function StreamView({ data }: Props) {
   }, [data.topics, selectedTopicName])
 
   const filteredTopics = useMemo(() => {
-      return data.topics.filter(t => t.name.toLowerCase().includes(filter.toLowerCase()))
+      return data.topics.filter((t: TopicSummary) => t.name.toLowerCase().includes(filter.toLowerCase()))
   }, [data.topics, filter])
 
   const selectedTopic = useMemo(() => 
-      data.topics.find(t => t.name === selectedTopicName),
+      data.topics.find((t: TopicSummary) => t.name === selectedTopicName),
   [data.topics, selectedTopicName])
 
   if (data.topics.length === 0) {
@@ -68,7 +68,7 @@ export function StreamView({ data }: Props) {
 
               <ScrollArea className="flex-1">
                   <div className="p-0">
-                      {filteredTopics.map((t) => (
+                      {filteredTopics.map((t: TopicSummary) => (
                           <div
                               key={t.name}
                               onClick={() => setSelectedTopicName(t.name)}
@@ -113,7 +113,7 @@ export function StreamView({ data }: Props) {
                                  <HardDrive className="h-3 w-3 text-slate-500" />
                                  <span className="text-slate-400">OFFSET:</span>
                                  <span className="text-slate-200 font-bold">
-                                    {selectedTopic.partitions.reduce((sum, p) => sum + p.messages.length, 0).toLocaleString()}
+                                    {selectedTopic.partitions.reduce((sum: number, p: PartitionInfo) => sum + p.messages.length, 0).toLocaleString()}
                                 </span>
                              </div>
                          </div>
@@ -128,7 +128,7 @@ export function StreamView({ data }: Props) {
                             </div>
                         ) : (
                             <div className="space-y-6">
-                                {selectedTopic.partitions.map(partition => (
+                                {selectedTopic.partitions.map((partition: PartitionInfo) => (
                                     <div key={partition.id} className="border border-slate-800 rounded bg-slate-900/20 overflow-hidden">
                                         <div className="px-4 py-2 bg-slate-900/50 border-b border-slate-800 flex justify-between items-center">
                                             <div className="flex items-center gap-2">
@@ -151,7 +151,7 @@ export function StreamView({ data }: Props) {
                                                 </TableRow>
                                             </TableHeader>
                                             <TableBody>
-                                                {partition.messages.map((message, idx) => (
+                                                {partition.messages.map((message: MessagePreview, idx: number) => (
                                                     <TableRow key={idx} className="border-slate-800 hover:bg-slate-900/30">
                                                         <TableCell className="font-mono text-[10px] text-slate-400 py-1.5">
                                                             OFFSET: {message.offset}

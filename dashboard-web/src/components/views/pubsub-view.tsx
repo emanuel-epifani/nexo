@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { PubSubBrokerSnapshot, TopicNodeSnapshot } from "@/lib/types"
+import { PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription } from "@/lib/types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -45,11 +45,11 @@ export function PubSubView({ data }: Props) {
                   });
               }
           }
-          node.children.forEach(child => traverse(child, node.name === 'root' ? '' : path));
+          node.children.forEach((child: TopicNodeSnapshot) => traverse(child, node.name === 'root' ? '' : path));
       };
       traverse(data.topic_tree, "");
 
-      const flatWildcards: FlatTopic[] = data.wildcard_subscriptions.map(sub => ({
+      const flatWildcards: FlatTopic[] = data.wildcard_subscriptions.map((sub: WildcardSubscription) => ({
           path: sub.pattern,
           subscribers: 1,
           retained_value: null,

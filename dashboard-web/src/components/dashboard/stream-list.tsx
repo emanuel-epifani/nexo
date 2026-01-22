@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { StreamBrokerSnapshot } from "@/lib/types"
+import { StreamBrokerSnapshot, TopicSummary, PartitionInfo } from "@/lib/types"
 
 interface Props {
   data: StreamBrokerSnapshot
@@ -44,13 +44,13 @@ export function StreamList({ data }: Props) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.topics.map((topic) => {
+            {data.topics.map((topic: TopicSummary) => {
               // Calculate total messages across all partitions
-              const totalMessages = topic.partitions.reduce((sum, partition) => sum + partition.messages.length, 0);
+              const totalMessages = topic.partitions.reduce((sum: number, partition: PartitionInfo) => sum + partition.messages.length, 0);
               // Collect all unique consumers across all partitions
               const allConsumers = new Set<string>();
-              topic.partitions.forEach(partition => {
-                partition.current_consumers.forEach(consumer => allConsumers.add(consumer));
+              topic.partitions.forEach((partition: PartitionInfo) => {
+                partition.current_consumers.forEach((consumer: string) => allConsumers.add(consumer));
               });
 
               return (

@@ -98,7 +98,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
 
   // Quick filter logic
   const filteredKeys = useMemo(() => {
-    return data.map.keys.filter(k => 
+    return data.map.keys.filter((k: KeyDetail) => 
         k.key.toLowerCase().includes(filter.toLowerCase())
     )
   }, [data.map.keys, filter])
@@ -129,7 +129,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         {/* List Container */}
         <ScrollArea className="flex-1">
             <div className="p-0">
-                {filteredKeys.map((k) => (
+                {filteredKeys.map((k: KeyDetail) => (
                     <button
                         key={k.key}
                         onClick={() => setSelectedKey(k)}

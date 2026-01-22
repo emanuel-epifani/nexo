@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react"
-import { QueueBrokerSnapshot, QueueSummary } from "@/lib/types"
+import { QueueBrokerSnapshot, QueueSummary, MessageSummary } from "@/lib/types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -44,7 +44,7 @@ export function QueueList({ data }: Props) {
       const active: QueueSummary[] = []
       const dlq: QueueSummary[] = []
 
-      data.queues.forEach(q => {
+      data.queues.forEach((q: QueueSummary) => {
           if (q.name.endsWith('_dlq')) {
               if (q.pending_count > 0 || q.inflight_count > 0 || q.scheduled_count > 0) {
                   dlq.push(q)
@@ -64,14 +64,14 @@ export function QueueList({ data }: Props) {
   }, [currentList, filter])
 
   const selectedQueue = useMemo(() => 
-      data.queues.find(q => q.name === selectedQueueName),
+      data.queues.find((q: QueueSummary) => q.name === selectedQueueName),
   [data.queues, selectedQueueName])
 
   // Filter Messages inside selected queue
   const filteredMessages = useMemo(() => {
       if (!selectedQueue) return []
       if (messageFilter === 'All') return selectedQueue.messages
-      return selectedQueue.messages.filter(m => m.state === messageFilter)
+      return selectedQueue.messages.filter((m: MessageSummary) => m.state === messageFilter)
   }, [selectedQueue, messageFilter])
 
   return (
@@ -178,9 +178,9 @@ export function QueueList({ data }: Props) {
                          {/* MESSAGE FILTERS TABS */}
                          <div className="flex gap-1">
                              <FilterButton label="All" count={selectedQueue.messages.length} active={messageFilter === 'All'} onClick={() => setMessageFilter('All')} />
-                             <FilterButton label="Pending" count={selectedQueue.messages.filter(m => m.state === 'Pending').length} active={messageFilter === 'Pending'} onClick={() => setMessageFilter('Pending')} />
-                             <FilterButton label="InFlight" count={selectedQueue.messages.filter(m => m.state === 'InFlight').length} active={messageFilter === 'InFlight'} onClick={() => setMessageFilter('InFlight')} />
-                             <FilterButton label="Scheduled" count={selectedQueue.messages.filter(m => m.state === 'Scheduled').length} active={messageFilter === 'Scheduled'} onClick={() => setMessageFilter('Scheduled')} />
+                             <FilterButton label="Pending" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'Pending').length} active={messageFilter === 'Pending'} onClick={() => setMessageFilter('Pending')} />
+                             <FilterButton label="InFlight" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'InFlight').length} active={messageFilter === 'InFlight'} onClick={() => setMessageFilter('InFlight')} />
+                             <FilterButton label="Scheduled" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'Scheduled').length} active={messageFilter === 'Scheduled'} onClick={() => setMessageFilter('Scheduled')} />
                          </div>
                      </div>
 
@@ -216,7 +216,7 @@ export function QueueList({ data }: Props) {
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                    {filteredMessages.map(msg => (
+                                    {filteredMessages.map((msg: MessageSummary) => (
                                         <TableRow key={msg.id} className="text-xs border-slate-800 hover:bg-slate-900/50 transition-colors group/row">
                                             <TableCell className="py-2 font-mono text-[10px] text-slate-500 select-all">
                                                 {msg.id}
