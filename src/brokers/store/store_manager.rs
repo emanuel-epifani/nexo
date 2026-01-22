@@ -71,14 +71,18 @@ impl StoreManager {
             
             let value_preview = match &val.value {
                 Value::Kv(KvValue(b)) => {
-                    if let Ok(s) = std::str::from_utf8(b) {
-                        if s.len() > 50 {
-                            format!("{}...", &s[0..50])
-                        } else {
-                            s.to_string()
-                        }
+                    if b.is_empty() {
+                        "[Empty]".to_string()
                     } else {
-                        format!("[Binary {} bytes]", b.len())
+                        let data_type = b[0];  // First byte = DataType (0=RAW, 1=STRING, 2=JSON)
+                        let content = &b[1..]; // Rest = actual data
+                        
+                        match data_type {
+                            0 => format!("0x{}", hex::encode(content)),     // RAW → hex
+                            1 => String::from_utf8_lossy(content).to_string(), // STRING → text
+                            2 => String::from_utf8_lossy(content).to_string(), // JSON → text
+                            _ => format!("[Unknown type: {}] 0x{}", data_type, hex::encode(content)),
+                        }
                     }
                 }
             };
@@ -99,7 +103,6 @@ impl StoreManager {
             keys_detail.push(crate::dashboard::models::store::KeyDetail {
                 key: entry.key().clone(),
                 value_preview,
-                created_at: None,
                 expires_at: expires_at_str,
             });
         }
@@ -107,7 +110,9 @@ impl StoreManager {
         crate::dashboard::models::store::StoreBrokerSnapshot {
             total_keys: self.store.len(),
             expiring_keys: expiring,
-            keys: keys_detail,
+            map: crate::dashboard::models::store::MapStructure {
+                keys: keys_detail,
+            },
         }
     }
 }

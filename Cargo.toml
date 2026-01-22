@@ -18,6 +18,7 @@ axum = "0.8.8"
 rust-embed = "8.9.0"
 mime_guess = "2.0.5"
 hashlink = "0.11.0"
+hex = "0.4"
 
 [profile.release]
 lto = true

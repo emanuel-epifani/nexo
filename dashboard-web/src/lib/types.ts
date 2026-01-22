@@ -53,14 +53,17 @@ export interface QueueBrokerSnapshot {
 export interface KeyDetail {
     key: string;
     value_preview: string;
-    created_at: string | null;
     expires_at: string | null;
+}
+
+export interface MapStructure {
+    keys: KeyDetail[];
 }
 
 export interface StoreBrokerSnapshot {
     total_keys: number;
     expiring_keys: number;
-    keys: KeyDetail[];
+    map: MapStructure;
 }
 
 // --- PUB/SUB BROKER ---

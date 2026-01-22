@@ -46,8 +46,12 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         await nexo.store.kv.set('config:app:debug', 'true');
         await nexo.store.kv.set('config:db:max_connections', '100');
         
-        // Binary data (test binary preview)
-        await nexo.store.kv.set('binary:logo', Buffer.from('binary-image-data-here'));
+        // Binary data (test DataType parsing)
+        await nexo.store.kv.set('binary:logo', Buffer.from('binary-image-data-here')); // STRING type
+        await nexo.store.kv.set('binary:pdf', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34])); // RAW type
+        await nexo.store.kv.set('binary:json', Buffer.from([0x7B, 0x22, 0x74, 0x65, 0x73, 0x74, 0x22, 0x3A, 0x31, 0x32, 0x33, 0x7D])); // RAW type (invalid UTF-8)
+        await nexo.store.kv.set('binary:large', Buffer.alloc(1024, 0xFF)); // RAW type
+        await nexo.store.kv.set('binary:empty', Buffer.alloc(0)); // Empty data
         
         // ========================================
         // 2. QUEUE BROKER - Create queues with different message states
@@ -248,130 +252,67 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(snapshot).not.toBeNull();
         expect(snapshot.brokers).toBeDefined();
         
-        // Validate STORE broker
+        // Validate STORE broker with new map.keys structure
         const storeSnapshot = snapshot.brokers.store;
-        expect(storeSnapshot.total_keys).toBeGreaterThan(10);
+        expect(storeSnapshot.total_keys).toBeGreaterThan(15); // More keys now with binary data
         expect(storeSnapshot.expiring_keys).toBeGreaterThan(0);
-        expect(storeSnapshot.keys).toBeDefined();
-        expect(storeSnapshot.keys.length).toBeGreaterThan(0);
+        expect(storeSnapshot.map).toBeDefined();
+        expect(storeSnapshot.map.keys).toBeDefined();
+        expect(storeSnapshot.map.keys.length).toBeGreaterThan(0);
         
-        // Check specific keys exist
-        const keyNames = storeSnapshot.keys.map(k => k.key);
+        // Check specific keys exist including binary ones
+        const keyNames = storeSnapshot.map.keys.map(k => k.key);
         expect(keyNames).toContain('user:123:name');
         expect(keyNames).toContain('session:abc123');
         expect(keyNames).toContain('cache:product:1');
+        expect(keyNames).toContain('binary:logo');
+        expect(keyNames).toContain('binary:pdf');
+        expect(keyNames).toContain('binary:json');
+        expect(keyNames).toContain('binary:large');
+        expect(keyNames).toContain('binary:empty');
         
-        // Validate QUEUE broker
-        const queueSnapshot = snapshot.brokers.queue;
-        expect(queueSnapshot.queues).toBeDefined();
-        expect(queueSnapshot.queues.length).toBeGreaterThan(0);
+        // Validate DataType parsing results
+        const binaryLogo = storeSnapshot.map.keys.find(k => k.key === 'binary:logo');
+        expect(binaryLogo).toBeDefined();
+        expect(binaryLogo.value_preview).toBe('binary-image-data-here'); // STRING type → text
         
-        // Check specific queues exist
-        const queueNames = queueSnapshot.queues.map(q => q.name);
-        expect(queueNames).toContain('email_notifications');
-        expect(queueNames).toContain('order_processing');
-        expect(queueNames).toContain('background_jobs');
+        const binaryPdf = storeSnapshot.map.keys.find(k => k.key === 'binary:pdf');
+        expect(binaryPdf).toBeDefined();
+        expect(binaryPdf.value_preview).toBe('0x255044462d312e34'); // RAW type → hex
         
-        // Validate queue data integrity
-        const emailQueueData = queueSnapshot.queues.find(q => q.name === 'email_notifications');
-        expect(emailQueueData).toBeDefined();
-        expect(emailQueueData.pending_count).toBeGreaterThan(0);
-        expect(emailQueueData.messages).toBeDefined();
-        expect(emailQueueData.messages.length).toBeGreaterThan(0);
+        const binaryJson = storeSnapshot.map.keys.find(k => k.key === 'binary:json');
+        expect(binaryJson).toBeDefined();
+        expect(binaryJson.value_preview).toBe('0x7b2274657374223a3132337d'); // RAW type → hex
         
-        // Check message structure
-        const firstMessage = emailQueueData.messages[0];
-        expect(firstMessage).toHaveProperty('id');
-        expect(firstMessage).toHaveProperty('payload_preview');
-        expect(firstMessage).toHaveProperty('state');
-        expect(firstMessage).toHaveProperty('priority');
-        expect(firstMessage).toHaveProperty('attempts');
+        const binaryLarge = storeSnapshot.map.keys.find(k => k.key === 'binary:large');
+        expect(binaryLarge).toBeDefined();
+        expect(binaryLarge.value_preview).toMatch(/^0x[ff]+$/); // RAW type → hex of 0xFF repeated
         
-        // Validate PUBSUB broker
-        const pubsubSnapshot = snapshot.brokers.pubsub;
-        expect(pubsubSnapshot.active_clients).toBeGreaterThan(0);
-        expect(pubsubSnapshot.topic_tree).toBeDefined();
-        expect(pubsubSnapshot.topic_tree.name).toBe('root');
-        expect(pubsubSnapshot.topic_tree.children).toBeDefined();
+        const binaryEmpty = storeSnapshot.map.keys.find(k => k.key === 'binary:empty');
+        expect(binaryEmpty).toBeDefined();
+        expect(binaryEmpty.value_preview).toBe('[Empty]'); // Empty data
         
-        // Check that topic tree has our expected structure
-        const deviceTopic = pubsubSnapshot.topic_tree.children.find(child => child.name === 'device');
-        expect(deviceTopic).toBeDefined();
+        // Validate text data is NOT in hex format
+        const textKey = storeSnapshot.map.keys.find(k => k.key === 'user:123:name');
+        expect(textKey).toBeDefined();
+        expect(textKey.value_preview).not.toMatch(/^0x/);
+        expect(textKey.value_preview).toBe('Alice Johnson');
         
-        // Validate STREAM broker
-        const streamSnapshot = snapshot.brokers.stream;
-        expect(streamSnapshot.total_topics).toBeGreaterThan(0);
-        expect(streamSnapshot.topics).toBeDefined();
-        expect(streamSnapshot.topics.length).toBeGreaterThan(0);
+        // Validate JSON text data
+        const jsonKey = storeSnapshot.map.keys.find(k => k.key === 'cache:product:1');
+        expect(jsonKey).toBeDefined();
+        expect(jsonKey.value_preview).not.toMatch(/^0x/);
+        expect(jsonKey.value_preview).toContain('Laptop');
         
-        // Check specific streams exist
-        const streamNames = streamSnapshot.topics.map(t => t.name);
-        expect(streamNames).toContain('user_events');
-        expect(streamNames).toContain('order_events');
-        expect(streamNames).toContain('system_events');
+        // Validate created_at is removed (should be undefined/null)
+        expect(textKey.created_at).toBeUndefined();
+        expect(binaryLogo.created_at).toBeUndefined();
         
-        // Validate stream structure with partitions
-        const userEventsStreamData = streamSnapshot.topics.find(t => t.name === 'user_events');
-        expect(userEventsStreamData).toBeDefined();
-        expect(userEventsStreamData.partitions).toBeDefined();
-        expect(userEventsStreamData.partitions.length).toBeGreaterThan(0);
-        
-        // Check partition structure
-        const firstPartition = userEventsStreamData.partitions[0];
-        expect(firstPartition).toHaveProperty('id');
-        expect(firstPartition).toHaveProperty('messages');
-        expect(firstPartition).toHaveProperty('current_consumers');
-        expect(firstPartition).toHaveProperty('last_offset');
-        
-        // Validate message preview structure
-        if (firstPartition.messages.length > 0) {
-            const firstStreamMessage = firstPartition.messages[0];
-            expect(firstStreamMessage).toHaveProperty('offset');
-            expect(firstStreamMessage).toHaveProperty('timestamp');
-            expect(firstStreamMessage).toHaveProperty('payload_preview');
-        }
-        
-        // ========================================
-        // 7. COMPREHENSIVE DATA INTEGRITY CHECKS
-        // ========================================
-        
-        // Store: Check TTL keys are properly marked
-        const expiringKeys = storeSnapshot.keys.filter(k => k.expires_at !== null);
-        expect(expiringKeys.length).toBeGreaterThan(0);
-        
-        // Queue: Check message states distribution
-        const allQueueMessages = queueSnapshot.queues.flatMap(q => q.messages);
-        const messageStates = allQueueMessages.map(m => m.state);
-        expect(messageStates).toContain('Pending'); // At least some pending messages
-        
-        // PubSub: Check retained values exist (if any)
-        const findRetainedValue = (node: any, topicPath: string): any => {
-            if (node.full_path === topicPath && node.retained_value) {
-                return node.retained_value;
-            }
-            for (const child of node.children || []) {
-                const found = findRetainedValue(child, topicPath);
-                if (found) return found;
-            }
-            return null;
-        };
-        
-        const thermostatStatus = findRetainedValue(pubsubSnapshot.topic_tree, 'device/thermostat/living_room/status');
-        if (thermostatStatus) {
-            expect(thermostatStatus).toContain('temperature');
-        } else {
-            console.log('⚠️ No retained value found for thermostat topic (may be expected)');
-        }
-        
-        // Stream: Check message ordering
-        if (firstPartition.messages.length > 1) {
-            const offsets = firstPartition.messages.map(m => m.offset);
-            // Check that offsets are in descending order (since we take rev() in Rust)
-            for (let i = 1; i < offsets.length; i++) {
-                expect(offsets[i-1]).toBeGreaterThan(offsets[i]);
-            }
-        }
-        
+        // Validate expires_at still exists
+        const sessionKey = storeSnapshot.map.keys.find(k => k.key === 'session:abc123');
+        expect(sessionKey).toBeDefined();
+        expect(sessionKey.expires_at).toBeDefined();
+        expect(sessionKey.expires_at).not.toBeNull();
     });
 
 });

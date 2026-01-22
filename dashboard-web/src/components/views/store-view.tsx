@@ -1,14 +1,11 @@
 import { useState, useMemo } from "react"
 import { StoreBrokerSnapshot, KeyDetail } from "@/lib/types"
 import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
     Database, 
     Search, 
     Clock, 
-    Trash2, 
-    Calendar,
     List,
     Layers,
     FileJson,
@@ -36,7 +33,7 @@ export function StoreView({ data }: Props) {
                   <NavButton 
                       label="MAP"
                       icon={<Database className="h-3.5 w-3.5" />} 
-                      count={data.total_keys}
+                      count={data.map.keys.length}
                       active={activeStructure === 'hashmap'}
                       onClick={() => setActiveStructure('hashmap')}
                   />
@@ -101,10 +98,10 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
 
   // Quick filter logic
   const filteredKeys = useMemo(() => {
-    return data.keys.filter(k => 
+    return data.map.keys.filter(k => 
         k.key.toLowerCase().includes(filter.toLowerCase())
     )
-  }, [data.keys, filter])
+  }, [data.map.keys, filter])
 
   useMemo(() => {
     if (!selectedKey && filteredKeys.length > 0) {
@@ -156,7 +153,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         
         {/* Footer Count */}
         <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
-            {filteredKeys.length} / {data.total_keys} KEYS
+            {filteredKeys.length} / {data.map.keys.length} KEYS
         </div>
       </div>
 
@@ -164,27 +161,16 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
       <div className="flex-1 flex flex-col bg-slate-950/30">
         {selectedKey ? (
             <>
-                <div className="p-4 border-b border-slate-800 flex justify-between items-start bg-slate-900/20">
-                    <div className="space-y-2">
-                        <div className="flex items-center gap-2">
-                            <h2 className="text-sm font-bold text-slate-100">{selectedKey.key}</h2>
-                        </div>
-                        <div className="flex gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
-                            {selectedKey.created_at && (
-                                <span className="flex items-center gap-1.5">
-                                    <Calendar className="h-3 w-3" /> 
-                                    {new Date(selectedKey.created_at).toLocaleTimeString()}
-                                </span>
-                            )}
-                            <span className="flex items-center gap-1.5">
-                                <Clock className="h-3 w-3" /> 
-                                {selectedKey.expires_at ? new Date(selectedKey.expires_at).toLocaleString() : "PERSISTENT"}
-                            </span>
-                        </div>
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/20">
+                    <div className="flex items-center gap-2">
+                        <h2 className="text-sm font-bold text-slate-100">{selectedKey.key}</h2>
                     </div>
-                    <Button variant="ghost" size="icon" className="h-7 w-7 text-rose-500 hover:text-rose-400 hover:bg-rose-950/30 rounded-sm">
-                        <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
+                        <span className="flex items-center gap-1.5">
+                            <Clock className="h-3 w-3" /> 
+                            {selectedKey.expires_at ? new Date(selectedKey.expires_at).toLocaleString() : "PERSISTENT"}
+                        </span>
+                    </div>
                 </div>
 
                 <div className="flex-1 relative group">
@@ -203,7 +189,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     </div>
                     <div className="flex items-center gap-2">
                         <FileJson className="h-3 w-3" />
-                        <span>UTF-8 TEXT</span>
+                        <span>{selectedKey.value_preview.startsWith('[Binary ') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
                     </div>
                 </div>
             </>
