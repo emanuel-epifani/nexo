@@ -68,7 +68,7 @@ export function PubSubView({ data }: Props) {
   [selectedPath, topics, wildcards]);
 
   return (
-      <div className="flex h-[calc(100vh-280px)] gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+      <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
           
           {/* SIDEBAR */}
           <div className="w-[400px] flex flex-col border-r border-slate-800 bg-slate-950/50">

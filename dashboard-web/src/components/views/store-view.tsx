@@ -25,7 +25,7 @@ export function StoreView({ data }: Props) {
   const [activeStructure, setActiveStructure] = useState<StructureType>('hashmap')
 
   return (
-      <div className="flex h-[calc(100vh-280px)] gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+      <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
           
           {/* SIDEBAR: Navigation */}
           <div className="w-48 flex flex-col border-r border-slate-800 bg-slate-950/50">
@@ -34,7 +34,7 @@ export function StoreView({ data }: Props) {
               </div>
               <div className="p-2 space-y-0.5">
                   <NavButton 
-                      label="HASH_MAP" 
+                      label="MAP"
                       icon={<Database className="h-3.5 w-3.5" />} 
                       count={data.total_keys}
                       active={activeStructure === 'hashmap'}
