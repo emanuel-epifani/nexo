@@ -50,3 +50,26 @@ export async function fetchSnapshot() {
     throw err;
   }
 }
+
+/**
+ * 📸 Single Broker Snapshot Helper
+ * Fetches a single broker's snapshot via the HTTP Dashboard API.
+ * Useful for testing individual brokers in isolation.
+ */
+export async function fetchBrokerSnapshot(brokerPath: string) {
+  const host = process.env.SERVER_HOST;
+  const port = process.env.SERVER_DASHBOARD_PORT;
+  
+  try {
+    const response = await fetch(`http://${host}:${port}${brokerPath}`);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch broker snapshot: ${brokerPath}`);
+    }
+    
+    return await response.json();
+  } catch (err) {
+    console.error(`Failed to connect to Dashboard API for broker ${brokerPath}:`, err);
+    throw err;
+  }
+}

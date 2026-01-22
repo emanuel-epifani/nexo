@@ -189,7 +189,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     </div>
                     <div className="flex items-center gap-2">
                         <FileJson className="h-3 w-3" />
-                        <span>{selectedKey.value_preview.startsWith('[Binary ') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
+                        <span>{selectedKey.value_preview.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
                     </div>
                 </div>
             </>
