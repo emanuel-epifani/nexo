@@ -1,7 +1,7 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef } from "react"
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { StoreBrokerSnapshot, KeyDetail } from "./types"
 import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
     Database, 
     Search, 
@@ -95,6 +95,7 @@ function NavButton({ label, icon, count, active, onClick, disabled }: any) {
 function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structure: StructureType }) {
   const [filter, setFilter] = useState("")
   const [selectedKey, setSelectedKey] = useState<KeyDetail | null>(null)
+  const parentRef = useRef<HTMLDivElement>(null)
 
   // Quick filter logic
   const filteredKeys = useMemo(() => {
@@ -102,6 +103,13 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         k.key.toLowerCase().includes(filter.toLowerCase())
     )
   }, [data.map.keys, filter])
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredKeys.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 33, // Approximate row height (px-4 py-2 text-xs border-b)
+    overscan: 5,
+  })
 
   useMemo(() => {
     if (!selectedKey && filteredKeys.length > 0) {
@@ -127,28 +135,46 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         </div>
 
         {/* List Container */}
-        <div className="flex-1 overflow-y-auto">
-            <div className="p-0">
-                {filteredKeys.map((k: KeyDetail) => (
-                    <button
-                        key={k.key}
-                        onClick={() => setSelectedKey(k)}
-                        className={`w-full text-left px-4 py-2 text-xs border-b border-slate-800/50 transition-colors truncate font-mono ${
-                            selectedKey?.key === k.key 
-                            ? "bg-slate-800 text-white" 
-                            : "hover:bg-slate-900/50 text-slate-400 hover:text-slate-200"
-                        }`}
-                    >
-                        {k.key}
-                    </button>
-                ))}
-                {filteredKeys.length === 0 && (
-                        <div className="flex flex-col items-center justify-center py-12 text-center px-4">
-                        <Search className="h-6 w-6 text-slate-800 mb-3" />
-                        <p className="text-xs text-slate-600">NO_MATCHES</p>
-                    </div>
-                )}
-            </div>
+        <div ref={parentRef} className="flex-1 overflow-y-auto w-full contain-strict">
+            {filteredKeys.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                    <Search className="h-6 w-6 text-slate-800 mb-3" />
+                    <p className="text-xs text-slate-600">NO_MATCHES</p>
+                </div>
+            ) : (
+                <div
+                    style={{
+                        height: `${rowVirtualizer.getTotalSize()}px`,
+                        width: '100%',
+                        position: 'relative',
+                    }}
+                >
+                    {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                        const k = filteredKeys[virtualRow.index]
+                        return (
+                            <button
+                                key={k.key}
+                                onClick={() => setSelectedKey(k)}
+                                style={{
+                                    position: 'absolute',
+                                    top: 0,
+                                    left: 0,
+                                    width: '100%',
+                                    height: `${virtualRow.size}px`,
+                                    transform: `translateY(${virtualRow.start}px)`,
+                                }}
+                                className={`text-left px-4 py-2 text-xs border-b border-slate-800/50 transition-colors truncate font-mono ${
+                                    selectedKey?.key === k.key 
+                                    ? "bg-slate-800 text-white" 
+                                    : "hover:bg-slate-900/50 text-slate-400 hover:text-slate-200"
+                                }`}
+                            >
+                                {k.key}
+                            </button>
+                        )
+                    })}
+                </div>
+            )}
         </div>
         
         {/* Footer Count */}
