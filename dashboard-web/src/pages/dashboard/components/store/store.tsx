@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { StoreBrokerSnapshot, KeyDetail } from "./types"
 import { Input } from "@/components/ui/input"
@@ -93,15 +93,30 @@ function NavButton({ label, icon, count, active, onClick, disabled }: any) {
 }
 
 function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structure: StructureType }) {
+  const [inputValue, setInputValue] = useState("")
   const [filter, setFilter] = useState("")
   const [selectedKey, setSelectedKey] = useState<KeyDetail | null>(null)
   const parentRef = useRef<HTMLDivElement>(null)
 
-  // Quick filter logic
+  useEffect(() => {
+    const timer = setTimeout(() => setFilter(inputValue), 300)
+    return () => clearTimeout(timer)
+  }, [inputValue])
+
+  // Quick filter logic with early exit at 1000 results
+  const FILTER_LIMIT = 1000
   const filteredKeys = useMemo(() => {
-    return data.map.keys.filter((k: KeyDetail) => 
-        k.key.toLowerCase().includes(filter.toLowerCase())
-    )
+    const lowerFilter = filter.toLowerCase()
+    const result: KeyDetail[] = []
+    
+    for (const k of data.map.keys) {
+      if (k.key.toLowerCase().includes(lowerFilter)) {
+        result.push(k)
+        if (result.length >= FILTER_LIMIT) break
+      }
+    }
+    
+    return result
   }, [data.map.keys, filter])
 
   const rowVirtualizer = useVirtualizer({
@@ -111,7 +126,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
     overscan: 5,
   })
 
-  useMemo(() => {
+  useEffect(() => {
     if (!selectedKey && filteredKeys.length > 0) {
         setSelectedKey(filteredKeys[0])
     }
@@ -127,8 +142,8 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
                 <Input 
                     placeholder={`FILTER ${structure.toUpperCase()}...`}
-                    value={filter}
-                    onChange={(e) => setFilter(e.target.value)}
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
                     className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700 focus-visible:border-slate-700"
                 />
             </div>
@@ -179,7 +194,12 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         
         {/* Footer Count */}
         <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
-            {filteredKeys.length} / {data.map.keys.length} KEYS
+            {filter === "" 
+              ? `${data.map.keys.length} KEYS`
+              : filteredKeys.length >= FILTER_LIMIT 
+                ? `${FILTER_LIMIT}+ MATCHES / ${data.map.keys.length} KEYS`
+                : `${filteredKeys.length} / ${data.map.keys.length} KEYS`
+            }
         </div>
       </div>
 
