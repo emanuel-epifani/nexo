@@ -7,13 +7,6 @@ import { NexoPubSub, NexoTopic } from './brokers/pubsub';
 import { NexoStream } from './brokers/stream';
 import { FrameCodec } from './codec';
 
-export * from './protocol';
-export * from './connection';
-export * from './brokers/store';
-export * from './brokers/queue';
-export * from './brokers/pubsub';
-export * from './brokers/stream';
-
 export class NexoClient {
   private conn: NexoConnection;
   private queues = new Map<string, NexoQueue<any>>();

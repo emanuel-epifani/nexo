@@ -3,6 +3,7 @@ import { logger } from './utils/logger';
 import { FrameType, ResponseStatus, Opcode, NexoOptions } from './protocol';
 import { Cursor, FrameCodec } from './codec';
 
+/** @internal */
 export class NexoConnection {
   private socket: net.Socket;
   public isConnected = false;
@@ -12,7 +13,6 @@ export class NexoConnection {
   
   public onPush?: (topic: string, data: any) => void;
 
-  // Simple Buffering
   private buffer: Buffer = Buffer.alloc(0);
 
   constructor(private host: string, private port: number, options: NexoOptions = {}) {
@@ -33,7 +33,7 @@ export class NexoConnection {
 
   private setupListeners() {
     this.socket.on('data', (chunk) => {
-      // 1. Easy Append
+      // TODO: value if implement ringbuffer/prealloc
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.processBuffer();
     });
@@ -110,6 +110,7 @@ export class NexoConnection {
     return new Promise((resolve, reject) => {
       // 1. Setup Timeout
       const timer = setTimeout(() => {
+        //TODO: value if change with just one global timeout
         this.pending.delete(id);
         reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
       }, this.requestTimeoutMs);

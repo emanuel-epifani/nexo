@@ -246,7 +246,6 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // Validate structure
         expect(snapshot).toBeDefined();
         expect(snapshot).not.toBeNull();
-        expect(snapshot.uptime_seconds).toBeGreaterThan(0);
         expect(snapshot.brokers).toBeDefined();
         
         // Validate STORE broker
@@ -381,8 +380,6 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         const snapshot = await fetchSnapshot();
         
         // Type validation - these should not throw TypeScript errors
-        const uptime: number = snapshot.uptime_seconds;
-        const serverTime: string = snapshot.server_time;
         const brokers = snapshot.brokers;
         
         // Store broker types

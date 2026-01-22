@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
-import { NexoClient } from "@nexo/client";
-import { BenchmarkProbe } from "../utils/benchmark-misure";
 
 const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
 

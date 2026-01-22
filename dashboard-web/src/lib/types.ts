@@ -94,7 +94,5 @@ export interface BrokersSnapshot {
 }
 
 export interface SystemSnapshot {
-    uptime_seconds: number;
-    server_time: string;
     brokers: BrokersSnapshot;
 }

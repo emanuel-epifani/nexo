@@ -6,8 +6,6 @@ use super::stream::StreamBrokerSnapshot;
 
 #[derive(Serialize)]
 pub struct SystemSnapshot {
-    pub uptime_seconds: u64,
-    pub server_time: String,
     pub brokers: BrokersSnapshot,
 }
 

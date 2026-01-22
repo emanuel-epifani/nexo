@@ -11,12 +11,8 @@ import {
     Database, 
     MessageSquare, 
     Radio, 
-    Activity,
-    RefreshCw,
-    Clock,
-    Terminal
+    Activity
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { SystemSnapshot } from '@/lib/types'
 
 const queryClient = new QueryClient()
@@ -30,13 +26,11 @@ export default function App() {
 }
 
 function Dashboard() {
-  const { data: serverData, isLoading, error, refetch } = useSystemState()
+  const { data: serverData, isLoading, error } = useSystemState()
   const [activeTab, setActiveTab] = useState<'store' | 'queue' | 'stream' | 'pubsub'>('store')
 
   // MOCK DATA for preview
   const mockData: SystemSnapshot = {
-      uptime_seconds: 1234,
-      server_time: new Date().toISOString(),
       brokers: {
           store: { total_keys: 1542, expiring_keys: 120, keys: [] },
           queue: { queues: [{ name: "email_notif", pending_count: 42, inflight_count: 5, scheduled_count: 0, consumers_waiting: 2, messages: [] }] },
@@ -52,7 +46,7 @@ function Dashboard() {
       <div className="flex h-screen items-center justify-center bg-slate-950 font-mono text-sm">
         <div className="flex items-center gap-2 text-slate-400">
             <Loader2 className="h-4 w-4 animate-spin" />
-            <span>CONNECTING_TO_KERNEL...</span>
+            <span>CONNECTING_TO_BROKER...</span>
         </div>
       </div>
     )
@@ -63,51 +57,17 @@ function Dashboard() {
       <div className="flex h-screen flex-col items-center justify-center gap-4 bg-slate-950 text-slate-200">
         <ServerCrash className="h-12 w-12 text-rose-500" />
         <h2 className="text-xl font-mono">CONNECTION_LOST</h2>
-        <Button variant="outline" onClick={() => refetch()} className="border-slate-800 hover:bg-slate-900 font-mono">
-            RETRY_CONNECTION
-        </Button>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-300 font-sans selection:bg-slate-700 selection:text-white">
-        
-      {/* HEADER */}
-      <header className="sticky top-0 z-50 w-full border-b border-slate-800 bg-slate-950/95 backdrop-blur">
-        <div className="max-w-[1600px] mx-auto px-6 h-14 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2 text-slate-100">
-                    <Terminal className="h-5 w-5" />
-                    <span className="font-mono font-bold tracking-tight">NEXO </span>
-                </div>
-                <div className="h-4 w-[1px] bg-slate-800" />
-                <span className="text-xs font-mono text-slate-500">v0.1.0-beta</span>
-            </div>
-
-            <div className="flex items-center gap-6 text-xs font-mono">
-                <div className="flex items-center gap-2 text-slate-400">
-                    <Clock className="h-3.5 w-3.5" />
-                    <span>UPTIME: {formatUptime(data.uptime_seconds)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                    <div className={`h-2 w-2 rounded-full ${serverData ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]' : 'bg-rose-500'}`} />
-                    <span className={serverData ? 'text-emerald-500' : 'text-rose-500'}>
-                        {serverData ? 'SYSTEM_OPERATIONAL' : 'SYSTEM_OFFLINE'}
-                    </span>
-                </div>
-                 <Button variant="ghost" size="sm" onClick={() => refetch()} className="h-8 w-8 p-0 hover:bg-slate-800 text-slate-500 hover:text-slate-300">
-                    <RefreshCw className="h-4 w-4" />
-                </Button>
-            </div>
-        </div>
-      </header>
-      
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-300 font-sans selection:bg-slate-700 selection:text-white">
       {/* MAIN CONTAINER */}
-      <div className="max-w-[1600px] mx-auto p-6 space-y-6">
+      <div className="flex flex-col flex-1 max-w-[1600px] mx-auto w-full px-6 pt-6">
         
         {/* NAVIGATION GRID - HORIZONTAL COMPACT */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <NavCard 
                 label="STORE" 
                 desc="Cache IN MEMORY"
@@ -139,20 +99,20 @@ function Dashboard() {
         </div>
 
         {/* CONTENT AREA */}
-        <main className="min-h-[600px] border-t border-slate-800/50 pt-6">
+        <main className="flex-1 border-t border-slate-800/50 pt-6 pb-6 pr-6 overflow-hidden">
             {activeTab === 'store' && <StoreView data={data.brokers.store} />}
             {activeTab === 'queue' && (
-                <div className="space-y-4">
+                <div className="h-full space-y-4 overflow-auto">
                     <QueueList data={data.brokers.queue} />
                 </div>
             )}
             {activeTab === 'stream' && (
-                <div className="space-y-4">
+                <div className="h-full space-y-4 overflow-auto">
                     <StreamView data={data.brokers.stream} />
                 </div>
             )}
             {activeTab === 'pubsub' && (
-                <div className="space-y-4">
+                <div className="h-full space-y-4 overflow-auto">
                     <PubSubView data={data.brokers.pubsub} />
                 </div>
             )}
@@ -200,9 +160,3 @@ function NavCard({ label, desc, active, onClick, icon }: any) {
     )
 }
 
-function formatUptime(seconds: number): string {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h}h ${m}m ${s}s`;
-}

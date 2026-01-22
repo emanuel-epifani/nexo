@@ -1,5 +1,6 @@
 import { DataType, FrameType, Opcode } from './protocol';
 
+/** @internal */
 export class Cursor {
   constructor(public buf: Buffer, public offset = 0) { }
 
@@ -23,6 +24,7 @@ export class Cursor {
   }
 }
 
+/** @internal */
 export class FrameCodec {
   // --- ENCODERS (Data -> Buffer) ---
 

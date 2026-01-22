@@ -1,3 +1,4 @@
+/** @internal */
 export enum FrameType {
   REQUEST = 0x01,
   RESPONSE = 0x02,
@@ -7,6 +8,7 @@ export enum FrameType {
   PONG = 0x06,
 }
 
+/** @internal */
 export enum ResponseStatus {
   OK = 0x00,
   ERR = 0x01,
@@ -14,6 +16,7 @@ export enum ResponseStatus {
   DATA = 0x03,
 }
 
+/** @internal */
 export enum Opcode {
   DEBUG_ECHO = 0x00,
   // Store KV: 0x02 - 0x05
@@ -39,6 +42,7 @@ export enum Opcode {
   S_COMMIT = 0x34,
 }
 
+/** @internal */
 export enum DataType {
   RAW = 0x00,
   STRING = 0x01,

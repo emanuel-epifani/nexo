@@ -47,8 +47,6 @@ impl NexoEngine {
 
     pub async fn get_global_snapshot(&self) -> SystemSnapshot {
         SystemSnapshot {
-            uptime_seconds: self.start_time.elapsed().as_secs(),
-            server_time: chrono::Local::now().to_rfc3339(),
             brokers: BrokersSnapshot {
                 store: self.store.get_snapshot(),
                 queue: self.queue.get_snapshot().await,
