@@ -22,5 +22,6 @@ pub struct MessageSummary {
     pub state: String, // "Pending", "InFlight", "Scheduled"
     pub priority: u8,
     pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_delivery_at: Option<String>,
 }

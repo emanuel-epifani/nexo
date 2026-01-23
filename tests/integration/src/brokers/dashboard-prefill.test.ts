@@ -148,6 +148,9 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             expect(cacheKey.value).not.toMatch(/^0x/);
         });
 
+        /*
+        di solito qui 1M di key 35secondi e
+         */
         it.skip('',async() => {
             for(let i = 0; i < 1000000; i++) {
             // for(let i = 0; i < 1e9; i++) {

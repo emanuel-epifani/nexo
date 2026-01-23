@@ -300,7 +300,7 @@ impl QueueState {
                         state: "InFlight".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
-                        next_delivery_at: Some(format_time(*expiry)),
+                        next_delivery_at: None,
                     });
                 }
             }

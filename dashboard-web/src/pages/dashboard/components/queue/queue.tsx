@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { QueueBrokerSnapshot, QueueSummary, MessageSummary } from "./types"
+import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -112,7 +112,7 @@ export function QueueView({ data }: Props) {
       } else if (messageState === 'InFlight') {
           return selectedQueue.inflight.find((m: MessageSummary) => m.id === selectedMessageId)
       } else {
-          return selectedQueue.scheduled.find((m: MessageSummary) => m.id === selectedMessageId)
+          return selectedQueue.scheduled.find((m: ScheduledMessageSummary) => m.id === selectedMessageId)
       }
   }, [selectedQueue, selectedMessageId, messageState])
 
@@ -364,6 +364,16 @@ export function QueueView({ data }: Props) {
                               <span className="font-mono text-[13px] text-slate-300">{selectedMessage.id}</span>
                           </div>
                       </div>
+
+                      {/* Delivery Time - Only for Scheduled */}
+                      {messageState === 'Scheduled' && selectedMessage && 'next_delivery_at' in selectedMessage && (
+                          <div className="p-3 border-b border-slate-800 bg-slate-900/20">
+                              <h3 className="text-[10px] font-bold uppercase text-slate-400 mb-2">DELIVERY AT</h3>
+                              <div className="bg-slate-900/50 p-2 rounded border border-slate-800">
+                                  <span className="font-mono text-[11px] text-slate-300">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
+                              </div>
+                          </div>
+                      )}
 
                       {/* Payload - Full Space */}
                       <div className="flex-1 flex flex-col min-h-0 p-3">

@@ -7,7 +7,7 @@ export interface QueueSummary {
   name: string;
   pending: MessageSummary[];
   inflight: MessageSummary[];
-  scheduled: MessageSummary[];
+  scheduled: ScheduledMessageSummary[];
 }
 
 export interface MessageSummary {
@@ -16,5 +16,8 @@ export interface MessageSummary {
   state: string; // "Pending", "InFlight", "Scheduled"
   priority: number; // u8
   attempts: number; // u32
-  next_delivery_at: string | null;
+}
+
+export interface ScheduledMessageSummary extends MessageSummary {
+  next_delivery_at: string;
 }
