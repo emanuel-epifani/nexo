@@ -19,14 +19,14 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         await nexo.store.kv.set('user:456:email', 'bob@example.com');
 
         // Session keys with TTL
-        await nexo.store.kv.set('session:abc123', JSON.stringify({ user_id: 123, active: true }), 3600);
-        await nexo.store.kv.set('session:def456', JSON.stringify({ user_id: 456, active: false }), 7200);
-        await nexo.store.kv.set('session:temp789', JSON.stringify({ temp: true }), 10); // Short TTL for testing
+        await nexo.store.kv.set('session:abc123', { user_id: 123, active: true }, 3600);
+        await nexo.store.kv.set('session:def456', { user_id: 456, active: false }, 7200);
+        await nexo.store.kv.set('session:temp789', { temp: true }, 10); // Short TTL for testing
 
         // Cache keys
-        await nexo.store.kv.set('cache:product:1', JSON.stringify({ id: 1, name: 'Laptop', price: 999 }));
-        await nexo.store.kv.set('cache:product:2', JSON.stringify({ id: 2, name: 'Mouse', price: 29 }));
-        await nexo.store.kv.set('cache:stats:daily', JSON.stringify({ users: 1500, orders: 450 }));
+        await nexo.store.kv.set('cache:product:1', { id: 1, name: 'Laptop', price: 999 });
+        await nexo.store.kv.set('cache:product:2', { id: 2, name: 'Mouse', price: 29 });
+        await nexo.store.kv.set('cache:stats:daily', { users: 1500, orders: 450 });
 
         // Configuration keys
         await nexo.store.kv.set('config:app:version', '1.2.3');
@@ -36,7 +36,7 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // Test different DataType behaviors
         await nexo.store.kv.set('text:plain', 'This is plain text'); // STRING type
         await nexo.store.kv.set('text:logo', 'binary-image-data-here'); // STRING type (text)
-        await nexo.store.kv.set('json:config', JSON.stringify({ debug: true, version: '1.0' })); // JSON type
+        await nexo.store.kv.set('json:config', { debug: true, version: '1.0' }); // JSON type
 
         // Binary data (RAW type - will be shown as hex)
         await nexo.store.kv.set('binary:pdf', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34])); // RAW type
@@ -344,19 +344,19 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         await nexo.pubsub('garden/temperature').subscribe(() => {});
         
         // Publish messages with retained flags
-        await nexo.pubsub('home/kitchen/temperature').publish(JSON.stringify({ value: 22.5, unit: 'celsius' }), { retain: true });
-        await nexo.pubsub('home/kitchen/humidity').publish(JSON.stringify({ value: 65, unit: 'percent' }), { retain: true });
-        await nexo.pubsub('home/livingroom/light').publish(JSON.stringify({ status: 'on', brightness: 80 }), { retain: true });
+        await nexo.pubsub('home/kitchen/temperature').publish({ value: 22.5, unit: 'celsius' }, { retain: true });
+        await nexo.pubsub('home/kitchen/humidity').publish({ value: 65, unit: 'percent' }, { retain: true });
+        await nexo.pubsub('home/livingroom/light').publish({ status: 'on', brightness: 80 }, { retain: true });
         
-        await nexo.pubsub('office/desk/monitor').publish(JSON.stringify({ brand: 'Dell', model: 'U2720Q' }), { retain: true });
-        await nexo.pubsub('office/desk/keyboard').publish(JSON.stringify({ type: 'mechanical', backlight: true }), { retain: false });
+        await nexo.pubsub('office/desk/monitor').publish({ brand: 'Dell', model: 'U2720Q' }, { retain: true });
+        await nexo.pubsub('office/desk/keyboard').publish({ type: 'mechanical', backlight: true }, { retain: false });
         
-        await nexo.pubsub('garden/soil/moisture').publish(JSON.stringify({ value: 45, unit: 'percent' }), { retain: true });
-        await nexo.pubsub('garden/temperature').publish(JSON.stringify({ value: 18.2, unit: 'celsius' }), { retain: true });
+        await nexo.pubsub('garden/soil/moisture').publish({ value: 45, unit: 'percent' }, { retain: true });
+        await nexo.pubsub('garden/temperature').publish({ value: 18.2, unit: 'celsius' }, { retain: true });
         
         // Publish some non-retained messages (should not appear in snapshot)
-        await nexo.pubsub('home/kitchen/temperature').publish(JSON.stringify({ value: 23.0, unit: 'celsius' }), { retain: false });
-        await nexo.pubsub('garden/water/pump').publish(JSON.stringify({ status: 'active' }), { retain: false });
+        await nexo.pubsub('home/kitchen/temperature').publish({ value: 23.0, unit: 'celsius' }, { retain: false });
+        await nexo.pubsub('garden/water/pump').publish({ status: 'active' }, { retain: false });
 
         // ========================================
         // 2. WAIT FOR DATA PROPAGATION
