@@ -22,7 +22,7 @@ interface Props {
 interface FlatTopic {
     path: string;
     subscribers: number;
-    retained_value: string | null;
+    retained_value: any | null;
     is_wildcard: boolean;
     client_id?: string;
 }
@@ -120,7 +120,7 @@ export function PubSubView({ data }: Props) {
                          <div className="flex-1 relative group">
                              <div className="absolute inset-0 overflow-auto p-6 scrollbar-thin">
                                 <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
-                                    {tryFormatJson(selectedItem.retained_value)}
+                                    {JSON.stringify(selectedItem.retained_value, null, 2)}
                                 </pre>
                              </div>
                          </div>
@@ -135,7 +135,7 @@ export function PubSubView({ data }: Props) {
                         <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/20 text-[10px] text-slate-500 flex justify-between font-mono uppercase">
                             <div className="flex items-center gap-2">
                                 <Binary className="h-3 w-3" />
-                                <span>SIZE: {new Blob([selectedItem.retained_value]).size} BYTES</span>
+                                <span>SIZE: {new Blob([JSON.stringify(selectedItem.retained_value)]).size} BYTES</span>
                             </div>
                             <div className="flex items-center gap-2">
                                 <FileJson className="h-3 w-3" />
@@ -230,13 +230,4 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             </ScrollArea>
         </div>
     )
-}
-
-function tryFormatJson(str: string) {
-    try {
-        if (str.startsWith("{") || str.startsWith("[")) {
-            return JSON.stringify(JSON.parse(str), null, 2)
-        }
-    } catch (e) {}
-    return str
 }

@@ -12,5 +12,5 @@ export interface WildcardSubscription {
 export interface TopicSnapshot {
   full_path: string;
   subscribers: number;
-  retained_value: string | null;
+  retained_value: any | null;
 }

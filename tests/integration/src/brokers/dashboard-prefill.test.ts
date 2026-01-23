@@ -343,13 +343,18 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         await nexo.pubsub('garden/soil/moisture').subscribe(() => {});
         await nexo.pubsub('garden/temperature').subscribe(() => {});
         
+        // Add some subscribers WITHOUT retained messages (to test frontend handling)
+        await nexo.pubsub('home/bedroom/light').subscribe(() => {}); // Only subscriber, no retained
+        await nexo.pubsub('office/desk/keyboard').subscribe(() => {}); // Only subscriber, no retained
+        await nexo.pubsub('garden/water/pump').subscribe(() => {}); // Only subscriber, no retained
+        
         // Publish messages with retained flags
         await nexo.pubsub('home/kitchen/temperature').publish({ value: 22.5, unit: 'celsius' }, { retain: true });
         await nexo.pubsub('home/kitchen/humidity').publish({ value: 65, unit: 'percent' }, { retain: true });
         await nexo.pubsub('home/livingroom/light').publish({ status: 'on', brightness: 80 }, { retain: true });
         
         await nexo.pubsub('office/desk/monitor').publish({ brand: 'Dell', model: 'U2720Q' }, { retain: true });
-        await nexo.pubsub('office/desk/keyboard').publish({ type: 'mechanical', backlight: true }, { retain: false });
+        await nexo.pubsub('office/desk/keyboard').publish({ type: 'mechanical', backlight: true }, { retain: false }); // Non-retained
         
         await nexo.pubsub('garden/soil/moisture').publish({ value: 45, unit: 'percent' }, { retain: true });
         await nexo.pubsub('garden/temperature').publish({ value: 18.2, unit: 'celsius' }, { retain: true });
@@ -420,65 +425,81 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(kitchenTemp).toBeDefined();
         expect(kitchenTemp.subscribers).toBeGreaterThan(0); // Direct subscription + wildcard
         expect(kitchenTemp.retained_value).not.toBeNull();
-        expect(kitchenTemp.retained_value).toContain('22.5'); // Should have the retained value
+        expect(kitchenTemp.retained_value.value).toBe(22.5); // Should be JSON object with value property
 
         // Kitchen humidity topic
         const kitchenHumidity = allTopics.find((t: any) => t.full_path === 'home/kitchen/humidity');
         expect(kitchenHumidity).toBeDefined();
         expect(kitchenHumidity.subscribers).toBe(1); // only direct subscription
         expect(kitchenHumidity.retained_value).not.toBeNull();
-        expect(kitchenHumidity.retained_value).toContain('65');
+        expect(kitchenHumidity.retained_value.value).toBe(65);
 
         // Living room light topic
         const livingRoomLight = allTopics.find((t: any) => t.full_path === 'home/livingroom/light');
         expect(livingRoomLight).toBeDefined();
         expect(livingRoomLight.subscribers).toBe(1); // only direct subscription
         expect(livingRoomLight.retained_value).not.toBeNull();
-        expect(livingRoomLight.retained_value).toContain('on');
+        expect(livingRoomLight.retained_value.status).toBe('on');
 
         // Office monitor topic
         const officeMonitor = allTopics.find((t: any) => t.full_path === 'office/desk/monitor');
         expect(officeMonitor).toBeDefined();
         expect(officeMonitor.subscribers).toBe(1); // only direct subscription
         expect(officeMonitor.retained_value).not.toBeNull();
-        expect(officeMonitor.retained_value).toContain('Dell');
+        expect(officeMonitor.retained_value.brand).toBe('Dell');
 
         // Garden topics
         const gardenMoisture = allTopics.find((t: any) => t.full_path === 'garden/soil/moisture');
         expect(gardenMoisture).toBeDefined();
         expect(gardenMoisture.subscribers).toBe(1); // only direct subscription
         expect(gardenMoisture.retained_value).not.toBeNull();
-        expect(gardenMoisture.retained_value).toContain('45');
+        expect(gardenMoisture.retained_value.value).toBe(45);
 
         const gardenTemp = allTopics.find((t: any) => t.full_path === 'garden/temperature');
         expect(gardenTemp).toBeDefined();
         expect(gardenTemp.subscribers).toBe(1); // only direct subscription
         expect(gardenTemp.retained_value).not.toBeNull();
-        expect(gardenTemp.retained_value).toContain('18.2');
+        expect(gardenTemp.retained_value.value).toBe(18.2);
 
         // ========================================
-        // 8. VALIDATE TOPICS WITHOUT RETAINED VALUES
+        // 8. VALIDATE TOPICS WITH SUBSCRIBERS BUT NO RETAINED VALUES
         // ========================================
         
-        // Water pump topic should not exist (no retained, no subscribers)
-        const waterPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump');
+        // Topics with subscribers but no retained values should appear
+        const bedroomLight = allTopics.find((t: any) => t.full_path === 'home/bedroom/light');
+        expect(bedroomLight).toBeDefined();
+        expect(bedroomLight.subscribers).toBe(1);
+        expect(bedroomLight.retained_value).toBeNull();
+        
+        const officeKeyboard = allTopics.find((t: any) => t.full_path === 'office/desk/keyboard');
+        expect(officeKeyboard).toBeDefined();
+        expect(officeKeyboard.subscribers).toBe(1);
+        expect(officeKeyboard.retained_value).toBeNull();
+        
+        const gardenPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump');
+        expect(gardenPump).toBeDefined();
+        expect(gardenPump.subscribers).toBe(1);
+        expect(gardenPump.retained_value).toBeNull();
+
+        // ========================================
+        // 9. VALIDATE TOPICS WITHOUT RETAINED VALUES
+        // ========================================
+        
+        // Topics that should not exist (no subscribers, no retained)
+        const waterPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump/nonexistent');
         expect(waterPump).toBeUndefined(); // Should not be in snapshot
 
-        // Office keyboard topic should also not exist (no retained, no subscribers)
-        const officeKeyboard = allTopics.find((t: any) => t.full_path === 'office/desk/keyboard');
-        expect(officeKeyboard).toBeUndefined(); // Should not be in snapshot - this is correct behavior
-
         // ========================================
-        // 9. VALIDATE SUBSCRIBER COUNTS
+        // 10. VALIDATE SUBSCRIBER COUNTS
         // ========================================
         
-        // Total topics with retained values
+        // Total topics with retained values (unchanged)
         const topicsWithRetained = allTopics.filter((t: any) => t.retained_value !== null);
         expect(topicsWithRetained.length).toBe(6); // kitchen temp/humidity, living light, office monitor, garden moisture/temperature
 
-        // Topics with active subscribers
+        // Topics with active subscribers (should include those without retained values)
         const topicsWithSubscribers = allTopics.filter((t: any) => t.subscribers > 0);
-        expect(topicsWithSubscribers.length).toBeGreaterThan(0);
+        expect(topicsWithSubscribers.length).toBeGreaterThan(8); // At least 8 retained + 3 subscribers-only
 
         console.log('✅ PUBSUB snapshot validation completed successfully');
         console.log(`📈 Found ${allTopics.length} total topics`);

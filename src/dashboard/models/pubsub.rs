@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
 
 #[derive(Serialize)]
 pub struct PubSubBrokerSnapshot {
@@ -17,5 +18,5 @@ pub struct WildcardSubscription {
 pub struct TopicSnapshot {
     pub full_path: String,
     pub subscribers: usize,
-    pub retained_value: Option<String>,
+    pub retained_value: Option<Value>,
 }

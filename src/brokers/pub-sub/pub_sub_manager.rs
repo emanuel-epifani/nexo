@@ -266,7 +266,16 @@ impl RootActor {
                 full_path: base_path.to_string(),
                 subscribers: node.subscribers.len(),
                 retained_value: node.retained.as_ref()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+                    .and_then(|bytes| {
+                        // Remove framing byte if present (first byte indicates message type)
+                        let clean_bytes = if bytes.len() > 1 && (bytes[0] == 0x01 || bytes[0] == 0x02) {
+                            &bytes[1..]
+                        } else {
+                            bytes
+                        };
+                        let json_str = String::from_utf8_lossy(clean_bytes);
+                        serde_json::from_str(&json_str).ok()
+                    }),
             });
         }
         
@@ -587,11 +596,17 @@ impl PubSubManager {
     pub async fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
         use crate::dashboard::models::pubsub::{PubSubBrokerSnapshot, WildcardSubscription};
 
+        println!("🔍 DEBUG: Clients in manager: {}", self.clients.len());
+        println!("🔍 DEBUG: Client subscriptions: {}", self.client_subscriptions.len());
+        println!("🔍 DEBUG: Actors: {}", self.actors.len());
+
         let mut wildcards = Vec::new();
         for entry in self.client_subscriptions.iter() {
             let client_id = entry.key().0.clone();
+            println!("🔍 DEBUG: Client {} has {} subscriptions", client_id, entry.value().len());
             for pattern in entry.value().iter() {
                 if pattern.contains('+') || pattern.contains('#') {
+                    println!("🔍 DEBUG: Found wildcard: {} for client {}", pattern, client_id);
                     wildcards.push(WildcardSubscription {
                         pattern: pattern.clone(),
                         client_id: client_id.clone(),
@@ -603,9 +618,11 @@ impl PubSubManager {
         // Build flat topics list by querying each actor
         let mut all_topics = Vec::new();
         for entry in self.actors.iter() {
+            println!("🔍 DEBUG: Querying actor for root: {}", entry.key());
             let (tx, rx) = oneshot::channel();
             if entry.value().send(RootCommand::GetFlatSnapshot { reply: tx }).await.is_ok() {
                 if let Ok(topics) = rx.await {
+                    println!("🔍 DEBUG: Actor {} returned {} topics", entry.key(), topics.len());
                     all_topics.extend(topics);
                 }
             }
