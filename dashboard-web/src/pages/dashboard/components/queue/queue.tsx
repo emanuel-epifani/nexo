@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useRef } from "react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 import { QueueBrokerSnapshot, QueueSummary, MessageSummary } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -29,12 +30,15 @@ export function QueueView({ data }: Props) {
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   
-  // Message Filter State
-  const [messageFilter, setMessageFilter] = useState<'All' | 'Pending' | 'InFlight' | 'Scheduled'>('All')
+  // Message State Filter (which list to show)
+  const [messageState, setMessageState] = useState<'Pending' | 'InFlight' | 'Scheduled'>('Pending')
   
   // Sort State
   const [sortColumn, setSortColumn] = useState<'priority' | 'attempts' | null>(null)
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+  
+  // Virtualization ref
+  const parentRef = useRef<HTMLDivElement>(null)
 
   // Reset selection when switching Main Tabs
   useEffect(() => {
@@ -42,23 +46,12 @@ export function QueueView({ data }: Props) {
       setSelectedMessageId(null)
   }, [activeTab])
 
-  // Split queues into Active vs DLQ
-  const { activeQueues, dlqQueues } = useMemo(() => {
-      const active: QueueSummary[] = []
-      const dlq: QueueSummary[] = []
+  // Filter DLQ queues (only show if they have messages)
+  const dlqQueues = useMemo(() => 
+      data.dlq_queues.filter(q => q.pending.length > 0 || q.inflight.length > 0 || q.scheduled.length > 0),
+  [data.dlq_queues])
 
-      data.queues.forEach((q: QueueSummary) => {
-          if (q.name.endsWith('_dlq')) {
-              if (q.pending_count > 0 || q.inflight_count > 0 || q.scheduled_count > 0) {
-                  dlq.push(q)
-              }
-          } else {
-              active.push(q)
-          }
-      })
-      
-      return { activeQueues: active, dlqQueues: dlq }
-  }, [data.queues])
+  const activeQueues = data.active_queues
 
   const currentList = activeTab === 'active' ? activeQueues : dlqQueues
 
@@ -66,17 +59,20 @@ export function QueueView({ data }: Props) {
       return currentList.filter(q => q.name.toLowerCase().includes(filter.toLowerCase()))
   }, [currentList, filter])
 
-  const selectedQueue = useMemo(() => 
-      data.queues.find((q: QueueSummary) => q.name === selectedQueueName),
-  [data.queues, selectedQueueName])
+  const selectedQueue = useMemo(() => {
+      const allQueues = [...data.active_queues, ...data.dlq_queues]
+      return allQueues.find((q: QueueSummary) => q.name === selectedQueueName)
+  }, [data.active_queues, data.dlq_queues, selectedQueueName])
 
-  // Filter and Sort Messages inside selected queue
+  // Get messages for current state and apply sorting
   const filteredMessages = useMemo(() => {
       if (!selectedQueue) return []
       
-      let messages = messageFilter === 'All' 
-          ? selectedQueue.messages 
-          : selectedQueue.messages.filter((m: MessageSummary) => m.state === messageFilter)
+      let messages = messageState === 'Pending' 
+          ? selectedQueue.pending 
+          : messageState === 'InFlight' 
+          ? selectedQueue.inflight 
+          : selectedQueue.scheduled
       
       // Apply sorting
       if (sortColumn) {
@@ -93,7 +89,7 @@ export function QueueView({ data }: Props) {
       }
       
       return messages
-  }, [selectedQueue, messageFilter, sortColumn, sortDirection])
+  }, [selectedQueue, messageState, sortColumn, sortDirection])
 
   // Handle sort column click
   const handleSortClick = (column: 'priority' | 'attempts') => {
@@ -107,10 +103,18 @@ export function QueueView({ data }: Props) {
       }
   }
 
-  // Get selected message details
-  const selectedMessage = useMemo(() => 
-      selectedQueue?.messages.find((m: MessageSummary) => m.id === selectedMessageId),
-  [selectedQueue, selectedMessageId])
+  // Get selected message details from the appropriate list
+  const selectedMessage = useMemo(() => {
+      if (!selectedQueue) return undefined
+      
+      if (messageState === 'Pending') {
+          return selectedQueue.pending.find((m: MessageSummary) => m.id === selectedMessageId)
+      } else if (messageState === 'InFlight') {
+          return selectedQueue.inflight.find((m: MessageSummary) => m.id === selectedMessageId)
+      } else {
+          return selectedQueue.scheduled.find((m: MessageSummary) => m.id === selectedMessageId)
+      }
+  }, [selectedQueue, selectedMessageId, messageState])
 
   // Copy to clipboard helper
   const copyToClipboard = (text: string, id: string) => {
@@ -121,13 +125,21 @@ export function QueueView({ data }: Props) {
 
   // Parse payload JSON safely
   const parsedPayload = useMemo(() => {
-      if (!selectedMessage?.payload_preview) return null
+      if (!selectedMessage?.payload) return null
       try {
-          return JSON.parse(selectedMessage.payload_preview)
+          return JSON.parse(selectedMessage.payload)
       } catch {
           return null
       }
-  }, [selectedMessage?.payload_preview])
+  }, [selectedMessage?.payload])
+
+  // Virtualization setup
+  const virtualizer = useVirtualizer({
+      count: filteredMessages.length,
+      getScrollElement: () => parentRef.current,
+      estimateSize: () => 36, // h-9 = 36px
+      overscan: 10,
+  })
 
   return (
       <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
@@ -196,9 +208,9 @@ export function QueueView({ data }: Props) {
                                   </div>
 
                                   <div className="flex items-center gap-2">
-                                      {q.pending_count > 0 && (
+                                      {q.pending.length > 0 && (
                                           <Badge variant="outline" className={`h-4 px-1.5 text-[9px] rounded-sm border ${activeTab === 'dlq' ? 'border-rose-900 bg-rose-950/30 text-rose-500' : 'border-amber-900 bg-amber-950/30 text-amber-500'}`}>
-                                              {q.pending_count}
+                                              {q.pending.length}
                                           </Badge>
                                       )}
                                   </div>
@@ -218,23 +230,22 @@ export function QueueView({ data }: Props) {
                          <div className="flex justify-between items-center mb-3">
                              <h2 className={`text-xs font-bold ${activeTab === 'dlq' ? 'text-rose-400' : 'text-slate-100'}`}>{selectedQueue.name}</h2>
                              <div className="flex gap-3">
-                                 <StatBadge label="PENDING" value={selectedQueue.pending_count} color="text-amber-500" />
-                                 <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight_count} color="text-blue-400" />
-                                 <StatBadge label="SCHEDULED" value={selectedQueue.scheduled_count} color="text-slate-400" />
+                                 <StatBadge label="PENDING" value={selectedQueue.pending.length} color="text-amber-500" />
+                                 <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight.length} color="text-blue-400" />
+                                 <StatBadge label="SCHEDULED" value={selectedQueue.scheduled.length} color="text-slate-400" />
                              </div>
                          </div>
 
-                         {/* MESSAGE FILTERS TABS */}
+                         {/* MESSAGE STATE TABS */}
                          <div className="flex gap-1">
-                             <FilterButton label="All" count={selectedQueue.messages.length} active={messageFilter === 'All'} onClick={() => setMessageFilter('All')} />
-                             <FilterButton label="Pending" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'Pending').length} active={messageFilter === 'Pending'} onClick={() => setMessageFilter('Pending')} />
-                             <FilterButton label="InFlight" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'InFlight').length} active={messageFilter === 'InFlight'} onClick={() => setMessageFilter('InFlight')} />
-                             <FilterButton label="Scheduled" count={selectedQueue.messages.filter((m: MessageSummary) => m.state === 'Scheduled').length} active={messageFilter === 'Scheduled'} onClick={() => setMessageFilter('Scheduled')} />
+                             <FilterButton label="Pending" count={selectedQueue.pending.length} active={messageState === 'Pending'} onClick={() => setMessageState('Pending')} />
+                             <FilterButton label="InFlight" count={selectedQueue.inflight.length} active={messageState === 'InFlight'} onClick={() => setMessageState('InFlight')} />
+                             <FilterButton label="Scheduled" count={selectedQueue.scheduled.length} active={messageState === 'Scheduled'} onClick={() => setMessageState('Scheduled')} />
                          </div>
                      </div>
 
-                     {/* Messages Table */}
-                     <ScrollArea className="flex-1">
+                     {/* Messages Table - Virtualized */}
+                     <div ref={parentRef} className="flex-1 overflow-y-auto">
                         {filteredMessages.length === 0 ? (
                             <div className="h-full flex flex-col items-center justify-center text-slate-700">
                                 <Box className="h-12 w-12 opacity-20 mb-4" />
@@ -243,7 +254,7 @@ export function QueueView({ data }: Props) {
                         ) : (
                             <div className="p-0">
                                 {/* Table Header */}
-                                <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-[9px] font-bold uppercase text-slate-500">
+                                <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-[9px] font-bold uppercase text-slate-500 z-10">
                                     <div>ID</div>
                                     <div className="text-center">Status</div>
                                     <button 
@@ -272,33 +283,55 @@ export function QueueView({ data }: Props) {
                                     </button>
                                 </div>
 
-                                {/* Table Rows */}
-                                {filteredMessages.map((msg: MessageSummary) => (
-                                    <div
-                                        key={msg.id}
-                                        onClick={() => setSelectedMessageId(msg.id)}
-                                        className={`
-                                            grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all items-center
-                                            ${selectedMessageId === msg.id ? 'bg-slate-800' : 'hover:bg-slate-900/50'}
-                                        `}
-                                    >
-                                        <span className={`font-mono text-[9px] truncate ${selectedMessageId === msg.id ? 'text-white font-bold' : 'text-slate-400'}`} title={msg.id}>
-                                            {msg.id}
-                                        </span>
-                                        <div className="flex justify-center">
-                                            <StatusBadgeCompact state={msg.state} />
+                                {/* Virtual List */}
+                                <div style={{
+                                    height: `${virtualizer.getTotalSize()}px`,
+                                    width: '100%',
+                                    position: 'relative',
+                                }}>
+                                    {virtualizer.getVirtualItems().map((virtualItem) => (
+                                        <div
+                                            key={filteredMessages[virtualItem.index].id}
+                                            data-index={virtualItem.index}
+                                            style={{
+                                                position: 'absolute',
+                                                top: 0,
+                                                left: 0,
+                                                width: '100%',
+                                                transform: `translateY(${virtualItem.start}px)`,
+                                            }}
+                                        >
+                                            {(() => {
+                                                const msg = filteredMessages[virtualItem.index]
+                                                return (
+                                                    <div
+                                                        onClick={() => setSelectedMessageId(msg.id)}
+                                                        className={`
+                                                            grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all items-center h-9
+                                                            ${selectedMessageId === msg.id ? 'bg-slate-800' : 'hover:bg-slate-900/50'}
+                                                        `}
+                                                    >
+                                                        <span className={`font-mono text-[11px] truncate ${selectedMessageId === msg.id ? 'text-white font-bold' : 'text-slate-400'}`} title={msg.id}>
+                                                            {msg.id}
+                                                        </span>
+                                                        <div className="flex justify-center">
+                                                            <StatusBadgeCompact state={msg.state} />
+                                                        </div>
+                                                        <div className={`text-center text-[9px] ${msg.priority > 0 ? 'text-amber-500 font-bold' : 'text-slate-600'}`}>
+                                                            {msg.priority}
+                                                        </div>
+                                                        <div className={`text-center text-[9px] ${msg.attempts > 0 ? 'text-rose-400 font-bold' : 'text-slate-600'}`}>
+                                                            {msg.attempts}
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })()}
                                         </div>
-                                        <div className={`text-center text-[9px] ${msg.priority > 0 ? 'text-amber-500 font-bold' : 'text-slate-600'}`}>
-                                            {msg.priority}
-                                        </div>
-                                        <div className={`text-center text-[9px] ${msg.attempts > 0 ? 'text-rose-400 font-bold' : 'text-slate-600'}`}>
-                                            {msg.attempts}
-                                        </div>
-                                    </div>
-                                ))}
+                                    ))}
+                                </div>
                             </div>
                         )}
-                     </ScrollArea>
+                     </div>
                  </div>
              ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
@@ -328,22 +361,22 @@ export function QueueView({ data }: Props) {
                               </button>
                           </div>
                           <div className="bg-slate-900/50 p-2 rounded border border-slate-800 break-all">
-                              <span className="font-mono text-[8px] text-slate-300">{selectedMessage.id}</span>
+                              <span className="font-mono text-[13px] text-slate-300">{selectedMessage.id}</span>
                           </div>
                       </div>
 
                       {/* Payload - Full Space */}
                       <div className="flex-1 flex flex-col min-h-0 p-3">
-                          <h4 className="text-[10px] font-bold uppercase text-slate-400 mb-2 flex-shrink-0">PAYLOAD</h4>
+                          <h4 className="text-[13px] font-bold uppercase text-slate-400 mb-2 flex-shrink-0">PAYLOAD</h4>
                           <ScrollArea className="flex-1 border border-slate-800 rounded bg-slate-900/50">
                               <div className="p-3">
                                   {parsedPayload ? (
-                                      <pre className="font-mono text-[8px] text-slate-300 whitespace-pre-wrap break-words">
+                                      <pre className="font-mono text-[13px] text-slate-300 whitespace-pre-wrap break-words">
                                           {JSON.stringify(parsedPayload, null, 2)}
                                       </pre>
                                   ) : (
-                                      <div className="font-mono text-[8px] text-slate-400 whitespace-pre-wrap break-words">
-                                          {selectedMessage.payload_preview}
+                                      <div className="font-mono text-[13px] text-slate-400 whitespace-pre-wrap break-words">
+                                          {selectedMessage.payload}
                                       </div>
                                   )}
                               </div>
@@ -385,29 +418,6 @@ function FilterButton({ label, count, active, onClick }: any) {
             {label}
             {count > 0 && <span className={`opacity-60 ${active ? 'text-white' : ''}`}>({count})</span>}
         </button>
-    )
-}
-
-function StatusBadge({ state }: { state: string }) {
-    let color = "bg-slate-800 text-slate-400 border-slate-700"
-    let icon = <Clock className="h-3 w-3" />
-
-    if (state === 'InFlight') {
-        color = "bg-blue-950/30 text-blue-400 border-blue-900/50"
-        icon = <RefreshCw className="h-3 w-3 animate-spin duration-[3s]" />
-    } else if (state === 'Pending') {
-        color = "bg-amber-950/30 text-amber-500 border-amber-900/50"
-        icon = <AlertCircle className="h-3 w-3" />
-    } else if (state === 'Scheduled') {
-        color = "bg-slate-800 text-slate-300 border-slate-700"
-        icon = <Clock className="h-3 w-3" />
-    }
-
-    return (
-        <div className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-sm border ${color} w-fit`}>
-            {icon}
-            <span className="text-[9px] uppercase font-bold">{state}</span>
-        </div>
     )
 }
 

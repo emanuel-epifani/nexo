@@ -1,18 +1,18 @@
 export interface QueueBrokerSnapshot {
-  queues: QueueSummary[];
+  active_queues: QueueSummary[];
+  dlq_queues: QueueSummary[];
 }
 
 export interface QueueSummary {
   name: string;
-  pending_count: number;
-  inflight_count: number;
-  scheduled_count: number;
-  messages: MessageSummary[];
+  pending: MessageSummary[];
+  inflight: MessageSummary[];
+  scheduled: MessageSummary[];
 }
 
 export interface MessageSummary {
   id: string; // UUID
-  payload_preview: string;
+  payload: string;
   state: string; // "Pending", "InFlight", "Scheduled"
   priority: number; // u8
   attempts: number; // u32

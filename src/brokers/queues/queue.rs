@@ -270,19 +270,17 @@ impl QueueState {
     }
 
     pub fn get_snapshot(&self, name: &str) -> QueueSummary {
-        let pending_count: usize = self.waiting_for_dispatch.values().map(|q| q.len()).sum();
-        let inflight_count: usize = self.waiting_for_ack.values().map(|v| v.len()).sum();
-        let scheduled_count: usize = self.waiting_for_time.values().map(|v| v.len()).sum();
-
-        let mut messages = Vec::new();
+        let mut pending = Vec::new();
+        let mut inflight = Vec::new();
+        let mut scheduled = Vec::new();
 
         // Pending
         for (priority, queue) in &self.waiting_for_dispatch {
             for id in queue {
                 if let Some(msg) = self.registry.get(id) {
-                    messages.push(MessageSummary {
+                    pending.push(MessageSummary {
                         id: msg.id,
-                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
                         state: "Pending".to_string(),
                         priority: *priority,
                         attempts: msg.attempts,
@@ -296,9 +294,9 @@ impl QueueState {
         for (expiry, list) in &self.waiting_for_ack {
             for id in list {
                 if let Some(msg) = self.registry.get(id) {
-                    messages.push(MessageSummary {
+                    inflight.push(MessageSummary {
                         id: msg.id,
-                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
                         state: "InFlight".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
@@ -312,9 +310,9 @@ impl QueueState {
         for (time, list) in &self.waiting_for_time {
             for id in list {
                 if let Some(msg) = self.registry.get(id) {
-                    messages.push(MessageSummary {
+                    scheduled.push(MessageSummary {
                         id: msg.id,
-                        payload_preview: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
                         state: "Scheduled".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
@@ -326,10 +324,9 @@ impl QueueState {
 
         QueueSummary {
             name: name.to_string(),
-            pending_count,
-            inflight_count,
-            scheduled_count,
-            messages,
+            pending,
+            inflight,
+            scheduled,
         }
     }
 

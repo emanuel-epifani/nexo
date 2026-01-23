@@ -236,16 +236,22 @@ impl QueueManager {
                 }
                 
                 ManagerCommand::GetSnapshot { reply } => {
-                    let mut summaries = Vec::new();
+                    let mut active_queues = Vec::new();
+                    let mut dlq_queues = Vec::new();
+                    
                     for (_, actor_tx) in &actors {
                         let (tx, rx) = oneshot::channel();
                         if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
                             if let Ok(summary) = rx.await {
-                                summaries.push(summary);
+                                if summary.name.ends_with("_dlq") {
+                                    dlq_queues.push(summary);
+                                } else {
+                                    active_queues.push(summary);
+                                }
                             }
                         }
                     }
-                    let _ = reply.send(QueueBrokerSnapshot { queues: summaries });
+                    let _ = reply.send(QueueBrokerSnapshot { active_queues, dlq_queues });
                 }
             }
         }
@@ -333,9 +339,9 @@ impl QueueManager {
     pub async fn get_snapshot(&self) -> QueueBrokerSnapshot {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(ManagerCommand::GetSnapshot { reply: tx }).await.is_ok() {
-            rx.await.unwrap_or(QueueBrokerSnapshot { queues: vec![] })
+            rx.await.unwrap_or(QueueBrokerSnapshot { active_queues: vec![], dlq_queues: vec![] })
         } else {
-            QueueBrokerSnapshot { queues: vec![] }
+            QueueBrokerSnapshot { active_queues: vec![], dlq_queues: vec![] }
         }
     }
 

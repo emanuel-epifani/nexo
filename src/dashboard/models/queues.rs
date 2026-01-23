@@ -3,22 +3,22 @@ use uuid::Uuid;
 
 #[derive(Serialize)]
 pub struct QueueBrokerSnapshot {
-    pub queues: Vec<QueueSummary>,
+    pub active_queues: Vec<QueueSummary>,
+    pub dlq_queues: Vec<QueueSummary>,
 }
 
 #[derive(Serialize)]
 pub struct QueueSummary {
     pub name: String,
-    pub pending_count: usize, 
-    pub inflight_count: usize, 
-    pub scheduled_count: usize, 
-    pub messages: Vec<MessageSummary>, 
+    pub pending: Vec<MessageSummary>,
+    pub inflight: Vec<MessageSummary>,
+    pub scheduled: Vec<MessageSummary>,
 }
 
 #[derive(Serialize)]
 pub struct MessageSummary {
     pub id: Uuid,
-    pub payload_preview: String,
+    pub payload: String,
     pub state: String, // "Pending", "InFlight", "Scheduled"
     pub priority: u8,
     pub attempts: u32,
