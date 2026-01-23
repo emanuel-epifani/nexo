@@ -38,6 +38,10 @@ APPROCCIO ALLO SVILUPPO
 - scriviamo i test vitest in tests/integration/src/brokers (usando l'sdk ts di nexo) coprendo quanti più edge case possibili
 - procediamo eventualmente a refactorizzare broker con stesse funzionalità ma sfruttando più ottimizzazioni possibili e vediamo se test continuano a passare
 
+GENERAL
+- non installare mai dipendenze sensa avermi prima consultati e aver valutato assieme (anzi, laddove possibiel toglierne valutiamo se fattibile. less is more)
+- non fare assunzioni, se qualche pezzo dell'implementazione ha più possibilità e non ho pensato a tutte, non supporre, fermami e chiedi esplicitamente come gestire quella situazione nel codice
+- se facciamo refactor di alcune logiche, non lasciare mai refusi  (ne codice ne commenti) sulla vecchia implementazione
 
 
 PRIORITA' PROGETTO
