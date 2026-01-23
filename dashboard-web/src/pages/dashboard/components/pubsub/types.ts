@@ -1,6 +1,6 @@
 export interface PubSubBrokerSnapshot {
   active_clients: number;
-  topic_tree: TopicNodeSnapshot;
+  topics: TopicSnapshot[];
   wildcard_subscriptions: WildcardSubscription[];
 }
 
@@ -9,10 +9,8 @@ export interface WildcardSubscription {
   client_id: string;
 }
 
-export interface TopicNodeSnapshot {
-  name: string;
+export interface TopicSnapshot {
   full_path: string;
   subscribers: number;
   retained_value: string | null;
-  children: TopicNodeSnapshot[];
 }

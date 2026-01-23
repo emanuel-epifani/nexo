@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react"
-import { PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription } from "./types"
+import { PubSubBrokerSnapshot, WildcardSubscription } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { 
@@ -32,21 +32,14 @@ export function PubSubView({ data }: Props) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   
   const { topics, wildcards } = useMemo(() => {
-      const flatTopics: FlatTopic[] = [];
-      const traverse = (node: TopicNodeSnapshot, currentPath: string) => {
-          const path = currentPath ? `${currentPath}/${node.name}` : node.name;
-          if (node.name !== 'root') {
-              // Show ALL topics, regardless of subscribers or retained value
-              flatTopics.push({
-                  path: node.full_path || path,
-                  subscribers: node.subscribers,
-                  retained_value: node.retained_value,
-                  is_wildcard: false
-              });
-          }
-          node.children.forEach((child: TopicNodeSnapshot) => traverse(child, node.name === 'root' ? '' : path));
-      };
-      traverse(data.topic_tree, "");
+      // Use flat topics directly from backend - no traverse needed!
+      const flatTopics = data.topics.map((topic: any) => ({
+          path: topic.full_path,
+          subscribers: topic.subscribers,
+          retained_value: topic.retained_value,
+          is_wildcard: false,
+          client_id: undefined
+      }));
 
       const flatWildcards: FlatTopic[] = data.wildcard_subscriptions.map((sub: WildcardSubscription) => ({
           path: sub.pattern,

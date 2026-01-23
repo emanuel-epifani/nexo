@@ -3,7 +3,7 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub struct PubSubBrokerSnapshot {
     pub active_clients: usize,
-    pub topic_tree: TopicNodeSnapshot,
+    pub topics: Vec<TopicSnapshot>,
     pub wildcard_subscriptions: Vec<WildcardSubscription>,
 }
 
@@ -14,10 +14,8 @@ pub struct WildcardSubscription {
 }
 
 #[derive(Serialize)]
-pub struct TopicNodeSnapshot {
-    pub name: String,
+pub struct TopicSnapshot {
     pub full_path: String,
     pub subscribers: usize,
     pub retained_value: Option<String>,
-    pub children: Vec<TopicNodeSnapshot>,
 }

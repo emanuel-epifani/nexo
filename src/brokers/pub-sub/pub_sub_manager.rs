@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
 use crate::config::PubSubConfig;
-use crate::dashboard::models::pubsub::TopicNodeSnapshot;
+use crate::dashboard::models::pubsub::TopicSnapshot;
 
 // ==========================================
 // PUBLIC TYPES
@@ -68,8 +68,8 @@ enum RootCommand {
     Disconnect {
         client: ClientId,
     },
-    GetSnapshot {
-        reply: oneshot::Sender<crate::dashboard::models::pubsub::TopicNodeSnapshot>,
+    GetFlatSnapshot {
+        reply: oneshot::Sender<Vec<crate::dashboard::models::pubsub::TopicSnapshot>>,
     },
 }
 
@@ -152,9 +152,9 @@ impl RootActor {
                 RootCommand::Disconnect { client } => {
                     self.disconnect(&client);
                 }
-                RootCommand::GetSnapshot { reply } => {
-                    let snapshot = self.build_snapshot();
-                    let _ = reply.send(snapshot);
+                RootCommand::GetFlatSnapshot { reply } => {
+                    let flat_snapshot = self.build_flat_snapshot();
+                    let _ = reply.send(flat_snapshot);
                 }
             }
         }
@@ -252,61 +252,41 @@ impl RootActor {
         }
     }
 
-    // --- SNAPSHOT ---
-    fn build_snapshot(&self) -> TopicNodeSnapshot {
-        TopicNodeSnapshot {
-            name: self.name.clone(),
-            full_path: self.name.clone(),
-            subscribers: self.tree.subscribers.len(),
-            retained_value: self.tree.retained.as_ref()
-                .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
-            children: self.build_children_snapshots(&self.tree, &self.name),
-        }
+    // --- FLAT SNAPSHOT ---
+    fn build_flat_snapshot(&self) -> Vec<TopicSnapshot> {
+        let mut topics = Vec::new();
+        self.collect_flat_topics(&self.tree, &self.name, &mut topics);
+        topics
     }
 
-    fn build_children_snapshots(&self, node: &Node, base_path: &str) -> Vec<TopicNodeSnapshot> {
-        let mut children = Vec::new();
+    fn collect_flat_topics(&self, node: &Node, base_path: &str, topics: &mut Vec<TopicSnapshot>) {
+        // Include node if it has subscribers or retained value
+        if node.subscribers.len() > 0 || node.retained.is_some() {
+            topics.push(TopicSnapshot {
+                full_path: base_path.to_string(),
+                subscribers: node.subscribers.len(),
+                retained_value: node.retained.as_ref()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+            });
+        }
         
         // Process exact match children
         for (child_name, child_node) in &node.children {
             let full_path = format!("{}/{}", base_path, child_name);
-            children.push(TopicNodeSnapshot {
-                name: child_name.clone(),
-                full_path: full_path.clone(),
-                subscribers: child_node.subscribers.len(),
-                retained_value: child_node.retained.as_ref()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
-                children: self.build_children_snapshots(child_node, &full_path),
-            });
+            self.collect_flat_topics(child_node, &full_path, topics);
         }
         
         // Process wildcard '+' child
         if let Some(plus_node) = &node.plus_child {
             let full_path = format!("{}/+", base_path);
-            children.push(TopicNodeSnapshot {
-                name: "+".to_string(),
-                full_path,
-                subscribers: plus_node.subscribers.len(),
-                retained_value: plus_node.retained.as_ref()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
-                children: self.build_children_snapshots(plus_node, &format!("{}/+", base_path)),
-            });
+            self.collect_flat_topics(plus_node, &full_path, topics);
         }
         
         // Process wildcard '#' child
         if let Some(hash_node) = &node.hash_child {
             let full_path = format!("{}/#", base_path);
-            children.push(TopicNodeSnapshot {
-                name: "#".to_string(),
-                full_path,
-                subscribers: hash_node.subscribers.len(),
-                retained_value: hash_node.retained.as_ref()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
-                children: self.build_children_snapshots(hash_node, &format!("{}/#", base_path)),
-            });
+            self.collect_flat_topics(hash_node, &full_path, topics);
         }
-        
-        children
     }
 
     // --- HELPERS ---
@@ -605,7 +585,7 @@ impl PubSubManager {
 
     /// Get snapshot for dashboard
     pub async fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
-        use crate::dashboard::models::pubsub::{PubSubBrokerSnapshot, TopicNodeSnapshot, WildcardSubscription};
+        use crate::dashboard::models::pubsub::{PubSubBrokerSnapshot, WildcardSubscription};
 
         let mut wildcards = Vec::new();
         for entry in self.client_subscriptions.iter() {
@@ -620,26 +600,20 @@ impl PubSubManager {
             }
         }
 
-        // Build complete tree snapshot by querying each actor
-        let mut children = Vec::new();
+        // Build flat topics list by querying each actor
+        let mut all_topics = Vec::new();
         for entry in self.actors.iter() {
             let (tx, rx) = oneshot::channel();
-            if entry.value().send(RootCommand::GetSnapshot { reply: tx }).await.is_ok() {
-                if let Ok(snapshot) = rx.await {
-                    children.push(snapshot);
+            if entry.value().send(RootCommand::GetFlatSnapshot { reply: tx }).await.is_ok() {
+                if let Ok(topics) = rx.await {
+                    all_topics.extend(topics);
                 }
             }
         }
 
         PubSubBrokerSnapshot {
             active_clients: self.clients.len(),
-            topic_tree: TopicNodeSnapshot {
-                name: "root".to_string(),
-                full_path: "".to_string(),
-                subscribers: 0,
-                retained_value: None,
-                children,
-            },
+            topics: all_topics,
             wildcard_subscriptions: wildcards,
         }
     }

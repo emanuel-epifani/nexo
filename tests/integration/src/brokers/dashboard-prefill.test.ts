@@ -378,7 +378,8 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(pubsubSnapshot).toBeDefined();
         expect(pubsubSnapshot).not.toBeNull();
         expect(pubsubSnapshot.active_clients).toBe(1); // Only the singleton client
-        expect(pubsubSnapshot.topic_tree).toBeDefined();
+        expect(pubsubSnapshot.topics).toBeDefined();
+        expect(Array.isArray(pubsubSnapshot.topics)).toBe(true);
         expect(pubsubSnapshot.wildcard_subscriptions).toBeDefined();
         expect(Array.isArray(pubsubSnapshot.wildcard_subscriptions)).toBe(true);
 
@@ -402,34 +403,12 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         // 6. VALIDATE TOPIC TREE STRUCTURE
         // ========================================
-        const { topic_tree } = pubsubSnapshot;
-        expect(topic_tree.name).toBe('root');
-        expect(topic_tree.full_path).toBe('');
-        expect(topic_tree.children.length).toBeGreaterThan(0);
+        expect(pubsubSnapshot.topics).toBeDefined();
+        expect(Array.isArray(pubsubSnapshot.topics)).toBe(true);
+        expect(pubsubSnapshot.topics.length).toBeGreaterThan(0);
 
-        // Helper function to flatten topic tree
-        const flattenTopics = (node: any, prefix: string = ''): any[] => {
-            const topics = [];
-            const fullPath = prefix ? `${prefix}/${node.name}` : node.name;
-            
-            if (node.name !== 'root') {
-                topics.push({
-                    name: node.name,
-                    full_path: node.full_path || fullPath,
-                    subscribers: node.subscribers,
-                    retained_value: node.retained_value,
-                    children: node.children
-                });
-            }
-            
-            for (const child of node.children) {
-                topics.push(...flattenTopics(child, node.name === 'root' ? '' : fullPath));
-            }
-            
-            return topics;
-        };
-
-        const allTopics = flattenTopics(topic_tree);
+        // Use flat topics directly from backend
+        const allTopics = pubsubSnapshot.topics;
         console.log('📋 All topics found:', allTopics.map((t: any) => t.full_path));
 
         // ========================================
@@ -490,30 +469,7 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(officeKeyboard).toBeUndefined(); // Should not be in snapshot - this is correct behavior
 
         // ========================================
-        // 9. VALIDATE HIERARCHICAL STRUCTURE
-        // ========================================
-        
-        // Check that home/kitchen branch exists
-        const homeNode = topic_tree.children.find((child: any) => child.name === 'home');
-        expect(homeNode).toBeDefined();
-        
-        if (homeNode) {
-            const kitchenNode = homeNode.children.find((child: any) => child.name === 'kitchen');
-            expect(kitchenNode).toBeDefined();
-            
-            if (kitchenNode) {
-                const tempNode = kitchenNode.children.find((child: any) => child.name === 'temperature');
-                const humidityNode = kitchenNode.children.find((child: any) => child.name === 'humidity');
-                
-                expect(tempNode).toBeDefined();
-                expect(humidityNode).toBeDefined();
-                expect(tempNode.retained_value).not.toBeNull();
-                expect(humidityNode.retained_value).not.toBeNull();
-            }
-        }
-
-        // ========================================
-        // 10. VALIDATE SUBSCRIBER COUNTS
+        // 9. VALIDATE SUBSCRIBER COUNTS
         // ========================================
         
         // Total topics with retained values
