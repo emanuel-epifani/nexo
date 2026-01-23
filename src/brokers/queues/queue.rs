@@ -280,7 +280,7 @@ impl QueueState {
                 if let Some(msg) = self.registry.get(id) {
                     pending.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
                         state: "Pending".to_string(),
                         priority: *priority,
                         attempts: msg.attempts,
@@ -296,7 +296,7 @@ impl QueueState {
                 if let Some(msg) = self.registry.get(id) {
                     inflight.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
                         state: "InFlight".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
@@ -312,7 +312,7 @@ impl QueueState {
                 if let Some(msg) = self.registry.get(id) {
                     scheduled.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload).to_string(),
+                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
                         state: "Scheduled".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
