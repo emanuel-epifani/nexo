@@ -1,6 +1,5 @@
 export interface StoreBrokerSnapshot {
   total_keys: number;
-  expiring_keys: number;
   map: MapStructure;
 }
 
@@ -11,5 +10,5 @@ export interface MapStructure {
 export interface KeyDetail {
   key: string;
   value: string;
-  expires_at: string | null; // ISO8601
+  expires_at: string; // ISO8601
 }

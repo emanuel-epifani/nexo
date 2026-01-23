@@ -214,7 +214,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     <div className="flex items-center gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
                         <span className="flex items-center gap-1.5">
                             <Clock className="h-3 w-3" /> 
-                            {selectedKey.expires_at ? new Date(selectedKey.expires_at).toLocaleString() : "PERSISTENT"}
+                            {new Date(selectedKey.expires_at).toLocaleString()}
                         </span>
                     </div>
                 </div>

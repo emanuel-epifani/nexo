@@ -3,7 +3,6 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub struct StoreBrokerSnapshot {
     pub total_keys: usize,
-    pub expiring_keys: usize,
     pub map: MapStructure,
 }
 
@@ -16,5 +15,5 @@ pub struct MapStructure {
 pub struct KeyDetail {
     pub key: String,
     pub value: String,
-    pub expires_at: Option<String>, // ISO8601
+    pub expires_at: String, // ISO8601
 }

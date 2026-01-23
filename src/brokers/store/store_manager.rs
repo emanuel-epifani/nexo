@@ -61,12 +61,16 @@ impl StoreManager {
 
     pub fn get_snapshot(&self) -> crate::dashboard::models::store::StoreBrokerSnapshot {
         let mut keys_detail = Vec::new();
-        let mut expiring = 0;
+        let now = Instant::now();
         
         for entry in self.store.iter() {
             let val = entry.value();
-            if val.expires_at.is_some() {
-                expiring += 1;
+            
+            // Skip expired keys
+            if let Some(expiry) = val.expires_at {
+                if expiry <= now {
+                    continue;
+                }
             }
             
             let value = match &val.value {
@@ -87,18 +91,12 @@ impl StoreManager {
                 }
             };
 
-            let expires_at_str = val.expires_at
-                .map(|inst| {
-                    let now = Instant::now();
-                    let sys_now = std::time::SystemTime::now();
-                    if inst > now {
-                        let dur = inst - now;
-                        let future_sys = sys_now + dur;
-                        chrono::DateTime::<chrono::Utc>::from(future_sys).to_rfc3339()
-                    } else {
-                        "Expired".to_string()
-                    }
-                });
+            let expires_at_str = {
+                let sys_now = std::time::SystemTime::now();
+                let dur = val.expires_at.unwrap() - now;
+                let future_sys = sys_now + dur;
+                chrono::DateTime::<chrono::Utc>::from(future_sys).to_rfc3339()
+            };
 
             keys_detail.push(crate::dashboard::models::store::KeyDetail {
                 key: entry.key().clone(),
@@ -108,8 +106,7 @@ impl StoreManager {
         }
         
         crate::dashboard::models::store::StoreBrokerSnapshot {
-            total_keys: self.store.len(),
-            expiring_keys: expiring,
+            total_keys: keys_detail.len(),
             map: crate::dashboard::models::store::MapStructure {
                 keys: keys_detail,
             },
