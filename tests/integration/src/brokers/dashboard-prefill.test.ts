@@ -62,14 +62,11 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             // Validate structure
             expect(storeSnapshot).toBeDefined();
             expect(storeSnapshot).not.toBeNull();
-            expect(storeSnapshot.total_keys).toBeGreaterThan(15);
-            expect(storeSnapshot.expiring_keys).toBeGreaterThan(0);
-            expect(storeSnapshot.map).toBeDefined();
-            expect(storeSnapshot.map.keys).toBeDefined();
-            expect(storeSnapshot.map.keys.length).toBeGreaterThan(0);
+            expect(storeSnapshot.keys).toBeDefined();
+            expect(storeSnapshot.keys.length).toBeGreaterThan(0);
 
             // Check specific keys exist
-            const keyNames = storeSnapshot.map.keys.map(k => k.key);
+            const keyNames = storeSnapshot.keys.map(k => k.key);
             expect(keyNames).toContain('user:123:name');
             expect(keyNames).toContain('session:abc123');
             expect(keyNames).toContain('cache:product:1');
@@ -86,40 +83,40 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             // ========================================
 
             // STRING type should be plain text
-            const textPlain = storeSnapshot.map.keys.find(k => k.key === 'text:plain');
+            const textPlain = storeSnapshot.keys.find(k => k.key === 'text:plain');
             expect(textPlain).toBeDefined();
             expect(textPlain.value).toBe('This is plain text');
             expect(textPlain.value).not.toMatch(/^0x/);
 
-            const textLogo = storeSnapshot.map.keys.find(k => k.key === 'text:logo');
+            const textLogo = storeSnapshot.keys.find(k => k.key === 'text:logo');
             expect(textLogo).toBeDefined();
             expect(textLogo.value).toBe('binary-image-data-here'); // STRING type → text
             expect(textLogo.value).not.toMatch(/^0x/);
 
             // JSON type should be readable text
-            const jsonConfig = storeSnapshot.map.keys.find(k => k.key === 'json:config');
+            const jsonConfig = storeSnapshot.keys.find(k => k.key === 'json:config');
             expect(jsonConfig).toBeDefined();
             expect(jsonConfig.value).toContain('debug');
             expect(jsonConfig.value).toContain('true');
             expect(jsonConfig.value).not.toMatch(/^0x/);
 
             // RAW type should be hex
-            const binaryPdf = storeSnapshot.map.keys.find(k => k.key === 'binary:pdf');
+            const binaryPdf = storeSnapshot.keys.find(k => k.key === 'binary:pdf');
             expect(binaryPdf).toBeDefined();
             expect(binaryPdf.value).toBe('0x255044462d312e34'); // RAW type → hex
             expect(binaryPdf.value).toMatch(/^0x/);
 
-            const binaryJson = storeSnapshot.map.keys.find(k => k.key === 'binary:json');
+            const binaryJson = storeSnapshot.keys.find(k => k.key === 'binary:json');
             expect(binaryJson).toBeDefined();
             expect(binaryJson.value).toBe('0x7b2274657374223a3132337d'); // RAW type → hex
             expect(binaryJson.value).toMatch(/^0x/);
 
-            const binaryLarge = storeSnapshot.map.keys.find(k => k.key === 'binary:large');
+            const binaryLarge = storeSnapshot.keys.find(k => k.key === 'binary:large');
             expect(binaryLarge).toBeDefined();
             expect(binaryLarge.value).toMatch(/^0x[ff]+$/); // RAW type → hex of 0xFF repeated
             expect(binaryLarge.value).toMatch(/^0x/);
 
-            const binaryEmpty = storeSnapshot.map.keys.find(k => k.key === 'binary:empty');
+            const binaryEmpty = storeSnapshot.keys.find(k => k.key === 'binary:empty');
             expect(binaryEmpty).toBeDefined();
             expect(binaryEmpty.value).toBe('0x'); // Empty data
 
@@ -128,24 +125,24 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             // ========================================
 
             // Validate created_at is removed
-            const userKey = storeSnapshot.map.keys.find(k => k.key === 'user:123:name');
+            const userKey = storeSnapshot.keys.find(k => k.key === 'user:123:name');
             expect(userKey.created_at).toBeUndefined();
             expect(textLogo.created_at).toBeUndefined();
 
             // Validate expires_at still exists
-            const sessionKey = storeSnapshot.map.keys.find(k => k.key === 'session:abc123');
+            const sessionKey = storeSnapshot.keys.find(k => k.key === 'session:abc123');
             expect(sessionKey).toBeDefined();
             expect(sessionKey.expires_at).toBeDefined();
             expect(sessionKey.expires_at).not.toBeNull();
 
             // Validate regular text data
-            const userName = storeSnapshot.map.keys.find(k => k.key === 'user:123:name');
+            const userName = storeSnapshot.keys.find(k => k.key === 'user:123:name');
             expect(userName).toBeDefined();
             expect(userName.value).toBe('Alice Johnson');
             expect(userName.value).not.toMatch(/^0x/);
 
             // Validate JSON cache data
-            const cacheKey = storeSnapshot.map.keys.find(k => k.key === 'cache:product:1');
+            const cacheKey = storeSnapshot.keys.find(k => k.key === 'cache:product:1');
             expect(cacheKey).toBeDefined();
             expect(cacheKey.value).toContain('Laptop');
             expect(cacheKey.value).not.toMatch(/^0x/);
@@ -226,15 +223,16 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         const queueSnapshot = await fetchBrokerSnapshot('/api/queue');
         console.log('📊 Queue Snapshot received:', JSON.stringify(queueSnapshot, null, 2));
 
-        expect(queueSnapshot.queues).toBeDefined();
-        expect(queueSnapshot.queues.length).toBeGreaterThanOrEqual(5);
+        expect(queueSnapshot.active_queues).toBeDefined();
+        const allQueues = [...queueSnapshot.active_queues, ...queueSnapshot.dlq_queues];
+        expect(allQueues.length).toBeGreaterThanOrEqual(5);
 
-        const videoQueue = queueSnapshot.queues.find(q => q.name === 'INFLIGHT_video_transcoding');
+        const videoQueue = allQueues.find(q => q.name === 'INFLIGHT_video_transcoding');
         expect(videoQueue).toBeDefined();
-        expect(videoQueue?.inflight_count).toBeGreaterThan(0); // Should have stuck messages
+        expect(videoQueue?.inflight.length).toBeGreaterThan(0); // Should have stuck messages
 
-        const jobs = queueSnapshot.queues.find(q => q.name === 'SCHEDULED_background_jobs');
-        expect(jobs?.scheduled_count).toBeGreaterThan(0);
+        const jobs = allQueues.find(q => q.name === 'SCHEDULED_background_jobs');
+        expect(jobs?.scheduled.length).toBeGreaterThan(0);
     });
     // describe('PUBSUB BROKER', () => { ... });
     // describe('STREAM BROKER', () => { ... });

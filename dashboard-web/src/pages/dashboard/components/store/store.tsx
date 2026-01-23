@@ -33,7 +33,7 @@ export function StoreView({ data }: Props) {
                   <NavButton 
                       label="MAP"
                       icon={<Database className="h-3.5 w-3.5" />} 
-                      count={data.map.keys.length}
+                      count={data.keys.length}
                       active={activeStructure === 'hashmap'}
                       onClick={() => setActiveStructure('hashmap')}
                   />
@@ -109,7 +109,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
     const lowerFilter = filter.toLowerCase()
     const result: KeyDetail[] = []
     
-    for (const k of data.map.keys) {
+    for (const k of data.keys) {
       if (k.key.toLowerCase().includes(lowerFilter)) {
         result.push(k)
         if (result.length >= FILTER_LIMIT) break
@@ -117,7 +117,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
     }
     
     return result
-  }, [data.map.keys, filter])
+  }, [data.keys, filter])
 
   const rowVirtualizer = useVirtualizer({
     count: filteredKeys.length,
@@ -195,10 +195,10 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         {/* Footer Count */}
         <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
             {filter === "" 
-              ? `${data.map.keys.length} KEYS`
+              ? `${data.keys.length} KEYS`
               : filteredKeys.length >= FILTER_LIMIT 
-                ? `${FILTER_LIMIT}+ MATCHES / ${data.map.keys.length} KEYS`
-                : `${filteredKeys.length} / ${data.map.keys.length} KEYS`
+                ? `${FILTER_LIMIT}+ MATCHES / ${data.keys.length} KEYS`
+                : `${filteredKeys.length} / ${data.keys.length} KEYS`
             }
         </div>
       </div>

@@ -1,9 +1,4 @@
 export interface StoreBrokerSnapshot {
-  total_keys: number;
-  map: MapStructure;
-}
-
-export interface MapStructure {
   keys: KeyDetail[];
 }
 

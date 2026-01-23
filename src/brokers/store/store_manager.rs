@@ -106,10 +106,7 @@ impl StoreManager {
         }
         
         crate::dashboard::models::store::StoreBrokerSnapshot {
-            total_keys: keys_detail.len(),
-            map: crate::dashboard::models::store::MapStructure {
-                keys: keys_detail,
-            },
+            keys: keys_detail,
         }
     }
 }
