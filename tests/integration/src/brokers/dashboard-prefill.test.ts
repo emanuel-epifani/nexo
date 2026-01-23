@@ -1,6 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { nexo, fetchBrokerSnapshot } from '../nexo';
-import { NexoClient } from '../../../sdk/ts/src/client';
 
 
 describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
@@ -385,22 +384,25 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(pubsubSnapshot.active_clients).toBe(1); // Only the singleton client
         expect(pubsubSnapshot.topics).toBeDefined();
         expect(Array.isArray(pubsubSnapshot.topics)).toBe(true);
-        expect(pubsubSnapshot.wildcard_subscriptions).toBeDefined();
-        expect(Array.isArray(pubsubSnapshot.wildcard_subscriptions)).toBe(true);
+        expect(pubsubSnapshot.wildcards).toBeDefined();
+        expect(pubsubSnapshot.wildcards.multi_level).toBeDefined();
+        expect(Array.isArray(pubsubSnapshot.wildcards.multi_level)).toBe(true);
+        expect(pubsubSnapshot.wildcards.single_level).toBeDefined();
+        expect(Array.isArray(pubsubSnapshot.wildcards.single_level)).toBe(true);
 
         // ========================================
         // 5. VALIDATE WILDCARD SUBSCRIPTIONS
         // ========================================
-        expect(pubsubSnapshot.wildcard_subscriptions.length).toBeGreaterThan(0);
+        expect(pubsubSnapshot.wildcards.multi_level.length + pubsubSnapshot.wildcards.single_level.length).toBeGreaterThan(0);
         
         // Should contain the single-level wildcard subscription
-        const singleWildcard = pubsubSnapshot.wildcard_subscriptions.find((sub: any) => 
+        const singleWildcard = pubsubSnapshot.wildcards.single_level.find((sub: any) => 
             sub.pattern === 'home/+/temperature'
         );
         expect(singleWildcard).toBeDefined();
         
         // Should contain the multi-level wildcard subscription
-        const multiWildcard = pubsubSnapshot.wildcard_subscriptions.find((sub: any) => 
+        const multiWildcard = pubsubSnapshot.wildcards.multi_level.find((sub: any) => 
             sub.pattern === 'sensors/#'
         );
         expect(multiWildcard).toBeDefined();
@@ -505,7 +507,8 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log(`📈 Found ${allTopics.length} total topics`);
         console.log(`💾 Found ${topicsWithRetained.length} topics with retained values`);
         console.log(`👥 Found ${topicsWithSubscribers.length} topics with active subscribers`);
-        console.log(`🎯 Found ${pubsubSnapshot.wildcard_subscriptions.length} wildcard subscriptions`);
+        console.log(`🎯 Found ${pubsubSnapshot.wildcards.multi_level.length} multi_level wildcard subscriptions`);
+        console.log(`🎯 Found ${pubsubSnapshot.wildcards.single_level.length} single_level wildcard subscriptions`);
     });
 
     // TODO: it('STREAM', () => { ... });

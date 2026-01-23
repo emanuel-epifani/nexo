@@ -1,7 +1,7 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useRef, useEffect } from "react"
 import { PubSubBrokerSnapshot, WildcardSubscription } from "./types"
 import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { 
     Search, 
     Hash, 
@@ -41,13 +41,22 @@ export function PubSubView({ data }: Props) {
           client_id: undefined
       }));
 
-      const flatWildcards: FlatTopic[] = data.wildcard_subscriptions.map((sub: WildcardSubscription) => ({
+      const flatWildcards: FlatTopic[] = [
+      ...data.wildcards.multi_level.map((sub: WildcardSubscription) => ({
           path: sub.pattern,
           subscribers: 1,
           retained_value: null,
           is_wildcard: true,
           client_id: sub.client_id
-      }));
+      })),
+      ...data.wildcards.single_level.map((sub: WildcardSubscription) => ({
+          path: sub.pattern,
+          subscribers: 1,
+          retained_value: null,
+          is_wildcard: true,
+          client_id: sub.client_id
+      }))
+  ];
 
       return { topics: flatTopics, wildcards: flatWildcards };
   }, [data]);
@@ -76,7 +85,7 @@ export function PubSubView({ data }: Props) {
                       onClick={() => setActiveTab('wildcards')}
                       className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'wildcards' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
                   >
-                      Wildcards ({wildcards.length})
+                      Wildcards ({data.wildcards.multi_level.length + data.wildcards.single_level.length})
                   </button>
               </div>
 
@@ -156,6 +165,7 @@ export function PubSubView({ data }: Props) {
   )
 }
 
+
 // TopicRow component con layout flessibile
 function TopicRow({ item, layout, selected, onSelect }: {
   item: any;
@@ -176,17 +186,12 @@ function TopicRow({ item, layout, selected, onSelect }: {
       {/* Topic Path - sempre presente */}
       <div className="flex flex-col gap-1 overflow-hidden min-w-0">
         <div className="flex items-center gap-2">
-          {item.is_wildcard ? (
-            <Hash className="h-3 w-3 text-amber-500 flex-shrink-0" />
-          ) : (
-            <Circle className="h-2 w-2 text-emerald-500 flex-shrink-0" />
-          )}
           <span className={`font-mono text-xs truncate ${selected ? 'text-white' : 'text-slate-300'}`}>
             {item.path}
           </span>
         </div>
         {item.client_id && (
-          <div className="pl-5 text-[10px] text-slate-500 truncate">
+          <div className="text-[10px] text-slate-500 truncate">
             Client: {item.client_id}
           </div>
         )}
@@ -223,11 +228,63 @@ function TopicRow({ item, layout, selected, onSelect }: {
 }
 
 function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
+    const [inputValue, setInputValue] = useState("")
     const [filter, setFilter] = useState("")
+    const [wildcardFilter, setWildcardFilter] = useState< 'multi' | 'single'>('single')
+    const parentRef = useRef<HTMLDivElement>(null)
 
-    const filtered = useMemo(() => {
-        return list.filter((t: any) => t.path.toLowerCase().includes(filter.toLowerCase()))
+    // Debounce text search by 300ms
+    useEffect(() => {
+        const timer = setTimeout(() => setFilter(inputValue), 300)
+        return () => clearTimeout(timer)
+    }, [inputValue])
+
+    const FILTER_LIMIT = 500
+
+    // Filter for TOPICS
+    const filteredTopics = useMemo(() => {
+        const lowerFilter = filter.toLowerCase()
+        const result: any[] = []
+        
+        for (const t of list) {
+            if (t.path.toLowerCase().includes(lowerFilter)) {
+                result.push(t)
+                if (result.length >= FILTER_LIMIT) break
+            }
+        }
+        return result;
     }, [list, filter])
+
+    // Filter for WILDCARDS
+    const filteredWildcards = useMemo(() => {
+        const lowerFilter = filter.toLowerCase()
+        const result: any[] = []
+        
+        for (const t of list) {
+            if (t.path.toLowerCase().includes(lowerFilter)) {
+                result.push(t)
+                if (result.length >= FILTER_LIMIT) break
+            }
+        }
+        
+        // Apply wildcard type filter
+        return result.filter((t: any) => {
+            if (wildcardFilter === 'multi') return t.path.includes('#');
+            if (wildcardFilter === 'single') return t.path.includes('+');
+            return true;
+        });
+    }, [list, filter, wildcardFilter])
+
+    const filtered = type === 'topics' ? filteredTopics : filteredWildcards
+
+    // Virtualizer only for topics
+    const rowVirtualizer = useVirtualizer({
+        count: type === 'topics' ? filtered.length : 0,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => 36, // Approximate row height
+        overscan: 5,
+        enabled: type === 'topics',
+    })
 
     return (
         <div className="flex flex-col h-full">
@@ -236,14 +293,40 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                     <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
                     <Input 
                         placeholder={type === 'topics' ? "Search path..." : "Search pattern..."}
-                        value={filter}
-                        onChange={(e) => setFilter(e.target.value)}
+                        value={inputValue}
+                        onChange={(e) => setInputValue(e.target.value)}
                         className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700 focus-visible:border-slate-700"
                     />
                 </div>
+                
+                {/* Sotto-filtri Wildcard - appare solo per tab wildcards */}
+                {type === 'wildcards' && (
+                    <div className="flex gap-1 mt-2">
+                        <button
+                            onClick={() => setWildcardFilter('multi')}
+                            className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
+                                wildcardFilter === 'multi'
+                                    ? 'bg-amber-950/30 text-amber-400 border border-amber-900'
+                                    : 'bg-slate-950 text-slate-500 border border-slate-800 hover:text-amber-400'
+                            }`}
+                        >
+                            # MULTI level ({list.filter((t: any) => t.path.includes('#')).length})
+                        </button>
+                        <button
+                            onClick={() => setWildcardFilter('single')}
+                            className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
+                                wildcardFilter === 'single'
+                                    ? 'bg-blue-950/30 text-blue-400 border border-blue-900'
+                                    : 'bg-slate-950 text-slate-500 border border-slate-800 hover:text-blue-400'
+                            }`}
+                        >
+                            + SINGLE level ({list.filter((t: any) => t.path.includes('+')).length})
+                        </button>
+                    </div>
+                )}
             </div>
 
-            <ScrollArea className="flex-1">
+            <div ref={parentRef} className="flex-1 overflow-y-auto w-full contain-strict">
                 {/* HEADER DIVERSO BASATO SU TYPE */}
                 {type === 'topics' ? (
                     <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-[9px] font-bold uppercase text-slate-500 z-10">
@@ -256,29 +339,71 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                 ) : (
                     <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 text-[9px] font-bold uppercase text-slate-500 z-10">
                         <div className="flex items-center gap-2">
-                            <span>Wildcard Pattern</span>
+                            <span>Wildcard Patterns</span>
                         </div>
                     </div>
                 )}
                 
-                <div className="p-0">
-                    {filtered.map((item: any) => (
-                        <TopicRow 
-                            key={item.path}
-                            item={item}
-                            layout={type}
-                            selected={selectedPath === item.path}
-                            onSelect={onSelect}
-                        />
-                    ))}
-                    
-                    {filtered.length === 0 && (
-                        <div className="py-12 text-center">
-                            <p className="text-xs text-slate-600">NO_RESULTS</p>
-                        </div>
-                    )}
-                </div>
-            </ScrollArea>
+                {filtered.length === 0 ? (
+                    <div className="py-12 text-center">
+                        <p className="text-xs text-slate-600">NO_RESULTS</p>
+                    </div>
+                ) : type === 'topics' ? (
+                    <div
+                        style={{
+                            height: `${rowVirtualizer.getTotalSize()}px`,
+                            width: '100%',
+                            position: 'relative',
+                        }}
+                    >
+                        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                            const item = filtered[virtualRow.index]
+                            return (
+                                <div
+                                    key={item.path}
+                                    style={{
+                                        position: 'absolute',
+                                        top: 0,
+                                        left: 0,
+                                        width: '100%',
+                                        height: `${virtualRow.size}px`,
+                                        transform: `translateY(${virtualRow.start}px)`,
+                                    }}
+                                >
+                                    <TopicRow 
+                                        item={item}
+                                        layout={type}
+                                        selected={selectedPath === item.path}
+                                        onSelect={onSelect}
+                                    />
+                                </div>
+                            )
+                        })}
+                    </div>
+                ) : (
+                    <div className="p-0">
+                        {filtered.map((item: any) => (
+                            <TopicRow 
+                                key={item.path}
+                                item={item}
+                                layout={type}
+                                selected={selectedPath === item.path}
+                                onSelect={onSelect}
+                            />
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Footer Count */}
+            <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
+                {filter === ""
+                    ? `${list.length} ${type === 'topics' ? 'TOPICS' : 'WILDCARDS'}`
+                    : (type === 'topics' ? filteredTopics.length : filteredWildcards.length) >= FILTER_LIMIT
+                    ? `${FILTER_LIMIT}+ MATCHES / ${list.length} ${type === 'topics' ? 'TOPICS' : 'WILDCARDS'}`
+                    : `${type === 'topics' ? filteredTopics.length : filteredWildcards.length} / ${list.length} ${type === 'topics' ? 'TOPICS' : 'WILDCARDS'}`
+                }
+            </div>
         </div>
     )
 }

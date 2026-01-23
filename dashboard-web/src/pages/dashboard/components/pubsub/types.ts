@@ -1,7 +1,12 @@
 export interface PubSubBrokerSnapshot {
   active_clients: number;
   topics: TopicSnapshot[];
-  wildcard_subscriptions: WildcardSubscription[];
+  wildcards: WildcardSubscriptions;
+}
+
+export interface WildcardSubscriptions {
+  multi_level: WildcardSubscription[];
+  single_level: WildcardSubscription[];
 }
 
 export interface WildcardSubscription {

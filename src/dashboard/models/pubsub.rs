@@ -5,7 +5,13 @@ use serde_json::Value;
 pub struct PubSubBrokerSnapshot {
     pub active_clients: usize,
     pub topics: Vec<TopicSnapshot>,
-    pub wildcard_subscriptions: Vec<WildcardSubscription>,
+    pub wildcards: WildcardSubscriptions,
+}
+
+#[derive(Serialize)]
+pub struct WildcardSubscriptions {
+    pub multi_level: Vec<WildcardSubscription>,
+    pub single_level: Vec<WildcardSubscription>,
 }
 
 #[derive(Serialize)]
