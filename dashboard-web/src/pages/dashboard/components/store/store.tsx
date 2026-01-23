@@ -135,7 +135,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
   return (
     <div className="flex h-full">
       {/* COLUMN 1: Key List */}
-      <div className="w-[320px] flex flex-col border-r border-slate-800 bg-slate-900/10">
+      <div className="w-[320px] flex flex-col border-r border-slate-800 bg-slate-900/10 flex-shrink-0">
         {/* Search Bar */}
         <div className="p-3 border-b border-slate-800">
             <div className="relative">
@@ -204,7 +204,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
       </div>
 
       {/* COLUMN 2: Value Inspector */}
-      <div className="flex-1 flex flex-col bg-slate-950/30">
+      <div className="flex-1 flex flex-col bg-slate-950/30 overflow-hidden">
         {selectedKey ? (
             <>
                 <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/20">
@@ -219,9 +219,9 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto">
-                    <div className="p-6">
-                        <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
+                <div className="flex-1 overflow-auto">
+                    <div className="p-6 min-w-0">
+                        <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre min-w-0">
                             {tryFormatJson(selectedKey.value)}
                         </pre>
                     </div>
