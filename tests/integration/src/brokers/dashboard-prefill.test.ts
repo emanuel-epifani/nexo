@@ -511,6 +511,135 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log(`🎯 Found ${pubsubSnapshot.wildcards.single_level.length} single_level wildcard subscriptions`);
     });
 
-    // TODO: it('STREAM', () => { ... });
+    it('STREAM', async () => {
+        // ========================================
+        // 1. SETUP STREAM BROKER DATA
+        // ========================================
+        console.log('🌊 Setting up STREAM broker data...');
+
+        // User events stream
+        await nexo.stream('user_events', 'analytics_group').create();
+        const userEventsProducer = nexo.stream('user_events');
+
+        // Publish user lifecycle events
+        await userEventsProducer.publish({ 
+            type: 'user_registered', 
+            user_id: 123, 
+            email: 'alice@example.com',
+            timestamp: Date.now()
+        });
+
+        await userEventsProducer.publish({ 
+            type: 'user_updated_profile', 
+            user_id: 123, 
+            changes: ['name', 'avatar'],
+            timestamp: Date.now()
+        });
+
+        await userEventsProducer.publish({ 
+            type: 'user_logged_in', 
+            user_id: 123, 
+            ip: '192.168.1.100',
+            timestamp: Date.now()
+        });
+
+        await userEventsProducer.publish({ 
+            type: 'user_registered', 
+            user_id: 456, 
+            email: 'bob@example.com',
+            timestamp: Date.now()
+        });
+
+        // Order events stream
+        await nexo.stream('order_events', 'order_processing_group').create();
+        const orderEventsProducer = nexo.stream('order_events');
+
+        await orderEventsProducer.publish({
+            type: 'order_created',
+            order_id: 'ORD-001',
+            user_id: 123,
+            amount: 99.99,
+            items: ['laptop', 'mouse'],
+            timestamp: Date.now()
+        });
+
+        await orderEventsProducer.publish({
+            type: 'payment_processed',
+            order_id: 'ORD-001',
+            payment_method: 'credit_card',
+            transaction_id: 'TXN-12345',
+            timestamp: Date.now()
+        });
+
+        await orderEventsProducer.publish({
+            type: 'order_shipped',
+            order_id: 'ORD-001',
+            tracking_number: 'TRK-999',
+            carrier: 'FedEx',
+            timestamp: Date.now()
+        });
+
+        // System events stream
+        await nexo.stream('system_events', 'monitoring_group').create();
+        const systemEventsProducer = nexo.stream('system_events');
+
+        await systemEventsProducer.publish({
+            type: 'server_restart',
+            server_id: 'web-01',
+            reason: 'maintenance',
+            uptime_before: 86400,
+            timestamp: Date.now()
+        });
+
+        await systemEventsProducer.publish({
+            type: 'database_backup_completed',
+            database: 'main',
+            size_gb: 2.5,
+            duration_seconds: 300,
+            timestamp: Date.now()
+        });
+
+        // ========================================
+        // 2. REGISTER SUBSCRIBERS TO STREAMS
+        // ========================================
+        console.log('👥 Registering stream subscribers...');
+
+        // Subscribe to user_events
+        const userEventsConsumer = nexo.stream('user_events', 'analytics_group');
+        const userEventsReceived: any[] = [];
+        await userEventsConsumer.subscribe(data => userEventsReceived.push(data));
+
+        // Subscribe to order_events
+        const orderEventsConsumer = nexo.stream('order_events', 'order_processing_group');
+        const orderEventsReceived: any[] = [];
+        await orderEventsConsumer.subscribe(data => orderEventsReceived.push(data));
+
+        // Subscribe to system_events
+        const systemEventsConsumer = nexo.stream('system_events', 'monitoring_group');
+        const systemEventsReceived: any[] = [];
+        await systemEventsConsumer.subscribe(data => systemEventsReceived.push(data));
+
+        // ========================================
+        // 3. WAIT FOR DATA PROPAGATION AND CONSUMPTION
+        // ========================================
+        console.log('⏳ Waiting for stream data propagation and consumption...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // ========================================
+        // 4. FETCH AND VALIDATE STREAM SNAPSHOT
+        // ========================================
+        const streamSnapshot = await fetchBrokerSnapshot('/api/stream');
+        
+        console.log('✅ STREAM snapshot validation completed successfully');
+        console.log(`📊 Stream snapshot:`, JSON.stringify(streamSnapshot, null, 2));
+        console.log(`📈 User events consumed: ${userEventsReceived.length}`);
+        console.log(`📈 Order events consumed: ${orderEventsReceived.length}`);
+        console.log(`📈 System events consumed: ${systemEventsReceived.length}`);
+
+        // Stop consumers
+        userEventsConsumer.stop();
+        orderEventsConsumer.stop();
+        systemEventsConsumer.stop();
+    });
 
 });

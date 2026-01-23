@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Serialize)]
 pub struct StreamBrokerSnapshot {
@@ -17,13 +18,19 @@ pub struct TopicSummary {
 pub struct PartitionInfo {
     pub id: u32,
     pub messages: Vec<MessagePreview>,
-    pub current_consumers: Vec<String>,
+    pub groups: Vec<ConsumerGroupSummary>,
     pub last_offset: u64,
+}
+
+#[derive(Serialize)]
+pub struct ConsumerGroupSummary {
+    pub id: String,
+    pub committed_offset: u64,
 }
 
 #[derive(Serialize)]
 pub struct MessagePreview {
     pub offset: u64,
     pub timestamp: String,
-    pub payload_preview: String,
+    pub payload: Value,
 }

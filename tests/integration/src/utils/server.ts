@@ -21,9 +21,6 @@ export async function isServerRunning(host: string, port: number): Promise<boole
   });
 }
 
-/**
- * Starts the Nexo broker and waits for it to be ready.
- */
 export async function runNexoServer(host: string, port: number): Promise<void> {
   console.log(`[TestSetup] Spawning Nexo server from: ${BINARY_PATH}`);
 
@@ -37,9 +34,6 @@ export async function runNexoServer(host: string, port: number): Promise<void> {
   console.log('[TestSetup] Server is ready.');
 }
 
-/**
- * Stops the Nexo broker.
- */
 export function killServer(): void {
   if (serverProcess) {
     serverProcess.kill();
@@ -47,9 +41,6 @@ export function killServer(): void {
   }
 }
 
-/**
- * Simple polling to check if the TCP port is open.
- */
 async function waitForPort(host: string, port: number, retries = 20): Promise<void> {
   for (let i = 0; i < retries; i++) {
     if (await isServerRunning(host, port)) return;

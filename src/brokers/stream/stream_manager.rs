@@ -207,41 +207,54 @@ impl TopicActor {
                         let mut partitions_info = Vec::new();
                         
                         for (i, partition) in self.state.partitions.iter().enumerate() {
-                            let current_consumers: Vec<String> = self.groups
-                                .values()
-                                .filter_map(|g| {
-                                    // Check if this group has a member assigned to this partition
-                                    g.members.values().find(|m| {
-                                        // TODO: Add partition assignment tracking in GroupMember
-                                        // For now, show all consumers for all partitions
-                                        true
-                                    }).map(|m| m.client_id.clone())
-                                })
-                                .collect();
+                            let p_id = i as u32;
+
+                            // 1. Groups Info
+                            let mut groups_info = Vec::new();
+                            for group in self.groups.values() {
+                                // Get committed offset for this partition (defaults to 0 if not found)
+                                let committed = group.get_committed_offset(p_id);
+                                
+                                // We include the group if it exists on this topic
+                                groups_info.push(crate::dashboard::models::stream::ConsumerGroupSummary {
+                                    id: group.id.clone(),
+                                    committed_offset: committed,
+                                });
+                            }
                             
+                            // 2. Messages (Full Content)
                             let messages_preview: Vec<crate::dashboard::models::stream::MessagePreview> = partition
                                 .log
                                 .iter()
                                 .rev()
-                                .take(50) // Limit preview to last 50 messages
                                 .map(|msg| {
+                                    // Skip first byte (datatype indicator)
+                                    let payload_bytes = if msg.payload.len() > 0 {
+                                        &msg.payload[1..]
+                                    } else {
+                                        &msg.payload[..]
+                                    };
+
+                                    // Try to parse as JSON, fallback to String
+                                    let payload_json: serde_json::Value = serde_json::from_slice(payload_bytes)
+                                        .unwrap_or_else(|_| {
+                                            serde_json::Value::String(String::from_utf8_lossy(payload_bytes).to_string())
+                                        });
+
                                     crate::dashboard::models::stream::MessagePreview {
                                         offset: msg.offset,
                                         timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
                                             .unwrap_or_default()
                                             .to_rfc3339(),
-                                        payload_preview: String::from_utf8_lossy(&msg.payload)
-                                            .chars()
-                                            .take(200) // Limit preview length
-                                            .collect::<String>(),
+                                        payload: payload_json,
                                     }
                                 })
                                 .collect();
                             
                             partitions_info.push(crate::dashboard::models::stream::PartitionInfo {
-                                id: i as u32,
+                                id: p_id,
                                 messages: messages_preview,
-                                current_consumers,
+                                groups: groups_info,
                                 last_offset: partition.next_offset,
                             });
                         }
