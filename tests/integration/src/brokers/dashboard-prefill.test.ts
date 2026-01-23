@@ -149,11 +149,12 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         });
 
         /*
-        di solito qui 1M di key 35secondi e
+        di solito qui 1M di key
+        SET = ca 35secondi
+        GET fe = (no gzip 3.8s & 84MB size) (gzip 7.96s & 11.3MB size)
          */
         it.skip('',async() => {
             for(let i = 0; i < 1000000; i++) {
-            // for(let i = 0; i < 1e9; i++) {
                 await nexo.store.kv.set(`user:${1000000+i}`, ``);
             }
         })

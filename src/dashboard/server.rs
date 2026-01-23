@@ -6,6 +6,7 @@ use axum::{
     http::{header, Uri, StatusCode},
     body::Body,
 };
+use tower_http::compression::CompressionLayer;
 use rust_embed::RustEmbed;
 use crate::NexoEngine;
 
@@ -20,6 +21,7 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
         .route("/api/queue", get(get_queue))
         .route("/api/stream", get(get_stream))
         .route("/api/pubsub", get(get_pubsub))
+        .layer(CompressionLayer::new())
         .fallback(static_handler)
         .with_state(engine);
 
