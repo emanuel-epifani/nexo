@@ -13,7 +13,7 @@ e infatti la mia idea è 1 broker qualunque funzionalità con 1 sola configutazi
 - DASHBOARD react che runna automaticamente su una porta quando avvii il container docker che fa una request ed ogni broker ritorna una snaphsto a quell'istante dello stato di tutti i broker (lo store, le queue, topics ecc) super comodo per debuggare in locale mentre sviluppi (non da usare in produzione come met) anche senza dover installare mille tool diversi stile datagrip, plugin vscode o altro ecc. scarichi il container, 1 sdk  e hai tutto, cache, queue, mqtt, topic, e una dashboard web per vedere stato dati esposto automaticamente.
 
 
-SERVER RUST (Robustness > Throughput > latency)
+SERVER RUST (Data consistency/Robustness > Throughput > Latency)
 - tutta la logica di connessioni/socket/parsing ecc dentro -> src/server
 - tutta la logica di business dentro -> src/brokers (ogni broker deve avere logica di business quanto più isolato all'interno di se stesso)
 - safety first
