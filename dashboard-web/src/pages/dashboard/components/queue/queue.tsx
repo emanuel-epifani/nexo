@@ -11,16 +11,12 @@ import {
     Box,
     AlertTriangle,
     Ban,
+    Copy,
+    Check,
+    ArrowUp,
+    ArrowDown,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 
 interface Props {
   data: QueueBrokerSnapshot
@@ -30,13 +26,20 @@ export function QueueView({ data }: Props) {
   const [activeTab, setActiveTab] = useState<'active' | 'dlq'>('active')
   const [filter, setFilter] = useState("")
   const [selectedQueueName, setSelectedQueueName] = useState<string | null>(null)
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   
   // Message Filter State
   const [messageFilter, setMessageFilter] = useState<'All' | 'Pending' | 'InFlight' | 'Scheduled'>('All')
+  
+  // Sort State
+  const [sortColumn, setSortColumn] = useState<'priority' | 'attempts' | null>(null)
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
 
   // Reset selection when switching Main Tabs
   useEffect(() => {
       setSelectedQueueName(null)
+      setSelectedMessageId(null)
   }, [activeTab])
 
   // Split queues into Active vs DLQ
@@ -67,12 +70,64 @@ export function QueueView({ data }: Props) {
       data.queues.find((q: QueueSummary) => q.name === selectedQueueName),
   [data.queues, selectedQueueName])
 
-  // Filter Messages inside selected queue
+  // Filter and Sort Messages inside selected queue
   const filteredMessages = useMemo(() => {
       if (!selectedQueue) return []
-      if (messageFilter === 'All') return selectedQueue.messages
-      return selectedQueue.messages.filter((m: MessageSummary) => m.state === messageFilter)
-  }, [selectedQueue, messageFilter])
+      
+      let messages = messageFilter === 'All' 
+          ? selectedQueue.messages 
+          : selectedQueue.messages.filter((m: MessageSummary) => m.state === messageFilter)
+      
+      // Apply sorting
+      if (sortColumn) {
+          messages = [...messages].sort((a, b) => {
+              let aVal = sortColumn === 'priority' ? a.priority : a.attempts
+              let bVal = sortColumn === 'priority' ? b.priority : b.attempts
+              
+              if (sortDirection === 'asc') {
+                  return aVal - bVal
+              } else {
+                  return bVal - aVal
+              }
+          })
+      }
+      
+      return messages
+  }, [selectedQueue, messageFilter, sortColumn, sortDirection])
+
+  // Handle sort column click
+  const handleSortClick = (column: 'priority' | 'attempts') => {
+      if (sortColumn === column) {
+          // Toggle direction if same column
+          setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')
+      } else {
+          // Set new column with desc as default
+          setSortColumn(column)
+          setSortDirection('desc')
+      }
+  }
+
+  // Get selected message details
+  const selectedMessage = useMemo(() => 
+      selectedQueue?.messages.find((m: MessageSummary) => m.id === selectedMessageId),
+  [selectedQueue, selectedMessageId])
+
+  // Copy to clipboard helper
+  const copyToClipboard = (text: string, id: string) => {
+      navigator.clipboard.writeText(text)
+      setCopiedId(id)
+      setTimeout(() => setCopiedId(null), 2000)
+  }
+
+  // Parse payload JSON safely
+  const parsedPayload = useMemo(() => {
+      if (!selectedMessage?.payload_preview) return null
+      try {
+          return JSON.parse(selectedMessage.payload_preview)
+      } catch {
+          return null
+      }
+  }, [selectedMessage?.payload_preview])
 
   return (
       <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
@@ -154,21 +209,15 @@ export function QueueView({ data }: Props) {
               </ScrollArea>
           </div>
 
-          {/* MAIN AREA: Messages Table */}
-          <div className="flex-1 bg-slate-950/30 flex flex-col min-w-0">
+          {/* CENTER AREA: Messages Table */}
+          <div className="w-[500px] bg-slate-950/30 flex flex-col min-w-0 border-r border-slate-800">
              {selectedQueue ? (
                  <div className="flex flex-col h-full">
                      {/* Header Stats */}
-                     <div className="p-4 border-b border-slate-800 bg-slate-900/20">
-                         <div className="flex justify-between items-center mb-4">
-                             <div className="flex items-center gap-2">
-                                 <h2 className={`text-sm font-bold ${activeTab === 'dlq' ? 'text-rose-400' : 'text-slate-100'}`}>{selectedQueue.name}</h2>
-                                 <div className="h-4 w-[1px] bg-slate-800 mx-2" />
-                                 <span className="text-[10px] text-slate-500 uppercase">
-                                     CONSUMERS: {selectedQueue.consumers_waiting}
-                                 </span>
-                             </div>
-                             <div className="flex gap-4">
+                     <div className="p-3 border-b border-slate-800 bg-slate-900/20">
+                         <div className="flex justify-between items-center mb-3">
+                             <h2 className={`text-xs font-bold ${activeTab === 'dlq' ? 'text-rose-400' : 'text-slate-100'}`}>{selectedQueue.name}</h2>
+                             <div className="flex gap-3">
                                  <StatBadge label="PENDING" value={selectedQueue.pending_count} color="text-amber-500" />
                                  <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight_count} color="text-blue-400" />
                                  <StatBadge label="SCHEDULED" value={selectedQueue.scheduled_count} color="text-slate-400" />
@@ -184,79 +233,128 @@ export function QueueView({ data }: Props) {
                          </div>
                      </div>
 
-                     {/* Messages List */}
-                     <div className="flex-1 overflow-auto bg-slate-950/10">
+                     {/* Messages Table */}
+                     <ScrollArea className="flex-1">
                         {filteredMessages.length === 0 ? (
                             <div className="h-full flex flex-col items-center justify-center text-slate-700">
                                 <Box className="h-12 w-12 opacity-20 mb-4" />
                                 <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_MESSAGES_FOUND</p>
                             </div>
                         ) : (
-                            <Table>
-                                <TableHeader className="bg-slate-900 border-b border-slate-800 sticky top-0 z-10">
-                                    <TableRow className="hover:bg-transparent">
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[240px]">
-                                            Message ID
-                                        </TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500">
-                                            Payload Preview
-                                        </TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[100px]">
-                                            State
-                                        </TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[80px] text-center" title="Priority (Higher = Sooner)">
-                                            Priority
-                                        </TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[80px] text-center" title="Delivery Attempts">
-                                            Attempts
-                                        </TableHead>
-                                        <TableHead className="h-8 font-mono text-[10px] uppercase text-slate-500 w-[160px] text-right" title="Scheduled Time or Visibility Timeout">
-                                            Deliver At
-                                        </TableHead>
-                                    </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                    {filteredMessages.map((msg: MessageSummary) => (
-                                        <TableRow key={msg.id} className="text-xs border-slate-800 hover:bg-slate-900/50 transition-colors group/row">
-                                            <TableCell className="py-2 font-mono text-[10px] text-slate-500 select-all">
-                                                {msg.id}
-                                            </TableCell>
-                                            <TableCell className="py-2 max-w-[400px]">
-                                                <div 
-                                                    className="truncate font-mono text-[10px] text-slate-300 bg-slate-900/50 px-2 py-1 rounded border border-slate-800 cursor-help"
-                                                    title={msg.payload_preview}
-                                                >
-                                                    {msg.payload_preview}
-                                                </div>
-                                            </TableCell>
-                                            <TableCell className="py-2">
-                                                <StatusBadge state={msg.state} />
-                                            </TableCell>
-                                            <TableCell className="font-mono text-slate-400 text-center py-2">
-                                                {msg.priority > 0 ? <span className="text-amber-500 font-bold">{msg.priority}</span> : 0}
-                                            </TableCell>
-                                            <TableCell className="font-mono text-slate-400 text-center py-2">
-                                                {msg.attempts > 0 ? <span className="text-rose-400 font-bold">{msg.attempts}</span> : 0}
-                                            </TableCell>
-                                            <TableCell className="text-slate-500 text-[10px] font-mono text-right py-2">
-                                                {msg.next_delivery_at ? (
-                                                    <span className="text-slate-300">{new Date(msg.next_delivery_at).toLocaleTimeString()}</span>
-                                                ) : (
-                                                    <span className="text-slate-700">-</span>
-                                                )}
-                                            </TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            </Table>
+                            <div className="p-0">
+                                {/* Table Header */}
+                                <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-[9px] font-bold uppercase text-slate-500">
+                                    <div>ID</div>
+                                    <div className="text-center">Status</div>
+                                    <button 
+                                        onClick={() => handleSortClick('priority')}
+                                        className="text-center hover:text-slate-300 transition-colors flex items-center justify-center gap-1"
+                                        title="Sort by Priority"
+                                    >
+                                        <span>Priority</span>
+                                        {sortColumn === 'priority' && (
+                                            sortDirection === 'desc' 
+                                                ? <ArrowDown className="h-3 w-3" />
+                                                : <ArrowUp className="h-3 w-3" />
+                                        )}
+                                    </button>
+                                    <button 
+                                        onClick={() => handleSortClick('attempts')}
+                                        className="text-center hover:text-slate-300 transition-colors flex items-center justify-center gap-1"
+                                        title="Sort by Attempts"
+                                    >
+                                        <span>Attempts</span>
+                                        {sortColumn === 'attempts' && (
+                                            sortDirection === 'desc' 
+                                                ? <ArrowDown className="h-3 w-3" />
+                                                : <ArrowUp className="h-3 w-3" />
+                                        )}
+                                    </button>
+                                </div>
+
+                                {/* Table Rows */}
+                                {filteredMessages.map((msg: MessageSummary) => (
+                                    <div
+                                        key={msg.id}
+                                        onClick={() => setSelectedMessageId(msg.id)}
+                                        className={`
+                                            grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all items-center
+                                            ${selectedMessageId === msg.id ? 'bg-slate-800' : 'hover:bg-slate-900/50'}
+                                        `}
+                                    >
+                                        <span className={`font-mono text-[9px] truncate ${selectedMessageId === msg.id ? 'text-white font-bold' : 'text-slate-400'}`} title={msg.id}>
+                                            {msg.id}
+                                        </span>
+                                        <div className="flex justify-center">
+                                            <StatusBadgeCompact state={msg.state} />
+                                        </div>
+                                        <div className={`text-center text-[9px] ${msg.priority > 0 ? 'text-amber-500 font-bold' : 'text-slate-600'}`}>
+                                            {msg.priority}
+                                        </div>
+                                        <div className={`text-center text-[9px] ${msg.attempts > 0 ? 'text-rose-400 font-bold' : 'text-slate-600'}`}>
+                                            {msg.attempts}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
                         )}
-                     </div>
+                     </ScrollArea>
                  </div>
              ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
                     <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_QUEUE</p>
                 </div>
              )}
+          </div>
+
+          {/* RIGHT PANEL: Message Details (Expanded) */}
+          <div className="flex-1 flex flex-col border-l border-slate-800 bg-slate-950/50 min-w-0">
+              {selectedMessage ? (
+                  <div className="flex flex-col h-full">
+                      {/* Header - Compact */}
+                      <div className="p-3 border-b border-slate-800 bg-slate-900/20 flex-shrink-0">
+                          <div className="flex items-center justify-between mb-2">
+                              <h3 className="text-[10px] font-bold uppercase text-slate-400">ID</h3>
+                              <button
+                                  onClick={() => copyToClipboard(selectedMessage.id, selectedMessage.id)}
+                                  className="p-1 hover:bg-slate-800 rounded transition-colors"
+                                  title="Copy Message ID"
+                              >
+                                  {copiedId === selectedMessage.id ? (
+                                      <Check className="h-3 w-3 text-green-500" />
+                                  ) : (
+                                      <Copy className="h-3 w-3 text-slate-500" />
+                                  )}
+                              </button>
+                          </div>
+                          <div className="bg-slate-900/50 p-2 rounded border border-slate-800 break-all">
+                              <span className="font-mono text-[8px] text-slate-300">{selectedMessage.id}</span>
+                          </div>
+                      </div>
+
+                      {/* Payload - Full Space */}
+                      <div className="flex-1 flex flex-col min-h-0 p-3">
+                          <h4 className="text-[10px] font-bold uppercase text-slate-400 mb-2 flex-shrink-0">PAYLOAD</h4>
+                          <ScrollArea className="flex-1 border border-slate-800 rounded bg-slate-900/50">
+                              <div className="p-3">
+                                  {parsedPayload ? (
+                                      <pre className="font-mono text-[8px] text-slate-300 whitespace-pre-wrap break-words">
+                                          {JSON.stringify(parsedPayload, null, 2)}
+                                      </pre>
+                                  ) : (
+                                      <div className="font-mono text-[8px] text-slate-400 whitespace-pre-wrap break-words">
+                                          {selectedMessage.payload_preview}
+                                      </div>
+                                  )}
+                              </div>
+                          </ScrollArea>
+                      </div>
+                  </div>
+              ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                      <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_MESSAGE</p>
+                  </div>
+              )}
           </div>
 
       </div>
@@ -309,6 +407,29 @@ function StatusBadge({ state }: { state: string }) {
         <div className={`flex items-center gap-1.5 px-1.5 py-0.5 rounded-sm border ${color} w-fit`}>
             {icon}
             <span className="text-[9px] uppercase font-bold">{state}</span>
+        </div>
+    )
+}
+
+function StatusBadgeCompact({ state }: { state: string }) {
+    let color = "bg-slate-800 text-slate-400 border-slate-700"
+    let icon = <Clock className="h-2 w-2" />
+
+    if (state === 'InFlight') {
+        color = "bg-blue-950/30 text-blue-400 border-blue-900/50"
+        icon = <RefreshCw className="h-2 w-2 animate-spin duration-[3s]" />
+    } else if (state === 'Pending') {
+        color = "bg-amber-950/30 text-amber-500 border-amber-900/50"
+        icon = <AlertCircle className="h-2 w-2" />
+    } else if (state === 'Scheduled') {
+        color = "bg-slate-800 text-slate-300 border-slate-700"
+        icon = <Clock className="h-2 w-2" />
+    }
+
+    return (
+        <div className={`flex items-center gap-1 px-1 py-0.5 rounded-sm border text-[8px] ${color}`}>
+            {icon}
+            <span className="uppercase font-bold">{state}</span>
         </div>
     )
 }

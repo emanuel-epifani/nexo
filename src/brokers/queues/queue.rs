@@ -329,7 +329,6 @@ impl QueueState {
             pending_count,
             inflight_count,
             scheduled_count,
-            consumers_waiting: 0, // Actor handles this separately
             messages,
         }
     }

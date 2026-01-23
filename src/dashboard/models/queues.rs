@@ -12,7 +12,6 @@ pub struct QueueSummary {
     pub pending_count: usize, 
     pub inflight_count: usize, 
     pub scheduled_count: usize, 
-    pub consumers_waiting: usize,
     pub messages: Vec<MessageSummary>, 
 }
 

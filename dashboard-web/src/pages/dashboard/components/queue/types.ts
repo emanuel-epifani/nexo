@@ -7,7 +7,6 @@ export interface QueueSummary {
   pending_count: number;
   inflight_count: number;
   scheduled_count: number;
-  consumers_waiting: number;
   messages: MessageSummary[];
 }
 

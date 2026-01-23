@@ -151,16 +151,91 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
             expect(cacheKey.value).not.toMatch(/^0x/);
         });
 
-        it('',async() => {
-            for(let i = 0; i < 10; i++) {
+        it.skip('',async() => {
+            for(let i = 0; i < 1000000; i++) {
             // for(let i = 0; i < 1e9; i++) {
                 await nexo.store.kv.set(`user:${1000000+i}`, ``);
             }
         })
     });
 
-    // TODO: Add other brokers tests here
-    // describe('QUEUE BROKER', () => { ... });
+    describe('QUEUE BROKER', async () => {
+        // ========================================
+        // 2. QUEUE BROKER - Create queues with different message states
+        // ========================================
+        console.log('📋 Setting up QUEUE broker data...');
+
+        // 1. Pending Messages (Standard)
+        const emailQueue = await nexo.queue('PENDING_email_notifications').create();
+        await emailQueue.push({ to: 'user@example.com', subject: 'Welcome!', template: 'welcome' });
+        await emailQueue.push({ to: 'admin@example.com', subject: 'New User Registration', template: 'admin_notify' });
+        await emailQueue.push({ to: 'support@example.com', subject: 'Help Request', template: 'support' });
+
+        // 2. Prioritized Messages
+        const orderQueue = await nexo.queue('PRIORITY_order_processing').create();
+        await orderQueue.push({ order_id: 'ORD-001', amount: 99.99, priority: 'high' }, { priority: 2 });
+        await orderQueue.push({ order_id: 'ORD-002', amount: 29.99, priority: 'low' }, { priority: 0 });
+        await orderQueue.push({ order_id: 'ORD-003', amount: 199.99, priority: 'high' }, { priority: 2 });
+
+        // 3. Scheduled Messages (Schedule for 1 hour in the future so they stay "Scheduled")
+        const jobQueue = await nexo.queue('SCHEDULED_background_jobs').create();
+        await jobQueue.push({ type: 'cleanup', target: 'temp_files' }, { delayMs: 3600000 });
+        await jobQueue.push({ type: 'report', target: 'daily_stats' }, { delayMs: 7200000 });
+
+        // 4. In-Flight Messages (Processing)
+        // We set a long visibility timeout (1 hour) and consume WITHOUT acking to keep them "InFlight"
+        const transcodeQueue = await nexo.queue('INFLIGHT_video_transcoding').create({
+            visibilityTimeoutMs: 3600000 // 1 hour visibility
+        });
+        await transcodeQueue.push({ file: 'video1.mp4', format: '1080p' });
+        await transcodeQueue.push({ file: 'video2.mov', format: '4k' });
+
+        // Consume but throw error to skip ACK (leaving them InFlight)
+        const sub = await transcodeQueue.subscribe(async (data) => {
+            // console.log('Simulating processing (NO ACK):', data);
+            throw new Error("Simulated Processing Error - Skip Ack");
+        }, { batchSize: 2, waitMs: 100 });
+
+        // Wait briefly for fetch to happen, then stop
+        await new Promise(r => setTimeout(r, 500));
+        sub.stop();
+
+        // 5. DLQ Messages (Dead Letter Queue)
+        // We manually populate a DLQ to simulate failures
+        const dlq = await nexo.queue('payments_dlq').create();
+        await dlq.push({
+            txn_id: 'tx_999',
+            error: 'Gateway Timeout',
+            attempts: 5,
+            original_queue: 'payments'
+        });
+        await dlq.push({
+            txn_id: 'tx_888',
+            error: 'Invalid Card',
+            attempts: 5,
+            original_queue: 'payments'
+        });
+
+        // ========================================
+        // 3. FETCH AND VALIDATE QUEUE SNAPSHOT
+        // ========================================
+        console.log('📸 Fetching QUEUE broker snapshot...');
+        // Wait a bit for InFlight state to settle
+        await new Promise(r => setTimeout(r, 500));
+
+        const queueSnapshot = await fetchBrokerSnapshot('/api/queue');
+        console.log('📊 Queue Snapshot received:', JSON.stringify(queueSnapshot, null, 2));
+
+        expect(queueSnapshot.queues).toBeDefined();
+        expect(queueSnapshot.queues.length).toBeGreaterThanOrEqual(5);
+
+        const videoQueue = queueSnapshot.queues.find(q => q.name === 'INFLIGHT_video_transcoding');
+        expect(videoQueue).toBeDefined();
+        expect(videoQueue?.inflight_count).toBeGreaterThan(0); // Should have stuck messages
+
+        const jobs = queueSnapshot.queues.find(q => q.name === 'SCHEDULED_background_jobs');
+        expect(jobs?.scheduled_count).toBeGreaterThan(0);
+    });
     // describe('PUBSUB BROKER', () => { ... });
     // describe('STREAM BROKER', () => { ... });
 
