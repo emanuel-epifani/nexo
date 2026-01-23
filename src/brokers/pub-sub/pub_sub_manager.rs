@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
 use crate::config::PubSubConfig;
+use crate::dashboard::models::pubsub::TopicNodeSnapshot;
 
 // ==========================================
 // PUBLIC TYPES
@@ -66,6 +67,9 @@ enum RootCommand {
     },
     Disconnect {
         client: ClientId,
+    },
+    GetSnapshot {
+        reply: oneshot::Sender<crate::dashboard::models::pubsub::TopicNodeSnapshot>,
     },
 }
 
@@ -147,6 +151,10 @@ impl RootActor {
                 }
                 RootCommand::Disconnect { client } => {
                     self.disconnect(&client);
+                }
+                RootCommand::GetSnapshot { reply } => {
+                    let snapshot = self.build_snapshot();
+                    let _ = reply.send(snapshot);
                 }
             }
         }
@@ -242,6 +250,63 @@ impl RootActor {
                 Self::remove_recursive(&mut self.tree, &parts, client);
             }
         }
+    }
+
+    // --- SNAPSHOT ---
+    fn build_snapshot(&self) -> TopicNodeSnapshot {
+        TopicNodeSnapshot {
+            name: self.name.clone(),
+            full_path: self.name.clone(),
+            subscribers: self.tree.subscribers.len(),
+            retained_value: self.tree.retained.as_ref()
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+            children: self.build_children_snapshots(&self.tree, &self.name),
+        }
+    }
+
+    fn build_children_snapshots(&self, node: &Node, base_path: &str) -> Vec<TopicNodeSnapshot> {
+        let mut children = Vec::new();
+        
+        // Process exact match children
+        for (child_name, child_node) in &node.children {
+            let full_path = format!("{}/{}", base_path, child_name);
+            children.push(TopicNodeSnapshot {
+                name: child_name.clone(),
+                full_path: full_path.clone(),
+                subscribers: child_node.subscribers.len(),
+                retained_value: child_node.retained.as_ref()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+                children: self.build_children_snapshots(child_node, &full_path),
+            });
+        }
+        
+        // Process wildcard '+' child
+        if let Some(plus_node) = &node.plus_child {
+            let full_path = format!("{}/+", base_path);
+            children.push(TopicNodeSnapshot {
+                name: "+".to_string(),
+                full_path,
+                subscribers: plus_node.subscribers.len(),
+                retained_value: plus_node.retained.as_ref()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+                children: self.build_children_snapshots(plus_node, &format!("{}/+", base_path)),
+            });
+        }
+        
+        // Process wildcard '#' child
+        if let Some(hash_node) = &node.hash_child {
+            let full_path = format!("{}/#", base_path);
+            children.push(TopicNodeSnapshot {
+                name: "#".to_string(),
+                full_path,
+                subscribers: hash_node.subscribers.len(),
+                retained_value: hash_node.retained.as_ref()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+                children: self.build_children_snapshots(hash_node, &format!("{}/#", base_path)),
+            });
+        }
+        
+        children
     }
 
     // --- HELPERS ---
@@ -555,16 +620,15 @@ impl PubSubManager {
             }
         }
 
-        // Build simple tree snapshot (roots only for now)
+        // Build complete tree snapshot by querying each actor
         let mut children = Vec::new();
         for entry in self.actors.iter() {
-            children.push(TopicNodeSnapshot {
-                name: entry.key().clone(),
-                full_path: entry.key().clone(),
-                subscribers: 0,  // Would need to query actor for accurate count
-                retained_value: None,
-                children: vec![],
-            });
+            let (tx, rx) = oneshot::channel();
+            if entry.value().send(RootCommand::GetSnapshot { reply: tx }).await.is_ok() {
+                if let Ok(snapshot) = rx.await {
+                    children.push(snapshot);
+                }
+            }
         }
 
         PubSubBrokerSnapshot {

@@ -36,14 +36,13 @@ export function PubSubView({ data }: Props) {
       const traverse = (node: TopicNodeSnapshot, currentPath: string) => {
           const path = currentPath ? `${currentPath}/${node.name}` : node.name;
           if (node.name !== 'root') {
-              if (node.subscribers > 0 || node.retained_value) {
-                  flatTopics.push({
-                      path: node.full_path || path,
-                      subscribers: node.subscribers,
-                      retained_value: node.retained_value,
-                      is_wildcard: false
-                  });
-              }
+              // Show ALL topics, regardless of subscribers or retained value
+              flatTopics.push({
+                  path: node.full_path || path,
+                  subscribers: node.subscribers,
+                  retained_value: node.retained_value,
+                  is_wildcard: false
+              });
           }
           node.children.forEach((child: TopicNodeSnapshot) => traverse(child, node.name === 'root' ? '' : path));
       };

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { nexo, fetchBrokerSnapshot } from '../nexo';
+import { NexoClient } from '../../../sdk/ts/src/client';
 
 
 describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
@@ -324,7 +325,212 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         expect(dlqPayload.error).toBeDefined();
     });
 
-    // TODO: it('PUBSUB ', () => { ... });
+    it('PUBSUB', async () => {
+        // ========================================
+        // 1. SETUP PUBSUB BROKER DATA
+        // ========================================
+        console.log('📡 Setting up PUBSUB broker data...');
+
+        // Subscribe to various topics (hierarchical and wildcards)
+        await nexo.pubsub('home/kitchen/temperature').subscribe(() => {});
+        await nexo.pubsub('home/kitchen/humidity').subscribe(() => {});
+        await nexo.pubsub('home/livingroom/light').subscribe(() => {});
+        
+        await nexo.pubsub('home/+/temperature').subscribe(() => {}); // Single wildcard
+        await nexo.pubsub('office/desk/monitor').subscribe(() => {});
+        await nexo.pubsub('sensors/#').subscribe(() => {}); // Multi-level wildcard
+        
+        await nexo.pubsub('garden/soil/moisture').subscribe(() => {});
+        await nexo.pubsub('garden/temperature').subscribe(() => {});
+        
+        // Publish messages with retained flags
+        await nexo.pubsub('home/kitchen/temperature').publish(JSON.stringify({ value: 22.5, unit: 'celsius' }), { retain: true });
+        await nexo.pubsub('home/kitchen/humidity').publish(JSON.stringify({ value: 65, unit: 'percent' }), { retain: true });
+        await nexo.pubsub('home/livingroom/light').publish(JSON.stringify({ status: 'on', brightness: 80 }), { retain: true });
+        
+        await nexo.pubsub('office/desk/monitor').publish(JSON.stringify({ brand: 'Dell', model: 'U2720Q' }), { retain: true });
+        await nexo.pubsub('office/desk/keyboard').publish(JSON.stringify({ type: 'mechanical', backlight: true }), { retain: false });
+        
+        await nexo.pubsub('garden/soil/moisture').publish(JSON.stringify({ value: 45, unit: 'percent' }), { retain: true });
+        await nexo.pubsub('garden/temperature').publish(JSON.stringify({ value: 18.2, unit: 'celsius' }), { retain: true });
+        
+        // Publish some non-retained messages (should not appear in snapshot)
+        await nexo.pubsub('home/kitchen/temperature').publish(JSON.stringify({ value: 23.0, unit: 'celsius' }), { retain: false });
+        await nexo.pubsub('garden/water/pump').publish(JSON.stringify({ status: 'active' }), { retain: false });
+
+        // ========================================
+        // 2. WAIT FOR DATA PROPAGATION
+        // ========================================
+        console.log('⏳ Waiting for data propagation...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // ========================================
+        // 3. FETCH AND VALIDATE PUBSUB SNAPSHOT
+        // ========================================
+        console.log('📸 Fetching PUBSUB broker snapshot...');
+        const pubsubSnapshot = await fetchBrokerSnapshot('/api/pubsub');
+        
+        console.log('📊 PubSub Snapshot received:', JSON.stringify(pubsubSnapshot, null, 2));
+
+        // ========================================
+        // 4. VALIDATE SNAPSHOT STRUCTURE
+        // ========================================
+        expect(pubsubSnapshot).toBeDefined();
+        expect(pubsubSnapshot).not.toBeNull();
+        expect(pubsubSnapshot.active_clients).toBe(1); // Only the singleton client
+        expect(pubsubSnapshot.topic_tree).toBeDefined();
+        expect(pubsubSnapshot.wildcard_subscriptions).toBeDefined();
+        expect(Array.isArray(pubsubSnapshot.wildcard_subscriptions)).toBe(true);
+
+        // ========================================
+        // 5. VALIDATE WILDCARD SUBSCRIPTIONS
+        // ========================================
+        expect(pubsubSnapshot.wildcard_subscriptions.length).toBeGreaterThan(0);
+        
+        // Should contain the single-level wildcard subscription
+        const singleWildcard = pubsubSnapshot.wildcard_subscriptions.find((sub: any) => 
+            sub.pattern === 'home/+/temperature'
+        );
+        expect(singleWildcard).toBeDefined();
+        
+        // Should contain the multi-level wildcard subscription
+        const multiWildcard = pubsubSnapshot.wildcard_subscriptions.find((sub: any) => 
+            sub.pattern === 'sensors/#'
+        );
+        expect(multiWildcard).toBeDefined();
+
+        // ========================================
+        // 6. VALIDATE TOPIC TREE STRUCTURE
+        // ========================================
+        const { topic_tree } = pubsubSnapshot;
+        expect(topic_tree.name).toBe('root');
+        expect(topic_tree.full_path).toBe('');
+        expect(topic_tree.children.length).toBeGreaterThan(0);
+
+        // Helper function to flatten topic tree
+        const flattenTopics = (node: any, prefix: string = ''): any[] => {
+            const topics = [];
+            const fullPath = prefix ? `${prefix}/${node.name}` : node.name;
+            
+            if (node.name !== 'root') {
+                topics.push({
+                    name: node.name,
+                    full_path: node.full_path || fullPath,
+                    subscribers: node.subscribers,
+                    retained_value: node.retained_value,
+                    children: node.children
+                });
+            }
+            
+            for (const child of node.children) {
+                topics.push(...flattenTopics(child, node.name === 'root' ? '' : fullPath));
+            }
+            
+            return topics;
+        };
+
+        const allTopics = flattenTopics(topic_tree);
+        console.log('📋 All topics found:', allTopics.map((t: any) => t.full_path));
+
+        // ========================================
+        // 7. VALIDATE SPECIFIC TOPICS WITH RETAINED VALUES
+        // ========================================
+        
+        // Kitchen temperature topic should have retained value and subscribers
+        const kitchenTemp = allTopics.find((t: any) => t.full_path === 'home/kitchen/temperature');
+        expect(kitchenTemp).toBeDefined();
+        expect(kitchenTemp.subscribers).toBeGreaterThan(0); // Direct subscription + wildcard
+        expect(kitchenTemp.retained_value).not.toBeNull();
+        expect(kitchenTemp.retained_value).toContain('22.5'); // Should have the retained value
+
+        // Kitchen humidity topic
+        const kitchenHumidity = allTopics.find((t: any) => t.full_path === 'home/kitchen/humidity');
+        expect(kitchenHumidity).toBeDefined();
+        expect(kitchenHumidity.subscribers).toBe(1); // only direct subscription
+        expect(kitchenHumidity.retained_value).not.toBeNull();
+        expect(kitchenHumidity.retained_value).toContain('65');
+
+        // Living room light topic
+        const livingRoomLight = allTopics.find((t: any) => t.full_path === 'home/livingroom/light');
+        expect(livingRoomLight).toBeDefined();
+        expect(livingRoomLight.subscribers).toBe(1); // only direct subscription
+        expect(livingRoomLight.retained_value).not.toBeNull();
+        expect(livingRoomLight.retained_value).toContain('on');
+
+        // Office monitor topic
+        const officeMonitor = allTopics.find((t: any) => t.full_path === 'office/desk/monitor');
+        expect(officeMonitor).toBeDefined();
+        expect(officeMonitor.subscribers).toBe(1); // only direct subscription
+        expect(officeMonitor.retained_value).not.toBeNull();
+        expect(officeMonitor.retained_value).toContain('Dell');
+
+        // Garden topics
+        const gardenMoisture = allTopics.find((t: any) => t.full_path === 'garden/soil/moisture');
+        expect(gardenMoisture).toBeDefined();
+        expect(gardenMoisture.subscribers).toBe(1); // only direct subscription
+        expect(gardenMoisture.retained_value).not.toBeNull();
+        expect(gardenMoisture.retained_value).toContain('45');
+
+        const gardenTemp = allTopics.find((t: any) => t.full_path === 'garden/temperature');
+        expect(gardenTemp).toBeDefined();
+        expect(gardenTemp.subscribers).toBe(1); // only direct subscription
+        expect(gardenTemp.retained_value).not.toBeNull();
+        expect(gardenTemp.retained_value).toContain('18.2');
+
+        // ========================================
+        // 8. VALIDATE TOPICS WITHOUT RETAINED VALUES
+        // ========================================
+        
+        // Water pump topic should not exist (no retained, no subscribers)
+        const waterPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump');
+        expect(waterPump).toBeUndefined(); // Should not be in snapshot
+
+        // Office keyboard topic should also not exist (no retained, no subscribers)
+        const officeKeyboard = allTopics.find((t: any) => t.full_path === 'office/desk/keyboard');
+        expect(officeKeyboard).toBeUndefined(); // Should not be in snapshot - this is correct behavior
+
+        // ========================================
+        // 9. VALIDATE HIERARCHICAL STRUCTURE
+        // ========================================
+        
+        // Check that home/kitchen branch exists
+        const homeNode = topic_tree.children.find((child: any) => child.name === 'home');
+        expect(homeNode).toBeDefined();
+        
+        if (homeNode) {
+            const kitchenNode = homeNode.children.find((child: any) => child.name === 'kitchen');
+            expect(kitchenNode).toBeDefined();
+            
+            if (kitchenNode) {
+                const tempNode = kitchenNode.children.find((child: any) => child.name === 'temperature');
+                const humidityNode = kitchenNode.children.find((child: any) => child.name === 'humidity');
+                
+                expect(tempNode).toBeDefined();
+                expect(humidityNode).toBeDefined();
+                expect(tempNode.retained_value).not.toBeNull();
+                expect(humidityNode.retained_value).not.toBeNull();
+            }
+        }
+
+        // ========================================
+        // 10. VALIDATE SUBSCRIBER COUNTS
+        // ========================================
+        
+        // Total topics with retained values
+        const topicsWithRetained = allTopics.filter((t: any) => t.retained_value !== null);
+        expect(topicsWithRetained.length).toBe(6); // kitchen temp/humidity, living light, office monitor, garden moisture/temperature
+
+        // Topics with active subscribers
+        const topicsWithSubscribers = allTopics.filter((t: any) => t.subscribers > 0);
+        expect(topicsWithSubscribers.length).toBeGreaterThan(0);
+
+        console.log('✅ PUBSUB snapshot validation completed successfully');
+        console.log(`📈 Found ${allTopics.length} total topics`);
+        console.log(`💾 Found ${topicsWithRetained.length} topics with retained values`);
+        console.log(`👥 Found ${topicsWithSubscribers.length} topics with active subscribers`);
+        console.log(`🎯 Found ${pubsubSnapshot.wildcard_subscriptions.length} wildcard subscriptions`);
+    });
+
     // TODO: it('STREAM', () => { ... });
 
 });
