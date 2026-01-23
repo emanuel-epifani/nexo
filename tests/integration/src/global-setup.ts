@@ -25,6 +25,6 @@ export default async function setup() {
   // 3. Return the teardown function
   return async () => {
     console.log('--- 🛑 Shutting down Nexo Server ---');
-    killServer();
+    // killServer();
   };
 }

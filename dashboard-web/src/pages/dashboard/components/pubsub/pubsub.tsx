@@ -156,6 +156,72 @@ export function PubSubView({ data }: Props) {
   )
 }
 
+// TopicRow component con layout flessibile
+function TopicRow({ item, layout, selected, onSelect }: {
+  item: any;
+  layout: 'topics' | 'wildcards';
+  selected: boolean;
+  onSelect: (path: string) => void;
+}) {
+  // Layout dinamico basato su type
+  const containerClass = layout === 'topics' 
+    ? 'group grid grid-cols-[1fr_4rem_4rem] gap-4 items-center px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all min-h-9'
+    : 'group flex items-center gap-3 px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all min-h-9';
+
+  return (
+    <div
+      className={`${containerClass} ${selected ? 'bg-slate-800' : 'hover:bg-slate-900/50'}`}
+      onClick={() => onSelect(item.path)}
+    >
+      {/* Topic Path - sempre presente */}
+      <div className="flex flex-col gap-1 overflow-hidden min-w-0">
+        <div className="flex items-center gap-2">
+          {item.is_wildcard ? (
+            <Hash className="h-3 w-3 text-amber-500 flex-shrink-0" />
+          ) : (
+            <Circle className="h-2 w-2 text-emerald-500 flex-shrink-0" />
+          )}
+          <span className={`font-mono text-xs truncate ${selected ? 'text-white' : 'text-slate-300'}`}>
+            {item.path}
+          </span>
+        </div>
+        {item.client_id && (
+          <div className="pl-5 text-[10px] text-slate-500 truncate">
+            Client: {item.client_id}
+          </div>
+        )}
+      </div>
+
+      {/* Colonne aggiuntive solo per topics */}
+      {layout === 'topics' && (
+        <>
+          {/* Colonna Subscribers */}
+          <div className="flex justify-center">
+            {!item.is_wildcard && item.subscribers > 0 ? (
+              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-slate-900 text-slate-400 border-slate-700 rounded-sm">
+                {item.subscribers}
+              </Badge>
+            ) : (
+              <span className="text-slate-700 text-[9px]">—</span>
+            )}
+          </div>
+
+          {/* Colonna Retained */}
+          <div className="flex justify-center">
+            {item.retained_value ? (
+              <Badge variant="outline" className="h-4 px-1 text-[9px] border-purple-900 bg-purple-950/30 text-purple-400 rounded-sm">
+                RET
+              </Badge>
+            ) : (
+              <span className="text-slate-700 text-[9px]">—</span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
     const [filter, setFilter] = useState("")
 
@@ -178,47 +244,32 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             </div>
 
             <ScrollArea className="flex-1">
+                {/* HEADER DIVERSO BASATO SU TYPE */}
+                {type === 'topics' ? (
+                    <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-[9px] font-bold uppercase text-slate-500 z-10">
+                        <div className="flex items-center gap-2">
+                            <span>Topic Path</span>
+                        </div>
+                        <div className="w-16 text-center">Subs</div>
+                        <div className="w-16 text-center">Retained</div>
+                    </div>
+                ) : (
+                    <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 text-[9px] font-bold uppercase text-slate-500 z-10">
+                        <div className="flex items-center gap-2">
+                            <span>Wildcard Pattern</span>
+                        </div>
+                    </div>
+                )}
+                
                 <div className="p-0">
                     {filtered.map((item: any) => (
-                        <div
-                            key={item.path + (item.client_id || '')}
-                            onClick={() => onSelect(item.path)}
-                            className={`
-                                group flex items-center justify-between px-4 py-3 border-b border-slate-800/50 cursor-pointer transition-all
-                                ${selectedPath === item.path ? 'bg-slate-800' : 'hover:bg-slate-900/50'}
-                            `}
-                        >
-                            <div className="flex flex-col gap-1 overflow-hidden">
-                                <div className="flex items-center gap-2">
-                                    {item.is_wildcard ? (
-                                        <Hash className="h-3 w-3 text-amber-500 flex-shrink-0" />
-                                    ) : (
-                                        <Circle className="h-2 w-2 text-emerald-500 flex-shrink-0" />
-                                    )}
-                                    <span className={`font-mono text-xs truncate ${selectedPath === item.path ? 'text-white' : 'text-slate-300'}`}>
-                                        {item.path}
-                                    </span>
-                                </div>
-                                {item.client_id && (
-                                    <div className="pl-5 text-[10px] text-slate-500 truncate">
-                                        Client: {item.client_id}
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="flex items-center gap-2 flex-shrink-0 ml-4">
-                                {item.retained_value && (
-                                    <Badge variant="outline" className="h-4 px-1 text-[9px] border-purple-900 bg-purple-950/30 text-purple-400 rounded-sm">
-                                        RET
-                                    </Badge>
-                                )}
-                                {!item.is_wildcard && item.subscribers > 0 && (
-                                    <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-slate-900 text-slate-400 border-slate-700 rounded-sm">
-                                        {item.subscribers}
-                                    </Badge>
-                                )}
-                            </div>
-                        </div>
+                        <TopicRow 
+                            key={item.path}
+                            item={item}
+                            layout={type}
+                            selected={selectedPath === item.path}
+                            onSelect={onSelect}
+                        />
                     ))}
                     
                     {filtered.length === 0 && (

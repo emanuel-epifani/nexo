@@ -260,25 +260,17 @@ impl RootActor {
     }
 
     fn collect_flat_topics(&self, node: &Node, base_path: &str, topics: &mut Vec<TopicSnapshot>) {
-        // Include node if it has subscribers or retained value
-        if node.subscribers.len() > 0 || node.retained.is_some() {
-            topics.push(TopicSnapshot {
-                full_path: base_path.to_string(),
-                subscribers: node.subscribers.len(),
-                retained_value: node.retained.as_ref()
-                    .and_then(|bytes| {
-                        // Remove framing byte if present (first byte indicates message type)
-                        let clean_bytes = if bytes.len() > 1 && (bytes[0] == 0x01 || bytes[0] == 0x02) {
-                            &bytes[1..]
-                        } else {
-                            bytes
-                        };
-                        let json_str = String::from_utf8_lossy(clean_bytes);
-                        serde_json::from_str(&json_str).ok()
-                    }),
-            });
-        }
-        
+        topics.push(TopicSnapshot {
+            full_path: base_path.to_string(),
+            subscribers: node.subscribers.len(),
+            retained_value: node.retained.as_ref()
+                .and_then(|bytes| {
+                    let payload_withouht_datatype = &bytes[1..];
+                    let json_str = String::from_utf8_lossy(payload_withouht_datatype);
+                    serde_json::from_str(&json_str).ok()
+                }),
+        });
+
         // Process exact match children
         for (child_name, child_node) in &node.children {
             let full_path = format!("{}/{}", base_path, child_name);
