@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from "../nexo";
-import { NexoClient, Opcode } from '@nexo/client';
-import { BenchmarkProbe } from "../utils/benchmark-misure";
 
 describe('QUEUE broker - Complete Feature Set', () => {
 

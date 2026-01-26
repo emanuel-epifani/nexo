@@ -17,7 +17,7 @@ export default async function setup() {
   // --- FULL INTEGRATION FLOW ---
   // 1. Build the Rust binary to ensure we're testing the latest code
   console.log('--- 🛠️  Building Nexo (Rust) ---');
-  execSync('cargo build --release', { cwd: ROOT_DIR, stdio: 'inherit' });
+  execSync('cargo build', { cwd: ROOT_DIR, stdio: 'inherit' });
 
   // 2. Start the server once for the entire suite
   await runNexoServer(host, port);
