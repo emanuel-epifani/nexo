@@ -16,14 +16,14 @@ export class NexoClient {
   public readonly store: NexoStore;
   private readonly pubsubBroker: NexoPubSub;
 
-  constructor(options: NexoOptions = {}) {
-    this.conn = new NexoConnection(options.host || '127.0.0.1', options.port || 7654, options);
+  constructor(options: NexoOptions) {
+    this.conn = new NexoConnection(options.host, options.port, options);
     this.store = new NexoStore(this.conn);
     this.pubsubBroker = new NexoPubSub(this.conn);
     this.setupGracefulShutdown();
   }
 
-  static async connect(options?: NexoOptions): Promise<NexoClient> {
+  static async connect(options: NexoOptions): Promise<NexoClient> {
     const client = new NexoClient(options);
     await client.conn.connect();
     return client;
@@ -33,19 +33,31 @@ export class NexoClient {
   disconnect() { this.conn.disconnect(); }
 
   queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {
-    if (!this.queues.has(name)) this.queues.set(name, new NexoQueue<T>(this.conn, name, config));
-    return this.queues.get(name) as NexoQueue<T>;
+    let q = this.queues.get(name);
+    if (!q) {
+      q = new NexoQueue<T>(this.conn, name, config);
+      this.queues.set(name, q);
+    }
+    return q;
   }
 
   stream<T = any>(name: string, group?: string): NexoStream<T> {
     const key = group ? `${name}:${group}` : name;
-    if (!this.streams.has(key)) this.streams.set(key, new NexoStream<T>(this.conn, name, group));
-    return this.streams.get(key) as NexoStream<T>;
+    let s = this.streams.get(key);
+    if (!s) {
+      s = new NexoStream<T>(this.conn, name, group);
+      this.streams.set(key, s);
+    }
+    return s;
   }
 
   pubsub<T = any>(name: string): NexoTopic<T> {
-    if (!this.topics.has(name)) this.topics.set(name, new NexoTopic<T>(this.pubsubBroker, name));
-    return this.topics.get(name) as NexoTopic<T>;
+    let t = this.topics.get(name);
+    if (!t) {
+      t = new NexoTopic<T>(this.pubsubBroker, name);
+      this.topics.set(name, t);
+    }
+    return t;
   }
 
   get debug() {
