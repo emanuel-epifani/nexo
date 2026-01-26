@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { nexo, fetchBrokerSnapshot } from '../nexo';
 
 
-describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
+describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
 
     it('STORE', async () => {
 

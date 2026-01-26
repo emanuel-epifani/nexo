@@ -47,12 +47,11 @@ export class NexoClient {
     return q;
   }
 
-  stream<T = any>(name: string, group?: string): NexoStream<T> {
-    const key = group ? `${name}:${group}` : name;
-    let s = this.streams.get(key);
+  stream<T = any>(name: string): NexoStream<T> {
+    let s = this.streams.get(name);
     if (!s) {
-      s = new NexoStream<T>(this.conn, name, group);
-      this.streams.set(key, s);
+      s = new NexoStream<T>(this.conn, name);
+      this.streams.set(name, s);
     }
     return s;
   }

@@ -7,54 +7,35 @@ export interface StreamSubscribeOptions {
   batchSize?: number; // Default 100
 }
 
-export class NexoStream<T = any> {
+class StreamSubscription<T> {
   private active = false;
-  private isSubscribed = false;
-
-  // Consumer Group State
   private generationId = BigInt(0);
   private assignedPartitions: number[] = [];
   private offsets = new Map<number, bigint>();
 
   constructor(
     private conn: NexoConnection,
-    public readonly name: string,
-    public readonly consumerGroup?: string
+    private streamName: string,
+    private group: string
   ) {}
 
-  async create(): Promise<this> {
-    await this.conn.send(Opcode.S_CREATE, FrameCodec.string(this.name));
-    return this;
-  }
-
-  async publish(data: T): Promise<void> {
-    await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
-  }
-
-  async subscribe(
+  async start(
     callback: (data: T) => Promise<any> | any,
-    options: StreamSubscribeOptions = {}
+    options: StreamSubscribeOptions
   ): Promise<void> {
-    if (this.isSubscribed) throw new Error("Stream already subscribed.");
-    if (!this.consumerGroup) throw new Error("Consumer Group required.");
-
-    this.isSubscribed = true;
     this.active = true;
+    const batchSize = options.batchSize ?? 100;
 
-    this.runConsumerLoop(callback, options.batchSize ?? 100).catch(err => {
-      logger.error("Stream consumer loop crashed", err);
+    // Run loop in background (fire & forget promise)
+    this.runConsumerLoop(callback, batchSize).catch(err => {
+      logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
       this.active = false;
-      this.isSubscribed = false;
     });
   }
 
   stop() {
     this.active = false;
   }
-
-  // ========================================
-  // CONSUMER LOOP
-  // ========================================
 
   private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number) {
     while (this.conn.isConnected && this.active) {
@@ -65,28 +46,24 @@ export class NexoStream<T = any> {
         if (!this.active || !this.conn.isConnected) break;
 
         if (this.isRebalanceError(e)) {
-          logger.warn("Rebalance triggered. Re-joining group...");
-          await this.backoff(200); // Let server stabilize after rebalance
+          logger.warn(`[${this.streamName}:${this.group}] Rebalance. Re-joining...`);
+          await this.backoff(200);
           continue;
         }
 
-        logger.error("Stream error. Retrying in 1s...", e);
+        logger.error(`[${this.streamName}:${this.group}] Error. Retrying in 1s...`, e);
         await this.backoff(1000);
       }
     }
-    this.isSubscribed = false;
   }
 
   private async joinGroup(): Promise<void> {
-    logger.info(`Joining group ${this.consumerGroup}...`);
-    
     const res = await this.conn.send(
       Opcode.S_JOIN,
-      FrameCodec.string(this.consumerGroup!),
-      FrameCodec.string(this.name)
+      FrameCodec.string(this.group),
+      FrameCodec.string(this.streamName)
     );
 
-    // Parse: [GenID:8][PartitionCount:4][P1:4, P1_Off:8, ...]
     this.generationId = res.cursor.readU64();
     const count = res.cursor.readU32();
 
@@ -99,8 +76,8 @@ export class NexoStream<T = any> {
       this.assignedPartitions.push(partitionId);
       this.offsets.set(partitionId, offset);
     }
-
-    logger.info(`Joined Gen ${this.generationId}. Partitions: [${this.assignedPartitions}]`);
+    
+    logger.debug(`[${this.streamName}:${this.group}] Joined Gen ${this.generationId}. Partitions: ${this.assignedPartitions}`);
   }
 
   private async pollLoop(callback: (data: T) => Promise<any> | any, batchSize: number): Promise<void> {
@@ -129,8 +106,8 @@ export class NexoStream<T = any> {
     const res = await this.conn.send(
       Opcode.S_FETCH,
       FrameCodec.u64(this.generationId),
-      FrameCodec.string(this.name),
-      FrameCodec.string(this.consumerGroup!),
+      FrameCodec.string(this.streamName),
+      FrameCodec.string(this.group),
       FrameCodec.u32(partition),
       FrameCodec.u64(currentOffset),
       FrameCodec.u32(batchSize)
@@ -139,7 +116,6 @@ export class NexoStream<T = any> {
     const messages = this.parseMessages(res.cursor);
     if (messages.length === 0) return;
 
-    // Process batch
     let lastProcessedOffset = currentOffset;
     let shouldCommit = true;
 
@@ -148,14 +124,13 @@ export class NexoStream<T = any> {
         await callback(msg.data);
         lastProcessedOffset = msg.offset;
       } catch (e: any) {
-        if (this.isRebalanceError(e)) throw e; // Propagate to outer loop
+        if (this.isRebalanceError(e)) throw e;
         logger.error(`Error processing P${partition}:${msg.offset}. Stopping batch.`);
         shouldCommit = false;
         break;
       }
     }
 
-    // Commit only if entire batch processed successfully
     if (shouldCommit && this.conn.isConnected) {
       await this.commitOffset(partition, lastProcessedOffset + BigInt(1));
     }
@@ -167,37 +142,31 @@ export class NexoStream<T = any> {
 
     for (let i = 0; i < count; i++) {
       const offset = cursor.readU64();
-      cursor.readU64(); // timestamp (unused)
+      cursor.readU64(); // timestamp
       const payloadLen = cursor.readU32();
       const payloadBuf = cursor.readBuffer(payloadLen);
       const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
       messages.push({ offset, data });
     }
-
     return messages;
   }
 
   private async commitOffset(partition: number, nextOffset: bigint): Promise<void> {
     this.offsets.set(partition, nextOffset);
-
     try {
       await this.conn.send(
         Opcode.S_COMMIT,
         FrameCodec.u64(this.generationId),
-        FrameCodec.string(this.consumerGroup!),
-        FrameCodec.string(this.name),
+        FrameCodec.string(this.group),
+        FrameCodec.string(this.streamName),
         FrameCodec.u32(partition),
         FrameCodec.u64(nextOffset)
       );
     } catch (e: any) {
-      if (this.isRebalanceError(e)) throw e; // Propagate
-      logger.error(`Commit failed for P${partition}:${nextOffset}`, e);
+      if (this.isRebalanceError(e)) throw e;
+      logger.error(`Commit failed P${partition}:${nextOffset}`, e);
     }
   }
-
-  // ========================================
-  // HELPERS
-  // ========================================
 
   private isRebalanceError(e: any): boolean {
     return e?.message?.includes("REBALANCE");
@@ -205,5 +174,38 @@ export class NexoStream<T = any> {
 
   private backoff(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
+  }
+}
+
+export class NexoStream<T = any> {
+  constructor(
+    private conn: NexoConnection,
+    public readonly name: string
+  ) {}
+
+  async create(): Promise<this> {
+    await this.conn.send(Opcode.S_CREATE, FrameCodec.string(this.name));
+    return this;
+  }
+
+  async publish(data: T): Promise<void> {
+    await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
+  }
+
+  async subscribe(
+    group: string,
+    callback: (data: T) => Promise<any> | any,
+    options: StreamSubscribeOptions = {}
+  ): Promise<{ stop: () => void }> {
+    if (!group) throw new Error("Consumer Group is required for subscription");
+
+    const subscription = new StreamSubscription<T>(this.conn, this.name, group);
+    
+    // Start the subscription loop (non-blocking)
+    await subscription.start(callback, options);
+
+    return {
+      stop: () => subscription.stop()
+    };
   }
 }

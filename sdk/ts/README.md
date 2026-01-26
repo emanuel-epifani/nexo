@@ -3,11 +3,11 @@
 High-performance TypeScript client for [Nexo Broker](https://github.com/emanuel-epifani/nexo).
 
 
-## Quick Start
+## Installation
 ```bash
-# install SDK
 npm install @emanuelepifani/nexo-client
 ```
+## Quick Start
 ```typescript
 // Initialize client
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
@@ -56,8 +56,8 @@ await criticalQueue.push({ type: 'scheduled' }, { delayMs: 3600000 });
 await criticalQueue.subscribe(
     async (task) => { await processTask(task); },
     {
-        batchSize: 10,   // Fetch 10 messages at once to optimizes throughput (default: 50)
-        concurrency: 5,  // Process 5 messages in parallel (default: 5)
+        batchSize: 100,   // Fetch 10 messages at once to optimizes throughput (default: 50)
+        concurrency: 10,  // Process 5 messages in parallel (default: 5)
         waitMs: 5000     // Long Polling: wait up to 5s if queue is empty
     }
 );
@@ -68,7 +68,7 @@ await criticalQueue.subscribe(
 
 ```typescript
 // Define topic (not need to create, auto-created on first publish)
-const alerts = client.topic<AlertMsg>("system-alerts");
+const alerts = await client.topic<AlertMsg>("system-alerts");
 // Subscribe
 await alerts.subscribe((msg) => console.log(msg));
 // Publish
@@ -108,39 +108,32 @@ await client.pubsub<string>('config/theme').publish('dark', { retain: true });
 ### 4. STREAM
 
 ```typescript
-const events = client.stream('user-events', 'analytics-group');
-// Publisher
-await events.publish({ event: 'login', userId: 123 });
-// Consumer
-await events.subscribe((msg) => { console.log('Event:', msg.event); });
---------
 // Create topic
-const producer = client.stream<OrderEvent>('orders').create();
-await producer.publish({ id: 'ord_123', amount: 99.00, status: 'paid' });
-
-// 3. Subscribe (Consumer)
-// Consumers MUST specify a group ('analytics')
-const consumer = client.stream<OrderEvent>('orders', 'analytics');
-
-await consumer.subscribe((msg) => {
-    // 'msg' is typed as OrderEvent
-    console.log(`Processing order ${msg.id}: ${msg.status}`);
-});
+const stream = await client.stream<UserEvent>('user-events').create();
+// Publisher
+await stream.publish({ type: 'login', userId: 'u1' });
+// Consumer (must specify group)
+await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
 ```
 
 <details>
 <summary><strong>Consumer Groups & Scaling</strong></summary>
 
 ```typescript
-// SCALING (Competing Consumers)
-// Same Group ('workers') -> Load Balancing
-// Partitions are distributed among workers.
-const w1 = client.stream<OrderEvent>('orders', 'workers');
-const w2 = client.stream<OrderEvent>('orders', 'workers');
+// Create Topic
+const orders = await client.stream<Order>('orders').orders.create();
 
-// BROADCAST (Fan-Out)
-// Different Groups -> Each group gets a full copy of the stream
-const analytics = client.stream<OrderEvent>('orders', 'analytics');
-const audit     = client.stream<OrderEvent>('orders', 'audit');
+// SCALING (Microservices Replicas / K8s Pods)
+// Same Group ('workers') -> Automatic Load Balancing & Rebalancing
+// Partitions are distributed among workers.
+await orders.subscribe('workers', (order) => process(order));
+await orders.subscribe('workers', (order) => process(order));
+
+
+// BROADCAST (Independent Domains)
+// Different Groups -> Each group gets a full copy of the stream.
+// Useful for independent services reacting to the same event.
+await orders.subscribe('analytics', (order) => trackMetrics(order));
+await orders.subscribe('audit-log', (order) => saveAudit(order));
 ```
 </details>
