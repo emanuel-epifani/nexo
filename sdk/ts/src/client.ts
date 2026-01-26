@@ -8,8 +8,8 @@ import { NexoStream } from './brokers/stream';
 import { FrameCodec } from './codec';
 
 export interface NexoOptions {
-  host?: string;
-  port?: number;
+  host: string;
+  port: number;
   requestTimeoutMs?: number;
 }
 

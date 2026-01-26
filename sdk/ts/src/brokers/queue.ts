@@ -11,12 +11,12 @@ export interface QueueConfig {
 }
 
 export interface QueueSubscribeOptions {
-  batchSize?: number;  // Default 50
-  waitMs?: number;     // Default 20000 (20 seconds)
-  concurrency?: number; // Default 1 (Serial)
+  batchSize?: number;
+  waitMs?: number;
+  concurrency?: number;
 }
 
-export interface PushOptions {
+export interface QueuePushOptions {
   priority?: number;
   delayMs?: number;
 }
@@ -57,7 +57,7 @@ export class NexoQueue<T = any> {
     return this;
   }
 
-  async push(data: T, options: PushOptions = {}): Promise<void> {
+  async push(data: T, options: QueuePushOptions = {}): Promise<void> {
     await this.conn.send(
         Opcode.Q_PUSH,
         FrameCodec.u8(options.priority || 0),
@@ -73,7 +73,7 @@ export class NexoQueue<T = any> {
 
     const batchSize = options.batchSize ?? 50;
     const waitMs = options.waitMs ?? 20000;
-    const concurrency = options.concurrency ?? 1;
+    const concurrency = options.concurrency ?? 5;
 
     try {
       await this.create();

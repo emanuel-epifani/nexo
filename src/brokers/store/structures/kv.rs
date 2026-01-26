@@ -25,9 +25,8 @@ impl KvOperations {
                     return None;
                 }
             }
-            if let Value::Kv(KvValue(bytes)) = &entry.value {
+            let Value::Kv(KvValue(bytes)) = &entry.value;
                 return Some(bytes.clone());
-            }
         }
         None
     }
