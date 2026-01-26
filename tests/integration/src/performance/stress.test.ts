@@ -16,7 +16,7 @@ describe('Stress test', async () => {
                 {
                     name: "JSON Object",
                     payload: { op: "ping", data: "test", timestamp: Date.now() },
-                    expectedThroughput: 30_000
+                    expectedThroughput: 150_000
                 },
                 {
                     name: "String",
@@ -97,28 +97,51 @@ describe('Stress test', async () => {
             probe.printResult();
         });
 
-        it('Encoding vs Network Ratio', async () => {
+        it('Encoding vs Decoding vs Network Ratio', async () => {
             const payload = { data: "x".repeat(512) };
+            const ITERATIONS = 10_000;
 
-            // Misura encoding
+            // 1. Misura solo Encoding
             let encodeTime = 0;
-            for (let i = 0; i < 10_000; i++) {
+            for (let i = 0; i < ITERATIONS; i++) {
                 const t0 = performance.now();
                 FrameCodec.any(payload);
                 encodeTime += performance.now() - t0;
             }
 
-            // Misura round-trip completo
+            // 2. Misura solo Decoding (Simulato)
+            const encodedBuffer = FrameCodec.any(payload); // Prepariamo un buffer
+            const cursor = new Cursor(encodedBuffer); // Creiamo il cursore
+            // Nota: dobbiamo resettare il cursore ad ogni giro o ricrearlo
+
+            let decodeTime = 0;
+            for (let i = 0; i < ITERATIONS; i++) {
+                const t0 = performance.now();
+                // Simuliamo l'overhead di creazione del cursore che avviene nella connection
+                const c = new Cursor(encodedBuffer);
+                FrameCodec.decodeAny(c);
+                decodeTime += performance.now() - t0;
+            }
+
+            // 3. Misura Round-Trip Completo (Reale)
             let totalTime = 0;
-            for (let i = 0; i < 10_000; i++) {
+            for (let i = 0; i < ITERATIONS; i++) {
                 const t0 = performance.now();
                 await (nexo as any).debug.echo(payload);
                 totalTime += performance.now() - t0;
             }
 
-            console.log(`Encoding: ${encodeTime.toFixed(2)}ms (${((encodeTime/totalTime)*100).toFixed(1)}%)`);
-            console.log(`Network+Decode: ${(totalTime-encodeTime).toFixed(2)}ms`);
+            // 4. Calcolo differenziale
+            // Network = Totale - (Encoding + Decoding)
+            const networkTime = totalTime - encodeTime - decodeTime;
+
+            console.log(`\n--- ANALYSIS (${ITERATIONS} ops) ---`);
+            console.log(`Total:       ${totalTime.toFixed(2)}ms`);
+            console.log(`Encoding:    ${encodeTime.toFixed(2)}ms (${((encodeTime/totalTime)*100).toFixed(1)}%)`);
+            console.log(`Decoding:    ${decodeTime.toFixed(2)}ms (${((decodeTime/totalTime)*100).toFixed(1)}%)`);
+            console.log(`Network/IO:  ${networkTime.toFixed(2)}ms (${((networkTime/totalTime)*100).toFixed(1)}%)`);
         });
+
     });
 
     describe('STORE', async () => {
