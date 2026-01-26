@@ -23,7 +23,7 @@ export class NexoClient {
   private readonly pubsubBroker: NexoPubSub;
 
   constructor(options: NexoOptions) {
-    this.conn = new NexoConnection(options.host, options.port, options);
+    this.conn = new NexoConnection(options);
     this.store = new NexoStore(this.conn);
     this.pubsubBroker = new NexoPubSub(this.conn);
     this.setupGracefulShutdown();
@@ -35,7 +35,6 @@ export class NexoClient {
     return client;
   }
 
-  get connected() { return this.conn.isConnected; }
   disconnect() { this.conn.disconnect(); }
 
   queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {

@@ -22,7 +22,12 @@ export class NexoConnection {
   private buffer: Buffer = Buffer.alloc(0);
   private chunks: Buffer[] = [];
 
-  constructor(private host: string, private port: number, options: NexoOptions = {}) {
+  private readonly host: string;
+  private readonly port: number;
+
+  constructor(options: NexoOptions) {
+    this.host = options.host;
+    this.port = options.port;
     this.socket = new net.Socket();
     this.socket.setNoDelay(true);
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
