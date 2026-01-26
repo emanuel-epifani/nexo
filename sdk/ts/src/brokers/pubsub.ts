@@ -1,6 +1,10 @@
 import { NexoConnection } from '../connection';
-import { Opcode, PublishOptions } from '../protocol';
+import { Opcode } from '../protocol';
 import { FrameCodec } from '../codec';
+
+export interface PublishOptions {
+  retain?: boolean;
+}
 
 export class NexoTopic<T = any> {
     constructor(private broker: NexoPubSub, public readonly name: string) {}

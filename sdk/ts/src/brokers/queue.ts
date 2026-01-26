@@ -1,7 +1,26 @@
 import { NexoConnection } from '../connection';
-import { Opcode, QueueConfig, QueueSubscribeOptions, PushOptions } from '../protocol';
+import { Opcode } from '../protocol';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+
+export interface QueueConfig {
+  visibilityTimeoutMs?: number;
+  maxRetries?: number;
+  ttlMs?: number;
+  delayMs?: number;
+  passive?: boolean;
+}
+
+export interface QueueSubscribeOptions {
+  batchSize?: number;  // Default 50
+  waitMs?: number;     // Default 20000 (20 seconds)
+  concurrency?: number; // Default 1 (Serial)
+}
+
+export interface PushOptions {
+  priority?: number;
+  delayMs?: number;
+}
 
 // Helper: Run Concurrent
 async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {

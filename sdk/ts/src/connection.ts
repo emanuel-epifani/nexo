@@ -1,6 +1,7 @@
 import * as net from 'net';
 import { logger } from './utils/logger';
-import { FrameType, ResponseStatus, Opcode, NexoOptions } from './protocol';
+import { FrameType, ResponseStatus, Opcode } from './protocol';
+import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
 
 /** @internal */

@@ -1,7 +1,11 @@
 import { NexoConnection } from '../connection';
-import { Opcode, StreamConfig, StreamPublishOptions, StreamSubscribeOptions } from '../protocol';
+import { Opcode } from '../protocol';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+
+export interface StreamSubscribeOptions {
+  batchSize?: number; // Default 100
+}
 
 export class NexoStream<T = any> {
   private active = false;
@@ -18,12 +22,12 @@ export class NexoStream<T = any> {
     public readonly consumerGroup?: string
   ) {}
 
-  async create(_config: StreamConfig = {}): Promise<this> {
+  async create(): Promise<this> {
     await this.conn.send(Opcode.S_CREATE, FrameCodec.string(this.name));
     return this;
   }
 
-  async publish(data: T, _options?: StreamPublishOptions): Promise<void> {
+  async publish(data: T): Promise<void> {
     await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
   }
 

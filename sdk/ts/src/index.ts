@@ -1,17 +1,6 @@
-export { NexoClient } from './client';
+export { NexoClient, NexoOptions } from './client';
 
-export type { 
-  NexoOptions, 
-  QueueConfig, 
-  QueueSubscribeOptions,
-  StreamConfig, 
-  StreamSubscribeOptions,
-  PushOptions,
-  PublishOptions,
-  StreamPublishOptions
-} from './protocol';
-
-export { NexoQueue } from './brokers/queue';
-export { NexoStream } from './brokers/stream';
-export { NexoTopic, NexoPubSub } from './brokers/pubsub';
+export { NexoQueue, QueueConfig, QueueSubscribeOptions, PushOptions } from './brokers/queue';
+export { NexoStream, StreamSubscribeOptions } from './brokers/stream';
+export { NexoTopic, NexoPubSub, PublishOptions } from './brokers/pubsub';
 export { NexoStore, NexoKV } from './brokers/store';

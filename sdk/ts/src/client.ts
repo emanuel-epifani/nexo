@@ -1,11 +1,17 @@
 import { logger } from './utils/logger';
-import {NexoOptions, Opcode, QueueConfig} from './protocol';
+import { Opcode } from './protocol';
 import { NexoConnection } from './connection';
 import { NexoStore } from './brokers/store';
-import { NexoQueue } from './brokers/queue';
+import { NexoQueue, QueueConfig } from './brokers/queue';
 import { NexoPubSub, NexoTopic } from './brokers/pubsub';
 import { NexoStream } from './brokers/stream';
 import { FrameCodec } from './codec';
+
+export interface NexoOptions {
+  host?: string;
+  port?: number;
+  requestTimeoutMs?: number;
+}
 
 export class NexoClient {
   private conn: NexoConnection;
