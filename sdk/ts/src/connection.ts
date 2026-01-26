@@ -8,8 +8,13 @@ export class NexoConnection {
   private socket: net.Socket;
   public isConnected = false;
   private nextId = 1;
-  private pending = new Map<number, (res: { status: number, data: Buffer }) => void>();
-  private requestTimeoutMs: number;
+  private pending = new Map<number, { 
+    resolve: (res: { status: number, data: Buffer }) => void, 
+    reject: (err: Error) => void,
+    ts: number 
+  }>();
+  private readonly requestTimeoutMs: number;
+  private readonly timeoutInterval?: NodeJS.Timeout;
   
   public onPush?: (topic: string, data: any) => void;
 
@@ -18,9 +23,21 @@ export class NexoConnection {
 
   constructor(private host: string, private port: number, options: NexoOptions = {}) {
     this.socket = new net.Socket();
-    this.socket.setNoDelay(true); // Low latency
+    this.socket.setNoDelay(true);
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
     this.setupListeners();
+    this.timeoutInterval = setInterval(() => this.checkTimeouts(), this.requestTimeoutMs);
+    if (this.timeoutInterval.unref) this.timeoutInterval.unref();
+  }
+
+  private checkTimeouts() {
+    const now = Date.now();
+    for (const [id, req] of this.pending) {
+      if (now - req.ts > this.requestTimeoutMs) {
+        this.pending.delete(id);
+        req.reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
+      }
+    }
   }
 
   async connect(): Promise<void> {
@@ -85,11 +102,11 @@ export class NexoConnection {
 
     switch (type) {
       case FrameType.RESPONSE: {
-        const resolve = this.pending.get(id);
-        if (resolve) {
+        const req = this.pending.get(id);
+        if (req) {
           this.pending.delete(id);
           // Payload: [Status:1][Data...]
-          resolve({ status: payload[0], data: payload.subarray(1) });
+          req.resolve({ status: payload[0], data: payload.subarray(1) });
         }
         break;
       }
@@ -118,41 +135,34 @@ export class NexoConnection {
     const packet = FrameCodec.packRequest(id, opcode, ...args);
 
     return new Promise((resolve, reject) => {
-      // 1. Setup Timeout
-      const timer = setTimeout(() => {
-        //TODO: value if change with just one global timeout
-        this.pending.delete(id);
-        reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
-      }, this.requestTimeoutMs);
+      if (!this.isConnected) {
+        return reject(new Error("Client not connected"));
+      }
 
-      // 2. Register Callback
-      this.pending.set(id, (res) => {
-        clearTimeout(timer);
-        if (res.status === ResponseStatus.ERR) {
-          const errCursor = new Cursor(res.data);
-          const errMsg = errCursor.readString();
-          // Silence common expected errors
-          if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
-            logger.error(`<- ERROR ${Opcode[opcode]} (${errMsg})`);
+      this.pending.set(id, {
+        resolve: (res) => {
+          if (res.status === ResponseStatus.ERR) {
+            const errCursor = new Cursor(res.data);
+            const errMsg = errCursor.readString();
+            // Silence common expected errors
+            if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
+              logger.error(`<- ERROR ${Opcode[opcode]} (${errMsg})`);
+            }
+            reject(new Error(errMsg));
+          } else {
+            resolve({ status: res.status, cursor: new Cursor(res.data) });
           }
-          reject(new Error(errMsg));
-        } else {
-          resolve({ status: res.status, cursor: new Cursor(res.data) });
-        }
+        },
+        reject,
+        ts: Date.now()
       });
 
-      // 3. Send
-      if (!this.isConnected) {
-        clearTimeout(timer);
-        this.pending.delete(id);
-        reject(new Error("Client not connected"));
-        return;
-      }
       this.socket.write(packet);
     });
   }
 
   disconnect() {
+    if (this.timeoutInterval) clearInterval(this.timeoutInterval);
     this.socket.destroy();
     this.isConnected = false;
   }

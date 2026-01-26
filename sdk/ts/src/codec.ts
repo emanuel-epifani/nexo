@@ -80,25 +80,33 @@ export class FrameCodec {
   }
 
   static packRequest(id: number, opcode: Opcode, ...parts: Buffer[]): Buffer {
+    // 1. Calcolo dimensione PAYLOAD (Opcode [1 byte] + Argomenti)
     let payloadSize = 1;
     for (const part of parts) payloadSize += part.length;
-    
-    const payload = Buffer.allocUnsafe(payloadSize);
-    payload.writeUInt8(opcode, 0);
-    let offset = 1;
+
+    // 2. Allocazione buffer TOTALE (Header [9 bytes] + Payload)
+    // Header è sempre fisso a 9 bytes: [Type:1][ID:4][Len:4]
+    const result = Buffer.allocUnsafe(9 + payloadSize);
+
+    // --- SCRITTURA HEADER (Bytes 0-8) ---
+    // Byte 0: Tipo di Frame (REQUEST = 0x01)
+    result.writeUInt8(FrameType.REQUEST, 0);
+    // Bytes 1-4: ID della richiesta (UInt32 Big Endian)
+    result.writeUInt32BE(id, 1);
+    // Bytes 5-8: Lunghezza del Payload (UInt32 Big Endian)
+    // Questo dice al server quanti byte leggere dopo l'header
+    result.writeUInt32BE(payloadSize, 5);
+
+    // --- SCRITTURA PAYLOAD (Bytes 9+) ---
+    // Byte 9: Opcode (Il primo byte del payload è sempre l'operazione)
+    result.writeUInt8(opcode, 9);
+    // Bytes 10+: Copia degli argomenti (dati effettivi)
+    let offset = 10;
     for (const part of parts) {
-      part.copy(payload, offset);
+      part.copy(result, offset);
       offset += part.length;
     }
-    
-    const header = Buffer.allocUnsafe(9);
-    header.writeUInt8(FrameType.REQUEST, 0);
-    header.writeUInt32BE(id, 1);
-    header.writeUInt32BE(payload.length, 5);
 
-    const result = Buffer.allocUnsafe(9 + payload.length);
-    header.copy(result, 0);
-    payload.copy(result, 9);
     return result;
   }
 
