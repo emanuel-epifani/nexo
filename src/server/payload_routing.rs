@@ -95,8 +95,8 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
     let queue_manager = &engine.queue;
 
     match cmd {
-        QueueCommand::Create { passive, config, q_name } => {
-            match queue_manager.declare_queue(q_name, config, passive).await {
+        QueueCommand::Create { config, q_name } => {
+            match queue_manager.declare_queue(q_name, config).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

@@ -8,7 +8,6 @@ export interface QueueConfig {
   maxRetries?: number;
   ttlMs?: number;
   delayMs?: number;
-  passive?: boolean;
 }
 
 export interface QueueSubscribeOptions {
@@ -45,7 +44,7 @@ export class NexoQueue<T = any> {
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
-    const flags = config.passive ? 0x01 : 0x00;
+    const flags = 0x00;
     await this.conn.send(
         Opcode.Q_CREATE,
         FrameCodec.u8(flags),
@@ -77,7 +76,7 @@ export class NexoQueue<T = any> {
     const concurrency = options.concurrency ?? 1;
 
     try {
-      await this.create({ passive: true });
+      await this.create();
     } catch (e) {
       this.isSubscribed = false;
       throw e;

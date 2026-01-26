@@ -12,7 +12,6 @@ pub const OP_Q_ACK: u8 = 0x13;
 pub enum QueueCommand {
     /// CREATE: [Flags:1][Visibility:8][MaxRetries:4][TTL:8][Delay:8][QNameLen:4][QName]
     Create {
-        passive: bool,
         config: QueueConfig,
         q_name: String,
     },
@@ -40,8 +39,8 @@ impl QueueCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
         match opcode {
             OP_Q_CREATE => {
-                let flags = cursor.read_u8()?;
-                let passive = (flags & 0x01) != 0;
+                let _flags = cursor.read_u8()?;
+                // Flags reserved (was passive 0x01)
                 let visibility_timeout_ms = cursor.read_u64()?;
                 let max_retries = cursor.read_u32()?;
                 let ttl_ms = cursor.read_u64()?;
@@ -55,7 +54,7 @@ impl QueueCommand {
                     default_delay_ms,
                 };
                 
-                Ok(Self::Create { passive, config, q_name })
+                Ok(Self::Create { config, q_name })
             }
             OP_Q_PUSH => {
                 let priority = cursor.read_u8()?;

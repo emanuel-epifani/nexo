@@ -47,7 +47,6 @@ pub enum ManagerCommand {
     CreateQueue {
         name: String,
         config: QueueConfig,
-        passive: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     GetQueueActor {
@@ -182,25 +181,17 @@ impl QueueManager {
 
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                ManagerCommand::CreateQueue { name, mut config, passive, reply } => {
-                    if passive {
-                        if actors.contains_key(&name) {
-                            let _ = reply.send(Ok(()));
-                        } else {
-                            let _ = reply.send(Err(format!("Queue '{}' not found", name)));
-                        }
-                    } else {
-                        if !actors.contains_key(&name) {
-                            config.merge_defaults();
-                            let actor_tx = Self::spawn_queue_actor(
-                                name.clone(), 
-                                config, 
-                                manager_tx.clone()
-                            );
-                            actors.insert(name, actor_tx);
-                        }
-                        let _ = reply.send(Ok(()));
+                ManagerCommand::CreateQueue { name, mut config, reply } => {
+                    if !actors.contains_key(&name) {
+                        config.merge_defaults();
+                        let actor_tx = Self::spawn_queue_actor(
+                            name.clone(), 
+                            config, 
+                            manager_tx.clone()
+                        );
+                        actors.insert(name, actor_tx);
                     }
+                    let _ = reply.send(Ok(()));
                 }
                 
                 ManagerCommand::GetQueueActor { name, reply } => {
@@ -288,9 +279,9 @@ impl QueueManager {
 
     // --- Public API ---
 
-    pub async fn declare_queue(&self, name: String, config: QueueConfig, passive: bool) -> Result<(), String> {
+    pub async fn declare_queue(&self, name: String, config: QueueConfig) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::CreateQueue { name, config, passive, reply: tx })
+        self.tx.send(ManagerCommand::CreateQueue { name, config, reply: tx })
             .await
             .map_err(|_| "Manager closed".to_string())?;
         rx.await.map_err(|_| "No reply".to_string())?
