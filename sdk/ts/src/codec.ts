@@ -48,8 +48,10 @@ export class FrameCodec {
 
   static string(s: string): Buffer {
     const strBuf = Buffer.from(s, 'utf8');
-    // [Len:4][Bytes...]
-    return Buffer.concat([this.u32(strBuf.length), strBuf]);
+    const result = Buffer.allocUnsafe(4 + strBuf.length);
+    result.writeUInt32BE(strBuf.length, 0);
+    strBuf.copy(result, 4);
+    return result;
   }
 
   static uuid(hex: string): Buffer {
@@ -71,20 +73,33 @@ export class FrameCodec {
       payload = Buffer.from(JSON.stringify(data ?? null), 'utf8');
     }
 
-    // [Type:1][Payload...]
-    return Buffer.concat([this.u8(type), payload]);
+    const result = Buffer.allocUnsafe(1 + payload.length);
+    result.writeUInt8(type, 0);
+    payload.copy(result, 1);
+    return result;
   }
 
   static packRequest(id: number, opcode: Opcode, ...parts: Buffer[]): Buffer {
-    const payload = Buffer.concat([this.u8(opcode), ...parts]);
-    const header = Buffer.allocUnsafe(9);
+    let payloadSize = 1;
+    for (const part of parts) payloadSize += part.length;
     
-    // Header: [Type:1][ID:4][PayloadLen:4]
+    const payload = Buffer.allocUnsafe(payloadSize);
+    payload.writeUInt8(opcode, 0);
+    let offset = 1;
+    for (const part of parts) {
+      part.copy(payload, offset);
+      offset += part.length;
+    }
+    
+    const header = Buffer.allocUnsafe(9);
     header.writeUInt8(FrameType.REQUEST, 0);
     header.writeUInt32BE(id, 1);
     header.writeUInt32BE(payload.length, 5);
 
-    return Buffer.concat([header, payload]);
+    const result = Buffer.allocUnsafe(9 + payload.length);
+    header.copy(result, 0);
+    payload.copy(result, 9);
+    return result;
   }
 
   // --- DECODERS (Buffer -> Data) ---

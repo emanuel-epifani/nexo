@@ -14,6 +14,7 @@ export class NexoConnection {
   public onPush?: (topic: string, data: any) => void;
 
   private buffer: Buffer = Buffer.alloc(0);
+  private chunks: Buffer[] = [];
 
   constructor(private host: string, private port: number, options: NexoOptions = {}) {
     this.socket = new net.Socket();
@@ -33,14 +34,14 @@ export class NexoConnection {
 
   private setupListeners() {
     this.socket.on('data', (chunk) => {
-      // TODO: value if implement ringbuffer/prealloc
-      this.buffer = Buffer.concat([this.buffer, chunk]);
+      this.chunks.push(chunk);
       this.processBuffer();
     });
 
     const cleanup = (err: any) => {
       this.isConnected = false;
       this.pending.clear();
+      this.chunks = [];
     };
 
     this.socket.on('error', (err) => logger.error("Socket error", err));
@@ -48,6 +49,15 @@ export class NexoConnection {
   }
 
   private processBuffer() {
+    if (this.chunks.length > 0) {
+      if (this.buffer.length > 0) {
+        this.buffer = Buffer.concat([this.buffer, ...this.chunks]);
+      } else {
+        this.buffer = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks);
+      }
+      this.chunks = [];
+    }
+
     while (true) {
       // Need at least header (9 bytes)
       if (this.buffer.length < 9) break;
