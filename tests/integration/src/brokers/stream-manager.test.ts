@@ -442,6 +442,18 @@ describe('Stream Manager', () => {
     });
 
 
+    describe('Guard Rails & Error Handling', () => {
+        it('should fail-fast when subscribing to non-existent stream', async () => {
+            const topic = `non-existent-${randomUUID()}`;
+            const group = 'g-fail';
+            const stream = clientA.stream(topic);
+            
+            await expect(stream.subscribe(group, async () => {}))
+                .rejects
+                .toThrow(/Stream '.*' not found/);
+        });
+    });
+
     describe('Multi-Topic', () => {
         it('should handle same group on different topics independently', async () => {
             const topicX = `multi-x-${randomUUID()}`;

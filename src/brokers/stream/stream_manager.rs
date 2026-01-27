@@ -440,6 +440,10 @@ impl StreamManager {
              total_topics: 0, total_active_groups: 0, topics: vec![]
          })
     }
+
+    pub async fn exists(&self, name: &str) -> bool {
+        self.get_actor(name).await.is_some()
+    }
 }
 
 pub struct StreamSession {

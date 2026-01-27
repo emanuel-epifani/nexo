@@ -518,7 +518,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log('🌊 Setting up STREAM broker data...');
 
         // User events stream
-        await nexo.stream('user_events', 'analytics_group').create();
+        await nexo.stream('user_events').create();
         const userEventsProducer = nexo.stream('user_events');
 
         // Publish user lifecycle events
@@ -551,7 +551,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         });
 
         // Order events stream
-        await nexo.stream('order_events', 'order_processing_group').create();
+        await nexo.stream('order_events').create();
         const orderEventsProducer = nexo.stream('order_events');
 
         await orderEventsProducer.publish({
@@ -580,7 +580,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         });
 
         // System events stream
-        await nexo.stream('system_events', 'monitoring_group').create();
+        await nexo.stream('system_events').create();
         const systemEventsProducer = nexo.stream('system_events');
 
         await systemEventsProducer.publish({
@@ -605,19 +605,19 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log('👥 Registering stream subscribers...');
 
         // Subscribe to user_events
-        const userEventsConsumer = nexo.stream('user_events', 'analytics_group');
+        const userEventsConsumer = nexo.stream('user_events');
         const userEventsReceived: any[] = [];
-        await userEventsConsumer.subscribe(data => userEventsReceived.push(data));
+        const userSub = await userEventsConsumer.subscribe('analytics_group', data => userEventsReceived.push(data));
 
         // Subscribe to order_events
-        const orderEventsConsumer = nexo.stream('order_events', 'order_processing_group');
+        const orderEventsConsumer = nexo.stream('order_events');
         const orderEventsReceived: any[] = [];
-        await orderEventsConsumer.subscribe(data => orderEventsReceived.push(data));
+        const orderSub = await orderEventsConsumer.subscribe('order_processing_group', data => orderEventsReceived.push(data));
 
         // Subscribe to system_events
-        const systemEventsConsumer = nexo.stream('system_events', 'monitoring_group');
+        const systemEventsConsumer = nexo.stream('system_events');
         const systemEventsReceived: any[] = [];
-        await systemEventsConsumer.subscribe(data => systemEventsReceived.push(data));
+        const systemSub = await systemEventsConsumer.subscribe('monitoring_group', data => systemEventsReceived.push(data));
 
         // ========================================
         // 3. WAIT FOR DATA PROPAGATION AND CONSUMPTION
@@ -637,9 +637,9 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log(`📈 System events consumed: ${systemEventsReceived.length}`);
 
         // Stop consumers
-        userEventsConsumer.stop();
-        orderEventsConsumer.stop();
-        systemEventsConsumer.stop();
+        userSub.stop();
+        orderSub.stop();
+        systemSub.stop();
     });
 
 });

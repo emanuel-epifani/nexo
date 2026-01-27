@@ -6,6 +6,7 @@ pub const OP_S_PUB: u8 = 0x31;
 pub const OP_S_FETCH: u8 = 0x32;
 pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_COMMIT: u8 = 0x34;
+pub const OP_S_EXISTS: u8 = 0x35;
 
 #[derive(Debug)]
 pub enum StreamCommand {
@@ -39,6 +40,10 @@ pub enum StreamCommand {
         topic: String,
         partition: u32,
         offset: u64,
+    },
+    /// EXISTS: [TopicLen:4][Topic]
+    Exists {
+        topic: String,
     },
 }
 
@@ -80,6 +85,10 @@ impl StreamCommand {
                 let offset = cursor.read_u64()?;
                 tracing::debug!("Parsed S_COMMIT: topic={} group={} p={} off={} gen={}", topic, group, partition, offset, gen_id);
                 Ok(Self::Commit { gen_id, group, topic, partition, offset })
+            }
+            OP_S_EXISTS => {
+                let topic = cursor.read_string()?;
+                Ok(Self::Exists { topic })
             }
             _ => Err(format!("Unknown Stream opcode: 0x{:02X}", opcode)),
         }

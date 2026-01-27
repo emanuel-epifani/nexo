@@ -7,6 +7,7 @@ pub const OP_Q_CREATE: u8 = 0x10;
 pub const OP_Q_PUSH: u8 = 0x11;
 pub const OP_Q_CONSUME: u8 = 0x12;
 pub const OP_Q_ACK: u8 = 0x13;
+pub const OP_Q_EXISTS: u8 = 0x14;
 
 #[derive(Debug)]
 pub enum QueueCommand {
@@ -31,6 +32,10 @@ pub enum QueueCommand {
     /// ACK: [ID:16][QNameLen:4][QName]
     Ack {
         id: Uuid,
+        q_name: String,
+    },
+    /// EXISTS: [QNameLen:4][QName]
+    Exists {
         q_name: String,
     },
 }
@@ -75,6 +80,10 @@ impl QueueCommand {
                 let id = Uuid::from_bytes(id_bytes);
                 let q_name = cursor.read_string()?;
                 Ok(Self::Ack { id, q_name })
+            }
+            OP_Q_EXISTS => {
+                let q_name = cursor.read_string()?;
+                Ok(Self::Exists { q_name })
             }
             _ => Err(format!("Unknown Queue opcode: 0x{:02X}", opcode)),
         }

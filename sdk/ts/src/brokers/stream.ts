@@ -188,6 +188,18 @@ export class NexoStream<T = any> {
     return this;
   }
 
+  async exists(): Promise<boolean> {
+    try {
+      const res = await this.conn.send(
+        Opcode.S_EXISTS,
+        FrameCodec.string(this.name)
+      );
+      return res.status === 0x00; // OK
+    } catch {
+      return false;
+    }
+  }
+
   async publish(data: T): Promise<void> {
     await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
   }
@@ -198,6 +210,11 @@ export class NexoStream<T = any> {
     options: StreamSubscribeOptions = {}
   ): Promise<{ stop: () => void }> {
     if (!group) throw new Error("Consumer Group is required for subscription");
+
+    // Fail Fast: Check existence first
+    if (!(await this.exists())) {
+      throw new Error(`Stream '${this.name}' not found`);
+    }
 
     const subscription = new StreamSubscription<T>(this.conn, this.name, group);
     

@@ -56,6 +56,18 @@ export class NexoQueue<T = any> {
     return this;
   }
 
+  async exists(): Promise<boolean> {
+    try {
+      const res = await this.conn.send(
+        Opcode.Q_EXISTS,
+        FrameCodec.string(this.name)
+      );
+      return res.status === 0x00; // OK
+    } catch {
+      return false;
+    }
+  }
+
   async push(data: T, options: QueuePushOptions = {}): Promise<void> {
     await this.conn.send(
         Opcode.Q_PUSH,
@@ -68,18 +80,17 @@ export class NexoQueue<T = any> {
 
   async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
     if (this.isSubscribed) throw new Error(`Queue '${this.name}' already subscribed.`);
+    
+    // Fail Fast: Check existence first
+    if (!(await this.exists())) {
+      throw new Error(`Queue '${this.name}' not found`);
+    }
+
     this.isSubscribed = true;
 
     const batchSize = options.batchSize ?? 50;
     const waitMs = options.waitMs ?? 20000;
     const concurrency = options.concurrency ?? 5;
-
-    try {
-      await this.create();
-    } catch (e) {
-      this.isSubscribed = false;
-      throw e;
-    }
 
     let active = true;
 

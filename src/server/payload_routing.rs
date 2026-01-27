@@ -128,6 +128,12 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 false => Response::Error("ACK failed".to_string()),
             }
         }
+        QueueCommand::Exists { q_name } => {
+            match queue_manager.exists(&q_name).await {
+                true => Response::Ok,
+                false => Response::Error("Queue not found".to_string()),
+            }
+        }
     }
 }
 
@@ -204,6 +210,12 @@ async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &Clie
             match stream.commit_offset(&group, &topic, partition, offset, &client, gen_id).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
+            }
+        }
+        StreamCommand::Exists { topic } => {
+            match stream.exists(&topic).await {
+                true => Response::Ok,
+                false => Response::Error("Stream not found".to_string()),
             }
         }
     }

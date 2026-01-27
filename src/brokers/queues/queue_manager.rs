@@ -336,6 +336,10 @@ impl QueueManager {
         }
     }
 
+    pub async fn exists(&self, name: &str) -> bool {
+        self.get_actor(name).await.is_some()
+    }
+
     async fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(ManagerCommand::GetQueueActor { 

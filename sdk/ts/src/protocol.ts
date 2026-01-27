@@ -30,6 +30,7 @@ export enum Opcode {
   Q_PUSH = 0x11,
   Q_CONSUME = 0x12,
   Q_ACK = 0x13,
+  Q_EXISTS = 0x14,
   // Topic: 0x20 - 0x2F
   PUB = 0x21,
   SUB = 0x22,
@@ -40,6 +41,7 @@ export enum Opcode {
   S_FETCH = 0x32,
   S_JOIN = 0x33,
   S_COMMIT = 0x34,
+  S_EXISTS = 0x35,
 }
 
 /** @internal */
