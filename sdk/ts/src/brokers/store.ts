@@ -1,27 +1,45 @@
 import { NexoConnection } from '../connection';
-import { Opcode, ResponseStatus } from '../protocol';
+import { ResponseStatus } from '../protocol';
 import { FrameCodec } from '../codec';
+
+export enum StoreOpcode {
+  KV_SET = 0x02,
+  KV_GET = 0x03,
+  KV_DEL = 0x04,
+}
+
+export const StoreCommands = {
+  kvSet: (conn: NexoConnection, key: string, value: any, ttlSeconds: number) =>
+    conn.send(
+      StoreOpcode.KV_SET,
+      FrameCodec.u64(ttlSeconds),
+      FrameCodec.string(key),
+      FrameCodec.any(value)
+    ),
+
+  kvGet: async (conn: NexoConnection, key: string) => {
+    const res = await conn.send(StoreOpcode.KV_GET, FrameCodec.string(key));
+    if (res.status === ResponseStatus.NULL) return null;
+    return FrameCodec.decodeAny(res.cursor);
+  },
+
+  kvDel: (conn: NexoConnection, key: string) =>
+    conn.send(StoreOpcode.KV_DEL, FrameCodec.string(key)),
+};
 
 export class NexoKV {
   constructor(private conn: NexoConnection) { }
 
   async set(key: string, value: any, ttlSeconds = 0): Promise<void> {
-    await this.conn.send(
-      Opcode.KV_SET,
-      FrameCodec.u64(ttlSeconds),
-      FrameCodec.string(key),
-      FrameCodec.any(value)
-    );
+    await StoreCommands.kvSet(this.conn, key, value, ttlSeconds);
   }
 
   async get<T = any>(key: string): Promise<T | null> {
-    const res = await this.conn.send(Opcode.KV_GET, FrameCodec.string(key));
-    if (res.status === ResponseStatus.NULL) return null;
-    return FrameCodec.decodeAny(res.cursor);
+    return StoreCommands.kvGet(this.conn, key);
   }
 
   async del(key: string): Promise<void> {
-    await this.conn.send(Opcode.KV_DEL, FrameCodec.string(key));
+    await StoreCommands.kvDel(this.conn, key);
   }
 }
 

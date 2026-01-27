@@ -1,7 +1,70 @@
 import { NexoConnection } from '../connection';
-import { Opcode } from '../protocol';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+
+export enum QueueOpcode {
+  Q_CREATE = 0x10,
+  Q_PUSH = 0x11,
+  Q_CONSUME = 0x12,
+  Q_ACK = 0x13,
+  Q_EXISTS = 0x14,
+}
+
+export const QueueCommands = {
+  create: (conn: NexoConnection, name: string, config: QueueConfig) =>
+    conn.send(
+      QueueOpcode.Q_CREATE,
+      FrameCodec.u8(0), // flags
+      FrameCodec.u64(config.visibilityTimeoutMs ?? 0),
+      FrameCodec.u32(config.maxRetries ?? 0),
+      FrameCodec.u64(config.ttlMs ?? 0),
+      FrameCodec.u64(config.delayMs ?? 0),
+      FrameCodec.string(name)
+    ),
+
+  exists: async (conn: NexoConnection, name: string) => {
+    try {
+      const res = await conn.send(QueueOpcode.Q_EXISTS, FrameCodec.string(name));
+      return res.status === 0x00;
+    } catch {
+      return false;
+    }
+  },
+
+  push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) =>
+    conn.send(
+      QueueOpcode.Q_PUSH,
+      FrameCodec.u8(options.priority || 0),
+      FrameCodec.u64(options.delayMs || 0),
+      FrameCodec.string(name),
+      FrameCodec.any(data)
+    ),
+
+  consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
+    const res = await conn.send(
+      QueueOpcode.Q_CONSUME,
+      FrameCodec.u32(batchSize),
+      FrameCodec.u64(waitMs),
+      FrameCodec.string(name)
+    );
+
+    const count = res.cursor.readU32();
+    if (count === 0) return [];
+
+    const messages: { id: string; data: T }[] = [];
+    for (let i = 0; i < count; i++) {
+      const idHex = res.cursor.readUUID();
+      const payloadLen = res.cursor.readU32();
+      const payloadBuf = res.cursor.readBuffer(payloadLen);
+      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      messages.push({ id: idHex, data });
+    }
+    return messages;
+  },
+
+  ack: (conn: NexoConnection, name: string, id: string) =>
+    conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
+};
 
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
@@ -43,39 +106,16 @@ export class NexoQueue<T = any> {
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
-    const flags = 0x00;
-    await this.conn.send(
-        Opcode.Q_CREATE,
-        FrameCodec.u8(flags),
-        FrameCodec.u64(config.visibilityTimeoutMs ?? 0),
-        FrameCodec.u32(config.maxRetries ?? 0),
-        FrameCodec.u64(config.ttlMs ?? 0),
-        FrameCodec.u64(config.delayMs ?? 0),
-        FrameCodec.string(this.name)
-    );
+    await QueueCommands.create(this.conn, this.name, config);
     return this;
   }
 
   async exists(): Promise<boolean> {
-    try {
-      const res = await this.conn.send(
-        Opcode.Q_EXISTS,
-        FrameCodec.string(this.name)
-      );
-      return res.status === 0x00; // OK
-    } catch {
-      return false;
-    }
+    return QueueCommands.exists(this.conn, this.name);
   }
 
   async push(data: T, options: QueuePushOptions = {}): Promise<void> {
-    await this.conn.send(
-        Opcode.Q_PUSH,
-        FrameCodec.u8(options.priority || 0),
-        FrameCodec.u64(options.delayMs || 0),
-        FrameCodec.string(this.name),
-        FrameCodec.any(data)
-    );
+    await QueueCommands.push(this.conn, this.name, data, options);
   }
 
   async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
@@ -97,24 +137,8 @@ export class NexoQueue<T = any> {
     const loop = async () => {
       while (active && this.conn.isConnected) {
         try {
-          const res = await this.conn.send(
-              Opcode.Q_CONSUME,
-              FrameCodec.u32(batchSize),
-              FrameCodec.u64(waitMs),
-              FrameCodec.string(this.name)
-          );
-
-          const count = res.cursor.readU32();
-          if (count === 0) continue;
-
-          const messages: { id: string; data: T }[] = [];
-          for (let i = 0; i < count; i++) {
-            const idHex = res.cursor.readUUID();
-            const payloadLen = res.cursor.readU32();
-            const payloadBuf = res.cursor.readBuffer(payloadLen);
-            const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
-            messages.push({ id: idHex, data });
-          }
+          const messages = await QueueCommands.consume<T>(this.conn, this.name, batchSize, waitMs);
+          if (messages.length === 0) continue;
 
           await runConcurrent(messages, concurrency, async (msg) => {
             if (!active) return;
@@ -142,6 +166,6 @@ export class NexoQueue<T = any> {
   }
 
   private async ack(id: string): Promise<void> {
-    await this.conn.send(Opcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(this.name));
+    await QueueCommands.ack(this.conn, this.name, id);
   }
 }

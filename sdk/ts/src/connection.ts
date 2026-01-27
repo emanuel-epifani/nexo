@@ -1,6 +1,6 @@
 import * as net from 'net';
 import { logger } from './utils/logger';
-import { FrameType, ResponseStatus, Opcode } from './protocol';
+import { FrameType, ResponseStatus } from './protocol';
 import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
 
@@ -134,7 +134,7 @@ export class NexoConnection {
     }
   }
 
-  send(opcode: Opcode, ...args: Buffer[]): Promise<{ status: ResponseStatus, cursor: Cursor }> {
+  send(opcode: number, ...args: Buffer[]): Promise<{ status: ResponseStatus, cursor: Cursor }> {
     const id = this.nextId++;
     if (this.nextId === 0) this.nextId = 1;
 
@@ -152,7 +152,7 @@ export class NexoConnection {
             const errMsg = errCursor.readString();
             // Silence common expected errors
             if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
-              logger.error(`<- ERROR ${Opcode[opcode]} (${errMsg})`);
+              logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);
             }
             reject(new Error(errMsg));
           } else {

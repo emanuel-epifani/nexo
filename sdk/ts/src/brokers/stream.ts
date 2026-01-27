@@ -1,7 +1,88 @@
 import { NexoConnection } from '../connection';
-import { Opcode } from '../protocol';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+
+export enum StreamOpcode {
+  S_CREATE = 0x30,
+  S_PUB = 0x31,
+  S_FETCH = 0x32,
+  S_JOIN = 0x33,
+  S_COMMIT = 0x34,
+  S_EXISTS = 0x35,
+}
+
+export const StreamCommands = {
+  create: (conn: NexoConnection, name: string) =>
+    conn.send(StreamOpcode.S_CREATE, FrameCodec.string(name)),
+
+  exists: async (conn: NexoConnection, name: string) => {
+    try {
+      const res = await conn.send(StreamOpcode.S_EXISTS, FrameCodec.string(name));
+      return res.status === 0x00;
+    } catch {
+      return false;
+    }
+  },
+
+  publish: (conn: NexoConnection, name: string, data: any) =>
+    conn.send(StreamOpcode.S_PUB, FrameCodec.string(name), FrameCodec.any(data)),
+
+  join: async (conn: NexoConnection, stream: string, group: string) => {
+    const res = await conn.send(StreamOpcode.S_JOIN, FrameCodec.string(group), FrameCodec.string(stream));
+    const generationId = res.cursor.readU64();
+    const count = res.cursor.readU32();
+    const partitions: { id: number, offset: bigint }[] = [];
+    for (let i = 0; i < count; i++) {
+      partitions.push({
+        id: res.cursor.readU32(),
+        offset: res.cursor.readU64()
+      });
+    }
+    return { generationId, partitions };
+  },
+
+  fetch: async <T>(
+    conn: NexoConnection,
+    stream: string,
+    group: string,
+    partition: number,
+    offset: bigint,
+    generationId: bigint,
+    batchSize: number
+  ): Promise<{ offset: bigint, data: T }[]> => {
+    const res = await conn.send(
+      StreamOpcode.S_FETCH,
+      FrameCodec.u64(generationId),
+      FrameCodec.string(stream),
+      FrameCodec.string(group),
+      FrameCodec.u32(partition),
+      FrameCodec.u64(offset),
+      FrameCodec.u32(batchSize)
+    );
+
+    const count = res.cursor.readU32();
+    const messages: { offset: bigint; data: T }[] = [];
+    for (let i = 0; i < count; i++) {
+      const msgOffset = res.cursor.readU64();
+      res.cursor.readU64(); // skip timestamp
+      const payloadLen = res.cursor.readU32();
+      const payloadBuf = res.cursor.readBuffer(payloadLen);
+      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      messages.push({ offset: msgOffset, data });
+    }
+    return messages;
+  },
+
+  commit: (conn: NexoConnection, stream: string, group: string, partition: number, offset: bigint, generationId: bigint) =>
+    conn.send(
+      StreamOpcode.S_COMMIT,
+      FrameCodec.u64(generationId),
+      FrameCodec.string(group),
+      FrameCodec.string(stream),
+      FrameCodec.u32(partition),
+      FrameCodec.u64(offset)
+    ),
+};
 
 export interface StreamSubscribeOptions {
   batchSize?: number; // Default 100
@@ -58,23 +139,15 @@ class StreamSubscription<T> {
   }
 
   private async joinGroup(): Promise<void> {
-    const res = await this.conn.send(
-      Opcode.S_JOIN,
-      FrameCodec.string(this.group),
-      FrameCodec.string(this.streamName)
-    );
+    const { generationId, partitions } = await StreamCommands.join(this.conn, this.streamName, this.group);
 
-    this.generationId = res.cursor.readU64();
-    const count = res.cursor.readU32();
-
+    this.generationId = generationId;
     this.assignedPartitions = [];
     this.offsets.clear();
 
-    for (let i = 0; i < count; i++) {
-      const partitionId = res.cursor.readU32();
-      const offset = res.cursor.readU64();
-      this.assignedPartitions.push(partitionId);
-      this.offsets.set(partitionId, offset);
+    for (const p of partitions) {
+      this.assignedPartitions.push(p.id);
+      this.offsets.set(p.id, p.offset);
     }
     
     logger.debug(`[${this.streamName}:${this.group}] Joined Gen ${this.generationId}. Partitions: ${this.assignedPartitions}`);
@@ -103,65 +176,47 @@ class StreamSubscription<T> {
   ): Promise<void> {
     const currentOffset = this.offsets.get(partition) ?? BigInt(0);
 
-    const res = await this.conn.send(
-      Opcode.S_FETCH,
-      FrameCodec.u64(this.generationId),
-      FrameCodec.string(this.streamName),
-      FrameCodec.string(this.group),
-      FrameCodec.u32(partition),
-      FrameCodec.u64(currentOffset),
-      FrameCodec.u32(batchSize)
-    );
+    try {
+      const messages = await StreamCommands.fetch<T>(
+        this.conn,
+        this.streamName,
+        this.group,
+        partition,
+        currentOffset,
+        this.generationId,
+        batchSize
+      );
 
-    const messages = this.parseMessages(res.cursor);
-    if (messages.length === 0) return;
+      if (messages.length === 0) return;
 
-    let lastProcessedOffset = currentOffset;
-    let shouldCommit = true;
+      let lastProcessedOffset = currentOffset;
+      let shouldCommit = true;
 
-    for (const msg of messages) {
-      try {
-        await callback(msg.data);
-        lastProcessedOffset = msg.offset;
-      } catch (e: any) {
-        if (this.isRebalanceError(e)) throw e;
-        logger.error(`Error processing P${partition}:${msg.offset}. Stopping batch.`);
-        shouldCommit = false;
-        break;
+      for (const msg of messages) {
+        try {
+          await callback(msg.data);
+          lastProcessedOffset = msg.offset;
+        } catch (e: any) {
+          if (this.isRebalanceError(e)) throw e;
+          logger.error(`Error processing P${partition}:${msg.offset}. Stopping batch.`);
+          shouldCommit = false;
+          break;
+        }
       }
-    }
 
-    if (shouldCommit && this.conn.isConnected) {
-      await this.commitOffset(partition, lastProcessedOffset + BigInt(1));
+      if (shouldCommit && this.conn.isConnected) {
+        await this.commitOffset(partition, lastProcessedOffset + BigInt(1));
+      }
+    } catch (e: any) {
+      if (this.isRebalanceError(e)) throw e;
+      throw e;
     }
-  }
-
-  private parseMessages(cursor: Cursor): Array<{ offset: bigint; data: T }> {
-    const count = cursor.readU32();
-    const messages: Array<{ offset: bigint; data: T }> = [];
-
-    for (let i = 0; i < count; i++) {
-      const offset = cursor.readU64();
-      cursor.readU64(); // timestamp
-      const payloadLen = cursor.readU32();
-      const payloadBuf = cursor.readBuffer(payloadLen);
-      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
-      messages.push({ offset, data });
-    }
-    return messages;
   }
 
   private async commitOffset(partition: number, nextOffset: bigint): Promise<void> {
     this.offsets.set(partition, nextOffset);
     try {
-      await this.conn.send(
-        Opcode.S_COMMIT,
-        FrameCodec.u64(this.generationId),
-        FrameCodec.string(this.group),
-        FrameCodec.string(this.streamName),
-        FrameCodec.u32(partition),
-        FrameCodec.u64(nextOffset)
-      );
+      await StreamCommands.commit(this.conn, this.streamName, this.group, partition, nextOffset, this.generationId);
     } catch (e: any) {
       if (this.isRebalanceError(e)) throw e;
       logger.error(`Commit failed P${partition}:${nextOffset}`, e);
@@ -184,24 +239,16 @@ export class NexoStream<T = any> {
   ) {}
 
   async create(): Promise<this> {
-    await this.conn.send(Opcode.S_CREATE, FrameCodec.string(this.name));
+    await StreamCommands.create(this.conn, this.name);
     return this;
   }
 
   async exists(): Promise<boolean> {
-    try {
-      const res = await this.conn.send(
-        Opcode.S_EXISTS,
-        FrameCodec.string(this.name)
-      );
-      return res.status === 0x00; // OK
-    } catch {
-      return false;
-    }
+    return StreamCommands.exists(this.conn, this.name);
   }
 
   async publish(data: T): Promise<void> {
-    await this.conn.send(Opcode.S_PUB, FrameCodec.string(this.name), FrameCodec.any(data));
+    await StreamCommands.publish(this.conn, this.name, data);
   }
 
   async subscribe(

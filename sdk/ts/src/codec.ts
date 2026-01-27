@@ -1,4 +1,4 @@
-import { DataType, FrameType, Opcode } from './protocol';
+import { DataType, FrameType } from './protocol';
 
 /** @internal */
 export class Cursor {
@@ -79,7 +79,7 @@ export class FrameCodec {
     return result;
   }
 
-  static packRequest(id: number, opcode: Opcode, ...parts: Buffer[]): Buffer {
+  static packRequest(id: number, opcode: number, ...parts: Buffer[]): Buffer {
     // 1. Calcolo dimensione PAYLOAD (Opcode [1 byte] + Argomenti)
     let payloadSize = 1;
     for (const part of parts) payloadSize += part.length;

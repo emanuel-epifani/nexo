@@ -1,6 +1,22 @@
 import { NexoConnection } from '../connection';
-import { Opcode } from '../protocol';
 import { FrameCodec } from '../codec';
+
+export enum PubSubOpcode {
+  PUB = 0x21,
+  SUB = 0x22,
+  UNSUB = 0x23,
+}
+
+export const PubSubCommands = {
+  publish: (conn: NexoConnection, topic: string, data: any, flags: number) =>
+    conn.send(PubSubOpcode.PUB, FrameCodec.u8(flags), FrameCodec.string(topic), FrameCodec.any(data)),
+
+  subscribe: (conn: NexoConnection, topic: string) =>
+    conn.send(PubSubOpcode.SUB, FrameCodec.string(topic)),
+
+  unsubscribe: (conn: NexoConnection, topic: string) =>
+    conn.send(PubSubOpcode.UNSUB, FrameCodec.string(topic)),
+};
 
 export interface PublishOptions {
   retain?: boolean;
@@ -22,7 +38,7 @@ export class NexoPubSub {
 
   async publish(topic: string, data: any, options?: PublishOptions): Promise<void> {
     const flags = options?.retain ? 0x01 : 0x00;
-    await this.conn.send(Opcode.PUB, FrameCodec.u8(flags), FrameCodec.string(topic), FrameCodec.any(data));
+    await PubSubCommands.publish(this.conn, topic, data, flags);
   }
 
   async subscribe(topic: string, callback: (data: any) => void): Promise<void> {
@@ -30,14 +46,14 @@ export class NexoPubSub {
     this.handlers.get(topic)!.push(callback);
 
     if (this.handlers.get(topic)!.length === 1) {
-      await this.conn.send(Opcode.SUB, FrameCodec.string(topic));
+      await PubSubCommands.subscribe(this.conn, topic);
     }
   }
 
   async unsubscribe(topic: string): Promise<void> {
     if (this.handlers.has(topic)) {
       this.handlers.delete(topic);
-      await this.conn.send(Opcode.UNSUB, FrameCodec.string(topic));
+      await PubSubCommands.unsubscribe(this.conn, topic);
     }
   }
 

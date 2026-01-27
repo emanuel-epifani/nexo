@@ -1,5 +1,4 @@
 import { logger } from './utils/logger';
-import { Opcode } from './protocol';
 import { NexoConnection } from './connection';
 import { NexoStore } from './brokers/store';
 import { NexoQueue, QueueConfig } from './brokers/queue';
@@ -67,7 +66,7 @@ export class NexoClient {
   get debug() {
     return {
       echo: async (data: any) => {
-        const res = await this.conn.send(Opcode.DEBUG_ECHO, FrameCodec.any(data));
+        const res = await this.conn.send(0x00, FrameCodec.any(data));
         return FrameCodec.decodeAny(res.cursor);
       }
     };
