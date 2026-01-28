@@ -76,21 +76,6 @@ impl Default for QueueConfig {
     }
 }
 
-impl QueueConfig {
-    pub fn merge_defaults(&mut self) {
-        let def = Self::default();
-        if self.visibility_timeout_ms == 0 {
-            self.visibility_timeout_ms = def.visibility_timeout_ms;
-        }
-        if self.max_retries == 0 {
-            self.max_retries = def.max_retries;
-        }
-        if self.ttl_ms == 0 {
-            self.ttl_ms = def.ttl_ms;
-        }
-    }
-}
-
 // ==========================================
 // QUEUE STATE (Pure State, No Concurrency)
 // ==========================================

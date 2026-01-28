@@ -11,9 +11,21 @@ export enum StreamOpcode {
   S_EXISTS = 0x35,
 }
 
+export interface StreamCreateOptions {
+  partitions?: number;
+}
+
+export interface StreamPublishOptions {
+  key?: string;
+}
+
 export const StreamCommands = {
-  create: (conn: NexoConnection, name: string) =>
-    conn.send(StreamOpcode.S_CREATE, FrameCodec.string(name)),
+  create: (conn: NexoConnection, name: string, options: StreamCreateOptions) =>
+    conn.send(
+      StreamOpcode.S_CREATE,
+      FrameCodec.string(name),
+      FrameCodec.string(JSON.stringify(options || {}))
+    ),
 
   exists: async (conn: NexoConnection, name: string) => {
     try {
@@ -24,8 +36,13 @@ export const StreamCommands = {
     }
   },
 
-  publish: (conn: NexoConnection, name: string, data: any) =>
-    conn.send(StreamOpcode.S_PUB, FrameCodec.string(name), FrameCodec.any(data)),
+  publish: (conn: NexoConnection, name: string, data: any, options: StreamPublishOptions) =>
+    conn.send(
+      StreamOpcode.S_PUB,
+      FrameCodec.string(name),
+      FrameCodec.string(JSON.stringify(options || {})),
+      FrameCodec.any(data)
+    ),
 
   join: async (conn: NexoConnection, stream: string, group: string) => {
     const res = await conn.send(StreamOpcode.S_JOIN, FrameCodec.string(group), FrameCodec.string(stream));
@@ -98,7 +115,7 @@ class StreamSubscription<T> {
     private conn: NexoConnection,
     private streamName: string,
     private group: string
-  ) {}
+  ) { }
 
   async start(
     callback: (data: T) => Promise<any> | any,
@@ -149,7 +166,7 @@ class StreamSubscription<T> {
       this.assignedPartitions.push(p.id);
       this.offsets.set(p.id, p.offset);
     }
-    
+
     logger.debug(`[${this.streamName}:${this.group}] Joined Gen ${this.generationId}. Partitions: ${this.assignedPartitions}`);
   }
 
@@ -236,10 +253,10 @@ export class NexoStream<T = any> {
   constructor(
     private conn: NexoConnection,
     public readonly name: string
-  ) {}
+  ) { }
 
-  async create(): Promise<this> {
-    await StreamCommands.create(this.conn, this.name);
+  async create(options: StreamCreateOptions = {}): Promise<this> {
+    await StreamCommands.create(this.conn, this.name, options);
     return this;
   }
 
@@ -247,8 +264,8 @@ export class NexoStream<T = any> {
     return StreamCommands.exists(this.conn, this.name);
   }
 
-  async publish(data: T): Promise<void> {
-    await StreamCommands.publish(this.conn, this.name, data);
+  async publish(data: T, options: StreamPublishOptions = {}): Promise<void> {
+    await StreamCommands.publish(this.conn, this.name, data, options);
   }
 
   async subscribe(
@@ -264,7 +281,7 @@ export class NexoStream<T = any> {
     }
 
     const subscription = new StreamSubscription<T>(this.conn, this.name, group);
-    
+
     // Start the subscription loop (non-blocking)
     await subscription.start(callback, options);
 

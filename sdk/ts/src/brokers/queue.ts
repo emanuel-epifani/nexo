@@ -15,9 +15,9 @@ export const QueueCommands = {
     conn.send(
       QueueOpcode.Q_CREATE,
       FrameCodec.u8(0), // flags
-      FrameCodec.u64(config.visibilityTimeoutMs ?? 0),
-      FrameCodec.u32(config.maxRetries ?? 0),
-      FrameCodec.u64(config.ttlMs ?? 0),
+      FrameCodec.u64(config.visibility_timeout_ms ?? 0),
+      FrameCodec.u32(config.max_retries ?? 0),
+      FrameCodec.u64(config.ttl_ms ?? 0),
       FrameCodec.string(name)
     ),
 
@@ -34,7 +34,7 @@ export const QueueCommands = {
     conn.send(
       QueueOpcode.Q_PUSH,
       FrameCodec.u8(options.priority || 0),
-      FrameCodec.u64(options.delayMs || 0),
+      FrameCodec.u64(options.delay_ms || 0),
       FrameCodec.string(name),
       FrameCodec.any(data)
     ),
@@ -66,9 +66,9 @@ export const QueueCommands = {
 };
 
 export interface QueueConfig {
-  visibilityTimeoutMs?: number;
-  maxRetries?: number;
-  ttlMs?: number;
+  visibility_timeout_ms?: number;
+  max_retries?: number;
+  ttl_ms?: number;
 }
 
 export interface QueueSubscribeOptions {
@@ -79,7 +79,7 @@ export interface QueueSubscribeOptions {
 
 export interface QueuePushOptions {
   priority?: number;
-  delayMs?: number;
+  delay_ms?: number;
 }
 
 async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {

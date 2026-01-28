@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
+use serde::Deserialize;
 
 pub const OP_S_CREATE: u8 = 0x30;
 pub const OP_S_PUB: u8 = 0x31;
@@ -8,15 +9,27 @@ pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_COMMIT: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 
+#[derive(Debug, Deserialize)]
+pub struct StreamCreateOptions {
+    pub partitions: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamPublishOptions {
+    pub key: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum StreamCommand {
-    /// CREATE: [TopicLen:4][Topic]
+    /// CREATE: [TopicLen:4][Topic][JSONLen:4][JSON]
     Create {
         topic: String,
+        options: StreamCreateOptions,
     },
-    /// PUB: [TopicLen:4][Topic][Data...]
+    /// PUB: [TopicLen:4][Topic][JSONLen:4][JSON][Data...]
     Publish {
         topic: String,
+        options: StreamPublishOptions,
         payload: Bytes,
     },
     /// FETCH: [GenID:8][TopicLen:4][Topic][GroupLen:4][Group][Partition:4][Offset:8][Limit:4]
@@ -52,14 +65,22 @@ impl StreamCommand {
         match opcode {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
+                let json_str = cursor.read_string()?;
+                let options: StreamCreateOptions = serde_json::from_str(&json_str)
+                    .map_err(|e| format!("Invalid JSON config: {}", e))?;
                 tracing::debug!("Parsed S_CREATE: topic={}", topic);
-                Ok(Self::Create { topic })
+                Ok(Self::Create { topic, options })
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
+                let json_str = cursor.read_string()?;
+                
+                let options: StreamPublishOptions = serde_json::from_str(&json_str)
+                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+
                 let payload = cursor.read_remaining();
                 tracing::debug!("Parsed S_PUB: topic={}, len={}", topic, payload.len());
-                Ok(Self::Publish { topic, payload })
+                Ok(Self::Publish { topic, options, payload })
             }
             OP_S_FETCH => {
                 let gen_id = cursor.read_u64()?;

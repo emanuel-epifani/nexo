@@ -174,9 +174,8 @@ impl QueueManager {
 
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                ManagerCommand::CreateQueue { name, mut config, reply } => {
+                ManagerCommand::CreateQueue { name, config, reply } => {
                     if !actors.contains_key(&name) {
-                        config.merge_defaults();
                         let actor_tx = Self::spawn_queue_actor(
                             name.clone(), 
                             config, 

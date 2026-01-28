@@ -9,9 +9,10 @@ use crate::brokers::pub_sub::ClientId;
 
 // Import Command types from brokers
 use crate::brokers::store::commands::StoreCommand;
-use crate::brokers::queues::commands::QueueCommand;
+use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
+use crate::brokers::queues::QueueConfig;
 
 // ========================================
 // OPCODES (Main dispatch)
@@ -95,7 +96,14 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
     let queue_manager = &engine.queue;
 
     match cmd {
-        QueueCommand::Create { config, q_name } => {
+        QueueCommand::Create { options, q_name } => {
+            let defaults = &engine.config.queue;
+            let config = QueueConfig {
+                visibility_timeout_ms: options.visibility_timeout_ms.unwrap_or(defaults.visibility_timeout_ms),
+                max_retries: options.max_retries.unwrap_or(defaults.max_retries),
+                ttl_ms: options.ttl_ms.unwrap_or(defaults.ttl_ms),
+            };
+
             match queue_manager.declare_queue(q_name, config).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
