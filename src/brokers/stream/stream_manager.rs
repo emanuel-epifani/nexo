@@ -13,7 +13,7 @@ use crate::brokers::stream::topic::TopicState;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
-use crate::config::StreamConfig;
+use crate::config::Config;
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
 
 // ==========================================
@@ -289,14 +289,13 @@ impl TopicActor {
 #[derive(Clone)]
 pub struct StreamManager {
     tx: mpsc::Sender<ManagerCommand>,
-    config: StreamConfig,
 }
 
 impl StreamManager {
-    pub fn new(config: StreamConfig) -> Self {
+    pub fn new() -> Self {
         let (tx, mut rx) = mpsc::channel(100);
-        let actor_capacity = config.actor_channel_capacity;
-        let default_partitions = config.default_partitions;
+        let actor_capacity = Config::global().stream.actor_channel_capacity;
+        let default_partitions = Config::global().stream.default_partitions;
 
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
@@ -352,7 +351,7 @@ impl StreamManager {
             }
         });
 
-        Self { tx, config }
+        Self { tx }
     }
 
     // --- Public API ---

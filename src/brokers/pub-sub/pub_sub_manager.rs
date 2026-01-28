@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
-use crate::config::PubSubConfig;
+use crate::config::Config;
 use crate::dashboard::models::pubsub::TopicSnapshot;
 
 // ==========================================
@@ -409,17 +409,15 @@ pub struct PubSubManager {
     clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
     client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
     global_hash_subscribers: RwLock<HashSet<ClientId>>,  // Subscribers to "#"
-    config: PubSubConfig,
 }
 
 impl PubSubManager {
-    pub fn new(config: PubSubConfig) -> Self {
+    pub fn new() -> Self {
         Self {
             actors: DashMap::new(),
             clients: DashMap::new(),
             client_subscriptions: DashMap::new(),
             global_hash_subscribers: RwLock::new(HashSet::new()),
-            config,
         }
     }
 
@@ -640,7 +638,7 @@ impl PubSubManager {
 
     fn get_or_create_actor(&self, root: &str) -> mpsc::Sender<RootCommand> {
         self.actors.entry(root.to_string()).or_insert_with(|| {
-            let (tx, rx) = mpsc::channel(self.config.actor_channel_capacity);
+            let (tx, rx) = mpsc::channel(Config::global().pubsub.actor_channel_capacity);
             let actor = RootActor::new(root.to_string(), rx);
             tokio::spawn(actor.run());
             tx

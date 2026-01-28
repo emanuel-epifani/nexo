@@ -13,6 +13,7 @@ use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
 use crate::brokers::queues::QueueConfig;
+use crate::config::Config;
 
 // ========================================
 // OPCODES (Main dispatch)
@@ -98,11 +99,13 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
 
     match cmd {
         QueueCommand::Create { options, q_name } => {
-            let defaults = &engine.config.queue;
+            let visibility_timeout_ms = Config::global().queue.visibility_timeout_ms;
+            let max_retries = Config::global().queue.max_retries;
+            let ttl_ms = Config::global().queue.ttl_ms;
             let config = QueueConfig {
-                visibility_timeout_ms: options.visibility_timeout_ms.unwrap_or(defaults.visibility_timeout_ms),
-                max_retries: options.max_retries.unwrap_or(defaults.max_retries),
-                ttl_ms: options.ttl_ms.unwrap_or(defaults.ttl_ms),
+                visibility_timeout_ms: options.visibility_timeout_ms.unwrap_or(visibility_timeout_ms),
+                max_retries: options.max_retries.unwrap_or(max_retries),
+                ttl_ms: options.ttl_ms.unwrap_or(ttl_ms),
             };
 
             match queue_manager.declare_queue(q_name, config).await {

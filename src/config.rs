@@ -1,4 +1,7 @@
 use std::env;
+use std::sync::OnceLock;
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
 
 // --- CONFIG AGGREGATOR ---
 
@@ -12,7 +15,11 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load() -> Self {
+    pub fn global() -> &'static Config {
+        CONFIG.get_or_init(Self::load)
+    }
+
+    fn load() -> Self {
         dotenv::dotenv().ok();
         Self {
             server: ServerConfig::load(),

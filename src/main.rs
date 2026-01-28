@@ -23,7 +23,6 @@ use crate::config::Config;
 
 #[derive(Clone)]
 pub struct NexoEngine {
-    pub config: Arc<Config>,
     pub store: Arc<StoreManager>,
     pub queue: Arc<QueueManager>,
     pub pubsub: Arc<PubSubManager>,
@@ -32,16 +31,13 @@ pub struct NexoEngine {
 }
 
 impl NexoEngine {
-    pub fn new(config: Config) -> Self {
-        let config = Arc::new(config);
-        
+    pub fn new() -> Self {
         Self {
-            store: Arc::new(StoreManager::new(config.store.clone())),
-            queue: Arc::new(QueueManager::new(config.queue.clone())),
-            pubsub: Arc::new(PubSubManager::new(config.pubsub.clone())),
-            stream: Arc::new(StreamManager::new(config.stream.clone())),
+            store: Arc::new(StoreManager::new()),
+            queue: Arc::new(QueueManager::new()),
+            pubsub: Arc::new(PubSubManager::new()),
+            stream: Arc::new(StreamManager::new()),
             start_time: Instant::now(),
-            config,
         }
     }
 
@@ -63,7 +59,7 @@ impl NexoEngine {
 
 #[tokio::main]
 async fn main() {
-    let config = Config::load();
+    let config = Config::global();
 
     // Init Tracing (logging)
     tracing_subscriber::fmt()
@@ -77,7 +73,7 @@ async fn main() {
     tracing::info!("{:#?}", config);
     tracing::info!("----------------------------");
 
-    let engine = NexoEngine::new(config.clone());
+    let engine = NexoEngine::new();
     
     let addr = format!("{}:{}", config.server.host, config.server.port);
 

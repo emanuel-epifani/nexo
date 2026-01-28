@@ -11,7 +11,7 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 use crate::brokers::queues::queue::{QueueState, QueueConfig, Message};
-use crate::config::QueueConfig as GlobalQueueConfig;
+use crate::config::Config;
 use crate::dashboard::models::queues::{QueueBrokerSnapshot, QueueSummary};
 
 // ==========================================
@@ -156,11 +156,11 @@ pub struct QueueManager {
 }
 
 impl QueueManager {
-    pub fn new(config: GlobalQueueConfig) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(256);
         let manager_tx = tx.clone();
         
-        tokio::spawn(Self::run_manager_loop(rx, manager_tx, config));
+        tokio::spawn(Self::run_manager_loop(rx, manager_tx));
         
         Self { tx }
     }
@@ -168,7 +168,6 @@ impl QueueManager {
     async fn run_manager_loop(
         mut rx: mpsc::Receiver<ManagerCommand>,
         manager_tx: mpsc::Sender<ManagerCommand>,
-        global_config: GlobalQueueConfig,
     ) {
         let mut actors: HashMap<String, mpsc::Sender<QueueActorCommand>> = HashMap::new();
 
@@ -194,6 +193,7 @@ impl QueueManager {
                     let actor_tx = if let Some(tx) = actors.get(&queue_name) {
                         tx.clone()
                     } else {
+                        let global_config = &Config::global().queue;
                         let config = QueueConfig {
                             visibility_timeout_ms: global_config.visibility_timeout_ms,
                             max_retries: global_config.max_retries,
@@ -307,12 +307,15 @@ impl QueueManager {
         false
     }
 
-    pub async fn consume_batch(&self, queue_name: String, max: usize, wait_ms: u64) -> Result<Vec<Message>, String> {
+    pub async fn consume_batch(&self, queue_name: String, max: Option<usize>, wait_ms: Option<u64>) -> Result<Vec<Message>, String> {
         let actor = self.get_actor(&queue_name).await
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
         
+        let max_val = max.unwrap_or(Config::global().queue.default_batch_size);
+        let wait_val = wait_ms.unwrap_or(Config::global().queue.default_wait_ms);
+
         let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::ConsumeBatch { max, wait_ms, reply: tx })
+        actor.send(QueueActorCommand::ConsumeBatch { max: max_val, wait_ms: wait_val, reply: tx })
             .await
             .map_err(|_| "Actor closed".to_string())?;
         rx.await.map_err(|_| "No reply".to_string())
