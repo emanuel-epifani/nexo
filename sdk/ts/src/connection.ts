@@ -29,7 +29,6 @@ export class NexoConnection {
     this.host = options.host;
     this.port = options.port;
     this.socket = new net.Socket();
-    this.socket.setNoDelay(true);
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
     this.setupListeners();
     this.timeoutInterval = setInterval(() => this.checkTimeouts(), this.requestTimeoutMs);
