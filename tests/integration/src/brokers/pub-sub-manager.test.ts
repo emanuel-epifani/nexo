@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { NexoClient } from '../../../../sdk/ts/src/client';
 import { nexo } from '../nexo';
-import { BenchmarkProbe } from "../utils/benchmark-misure";
 
 const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
+const SERVER_HOST = process.env.SERVER_HOST!;
+
 
 describe('PubSub Broker (MQTT-Style)', () => {
 
@@ -94,7 +95,7 @@ describe('PubSub Broker (MQTT-Style)', () => {
         const handler = () => { count++; };
 
         // We need a fresh connection to test clean unsubscribe isolation
-        const client2 = await NexoClient.connect({ port: SERVER_PORT });
+        const client2 = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
 
         await client2.pubsub(topic).subscribe(handler);
         await client2.pubsub(topic).publish('msg1');

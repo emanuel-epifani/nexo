@@ -8,8 +8,13 @@ export enum PubSubOpcode {
 }
 
 export const PubSubCommands = {
-  publish: (conn: NexoConnection, topic: string, data: any, flags: number) =>
-    conn.send(PubSubOpcode.PUB, FrameCodec.u8(flags), FrameCodec.string(topic), FrameCodec.any(data)),
+  publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) =>
+    conn.send(
+      PubSubOpcode.PUB,
+      FrameCodec.string(topic),
+      FrameCodec.string(JSON.stringify(options || {})),
+      FrameCodec.any(data)
+    ),
 
   subscribe: (conn: NexoConnection, topic: string) =>
     conn.send(PubSubOpcode.SUB, FrameCodec.string(topic)),
@@ -23,10 +28,10 @@ export interface PublishOptions {
 }
 
 export class NexoTopic<T = any> {
-    constructor(private broker: NexoPubSub, public readonly name: string) {}
-    async publish(data: T, options?: PublishOptions) { return this.broker.publish(this.name, data, options); }
-    async subscribe(cb: (data: T) => void) { return this.broker.subscribe(this.name, cb); }
-    async unsubscribe() { return this.broker.unsubscribe(this.name); }
+  constructor(private broker: NexoPubSub, public readonly name: string) { }
+  async publish(data: T, options?: PublishOptions) { return this.broker.publish(this.name, data, options); }
+  async subscribe(cb: (data: T) => void) { return this.broker.subscribe(this.name, cb); }
+  async unsubscribe() { return this.broker.unsubscribe(this.name); }
 }
 
 export class NexoPubSub {
@@ -37,8 +42,7 @@ export class NexoPubSub {
   }
 
   async publish(topic: string, data: any, options?: PublishOptions): Promise<void> {
-    const flags = options?.retain ? 0x01 : 0x00;
-    await PubSubCommands.publish(this.conn, topic, data, flags);
+    await PubSubCommands.publish(this.conn, topic, data, options || {});
   }
 
   async subscribe(topic: string, callback: (data: any) => void): Promise<void> {

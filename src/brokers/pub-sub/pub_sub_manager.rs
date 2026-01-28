@@ -491,8 +491,7 @@ impl PubSubManager {
     }
 
     /// Publish a message
-    pub async fn publish(&self, topic: &str, data: Bytes, flags: u8) -> usize {
-        let retain = (flags & 0x01) != 0;
+    pub async fn publish(&self, topic: &str, data: Bytes, retain: bool) -> usize {
         let parts: Vec<&str> = topic.split('/').collect();
         
         if parts.is_empty() {
