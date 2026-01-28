@@ -18,9 +18,9 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         await nexo.store.map.set('user:456:email', 'bob@example.com');
 
         // Session keys with TTL
-        await nexo.store.map.set('session:abc123', { user_id: 123, active: true }, 3600);
-        await nexo.store.map.set('session:def456', { user_id: 456, active: false }, 7200);
-        await nexo.store.map.set('session:temp789', { temp: true }, 10); // Short TTL for testing
+        await nexo.store.map.set('session:abc123', { user_id: 123, active: true }, { ttl: 3600 });
+        await nexo.store.map.set('session:def456', { user_id: 456, active: false }, { ttl: 7200 });
+        await nexo.store.map.set('session:temp789', { temp: true }, { ttl: 10 }); // Short TTL for testing
 
         // Cache keys
         await nexo.store.map.set('cache:product:1', { id: 1, name: 'Laptop', price: 999 });

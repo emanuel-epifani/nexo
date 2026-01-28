@@ -8,7 +8,7 @@ describe('STORE.MAP broker', () => {
     const value = 'test_value';
 
     // Set value
-    await nexo.store.map.set(key, value);
+    await nexo.store.map.set(key, value, { ttl: 60 });
 
     // Get value
     const result = await nexo.store.map.get(key);
@@ -39,7 +39,7 @@ describe('STORE.MAP broker', () => {
     const key = "temp_key";
     const value = "valore";
     // Set with TTL of 1 second
-    await nexo.store.map.set(key, value, 1);
+    await nexo.store.map.set(key, value, { ttl: 1 });
 
     // Should exist immediately
     const val1 = await nexo.store.map.get(key);

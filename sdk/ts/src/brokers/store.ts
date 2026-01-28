@@ -34,8 +34,7 @@ export interface MapSetOptions {
 export class NexoMap {
   constructor(private conn: NexoConnection) { }
 
-  async set(key: string, value: any, ttlSeconds?: number): Promise<void> {
-    const options: MapSetOptions = ttlSeconds ? { ttl: ttlSeconds } : {};
+  async set(key: string, value: any, options: MapSetOptions = {}): Promise<void> {
     await StoreCommands.mapSet(this.conn, key, value, options);
   }
 

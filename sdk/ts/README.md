@@ -19,8 +19,14 @@ const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 ### 1. STORE
 
 ```typescript
-await client.store.map.set("user:1", { name: "Max" });
+// set key
+await client.store.map.set("user:1", { name: "Max", role: "admin" });
+
+// get key
 const user = await client.store.map.get<User>("user:1");
+
+// delete key
+await client.store.map.del("user:1");
 ```
 
 ### 2. QUEUE
