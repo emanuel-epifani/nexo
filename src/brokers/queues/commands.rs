@@ -10,11 +10,26 @@ pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "strategy")]
+#[serde(rename_all = "camelCase")]
+pub enum PersistenceOptions {
+    #[serde(rename = "memory")]
+    Memory,
+    #[serde(rename = "file_sync")]
+    FileSync,
+    #[serde(rename = "file_async")]
+    FileAsync {
+        flush_interval_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub ttl_ms: Option<u64>,
+    pub persistence: Option<PersistenceOptions>,
 }
 
 #[derive(Debug, Deserialize)]

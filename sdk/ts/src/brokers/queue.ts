@@ -60,10 +60,18 @@ export const QueueCommands = {
     conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
 };
 
+export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
+
+export type PersistenceOptions =
+  | { strategy: 'memory' }
+  | { strategy: 'file_sync' }
+  | { strategy: 'file_async'; flushIntervalMs?: number };
+
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
   ttlMs?: number;
+  persistence?: PersistenceOptions;
 }
 
 export interface QueueSubscribeOptions {

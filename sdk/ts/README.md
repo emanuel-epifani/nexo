@@ -2,10 +2,18 @@
 
 High-performance TypeScript client for [Nexo Broker](https://github.com/emanuel-epifani/nexo).
 
-
 ## Quick Start
 
-### Installation
+
+### Run NEXO server
+```bash
+docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo:latest
+```
+This exposes:
+- Port 7654 (TCP): Main server socket for SDK clients.
+- Port 8080 (HTTP): Web Dashboard with status of all brokers.
+
+### Install SDK
 
 ```bash
 npm install @emanuelepifani/nexo-client
@@ -16,16 +24,16 @@ npm install @emanuelepifani/nexo-client
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 ```
 
-### 1. STORE
+### 1. STORE (Key-Value Map)
 
 ```typescript
-// set key
+// SET key
 await client.store.map.set("user:1", { name: "Max", role: "admin" });
 
-// get key
+// GET key
 const user = await client.store.map.get<User>("user:1");
 
-// delete key
+// DEL key
 await client.store.map.del("user:1");
 ```
 
@@ -44,30 +52,52 @@ await mailQ.subscribe((msg) => console.log(msg));
 <summary><strong>Advanced Queue Features (Retry, Delay, Priority, Concurrency)</strong></summary>
 
 ```typescript
-// 1. Queue Configuration (Policy)
-// Defines default behavior for ALL messages in this queue
-const criticalQueue = await client.queue('critical-tasks').create({
-    visibilityTimeoutMs: 10000, // If worker doesn't ACK in 10s, retry delivery
-    maxRetries: 5,              // Move to DLQ after 5 failed attempts
-    ttlMs: 60000,               // Expire message if not consumed within 60s
-    delayMs: 0                  // Delay for scheduled msg (default=0, no delay)
+// -------------------------------------------------------------
+// 1. CREATION (Default behavior for all messages in this queue)
+// -------------------------------------------------------------
+interface CriticalTask { type: string; payload: any; }
+
+const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create({
+    // RELIABILITY:
+    visibilityTimeoutMs: 10000, // Retry delivery if not ACKed within 10s   (default=30s)
+    maxRetries: 5,              // Move to DLQ after 5 failures             (default=5)
+    ttlMs: 60000,               // Message expires if not consumed in 60s   (default=7days)
+
+    // PERSISTENCE:
+    // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
+    // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
+    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) -> DEFAULT 
+    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
+    persistence: {
+        strategy: 'file_async',
+        flushIntervalMs: 100    
+    }
 });
 
-// 2. Push Options (Per-message Override)
-// Priority: Higher priority (255) delivered before lower (0)
+
+// ---------------------------------------------------------
+// 2. PRODUCING (Override specific behaviors per message)
+// ---------------------------------------------------------
+
+// PRIORITY: Higher value (255) delivered before lower values (0)
+// This message jumps ahead of all priority < 255 messages sent previously and still not consumed.
 await criticalQueue.push({ type: 'urgent' }, { priority: 255 });
 
-// Delay: This specific message becomes visible only after 1 hour
-// (Overrides queue's default delayMs)
+// SCHEDULING: Delay visibility
+// This message is hidden for 1 hour (default delayMs: 0, instant)
 await criticalQueue.push({ type: 'scheduled' }, { delayMs: 3600000 });
 
-// 3. Consume Options (Worker Tuning)
+
+
+// ---------------------------------------------------------
+// 3. CONSUMING (Worker Tuning to optimize throughput and latency)
+// ---------------------------------------------------------
 await criticalQueue.subscribe(
     async (task) => { await processTask(task); },
     {
-        batchSize: 100,   // Fetch 10 messages at once to optimizes throughput (default: 50)
-        concurrency: 10,  // Process 5 messages in parallel (default: 5)
-        waitMs: 5000     // Long Polling: wait up to 5s if queue is empty
+        batchSize: 100,   // Network: Fetch 100 messages in one request
+        concurrency: 10,  // Local: Process 10 messages concurrently (useful for I/O tasks)
+        waitMs: 5000      // Polling: If empty, wait 5s for new messages before retrying
     }
 );
 ```
@@ -93,19 +123,19 @@ await alerts.publish({ level: "high" });
 
 // 1. Single-Level Wildcard (+)
 // Matches: 'home/kitchen/light', 'home/garage/light'
-const roomLights = client.pubsub<'ON' | 'OFF'>('home/+/light');
-await roomLights.subscribe((status) => console.log('Light is:', status));
+const roomLights = client.pubsub<LightStatus>('home/+/light');
+await roomLights.subscribe((status) => console.log('Light is:', status.state));
 
 // 2. Multi-Level Wildcard (#)
 // Matches all topics under 'sensors/'
-const allSensors = client.pubsub<{ value: number }>('sensors/#');
+const allSensors = client.pubsub<SensorData>('sensors/#');
 await allSensors.subscribe((data) => console.log('Sensor value:', data.value));
 
 // PUBLISHING (No wildcards allowed!)
 // ---------------------------------
 // You must publish to concrete topics with matching types
-await client.pubsub<'ON' | 'OFF'>('home/kitchen/light').publish('ON');
-await client.pubsub<{ value: number }>('sensors/kitchen/temp').publish({ value: 22.5 });
+await client.pubsub<LightStatus>('home/kitchen/light').publish({ state: 'ON' });
+await client.pubsub<SensorData>('sensors/kitchen/temp').publish({ value: 22.5, unit: 'C' });
 
 // RETAINED MESSAGES
 // -----------------
@@ -129,8 +159,27 @@ await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} pe
 <summary><strong>Consumer Groups & Scaling</strong></summary>
 
 ```typescript
-// Create Topic
-const orders = await client.stream<Order>('orders').create();
+// ---------------------------------------------------------
+// 1. STREAM CREATION & POLICY
+// ---------------------------------------------------------
+const orders = await client.stream<Order>('orders').create({
+    // SCALING
+    partitions: 4,              // Max concurrent consumers per group on same topic (default=8)
+
+    // PERSISTENCE:
+    // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
+    // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
+    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) -> DEFAULT 
+    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
+    persistence: {
+        strategy: 'file_async',
+        flushIntervalMs: 100    
+    }
+});
+
+// ---------------------------------------------------------
+// 2. CONSUMING (Scaling & Broadcast patterns)
+// ---------------------------------------------------------
 
 // SCALING (Microservices Replicas / K8s Pods)
 // Same Group ('workers') -> Automatic Load Balancing & Rebalancing
@@ -146,3 +195,25 @@ await orders.subscribe('analytics', (order) => trackMetrics(order));
 await orders.subscribe('audit-log', (order) => saveAudit(order));
 ```
 </details>
+
+
+---
+
+## License
+
+MIT
+
+
+## Links
+
+- **Nexo Broker (Server):** [GitHub Repository](https://github.com/emanuel-epifani/nexo)
+- **Server Docs:** [Nexo Internals & Architecture](https://github.com/emanuel-epifani/nexo/tree/main/docs)
+- **SDK Source:** [sdk/ts](https://github.com/emanuel-epifani/nexo/tree/main/sdk/ts)
+- **Docker Image:** [emanuelepifani/nexo](https://hub.docker.com/r/emanuelepifani/nexo)
+
+## Author
+
+Built by **Emanuel Epifani**.
+
+- [LinkedIn](https://www.linkedin.com/in/emanuel-epifani/)
+- [GitHub](https://github.com/emanuel-epifani)

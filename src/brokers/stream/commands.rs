@@ -10,8 +10,24 @@ pub const OP_S_COMMIT: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "strategy")]
+#[serde(rename_all = "camelCase")]
+pub enum PersistenceOptions {
+    #[serde(rename = "memory")]
+    Memory,
+    #[serde(rename = "file_sync")]
+    FileSync,
+    #[serde(rename = "file_async")]
+    FileAsync {
+        flush_interval_ms: Option<u64>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
     pub partitions: Option<u32>,
+    pub persistence: Option<PersistenceOptions>,
 }
 
 #[derive(Debug, Deserialize)]

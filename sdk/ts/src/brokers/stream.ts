@@ -11,8 +11,16 @@ export enum StreamOpcode {
   S_EXISTS = 0x35,
 }
 
+export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
+
+export type PersistenceOptions =
+  | { strategy: 'memory' }
+  | { strategy: 'file_sync' }
+  | { strategy: 'file_async'; flushIntervalMs?: number };
+
 export interface StreamCreateOptions {
   partitions?: number;
+  persistence?: PersistenceOptions;
 }
 
 export interface StreamPublishOptions {
