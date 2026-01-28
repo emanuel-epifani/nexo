@@ -14,6 +14,7 @@ use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
 use crate::config::StreamConfig;
+use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -21,7 +22,7 @@ use crate::config::StreamConfig;
 
 pub enum TopicCommand {
     Publish {
-        key: Option<String>,
+        options: StreamPublishOptions,
         payload: Bytes,
         reply: oneshot::Sender<Result<u64, String>>,
     },
@@ -63,7 +64,7 @@ pub enum ManagerCommand {
     },
     CreateTopic {
         name: String,
-        partitions: u32,
+        options: StreamCreateOptions,
         reply: oneshot::Sender<Result<(), String>>, // Ack
     },
     DisconnectClient {
@@ -101,10 +102,21 @@ impl TopicActor {
     async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                TopicCommand::Publish { key: _, payload, reply } => {
+                TopicCommand::Publish { options, payload, reply } => {
                     let p_count = self.state.get_partitions_count() as u32;
-                    let partition = self.last_partition % p_count;
-                    self.last_partition = (self.last_partition + 1) % p_count;
+                    
+                    let partition = if let Some(key) = &options.key {
+                        // Key-based partitioning (simple hash)
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        key.hash(&mut hasher);
+                        (hasher.finish() % (p_count as u64)) as u32
+                    } else {
+                        // Round-robin
+                        let p = self.last_partition % p_count;
+                        self.last_partition = (self.last_partition + 1) % p_count;
+                        p
+                    };
                     
                     let offset = self.state.publish(partition, payload);
                     let _ = reply.send(Ok(offset));
@@ -284,14 +296,16 @@ impl StreamManager {
     pub fn new(config: StreamConfig) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
         let actor_capacity = config.actor_channel_capacity;
+        let default_partitions = config.default_partitions;
 
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
             
             while let Some(cmd) = rx.recv().await {
                 match cmd {
-                    ManagerCommand::CreateTopic { name, partitions, reply } => {
+                    ManagerCommand::CreateTopic { name, options, reply } => {
                         if !actors.contains_key(&name) {
+                            let partitions = options.partitions.unwrap_or(default_partitions);
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
                             tracing::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
                             let actor = TopicActor::new(name.clone(), partitions, t_rx);
@@ -350,10 +364,9 @@ impl StreamManager {
         }
     }
 
-    pub async fn create_topic(&self, name: String) -> Result<(), String> {
+    pub async fn create_topic(&self, name: String, options: StreamCreateOptions) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        let partitions = self.config.default_partitions;
-        self.tx.send(ManagerCommand::CreateTopic { name, partitions, reply: tx }).await.map_err(|_| "Server closed")?;
+        self.tx.send(ManagerCommand::CreateTopic { name, options, reply: tx }).await.map_err(|_| "Server closed")?;
         rx.await.map_err(|_| "No reply")?
     }
 
@@ -363,10 +376,10 @@ impl StreamManager {
         rx.await.ok().flatten()
     }
 
-    pub async fn publish(&self, topic: &str, payload: Bytes) -> Result<u64, String> {
+    pub async fn publish(&self, topic: &str, options: StreamPublishOptions, payload: Bytes) -> Result<u64, String> {
         let actor = self.get_actor(topic).await.ok_or("Topic not found")?;
         let (tx, rx) = oneshot::channel();
-        actor.send(TopicCommand::Publish { key: None, payload, reply: tx }).await.map_err(|_| "Actor closed")?;
+        actor.send(TopicCommand::Publish { options, payload, reply: tx }).await.map_err(|_| "Actor closed")?;
         rx.await.map_err(|_| "No reply")?
     }
 

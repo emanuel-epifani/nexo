@@ -10,6 +10,7 @@ pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
@@ -17,10 +18,17 @@ pub struct QueueCreateOptions {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueuePushOptions {
-    #[serde(default)]
-    pub priority: u8,
+    pub priority: Option<u8>,
     pub delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueConsumeOptions {
+    pub batch_size: Option<usize>,
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -36,11 +44,10 @@ pub enum QueueCommand {
         options: QueuePushOptions,
         payload: Bytes,
     },
-    /// CONSUME: [MaxBatch:4][WaitMs:8][QNameLen:4][QName]
+    /// CONSUME: [QNameLen:4][QName][JSONLen:4][JSON]
     Consume {
-        max_batch: usize,
-        wait_ms: u64,
         q_name: String,
+        options: QueueConsumeOptions,
     },
     /// ACK: [ID:16][QNameLen:4][QName]
     Ack {
@@ -57,7 +64,6 @@ impl QueueCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
         match opcode {
             OP_Q_CREATE => {
-                let _flags = cursor.read_u8()?; // Reserved/Legacy
                 let q_name = cursor.read_string()?;
                 let json_str = cursor.read_string()?;
 
@@ -77,10 +83,13 @@ impl QueueCommand {
                 Ok(Self::Push { q_name, options, payload })
             }
             OP_Q_CONSUME => {
-                let max_batch = cursor.read_u32()? as usize;
-                let wait_ms = cursor.read_u64()?;
                 let q_name = cursor.read_string()?;
-                Ok(Self::Consume { max_batch, wait_ms, q_name })
+                let json_str = cursor.read_string()?;
+
+                let options: QueueConsumeOptions = serde_json::from_str(&json_str)
+                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+
+                Ok(Self::Consume { q_name, options })
             }
             OP_Q_ACK => {
                 let id_bytes = cursor.read_uuid_bytes()?;

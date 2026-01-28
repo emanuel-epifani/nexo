@@ -32,7 +32,7 @@ pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) ->
         // DEBUG
         OP_DEBUG_ECHO => { Response::Data(cursor.read_remaining()) }
 
-        // KV STORE (0x02 - 0x0F)
+        // STORE (0x02 - 0x0F)
         0x02..=0x0F => {
             match StoreCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_store(cmd, engine),
@@ -109,13 +109,18 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::Push { priority, delay, q_name, payload } => {
+        QueueCommand::Push { q_name, options, payload } => {
+            let priority = options.priority.unwrap_or(0);
+            let delay = options.delay_ms;
             match queue_manager.push(q_name, payload, priority, delay).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::Consume { max_batch, wait_ms, q_name } => {
+        QueueCommand::Consume { q_name, options } => {
+            let max_batch = options.batch_size.unwrap_or(engine.config.queue.default_batch_size);
+            let wait_ms = options.wait_ms.unwrap_or(engine.config.queue.default_wait_ms);
+            
             match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
                 Ok(messages) => {
                     let mut buf = Vec::new();
@@ -170,14 +175,14 @@ async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &Clie
     let client = client_id.0.clone();
 
     match cmd {
-        StreamCommand::Create { topic } => {
-            match stream.create_topic(topic).await {
+        StreamCommand::Create { topic, options } => {
+            match stream.create_topic(topic, options).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }
         }
-        StreamCommand::Publish { topic, payload } => {
-            match stream.publish(&topic, payload).await {
+        StreamCommand::Publish { topic, options, payload } => {
+            match stream.publish(&topic, options, payload).await {
                 Ok(offset_id) => Response::Data(Bytes::from(offset_id.to_be_bytes().to_vec())),
                 Err(e) => Response::Error(e),
             }

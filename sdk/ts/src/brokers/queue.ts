@@ -14,11 +14,8 @@ export const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) =>
     conn.send(
       QueueOpcode.Q_CREATE,
-      FrameCodec.u8(0), // flags
-      FrameCodec.u64(config.visibility_timeout_ms ?? 0),
-      FrameCodec.u32(config.max_retries ?? 0),
-      FrameCodec.u64(config.ttl_ms ?? 0),
-      FrameCodec.string(name)
+      FrameCodec.string(name),
+      FrameCodec.string(JSON.stringify(config || {}))
     ),
 
   exists: async (conn: NexoConnection, name: string) => {
@@ -33,18 +30,16 @@ export const QueueCommands = {
   push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) =>
     conn.send(
       QueueOpcode.Q_PUSH,
-      FrameCodec.u8(options.priority || 0),
-      FrameCodec.u64(options.delay_ms || 0),
       FrameCodec.string(name),
+      FrameCodec.string(JSON.stringify(options || {})),
       FrameCodec.any(data)
     ),
 
   consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
     const res = await conn.send(
       QueueOpcode.Q_CONSUME,
-      FrameCodec.u32(batchSize),
-      FrameCodec.u64(waitMs),
-      FrameCodec.string(name)
+      FrameCodec.string(name),
+      FrameCodec.string(JSON.stringify({ batchSize, waitMs }))
     );
 
     const count = res.cursor.readU32();
@@ -66,9 +61,9 @@ export const QueueCommands = {
 };
 
 export interface QueueConfig {
-  visibility_timeout_ms?: number;
-  max_retries?: number;
-  ttl_ms?: number;
+  visibilityTimeoutMs?: number;
+  maxRetries?: number;
+  ttlMs?: number;
 }
 
 export interface QueueSubscribeOptions {
@@ -79,7 +74,7 @@ export interface QueueSubscribeOptions {
 
 export interface QueuePushOptions {
   priority?: number;
-  delay_ms?: number;
+  delayMs?: number;
 }
 
 async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {

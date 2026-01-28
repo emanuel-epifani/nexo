@@ -65,9 +65,13 @@ impl StoreConfig {
 // QUEUE
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
+    // CREATE config
     pub visibility_timeout_ms: u64,
     pub max_retries: u32,
     pub ttl_ms: u64,
+    // PUSH config
+    pub default_batch_size: usize,
+    pub default_wait_ms: u64,
 }
 
 impl QueueConfig {
@@ -76,6 +80,8 @@ impl QueueConfig {
             visibility_timeout_ms: get_env("QUEUE_VISIBILITY_MS", "30000"),
             max_retries:           get_env("QUEUE_MAX_RETRIES", "5"),
             ttl_ms:                get_env("QUEUE_TTL_MS", "604800000"),
+            default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", "10"),
+            default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", "0"),
         }
     }
 }

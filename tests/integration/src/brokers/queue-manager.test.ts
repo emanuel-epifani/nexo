@@ -43,7 +43,7 @@ describe('QUEUE broker - Complete Feature Set', () => {
             await Promise.all(pushPromises);
 
             const receivedIndices = new Set<number>();
-            
+
             const sub = await q.subscribe(async (data) => {
                 receivedIndices.add(data.index);
                 await new Promise(r => setTimeout(r, 5)); // Simulate work
@@ -64,7 +64,7 @@ describe('QUEUE broker - Complete Feature Set', () => {
 
         it('should maintain strict FIFO order with concurrency 1', async () => {
             const q = await nexo.queue('fifo_test').create();
-            
+
             await q.push(1);
             await q.push(2);
             await q.push(3);
@@ -85,9 +85,9 @@ describe('QUEUE broker - Complete Feature Set', () => {
         it('should move message to DLQ after maxRetries failures', async () => {
             const qName = 'dlq_test_queue';
             // Configure: 100ms visibility, 2 retries (initial + 1 retry)
-            const q = await nexo.queue(qName).create({ 
-                maxRetries: 2, 
-                visibilityTimeoutMs: 100 
+            const q = await nexo.queue(qName).create({
+                maxRetries: 2,
+                visibilityTimeoutMs: 100
             });
             const dlq = await nexo.queue(`${qName}_dlq`).create();
 
@@ -112,7 +112,7 @@ describe('QUEUE broker - Complete Feature Set', () => {
             const dlqSub = await dlq.subscribe(async (data) => {
                 dlqMsg = data;
             });
-            
+
             await new Promise(r => setTimeout(r, 500));
             dlqSub.stop();
 
@@ -169,11 +169,11 @@ describe('QUEUE broker - Complete Feature Set', () => {
     describe('6. SDK Guard Rails', () => {
         it('should throw error when calling subscribe twice on same instance', async () => {
             const q = await nexo.queue('guard_rail_test').create();
-            
-            const sub1 = await q.subscribe(async () => {});
-            
+
+            const sub1 = await q.subscribe(async () => { });
+
             // Should fail immediately
-            await expect(q.subscribe(async () => {}))
+            await expect(q.subscribe(async () => { }))
                 .rejects
                 .toThrow(/Queue 'guard_rail_test' already subscribed/);
 
@@ -182,16 +182,16 @@ describe('QUEUE broker - Complete Feature Set', () => {
 
         it('should fail-fast when subscribing to non-existent queue', async () => {
             const q = nexo.queue('non_existent_queue');
-            
+
             // Should fail immediately with Queue not found
-            await expect(q.subscribe(async () => {}))
+            await expect(q.subscribe(async () => { }))
                 .rejects
                 .toThrow(/Queue 'non_existent_queue' not found/);
-                
+
             // Guard rail should be reset so we can try again later (e.g. after creating it)
             // We can test this by creating it and checking if subscribe works
             await q.create();
-            const sub = await q.subscribe(async () => {}); // Should work now
+            const sub = await q.subscribe(async () => { }); // Should work now
             sub.stop();
         });
     });
