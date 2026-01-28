@@ -148,18 +148,15 @@ export function StreamView({ data }: Props) {
                         <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800">
                             {/* HEADER */}
                             <div className="px-5 py-3  border-b border-slate-800 bg-slate-900/40">
-                                <div className="text-[12px] text-slate-400 font-mono font-medium pb-4">Partition: {currentPartition.id}  |  Total messages: {currentPartition.last_offset}</div>
+                                <div className="text-[12px] text-slate-400 font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
                                 <div className="text-[12px] text-slate-400 font-mono font-medium">Consumer groups:</div>
                                 {currentPartition.groups.length > 0 && (
                                     <div className="space-y-1">
                                         {currentPartition.groups.map((group: ConsumerGroupSummary) => {
-                                            const progress = Math.round((group.committed_offset / currentPartition.last_offset) * 10)
-                                            const progressBar = Array(progress).fill('▓').join('') + Array(10 - progress).fill('░').join('')
                                             return (
                                                 <div key={group.id} className="grid grid-cols-3 gap-4 text-[11px] text-slate-400 font-mono">
                                                     <div className="truncate ml-6 ">- {group.id}</div>
                                                     <div className="text-right text-slate-500">Progress: {group.committed_offset}/{currentPartition.last_offset}</div>
-                                                    <div className="text-slate-500">{progressBar}</div>
                                                 </div>
                                             )
                                         })}
