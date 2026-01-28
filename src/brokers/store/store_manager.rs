@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::time;
 
 use crate::brokers::store::types::{Entry, Value};
-use crate::brokers::store::structures::kv::{KvOperations, KvValue};
+use crate::brokers::store::structures::map::{MapOperations, MapValue};
 use crate::config::Config;
 
 pub struct StoreManager {
@@ -37,7 +37,7 @@ impl StoreManager {
         Self { store }
     }
 
-    pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
+    pub fn map_set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
         let expires_at = match ttl {
             Some(0) | None => {
                 // Use default TTL from config
@@ -46,16 +46,16 @@ impl StoreManager {
             Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
         };
 
-        KvOperations::set(&self.store, key, value, expires_at);
+        MapOperations::set(&self.store, key, value, expires_at);
         Ok(())
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<Bytes>, String> {
-        Ok(KvOperations::get(&self.store, key))
+    pub fn map_get(&self, key: &str) -> Result<Option<Bytes>, String> {
+        Ok(MapOperations::get(&self.store, key))
     }
 
-    pub fn del(&self, key: &str) -> Result<bool, String> {
-        Ok(KvOperations::del(&self.store, key))
+    pub fn map_del(&self, key: &str) -> Result<bool, String> {
+        Ok(MapOperations::del(&self.store, key))
     }
 
     pub fn get_snapshot(&self) -> crate::dashboard::models::store::StoreBrokerSnapshot {
@@ -73,7 +73,7 @@ impl StoreManager {
             }
             
             let value = match &val.value {
-                Value::Kv(KvValue(b)) => {
+                Value::Map(MapValue(b)) => {
                     if b.is_empty() {
                         "[Empty]".to_string()
                     } else {

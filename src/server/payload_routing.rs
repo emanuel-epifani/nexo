@@ -8,7 +8,7 @@ use bytes::Bytes;
 use crate::brokers::pub_sub::ClientId;
 
 // Import Command types from brokers
-use crate::brokers::store::commands::StoreCommand;
+use crate::brokers::store::commands::{StoreCommand, MapCommand};
 use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
@@ -75,21 +75,23 @@ pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) ->
 
 fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
     match cmd {
-        StoreCommand::Set { key, options, value } => {
-            let ttl = options.ttl;
-            engine.store.set(key, value, ttl)
-                .map(|_| Response::Ok)
-                .unwrap_or_else(Response::Error)
-        }
-        StoreCommand::Get { key } => {
-            engine.store.get(&key)
-                .map(|res| res.map(Response::Data).unwrap_or(Response::Null))
-                .unwrap_or_else(Response::Error)
-        }
-        StoreCommand::Del { key } => {
-            engine.store.del(&key)
-                .map(|_| Response::Ok)
-                .unwrap_or_else(Response::Error)
+        StoreCommand::Map(map_cmd) => match map_cmd {
+            MapCommand::Set { key, options, value } => {
+                let ttl = options.ttl;
+                engine.store.map_set(key, value, ttl)
+                    .map(|_| Response::Ok)
+                    .unwrap_or_else(Response::Error)
+            }
+            MapCommand::Get { key } => {
+                engine.store.map_get(&key)
+                    .map(|res| res.map(Response::Data).unwrap_or(Response::Null))
+                    .unwrap_or_else(Response::Error)
+            }
+            MapCommand::Del { key } => {
+                engine.store.map_del(&key)
+                    .map(|_| Response::Ok)
+                    .unwrap_or_else(Response::Error)
+            }
         }
     }
 }

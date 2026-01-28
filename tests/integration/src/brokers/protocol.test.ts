@@ -39,11 +39,11 @@ describe('Nexo Protocol & Socket', () => {
         });
 
         it('DataType - Empty string vs null distinction', async () => {
-            await nexo.store.kv.set('proto:empty-str', '');
-            await nexo.store.kv.set('proto:null-val', null);
+            await nexo.store.map.set('proto:empty-str', '');
+            await nexo.store.map.set('proto:null-val', null);
 
-            expect(await nexo.store.kv.get('proto:empty-str')).toBe('');
-            expect(await nexo.store.kv.get('proto:null-val')).toBeNull();
+            expect(await nexo.store.map.get('proto:empty-str')).toBe('');
+            expect(await nexo.store.map.get('proto:null-val')).toBeNull();
         });
 
         it('DataType - Binary-like data via base64', async () => {

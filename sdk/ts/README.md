@@ -3,28 +3,31 @@
 High-performance TypeScript client for [Nexo Broker](https://github.com/emanuel-epifani/nexo).
 
 
-## Installation
+## Quick Start
+
+### Installation
+
 ```bash
 npm install @emanuelepifani/nexo-client
 ```
-## Quick Start
+
+### Connection
 ```typescript
-// Initialize client
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 ```
 
 ### 1. STORE
 
 ```typescript
-await client.store.kv.set("user:1", { name: "Max" });
-const user = await client.store.kv.get<User>("user:1");
+await client.store.map.set("user:1", { name: "Max" });
+const user = await client.store.map.get<User>("user:1");
 ```
 
 ### 2. QUEUE
 
 ```typescript
 // Create queue
-const mailQ = client.queue<MailJob>("emails").create();
+const mailQ = await client.queue<MailJob>("emails").create();
 // Push message
 await mailQ.push({ to: "test@test.com" });
 // Subscribe
@@ -37,7 +40,7 @@ await mailQ.subscribe((msg) => console.log(msg));
 ```typescript
 // 1. Queue Configuration (Policy)
 // Defines default behavior for ALL messages in this queue
-const criticalQueue = client.queue('critical-tasks').create({
+const criticalQueue = await client.queue('critical-tasks').create({
     visibilityTimeoutMs: 10000, // If worker doesn't ACK in 10s, retry delivery
     maxRetries: 5,              // Move to DLQ after 5 failed attempts
     ttlMs: 60000,               // Expire message if not consumed within 60s
@@ -68,7 +71,7 @@ await criticalQueue.subscribe(
 
 ```typescript
 // Define topic (not need to create, auto-created on first publish)
-const alerts = await client.topic<AlertMsg>("system-alerts");
+const alerts = client.pubsub<AlertMsg>("system-alerts");
 // Subscribe
 await alerts.subscribe((msg) => console.log(msg));
 // Publish
@@ -121,7 +124,7 @@ await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} pe
 
 ```typescript
 // Create Topic
-const orders = await client.stream<Order>('orders').orders.create();
+const orders = await client.stream<Order>('orders').create();
 
 // SCALING (Microservices Replicas / K8s Pods)
 // Same Group ('workers') -> Automatic Load Balancing & Rebalancing

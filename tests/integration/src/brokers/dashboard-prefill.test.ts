@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { nexo, fetchBrokerSnapshot } from '../nexo';
 
 
-describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
+describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
 
     it('STORE', async () => {
 
@@ -12,36 +12,36 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log('📦 Setting up STORE broker data...');
 
         // Basic keys
-        await nexo.store.kv.set('user:123:name', 'Alice Johnson');
-        await nexo.store.kv.set('user:123:email', 'alice@example.com');
-        await nexo.store.kv.set('user:456:name', 'Bob Smith');
-        await nexo.store.kv.set('user:456:email', 'bob@example.com');
+        await nexo.store.map.set('user:123:name', 'Alice Johnson');
+        await nexo.store.map.set('user:123:email', 'alice@example.com');
+        await nexo.store.map.set('user:456:name', 'Bob Smith');
+        await nexo.store.map.set('user:456:email', 'bob@example.com');
 
         // Session keys with TTL
-        await nexo.store.kv.set('session:abc123', { user_id: 123, active: true }, 3600);
-        await nexo.store.kv.set('session:def456', { user_id: 456, active: false }, 7200);
-        await nexo.store.kv.set('session:temp789', { temp: true }, 10); // Short TTL for testing
+        await nexo.store.map.set('session:abc123', { user_id: 123, active: true }, 3600);
+        await nexo.store.map.set('session:def456', { user_id: 456, active: false }, 7200);
+        await nexo.store.map.set('session:temp789', { temp: true }, 10); // Short TTL for testing
 
         // Cache keys
-        await nexo.store.kv.set('cache:product:1', { id: 1, name: 'Laptop', price: 999 });
-        await nexo.store.kv.set('cache:product:2', { id: 2, name: 'Mouse', price: 29 });
-        await nexo.store.kv.set('cache:stats:daily', { users: 1500, orders: 450 });
+        await nexo.store.map.set('cache:product:1', { id: 1, name: 'Laptop', price: 999 });
+        await nexo.store.map.set('cache:product:2', { id: 2, name: 'Mouse', price: 29 });
+        await nexo.store.map.set('cache:stats:daily', { users: 1500, orders: 450 });
 
         // Configuration keys
-        await nexo.store.kv.set('config:app:version', '1.2.3');
-        await nexo.store.kv.set('config:app:debug', 'true');
-        await nexo.store.kv.set('config:db:max_connections', '100');
+        await nexo.store.map.set('config:app:version', '1.2.3');
+        await nexo.store.map.set('config:app:debug', 'true');
+        await nexo.store.map.set('config:db:max_connections', '100');
 
         // Test different DataType behaviors
-        await nexo.store.kv.set('text:plain', 'This is plain text'); // STRING type
-        await nexo.store.kv.set('text:logo', 'binary-image-data-here'); // STRING type (text)
-        await nexo.store.kv.set('json:config', { debug: true, version: '1.0' }); // JSON type
+        await nexo.store.map.set('text:plain', 'This is plain text'); // STRING type
+        await nexo.store.map.set('text:logo', 'binary-image-data-here'); // STRING type (text)
+        await nexo.store.map.set('json:config', { debug: true, version: '1.0' }); // JSON type
 
         // Binary data (RAW type - will be shown as hex)
-        await nexo.store.kv.set('binary:pdf', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34])); // RAW type
-        await nexo.store.kv.set('binary:json', Buffer.from([0x7B, 0x22, 0x74, 0x65, 0x73, 0x74, 0x22, 0x3A, 0x31, 0x32, 0x33, 0x7D])); // RAW type
-        await nexo.store.kv.set('binary:large', Buffer.alloc(1024, 0xFF)); // RAW type
-        await nexo.store.kv.set('binary:empty', Buffer.alloc(0)); // Empty data
+        await nexo.store.map.set('binary:pdf', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34])); // RAW type
+        await nexo.store.map.set('binary:json', Buffer.from([0x7B, 0x22, 0x74, 0x65, 0x73, 0x74, 0x22, 0x3A, 0x31, 0x32, 0x33, 0x7D])); // RAW type
+        await nexo.store.map.set('binary:large', Buffer.alloc(1024, 0xFF)); // RAW type
+        await nexo.store.map.set('binary:empty', Buffer.alloc(0)); // Empty data
 
         // ========================================
         // 2. WAIT FOR DATA PROPAGATION
@@ -331,33 +331,33 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         console.log('📡 Setting up PUBSUB broker data...');
 
         // Subscribe to various topics (hierarchical and wildcards)
-        await nexo.pubsub('home/kitchen/temperature').subscribe(() => {});
-        await nexo.pubsub('home/kitchen/humidity').subscribe(() => {});
-        await nexo.pubsub('home/livingroom/light').subscribe(() => {});
-        
-        await nexo.pubsub('home/+/temperature').subscribe(() => {}); // Single wildcard
-        await nexo.pubsub('office/desk/monitor').subscribe(() => {});
-        await nexo.pubsub('sensors/#').subscribe(() => {}); // Multi-level wildcard
-        
-        await nexo.pubsub('garden/soil/moisture').subscribe(() => {});
-        await nexo.pubsub('garden/temperature').subscribe(() => {});
-        
+        await nexo.pubsub('home/kitchen/temperature').subscribe(() => { });
+        await nexo.pubsub('home/kitchen/humidity').subscribe(() => { });
+        await nexo.pubsub('home/livingroom/light').subscribe(() => { });
+
+        await nexo.pubsub('home/+/temperature').subscribe(() => { }); // Single wildcard
+        await nexo.pubsub('office/desk/monitor').subscribe(() => { });
+        await nexo.pubsub('sensors/#').subscribe(() => { }); // Multi-level wildcard
+
+        await nexo.pubsub('garden/soil/moisture').subscribe(() => { });
+        await nexo.pubsub('garden/temperature').subscribe(() => { });
+
         // Add some subscribers WITHOUT retained messages (to test frontend handling)
-        await nexo.pubsub('home/bedroom/light').subscribe(() => {}); // Only subscriber, no retained
-        await nexo.pubsub('office/desk/keyboard').subscribe(() => {}); // Only subscriber, no retained
-        await nexo.pubsub('garden/water/pump').subscribe(() => {}); // Only subscriber, no retained
-        
+        await nexo.pubsub('home/bedroom/light').subscribe(() => { }); // Only subscriber, no retained
+        await nexo.pubsub('office/desk/keyboard').subscribe(() => { }); // Only subscriber, no retained
+        await nexo.pubsub('garden/water/pump').subscribe(() => { }); // Only subscriber, no retained
+
         // Publish messages with retained flags
         await nexo.pubsub('home/kitchen/temperature').publish({ value: 22.5, unit: 'celsius' }, { retain: true });
         await nexo.pubsub('home/kitchen/humidity').publish({ value: 65, unit: 'percent' }, { retain: true });
         await nexo.pubsub('home/livingroom/light').publish({ status: 'on', brightness: 80 }, { retain: true });
-        
+
         await nexo.pubsub('office/desk/monitor').publish({ brand: 'Dell', model: 'U2720Q' }, { retain: true });
         await nexo.pubsub('office/desk/keyboard').publish({ type: 'mechanical', backlight: true }, { retain: false }); // Non-retained
-        
+
         await nexo.pubsub('garden/soil/moisture').publish({ value: 45, unit: 'percent' }, { retain: true });
         await nexo.pubsub('garden/temperature').publish({ value: 18.2, unit: 'celsius' }, { retain: true });
-        
+
         // Publish some non-retained messages (should not appear in snapshot)
         await nexo.pubsub('home/kitchen/temperature').publish({ value: 23.0, unit: 'celsius' }, { retain: false });
         await nexo.pubsub('garden/water/pump').publish({ status: 'active' }, { retain: false });
@@ -373,7 +373,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         console.log('📸 Fetching PUBSUB broker snapshot...');
         const pubsubSnapshot = await fetchBrokerSnapshot('/api/pubsub');
-        
+
         console.log('📊 PubSub Snapshot received:', JSON.stringify(pubsubSnapshot, null, 2));
 
         // ========================================
@@ -394,15 +394,15 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // 5. VALIDATE WILDCARD SUBSCRIPTIONS
         // ========================================
         expect(pubsubSnapshot.wildcards.multi_level.length + pubsubSnapshot.wildcards.single_level.length).toBeGreaterThan(0);
-        
+
         // Should contain the single-level wildcard subscription
-        const singleWildcard = pubsubSnapshot.wildcards.single_level.find((sub: any) => 
+        const singleWildcard = pubsubSnapshot.wildcards.single_level.find((sub: any) =>
             sub.pattern === 'home/+/temperature'
         );
         expect(singleWildcard).toBeDefined();
-        
+
         // Should contain the multi-level wildcard subscription
-        const multiWildcard = pubsubSnapshot.wildcards.multi_level.find((sub: any) => 
+        const multiWildcard = pubsubSnapshot.wildcards.multi_level.find((sub: any) =>
             sub.pattern === 'sensors/#'
         );
         expect(multiWildcard).toBeDefined();
@@ -421,7 +421,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         // 7. VALIDATE SPECIFIC TOPICS WITH RETAINED VALUES
         // ========================================
-        
+
         // Kitchen temperature topic should have retained value and subscribers
         const kitchenTemp = allTopics.find((t: any) => t.full_path === 'home/kitchen/temperature');
         expect(kitchenTemp).toBeDefined();
@@ -466,18 +466,18 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         // 8. VALIDATE TOPICS WITH SUBSCRIBERS BUT NO RETAINED VALUES
         // ========================================
-        
+
         // Topics with subscribers but no retained values should appear
         const bedroomLight = allTopics.find((t: any) => t.full_path === 'home/bedroom/light');
         expect(bedroomLight).toBeDefined();
         expect(bedroomLight.subscribers).toBe(1);
         expect(bedroomLight.retained_value).toBeNull();
-        
+
         const officeKeyboard = allTopics.find((t: any) => t.full_path === 'office/desk/keyboard');
         expect(officeKeyboard).toBeDefined();
         expect(officeKeyboard.subscribers).toBe(1);
         expect(officeKeyboard.retained_value).toBeNull();
-        
+
         const gardenPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump');
         expect(gardenPump).toBeDefined();
         expect(gardenPump.subscribers).toBe(1);
@@ -486,7 +486,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         // 9. VALIDATE TOPICS WITHOUT RETAINED VALUES
         // ========================================
-        
+
         // Topics that should not exist (no subscribers, no retained)
         const waterPump = allTopics.find((t: any) => t.full_path === 'garden/water/pump/nonexistent');
         expect(waterPump).toBeUndefined(); // Should not be in snapshot
@@ -494,7 +494,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // ========================================
         // 10. VALIDATE SUBSCRIBER COUNTS
         // ========================================
-        
+
         // Total topics with retained values (unchanged)
         const topicsWithRetained = allTopics.filter((t: any) => t.retained_value !== null);
         expect(topicsWithRetained.length).toBe(6); // kitchen temp/humidity, living light, office monitor, garden moisture/temperature
@@ -522,30 +522,30 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         const userEventsProducer = nexo.stream('user_events');
 
         // Publish user lifecycle events
-        await userEventsProducer.publish({ 
-            type: 'user_registered', 
-            user_id: 123, 
+        await userEventsProducer.publish({
+            type: 'user_registered',
+            user_id: 123,
             email: 'alice@example.com',
             timestamp: Date.now()
         });
 
-        await userEventsProducer.publish({ 
-            type: 'user_updated_profile', 
-            user_id: 123, 
+        await userEventsProducer.publish({
+            type: 'user_updated_profile',
+            user_id: 123,
             changes: ['name', 'avatar'],
             timestamp: Date.now()
         });
 
-        await userEventsProducer.publish({ 
-            type: 'user_logged_in', 
-            user_id: 123, 
+        await userEventsProducer.publish({
+            type: 'user_logged_in',
+            user_id: 123,
             ip: '192.168.1.100',
             timestamp: Date.now()
         });
 
-        await userEventsProducer.publish({ 
-            type: 'user_registered', 
-            user_id: 456, 
+        await userEventsProducer.publish({
+            type: 'user_registered',
+            user_id: 456,
             email: 'bob@example.com',
             timestamp: Date.now()
         });
@@ -629,7 +629,7 @@ describe.skip('DASHBOARD PREFILL - Complete Data Visualization', () => {
         // 4. FETCH AND VALIDATE STREAM SNAPSHOT
         // ========================================
         const streamSnapshot = await fetchBrokerSnapshot('/api/stream');
-        
+
         console.log('✅ STREAM snapshot validation completed successfully');
         console.log(`📊 Stream snapshot:`, JSON.stringify(streamSnapshot, null, 2));
         console.log(`📈 User events consumed: ${userEventsReceived.length}`);

@@ -1,6 +1,6 @@
 # Store Broker
 
-## Architecture: DashMap (Lock-Free KV)
+## Architecture: DashMap (Lock-Free Map)
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -21,7 +21,7 @@
 ## Design Rationale
 
 **Why DashMap?**
-- KV operations are independent (no cross-key coordination needed)
+- Map operations are independent (no cross-key coordination needed)
 - `DashMap` provides fine-grained locking per shard → concurrent reads/writes scale linearly
 - Simplest possible model: no actors, no channels, no complex state machines
 

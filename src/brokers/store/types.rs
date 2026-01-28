@@ -1,9 +1,9 @@
 use std::time::Instant;
-use crate::brokers::store::structures::kv::KvValue;
+use crate::brokers::store::structures::map::MapValue;
 
 #[derive(Clone, Debug)]
 pub enum Value {
-    Kv(KvValue),
+    Map(MapValue),
 }
 
 #[derive(Clone, Debug)]
