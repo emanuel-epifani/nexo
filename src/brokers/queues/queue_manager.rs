@@ -95,14 +95,7 @@ impl QueueActor {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
-                    let effective_delay = delay_ms.or(
-                        if self.config.default_delay_ms > 0 { 
-                            Some(self.config.default_delay_ms) 
-                        } else { 
-                            None 
-                        }
-                    );
-                    self.state.push(payload, priority, effective_delay);
+                    self.state.push(payload, priority, delay_ms);
                     let _ = reply.send(());
                 }
                 
@@ -206,7 +199,6 @@ impl QueueManager {
                             visibility_timeout_ms: global_config.visibility_timeout_ms,
                             max_retries: global_config.max_retries,
                             ttl_ms: global_config.ttl_ms,
-                            default_delay_ms: 0,
                         };
                         let tx = Self::spawn_queue_actor(
                             queue_name.clone(),

@@ -18,7 +18,6 @@ export const QueueCommands = {
       FrameCodec.u64(config.visibilityTimeoutMs ?? 0),
       FrameCodec.u32(config.maxRetries ?? 0),
       FrameCodec.u64(config.ttlMs ?? 0),
-      FrameCodec.u64(config.delayMs ?? 0),
       FrameCodec.string(name)
     ),
 
@@ -70,7 +69,6 @@ export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
   ttlMs?: number;
-  delayMs?: number;
 }
 
 export interface QueueSubscribeOptions {
@@ -120,7 +118,7 @@ export class NexoQueue<T = any> {
 
   async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
     if (this.isSubscribed) throw new Error(`Queue '${this.name}' already subscribed.`);
-    
+
     // Fail Fast: Check existence first
     if (!(await this.exists())) {
       throw new Error(`Queue '${this.name}' not found`);
@@ -146,8 +144,8 @@ export class NexoQueue<T = any> {
               await callback(msg.data);
               await this.ack(msg.id);
             } catch (e) {
-                if (!this.conn.isConnected) return;
-                logger.error(`Callback error in queue ${this.name}:`, e);
+              if (!this.conn.isConnected) return;
+              logger.error(`Callback error in queue ${this.name}:`, e);
             }
           });
 

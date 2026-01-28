@@ -45,8 +45,11 @@ export default defineConfig({
     testTimeout: 100000,
     hookTimeout: 100000,
     include: ['src/**/*.test.ts'],
+    setupFiles: ["./src/file-setup.ts"],
     globalSetup: ['./src/global-setup.ts'],
-    fileParallelism: true,
+    // 1. Disabilita parallelismo TRA file
+    fileParallelism: false,
+    // 2. Disabilita parallelismo tra test DENTRO lo stesso file
     sequence: {
       concurrent: false,
     },

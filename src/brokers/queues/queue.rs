@@ -64,7 +64,6 @@ pub struct QueueConfig {
     pub visibility_timeout_ms: u64,
     pub max_retries: u32,
     pub ttl_ms: u64,
-    pub default_delay_ms: u64,
 }
 
 impl Default for QueueConfig {
@@ -73,7 +72,6 @@ impl Default for QueueConfig {
             visibility_timeout_ms: 30000,
             max_retries: 5,
             ttl_ms: 604800000, // 7 days in ms
-            default_delay_ms: 0,
         }
     }
 }
