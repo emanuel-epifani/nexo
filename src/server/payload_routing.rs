@@ -74,7 +74,8 @@ pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) ->
 
 fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
     match cmd {
-        StoreCommand::Set { ttl, key, value } => {
+        StoreCommand::Set { key, options, value } => {
+            let ttl = options.ttl;
             engine.store.set(key, value, ttl)
                 .map(|_| Response::Ok)
                 .unwrap_or_else(Response::Error)
@@ -118,8 +119,8 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
             }
         }
         QueueCommand::Consume { q_name, options } => {
-            let max_batch = options.batch_size.unwrap_or(engine.config.queue.default_batch_size);
-            let wait_ms = options.wait_ms.unwrap_or(engine.config.queue.default_wait_ms);
+            let max_batch = options.batch_size;
+            let wait_ms = options.wait_ms;
             
             match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
                 Ok(messages) => {

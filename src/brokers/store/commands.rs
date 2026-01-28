@@ -1,16 +1,23 @@
 use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
+use serde::Deserialize;
 
 pub const OP_KV_SET: u8 = 0x02;
 pub const OP_KV_GET: u8 = 0x03;
 pub const OP_KV_DEL: u8 = 0x04;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreSetOptions {
+    pub ttl: Option<u64>,
+}
+
 #[derive(Debug)]
 pub enum StoreCommand {
-    /// SET: [TTL:8][KeyLen:4][Key][Val...]
+    /// SET: [KeyLen:4][Key][JSONLen:4][JSON][Val...]
     Set {
-        ttl: Option<u64>,
         key: String,
+        options: StoreSetOptions,
         value: Bytes,
     },
     /// GET: [KeyLen:4][Key]
@@ -27,11 +34,14 @@ impl StoreCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
         match opcode {
             OP_KV_SET => {
-                let ttl_secs = cursor.read_u64()?;
-                let ttl = if ttl_secs == 0 { None } else { Some(ttl_secs) };
                 let key = cursor.read_string()?;
+                let json_str = cursor.read_string()?;
+                
+                let options: StoreSetOptions = serde_json::from_str(&json_str)
+                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+
                 let value = cursor.read_remaining();
-                Ok(Self::Set { ttl, key, value })
+                Ok(Self::Set { key, options, value })
             }
             OP_KV_GET => {
                 let key = cursor.read_string()?;

@@ -9,11 +9,11 @@ export enum StoreOpcode {
 }
 
 export const StoreCommands = {
-  kvSet: (conn: NexoConnection, key: string, value: any, ttlSeconds: number) =>
+  kvSet: (conn: NexoConnection, key: string, value: any, options: StoreSetOptions) =>
     conn.send(
       StoreOpcode.KV_SET,
-      FrameCodec.u64(ttlSeconds),
       FrameCodec.string(key),
+      FrameCodec.string(JSON.stringify(options || {})),
       FrameCodec.any(value)
     ),
 
@@ -27,11 +27,16 @@ export const StoreCommands = {
     conn.send(StoreOpcode.KV_DEL, FrameCodec.string(key)),
 };
 
+export interface StoreSetOptions {
+  ttl?: number;
+}
+
 export class NexoKV {
   constructor(private conn: NexoConnection) { }
 
-  async set(key: string, value: any, ttlSeconds = 0): Promise<void> {
-    await StoreCommands.kvSet(this.conn, key, value, ttlSeconds);
+  async set(key: string, value: any, ttlSeconds?: number): Promise<void> {
+    const options: StoreSetOptions = ttlSeconds ? { ttl: ttlSeconds } : {};
+    await StoreCommands.kvSet(this.conn, key, value, options);
   }
 
   async get<T = any>(key: string): Promise<T | null> {
