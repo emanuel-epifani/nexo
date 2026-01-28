@@ -49,14 +49,12 @@ impl QueueCommand {
                 let visibility_timeout_ms = cursor.read_u64()?;
                 let max_retries = cursor.read_u32()?;
                 let ttl_ms = cursor.read_u64()?;
-                let default_delay_ms = cursor.read_u64()?;
                 let q_name = cursor.read_string()?;
                 
                 let config = QueueConfig {
                     visibility_timeout_ms,
                     max_retries,
                     ttl_ms,
-                    default_delay_ms,
                 };
                 
                 Ok(Self::Create { config, q_name })
