@@ -12,10 +12,9 @@ export class NexoConnection {
   private pending = new Map<number, { 
     resolve: (res: { status: number, data: Buffer }) => void, 
     reject: (err: Error) => void,
-    ts: number 
+    timer: NodeJS.Timeout
   }>();
   private readonly requestTimeoutMs: number;
-  private readonly timeoutInterval?: NodeJS.Timeout;
   
   public onPush?: (topic: string, data: any) => void;
 
@@ -31,18 +30,6 @@ export class NexoConnection {
     this.socket = new net.Socket();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
     this.setupListeners();
-    this.timeoutInterval = setInterval(() => this.checkTimeouts(), this.requestTimeoutMs);
-    if (this.timeoutInterval.unref) this.timeoutInterval.unref();
-  }
-
-  private checkTimeouts() {
-    const now = Date.now();
-    for (const [id, req] of this.pending) {
-      if (now - req.ts > this.requestTimeoutMs) {
-        this.pending.delete(id);
-        req.reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
-      }
-    }
   }
 
   async connect(): Promise<void> {
@@ -144,8 +131,14 @@ export class NexoConnection {
         return reject(new Error("Client not connected"));
       }
 
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
+      }, this.requestTimeoutMs);
+
       this.pending.set(id, {
         resolve: (res) => {
+          clearTimeout(timer);
           if (res.status === ResponseStatus.ERR) {
             const errCursor = new Cursor(res.data);
             const errMsg = errCursor.readString();
@@ -158,8 +151,11 @@ export class NexoConnection {
             resolve({ status: res.status, cursor: new Cursor(res.data) });
           }
         },
-        reject,
-        ts: Date.now()
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+        timer
       });
 
       this.socket.write(packet);
@@ -167,7 +163,10 @@ export class NexoConnection {
   }
 
   disconnect() {
-    if (this.timeoutInterval) clearInterval(this.timeoutInterval);
+    for (const req of this.pending.values()) {
+      clearTimeout(req.timer);
+    }
+    this.pending.clear();
     this.socket.destroy();
     this.isConnected = false;
   }
