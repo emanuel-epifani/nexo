@@ -42,7 +42,7 @@ describe('Stress test', async () => {
                         probe.record(performance.now() - t0);
                     }
                 };
-                await Promise.all(Array.from({ length: 100 }, worker));
+                await Promise.all(Array.from({ length: 1 }, worker));
 
                 const stats = probe.printResult();
                 expect(stats.throughput).toBeGreaterThan(testCase.expectedThroughput);

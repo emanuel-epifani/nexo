@@ -36,10 +36,10 @@ export class NexoClient {
 
   disconnect() { this.conn.disconnect(); }
 
-  queue<T = any>(name: string, config?: QueueConfig): NexoQueue<T> {
+  queue<T = any>(name: string): NexoQueue<T> {
     let q = this.queues.get(name);
     if (!q) {
-      q = new NexoQueue<T>(this.conn, name, config);
+      q = new NexoQueue<T>(this.conn, name);
       this.queues.set(name, q);
     }
     return q;

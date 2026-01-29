@@ -102,8 +102,7 @@ export class NexoQueue<T = any> {
 
   constructor(
     private conn: NexoConnection,
-    public readonly name: string,
-    private _config?: QueueConfig
+    public readonly name: string
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
