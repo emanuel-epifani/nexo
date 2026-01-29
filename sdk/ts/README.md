@@ -24,16 +24,14 @@ npm install @emanuelepifani/nexo-client
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 ```
 
-### 1. STORE (Key-Value Map)
+### 1. STORE
 
 ```typescript
-// SET key
+// Set key
 await client.store.map.set("user:1", { name: "Max", role: "admin" });
-
-// GET key
+// Get key
 const user = await client.store.map.get<User>("user:1");
-
-// DEL key
+// Del key
 await client.store.map.del("user:1");
 ```
 
