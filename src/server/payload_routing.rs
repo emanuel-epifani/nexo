@@ -13,6 +13,8 @@ use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
 use crate::brokers::queues::QueueConfig;
+use crate::brokers::queues::commands::PersistenceOptions;
+use crate::brokers::queues::persistence::types::PersistenceMode;
 use crate::config::Config;
 
 // ========================================
@@ -104,10 +106,21 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
             let visibility_timeout_ms = Config::global().queue.visibility_timeout_ms;
             let max_retries = Config::global().queue.max_retries;
             let ttl_ms = Config::global().queue.ttl_ms;
+            
+            let persistence = match options.persistence {
+                Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
+                Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
+                Some(PersistenceOptions::FileAsync { flush_interval_ms }) => PersistenceMode::Async {
+                    flush_ms: flush_interval_ms.unwrap_or(100),
+                },
+                None => PersistenceMode::default(),
+            };
+
             let config = QueueConfig {
                 visibility_timeout_ms: options.visibility_timeout_ms.unwrap_or(visibility_timeout_ms),
                 max_retries: options.max_retries.unwrap_or(max_retries),
                 ttl_ms: options.ttl_ms.unwrap_or(ttl_ms),
+                persistence,
             };
 
             match queue_manager.declare_queue(q_name, config).await {

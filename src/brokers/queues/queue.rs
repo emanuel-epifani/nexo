@@ -12,6 +12,7 @@ use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
 
 use crate::dashboard::models::queues::{QueueSummary, MessageSummary};
+use crate::brokers::queues::persistence::types::PersistenceMode;
 
 // ==========================================
 // MESSAGE & CONFIG
@@ -64,14 +65,19 @@ pub struct QueueConfig {
     pub visibility_timeout_ms: u64,
     pub max_retries: u32,
     pub ttl_ms: u64,
+    pub persistence: PersistenceMode,
 }
+
+use crate::config::Config;
 
 impl Default for QueueConfig {
     fn default() -> Self {
+        let global = &Config::global().queue;
         Self {
-            visibility_timeout_ms: 30000,
-            max_retries: 5,
-            ttl_ms: 604800000, // 7 days in ms
+            visibility_timeout_ms: global.visibility_timeout_ms,
+            max_retries: global.max_retries,
+            ttl_ms: global.ttl_ms,
+            persistence: PersistenceMode::default(),
         }
     }
 }
@@ -102,10 +108,11 @@ impl QueueState {
     }
 
     /// Push a message. Returns true if pulse loop should wake (new earliest event).
-    pub fn push(&mut self, payload: Bytes, priority: u8, delay_ms: Option<u64>) -> bool {
-        let msg = Message::new(payload, priority, delay_ms);
+    pub fn push(&mut self, msg: Message) -> bool {
         let id = msg.id;
         let initial_state = msg.state.clone();
+        let priority = msg.priority;
+        let scheduled_ts = if let MessageState::Scheduled(ts) = initial_state { Some(ts) } else { None };
         
         self.registry.insert(id, msg);
 
@@ -119,7 +126,11 @@ impl QueueState {
                 // Check if this is the earliest scheduled
                 self.waiting_for_time.keys().next().map(|&t| t == ts).unwrap_or(false)
             }
-            MessageState::InFlight(_) => false, // Impossible for new message
+            MessageState::InFlight(ts) => {
+                self.waiting_for_ack.entry(ts).or_default().insert(id);
+                // Check if this is the earliest timeout
+                self.waiting_for_ack.keys().next().map(|&t| t == ts).unwrap_or(false)
+            }
         }
     }
 
@@ -203,8 +214,10 @@ impl QueueState {
     }
 
     /// Process expired events (scheduled -> ready, timeout -> retry/DLQ).
-    /// Returns list of (payload, priority) for DLQ.
-    pub fn process_expired(&mut self, max_retries: u32) -> Vec<(Bytes, u8)> {
+    /// Returns (requeued_messages, dlq_messages).
+    /// requeued_messages: messages that transitioned to Ready (need UpdateState in DB)
+    /// dlq_messages: messages moved to DLQ (need MoveToDlq in DB)
+    pub fn process_expired(&mut self, max_retries: u32) -> (Vec<Message>, Vec<Message>) {
         let now = current_time_ms();
         let mut ids_to_ready = Vec::new();
         let mut ids_to_dlq = Vec::new();
@@ -235,21 +248,37 @@ impl QueueState {
             }
         }
 
+        let mut requeued_msgs = Vec::new();
         // Transition to ready
         for id in ids_to_ready {
-            self.transition_to(id, MessageState::Ready);
-        }
-
-        // Collect DLQ payloads and delete
-        let mut dlq_items = Vec::new();
-        for id in ids_to_dlq {
-            if let Some(msg) = self.registry.get(&id) {
-                dlq_items.push((msg.payload.clone(), msg.priority));
+            if self.transition_to(id, MessageState::Ready) {
+                if let Some(msg) = self.registry.get_mut(&id) {
+                    msg.visible_at = 0; // Ready immediately
+                    requeued_msgs.push(msg.clone());
+                }
             }
-            self.delete_message(id);
         }
 
-        dlq_items
+        // Collect DLQ messages and delete from active
+        let mut dlq_msgs = Vec::new();
+        for id in ids_to_dlq {
+            if let Some(msg) = self.registry.remove(&id) { // Remove returns value
+                // Clean up indexes
+                match msg.state {
+                    MessageState::InFlight(ts) => {
+                         if let Some(queue) = self.waiting_for_ack.get_mut(&ts) {
+                            queue.remove(&id);
+                            if queue.is_empty() { self.waiting_for_ack.remove(&ts); }
+                        }
+                    },
+                    // Should be InFlight mostly, but handle others if logic changes
+                    _ => {} 
+                }
+                dlq_msgs.push(msg);
+            }
+        }
+
+        (requeued_msgs, dlq_msgs)
     }
 
     pub fn get_snapshot(&self, name: &str) -> QueueSummary {

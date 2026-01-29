@@ -9,8 +9,11 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use uuid::Uuid;
+use std::path::PathBuf;
+use tracing::{error, info};
 
 use crate::brokers::queues::queue::{QueueState, QueueConfig, Message};
+use crate::brokers::queues::persistence::{QueueStore, types::{StorageOp, PersistenceMode}};
 use crate::config::Config;
 use crate::dashboard::models::queues::{QueueBrokerSnapshot, QueueSummary};
 
@@ -71,6 +74,7 @@ struct QueueActor {
     name: String,
     state: QueueState,
     config: QueueConfig,
+    store: QueueStore,
     rx: mpsc::Receiver<QueueActorCommand>,
     manager_tx: mpsc::Sender<ManagerCommand>,
 }
@@ -82,30 +86,76 @@ impl QueueActor {
         rx: mpsc::Receiver<QueueActorCommand>,
         manager_tx: mpsc::Sender<ManagerCommand>,
     ) -> Self {
+        let base_path = PathBuf::from(&Config::global().queue.persistence_path);
+        
+        // Ensure directory exists
+        if let Err(e) = std::fs::create_dir_all(&base_path) {
+            error!("Failed to create queue data directory at {:?}: {}", base_path, e);
+        }
+
+        let db_path = base_path.join(format!("{}.db", name));
+        let store = QueueStore::new(db_path, config.persistence.clone());
+
         Self {
             name,
             state: QueueState::new(),
             config,
+            store,
             rx,
             manager_tx,
         }
     }
 
     async fn run(mut self) {
+        // RECOVERY PHASE
+        match self.store.recover() {
+            Ok(messages) => {
+                let count = messages.len();
+                if count > 0 {
+                    for msg in messages {
+                        self.state.push(msg);
+                    }
+                    info!("Queue '{}': Recovered {} messages from storage", self.name, count);
+                }
+            }
+            Err(e) => {
+                error!("Queue '{}': Persistence recovery failed: {}", self.name, e);
+            }
+        }
+
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
-                    self.state.push(payload, priority, delay_ms);
+                    let msg = Message::new(payload, priority, delay_ms);
+                    self.state.push(msg.clone());
+                    
+                    // Persist
+                    let _ = self.store.execute(StorageOp::Insert(msg)).await;
+                    
                     let _ = reply.send(());
                 }
                 
                 QueueActorCommand::Pop { reply } => {
-                    let (msg, _) = self.state.pop(self.config.visibility_timeout_ms);
-                    let _ = reply.send(msg);
+                    let (msg_opt, _) = self.state.pop(self.config.visibility_timeout_ms);
+                    
+                    if let Some(msg) = &msg_opt {
+                        // Persist visibility update
+                        let _ = self.store.execute(StorageOp::UpdateState { 
+                            id: msg.id, 
+                            visible_at: msg.visible_at, 
+                            attempts: msg.attempts 
+                        }).await;
+                    }
+
+                    let _ = reply.send(msg_opt);
                 }
                 
                 QueueActorCommand::Ack { id, reply } => {
                     let result = self.state.ack(id);
+                    if result {
+                        // Persist delete
+                        let _ = self.store.execute(StorageOp::Delete(id)).await;
+                    }
                     let _ = reply.send(result);
                 }
                 
@@ -113,11 +163,27 @@ impl QueueActor {
                     let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
                     
                     if !msgs.is_empty() {
+                        // Persist all visibility updates
+                        for msg in &msgs {
+                            let _ = self.store.execute(StorageOp::UpdateState { 
+                                id: msg.id, 
+                                visible_at: msg.visible_at, 
+                                attempts: msg.attempts 
+                            }).await;
+                        }
                         let _ = reply.send(msgs);
                     } else {
                         // Wait with timeout, then retry
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(100))).await;
                         let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
+                        
+                        for msg in &msgs {
+                            let _ = self.store.execute(StorageOp::UpdateState { 
+                                id: msg.id, 
+                                visible_at: msg.visible_at, 
+                                attempts: msg.attempts 
+                            }).await;
+                        }
                         let _ = reply.send(msgs);
                     }
                 }
@@ -128,17 +194,29 @@ impl QueueActor {
                 }
                 
                 QueueActorCommand::ProcessExpired => {
-                    let dlq_items = self.state.process_expired(self.config.max_retries);
+                    let (requeued, dlq_msgs) = self.state.process_expired(self.config.max_retries);
                     
-                    if !dlq_items.is_empty() {
+                    // Persist Requeued (Update State to Ready/0)
+                    for msg in requeued {
+                        let _ = self.store.execute(StorageOp::UpdateState {
+                            id: msg.id,
+                            visible_at: 0, // Ready
+                            attempts: msg.attempts
+                        }).await;
+                    }
+
+                    // Persist DLQ Moves (Delete from current DB, Push to new Queue)
+                    for msg in dlq_msgs {
+                        // 1. Delete from current Queue DB
+                        let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
+
+                        // 2. Push to DLQ Queue (via Manager)
                         let dlq_name = format!("{}_dlq", self.name);
-                        for (payload, priority) in dlq_items {
-                            let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
-                                queue_name: dlq_name.clone(),
-                                payload,
-                                priority,
-                            }).await;
-                        }
+                        let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
+                            queue_name: dlq_name,
+                            payload: msg.payload,
+                            priority: msg.priority,
+                        }).await;
                     }
                 }
             }
@@ -198,6 +276,7 @@ impl QueueManager {
                             visibility_timeout_ms: global_config.visibility_timeout_ms,
                             max_retries: global_config.max_retries,
                             ttl_ms: global_config.ttl_ms,
+                            persistence: PersistenceMode::Memory, // Default to memory for implcit DLQ
                         };
                         let tx = Self::spawn_queue_actor(
                             queue_name.clone(),

@@ -21,7 +21,11 @@ rust-embed = "8.9.0"
 mime_guess = "2.0.5"
 hashlink = "0.11.0"
 hex = "0.4"
+rusqlite = { version = "0.38.0", features = ["bundled", "uuid", "time"] }
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3.24.0"

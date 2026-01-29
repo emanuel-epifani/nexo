@@ -79,6 +79,9 @@ pub struct QueueConfig {
     // PUSH config
     pub default_batch_size: usize,
     pub default_wait_ms: u64,
+    // PERSISTENCE config
+    pub persistence_path: String,
+    pub default_flush_ms: u64,
 }
 
 impl QueueConfig {
@@ -89,6 +92,8 @@ impl QueueConfig {
             ttl_ms:                get_env("QUEUE_TTL_MS", "604800000"),
             default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", "10"),
             default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", "0"),
+            persistence_path:      get_env("QUEUE_ROOT_PERSISTENCE_PATH", "./data/queues"),
+            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", "100"),
         }
     }
 }
