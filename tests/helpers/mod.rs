@@ -1,11 +1,19 @@
+use std::sync::Arc;
 use nexo::brokers::queues::QueueManager;
 use nexo::brokers::store::StoreManager;
 use tempfile::TempDir;
 use std::time::{Duration, Instant};
+use nexo::brokers::pub_sub::PubSubManager;
 
 pub async fn setup_manager() -> (QueueManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let manager = QueueManager::new();
+    (manager, temp_dir)
+}
+
+pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let manager = Arc::new(PubSubManager::new());
     (manager, temp_dir)
 }
 
