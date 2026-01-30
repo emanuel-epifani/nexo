@@ -102,7 +102,8 @@ impl TopicActor {
         rx: mpsc::Receiver<TopicCommand>, 
         mode: PersistenceMode,
         base_path: String,
-        compaction_threshold: u64
+        compaction_threshold: u64,
+        max_segment_size: u64
     ) -> Self {
         // 1. Recovery
         let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
@@ -125,7 +126,8 @@ impl TopicActor {
             mode.clone(), 
             w_rx,
             PathBuf::from(base_path),
-            compaction_threshold
+            compaction_threshold,
+            max_segment_size
         );
         tokio::spawn(writer.run());
 
@@ -419,7 +421,8 @@ impl StreamManager {
                                 t_rx, 
                                 persistence,
                                 actor_config.persistence_path.clone(),
-                                actor_config.compaction_threshold
+                                actor_config.compaction_threshold,
+                                actor_config.max_segment_size
                             );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);

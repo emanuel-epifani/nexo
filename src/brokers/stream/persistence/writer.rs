@@ -22,6 +22,11 @@ pub struct RecoveredState {
     pub groups_data: HashMap<String, (u64, HashMap<u32, u64>)>,
 }
 
+struct Segment {
+    path: PathBuf,
+    start_offset: u64,
+}
+
 // --- PUBLIC API ---
 
 pub fn recover_topic(topic_name: &str, partitions_count: u32, base_path: PathBuf) -> RecoveredState {
@@ -32,13 +37,17 @@ pub fn recover_topic(topic_name: &str, partitions_count: u32, base_path: PathBuf
         return state;
     }
 
-    // 1. Load Partitions (0.log, 1.log, ...)
+    // 1. Load Partitions (Segments)
     for i in 0..partitions_count {
-        let path = base_path.join(format!("{}.log", i));
-        if path.exists() {
-            let msgs = load_partition_file(&path);
-            info!("Topic '{}' P{}: recovered {} messages", topic_name, i, msgs.len());
-            state.partitions_data.insert(i, msgs);
+        // Troviamo tutti i segmenti: {i}_{offset}.log e anche {i}.log (vecchio formato)
+        if let Ok(segments) = find_segments(&base_path, i) {
+            let mut all_msgs = VecDeque::new();
+            for segment in segments {
+                let msgs = load_partition_file(&segment.path);
+                info!("Topic '{}' P{} Segment {}: recovered {} messages", topic_name, i, segment.start_offset, msgs.len());
+                all_msgs.extend(msgs);
+            }
+            state.partitions_data.insert(i, all_msgs);
         }
     }
 
@@ -59,6 +68,49 @@ pub fn recover_topic(topic_name: &str, partitions_count: u32, base_path: PathBuf
     state
 }
 
+// --- HELPERS ---
+
+fn find_segments(base_path: &PathBuf, partition: u32) -> std::io::Result<Vec<Segment>> {
+    let mut segments = Vec::new();
+    let prefix = format!("{}_", partition);
+    let old_style = format!("{}.log", partition);
+
+    for entry in std::fs::read_dir(base_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        
+        let fname = entry.file_name().to_string_lossy().to_string();
+        
+        if fname == old_style {
+            segments.push(Segment { path, start_offset: 0 });
+        } else if fname.starts_with(&prefix) && fname.ends_with(".log") {
+            // Parse offset: "0_100.log" -> 100
+            let part_offset = &fname[..fname.len()-4]; // remove .log
+            if let Some(offset_str) = part_offset.split('_').nth(1) {
+                if let Ok(offset) = offset_str.parse::<u64>() {
+                    segments.push(Segment { path, start_offset: offset });
+                }
+            }
+        }
+    }
+    
+    segments.sort_by_key(|s| s.start_offset);
+    Ok(segments)
+}
+
+fn find_active_segment(base_path: &PathBuf, partition: u32) -> std::io::Result<Segment> {
+    let segments = find_segments(base_path, partition)?;
+    if let Some(last) = segments.into_iter().last() {
+        Ok(last)
+    } else {
+        // Nessun segmento, creiamo il primo: 0_0.log
+        let path = base_path.join(format!("{}_0.log", partition));
+        Ok(Segment { path, start_offset: 0 })
+    }
+}
+
+
 // --- STREAM WRITER ---
 
 pub struct StreamWriter {
@@ -68,16 +120,18 @@ pub struct StreamWriter {
     partitions_count: u32,
     
     // Eager handles
-    partition_files: Vec<Option<BufWriter<File>>>,
+    // Mappa Partizione -> (File Handle, Bytes Scritti Attuali)
+    writers: HashMap<u32, (BufWriter<File>, u64)>, 
     commit_file: Option<BufWriter<File>>,
 
     // Async Batching
     batch: Vec<WriterCommand>,
     rx: mpsc::Receiver<WriterCommand>,
 
-    // Compaction
+    // Compaction & Segmentation
     ops_since_last_compaction: u64,
     compaction_threshold: u64,
+    max_segment_size: u64,
 }
 
 impl StreamWriter {
@@ -88,6 +142,7 @@ impl StreamWriter {
         rx: mpsc::Receiver<WriterCommand>,
         base_path: PathBuf,
         compaction_threshold: u64,
+        max_segment_size: u64,
     ) -> Self {
         let base_path = base_path.join(&topic_name);
         
@@ -96,12 +151,13 @@ impl StreamWriter {
             mode,
             base_path,
             partitions_count,
-            partition_files: Vec::new(),
+            writers: HashMap::new(),
             commit_file: None,
             batch: Vec::new(),
             rx,
             ops_since_last_compaction: 0,
             compaction_threshold,
+            max_segment_size,
         }
     }
 
@@ -175,12 +231,17 @@ impl StreamWriter {
         fs::create_dir_all(&self.base_path)?;
 
         // Open Partition Logs
-        self.partition_files.resize_with(self.partitions_count as usize, || None);
-        
+        // Per ogni partizione, cerchiamo l'ultimo segmento attivo
         for i in 0..self.partitions_count {
-            let path = self.base_path.join(format!("{}.log", i));
-            let file = OpenOptions::new().create(true).append(true).open(path)?;
-            self.partition_files[i as usize] = Some(BufWriter::new(file));
+            // Cerchiamo file del tipo: {i}_{offset}.log
+            // Se non ne troviamo, creiamo {i}_0.log
+            let active_segment = find_active_segment(&self.base_path, i)?;
+            let path = active_segment.path;
+            
+            let file = OpenOptions::new().create(true).append(true).open(&path)?;
+            let size = file.metadata()?.len();
+            
+            self.writers.insert(i, (BufWriter::new(file), size));
         }
 
         // Open Commit Log
@@ -216,12 +277,10 @@ impl StreamWriter {
 
         // 2. Flush to disk
         // Flush partitions
-        for writer in &mut self.partition_files {
-            if let Some(w) = writer {
-                if let Err(e) = w.flush() {
-                    error!("Failed to flush partition file: {}", e);
-                    failed = true;
-                }
+        for (_, (w, _)) in self.writers.iter_mut() {
+            if let Err(e) = w.flush() {
+                error!("Failed to flush partition file: {}", e);
+                failed = true;
             }
         }
         // Flush commits
@@ -249,10 +308,23 @@ impl StreamWriter {
     fn write_op(&mut self, op: &StreamStorageOp) -> std::io::Result<()> {
         match op {
             StreamStorageOp::Append { partition, offset, timestamp, payload } => {
-                if let Some(Some(writer)) = self.partition_files.get_mut(*partition as usize) {
+                if let Some((writer, current_size)) = self.writers.get_mut(partition) {
                     // [Len: u32][CRC32: u32][Offset: u64][Timestamp: u64][Payload: Bytes]
                     let len = 8 + 8 + payload.len() as u32; // Offset + Ts + Payload
-                    
+                    let entry_size = 4 + 4 + len as u64; // Len + CRC + Content
+
+                    // Check Segmentation
+                    if *current_size + entry_size > self.max_segment_size {
+                        writer.flush()?;
+                        
+                        // Ruota: Nuovo file {partition}_{offset}.log
+                        let new_path = self.base_path.join(format!("{}_{}.log", partition, offset));
+                        let new_file = File::create(&new_path)?;
+                        *writer = BufWriter::new(new_file);
+                        *current_size = 0;
+                        info!("Rotated log for partition {} to offset {}", partition, offset);
+                    }
+
                     let mut hasher = Hasher::new();
                     hasher.update(&offset.to_be_bytes());
                     hasher.update(&timestamp.to_be_bytes());
@@ -264,6 +336,8 @@ impl StreamWriter {
                     writer.write_all(&offset.to_be_bytes())?;
                     writer.write_all(&timestamp.to_be_bytes())?;
                     writer.write_all(payload)?;
+                    
+                    *current_size += entry_size;
                 }
             }
             StreamStorageOp::Commit { group, partition, offset, generation_id } => {

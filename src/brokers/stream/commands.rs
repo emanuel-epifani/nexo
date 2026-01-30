@@ -23,7 +23,7 @@ pub enum PersistenceOptions {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
     pub partitions: Option<u32>,

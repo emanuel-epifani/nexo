@@ -120,6 +120,7 @@ pub struct StreamConfig {
     pub persistence_path: String,
     pub default_flush_ms: u64,
     pub compaction_threshold: u64,
+    pub max_segment_size: u64,
 }
 
 impl StreamConfig {
@@ -130,6 +131,7 @@ impl StreamConfig {
             persistence_path:       get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
             default_flush_ms:       get_env("STREAM_DEFAULT_FLUSH_MS", "100"),
             compaction_threshold:   get_env("STREAM_COMPACTION_THRESHOLD", "10000"),
+            max_segment_size:       get_env("STREAM_MAX_SEGMENT_SIZE", "104857600"), // 100MB
         }
     }
 }

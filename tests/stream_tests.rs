@@ -277,10 +277,17 @@ mod persistence {
         }
 
         // 2. Corrupt Data (Append garbage)
-        // Wait a bit to ensure async file flush/creation has happened
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let log_path = temp_dir.path().join(topic).join("0.log");
+        let log_path = temp_dir.path().join(topic).join("0_0.log");
+        
+        // Se non esiste 0_0.log, prova 0.log (compatibilità)
+        let log_path = if log_path.exists() {
+            log_path
+        } else {
+            temp_dir.path().join(topic).join("0.log")
+        };
+
         let mut file = std::fs::OpenOptions::new().append(true).open(log_path).expect("Log file should exist");
         file.write_all(b"GARBAGE_DATA_WITHOUT_HEADER").unwrap();
 
@@ -293,7 +300,6 @@ mod persistence {
             }).await.unwrap();
 
             let msgs = manager.read(topic, 0, 10).await;
-            // Should read 2 valid messages and stop at garbage
             assert_eq!(msgs.len(), 2);
             assert_eq!(msgs[0].payload, Bytes::from("valid1"));
             assert_eq!(msgs[1].payload, Bytes::from("valid2"));
@@ -318,7 +324,8 @@ mod persistence {
         // Creazione Topic
         manager.create_topic(topic.to_string(), StreamCreateOptions {
             partitions: Some(1),
-            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }), // Flush veloce
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }),
+            ..Default::default()
         }).await.unwrap();
 
         // Join Group
@@ -340,11 +347,10 @@ mod persistence {
         let recovered_manager = StreamManager::with_config(recover_config);
 
         // 4. VERIFY: Verifichiamo lo stato recuperato
-        // Facciamo un join: dovremmo ricevere l'offset 10 come punto di partenza
-        // Nota: re-create topic necessario per spawnare l'attore (come negli altri test)
         recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
             partitions: Some(1),
             persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }),
+            ..Default::default()
         }).await.unwrap();
 
         let (_new_gen, _assignments, committed_offsets) = recovered_manager
@@ -359,15 +365,79 @@ mod persistence {
             "L'offset recuperato dopo la compattazione deve essere l'ultimo committato (10)"
         );
 
-        // Opzionale: Verifica fisica che il file non sia esploso
         let file_size = std::fs::metadata(temp_dir.path().join(topic).join("commits.log"))
             .unwrap()
             .len();
         
         println!("Final commits.log size: {} bytes", file_size);
-        // Un singolo record pesa circa 40-50 byte. 10 record sarebbero ~500. 1 record ~50.
-        // Diamo un margine ampio ma che esclude 10 record.
         assert!(file_size < 300, "Il file commits.log dovrebbe essere compattato (piccolo)");
+    }
+
+    #[tokio::test]
+    async fn test_stream_log_segmentation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
+        // Set segment size to a very small value to force rotation frequently
+        // 1 message is around 50-60 bytes. Let's set it to 100 bytes to force rotation after ~2 messages.
+        config.max_segment_size = 100; 
+
+        let manager = StreamManager::with_config(config);
+        let topic = "topic_segmentation";
+
+        manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileSync),
+            ..Default::default()
+        }).await.unwrap();
+
+        // 1. Write messages
+        // Msg 1 (offset 0)
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg1")).await.unwrap();
+        // Msg 2 (offset 1) - Should fill segment
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg2")).await.unwrap();
+        // Msg 3 (offset 2) - Should trigger rotation and go to new segment
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg3")).await.unwrap();
+        // Msg 4 (offset 3)
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg4")).await.unwrap();
+
+        // Wait for async flush/rotation
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 2. Verify Filesystem
+        let topic_path = temp_dir.path().join(topic);
+        let mut files: Vec<String> = std::fs::read_dir(&topic_path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".log") && name != "commits.log")
+            .collect();
+        files.sort();
+
+        println!("Segment files found: {:?}", files);
+        assert!(files.len() >= 2, "Should have at least 2 segments");
+        // Expecting something like: "0_0.log", "0_2.log" (assuming rotation happened at offset 2)
+
+        // 3. Verify Reading (Transparency)
+        // Restart manager to force recovery from disk
+        drop(manager);
+        
+        let mut recover_config = Config::global().stream.clone();
+        recover_config.persistence_path = path_str;
+        let recovered_manager = StreamManager::with_config(recover_config);
+        
+        // Trigger recovery
+        recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileSync),
+            ..Default::default()
+        }).await.unwrap();
+
+        let msgs = recovered_manager.read(topic, 0, 10).await;
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].payload, Bytes::from("msg1"));
+        assert_eq!(msgs[3].payload, Bytes::from("msg4"));
     }
 }
 
