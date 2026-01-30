@@ -1,51 +1,19 @@
-//! Queue Manager: Actor-based message queue system
-//! 
-//! Architecture: Actor per Queue
-//! - QueueManager is a router that maps queue names to QueueActor handles
-//! - Each QueueActor owns its state and processes commands sequentially
-//! - DLQ handled via ManagerCommand::MoveToDLQ (no circular refs)
+//! Queue Manager: Router and lifecycle manager for Queue Actors
 
-use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{self, Instant}; // Add Instant
 use bytes::Bytes;
 use uuid::Uuid;
-use std::path::PathBuf;
-use tracing::{error, info};
+use std::collections::HashMap;
 
-use crate::brokers::queues::queue::{QueueState, QueueConfig, Message};
-use crate::brokers::queues::persistence::{QueueStore, types::{StorageOp, PersistenceMode}};
+use crate::brokers::queues::queue::{QueueConfig, Message};
+use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
+use crate::brokers::queues::persistence::types::PersistenceMode;
 use crate::config::Config;
-use crate::dashboard::models::queues::{QueueBrokerSnapshot, QueueSummary};
+use crate::dashboard::models::queues::QueueBrokerSnapshot;
 
 // ==========================================
-// ACTOR COMMANDS
+// MANAGER COMMANDS
 // ==========================================
-
-pub enum QueueActorCommand {
-    Push {
-        payload: Bytes,
-        priority: u8,
-        delay_ms: Option<u64>,
-        reply: oneshot::Sender<()>,
-    },
-    Pop {
-        reply: oneshot::Sender<Option<Message>>,
-    },
-    Ack {
-        id: Uuid,
-        reply: oneshot::Sender<bool>,
-    },
-    ConsumeBatch {
-        max: usize,
-        wait_ms: u64,
-        reply: oneshot::Sender<Vec<Message>>,
-    },
-    GetSnapshot {
-        reply: oneshot::Sender<QueueSummary>,
-    },
-    ProcessExpired,
-}
 
 pub enum ManagerCommand {
     CreateQueue {
@@ -65,194 +33,6 @@ pub enum ManagerCommand {
     GetSnapshot {
         reply: oneshot::Sender<QueueBrokerSnapshot>,
     },
-}
-
-// ==========================================
-// QUEUE ACTOR
-// ==========================================
-
-struct QueueActor {
-    name: String,
-    state: QueueState,
-    config: QueueConfig,
-    store: QueueStore,
-    rx: mpsc::Receiver<QueueActorCommand>,
-    manager_tx: mpsc::Sender<ManagerCommand>,
-}
-
-impl QueueActor {
-    fn new(
-        name: String,
-        config: QueueConfig,
-        rx: mpsc::Receiver<QueueActorCommand>,
-        manager_tx: mpsc::Sender<ManagerCommand>,
-    ) -> Self {
-        let base_path = PathBuf::from(&Config::global().queue.persistence_path);
-        
-        // Ensure directory exists
-        if let Err(e) = std::fs::create_dir_all(&base_path) {
-            error!("Failed to create queue data directory at {:?}: {}", base_path, e);
-        }
-
-        let db_path = base_path.join(format!("{}.db", name));
-        let store = QueueStore::new(db_path, config.persistence.clone());
-
-        Self {
-            name,
-            state: QueueState::new(),
-            config,
-            store,
-            rx,
-            manager_tx,
-        }
-    }
-
-    async fn run(mut self) {
-        // RECOVERY PHASE
-        match self.store.recover() {
-            Ok(messages) => {
-                let count = messages.len();
-                if count > 0 {
-                    for msg in messages {
-                        self.state.push(msg);
-                    }
-                    info!("Queue '{}': Recovered {} messages from storage", self.name, count);
-                }
-            }
-            Err(e) => {
-                error!("Queue '{}': Persistence recovery failed: {}", self.name, e);
-            }
-        }
-
-        loop {
-            // Calculate next timeout
-            let sleep_until = if let Some(ts_ms) = self.state.next_timeout() {
-                let now_ms = crate::brokers::queues::queue::current_time_ms();
-                if ts_ms <= now_ms {
-                    // println!("Queue '{}': Event expired! ts={} now={}", self.name, ts_ms, now_ms);
-                    Instant::now()
-                } else {
-                    let delta = std::time::Duration::from_millis(ts_ms - now_ms);
-                    Instant::now() + delta
-                }
-            } else {
-                // println!("Queue '{}': No scheduled events, sleeping forever", self.name);
-                Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600)
-            };
-
-            // Use tokio::select! to wait for either a command or the timeout
-            tokio::select! {
-                // 1. Handle Commands
-                maybe_cmd = self.rx.recv() => {
-                    match maybe_cmd {
-                        Some(cmd) => {
-                            // println!("Queue '{}': Received command", self.name);
-                            self.handle_command(cmd).await;
-                        },
-                        None => break, 
-                    }
-                }
-
-                // 2. Handle Timeout (Pulse)
-                _ = time::sleep_until(sleep_until), if self.state.next_timeout().is_some() => {
-                    ///println!("Queue '{}': Timer fired! Processing expired.", self.name);
-                    self.process_expired().await;
-                }
-            }
-        }
-    }
-
-    async fn handle_command(&mut self, cmd: QueueActorCommand) {
-        match cmd {
-            QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
-                let msg = Message::new(payload, priority, delay_ms);
-                self.state.push(msg.clone());
-                let _ = self.store.execute(StorageOp::Insert(msg)).await;
-                let _ = reply.send(());
-            }
-            
-            QueueActorCommand::Pop { reply } => {
-                let (msg_opt, _) = self.state.pop(self.config.visibility_timeout_ms);
-                if let Some(msg) = &msg_opt {
-                    let _ = self.store.execute(StorageOp::UpdateState { 
-                        id: msg.id, 
-                        visible_at: msg.visible_at, 
-                        attempts: msg.attempts 
-                    }).await;
-                }
-                let _ = reply.send(msg_opt);
-            }
-            
-            QueueActorCommand::Ack { id, reply } => {
-                let result = self.state.ack(id);
-                if result {
-                    let _ = self.store.execute(StorageOp::Delete(id)).await;
-                }
-                let _ = reply.send(result);
-            }
-            
-            QueueActorCommand::ConsumeBatch { max, wait_ms, reply } => {
-                let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
-                if !msgs.is_empty() {
-                    for msg in &msgs {
-                        let _ = self.store.execute(StorageOp::UpdateState { 
-                            id: msg.id, 
-                            visible_at: msg.visible_at, 
-                            attempts: msg.attempts 
-                        }).await;
-                    }
-                    let _ = reply.send(msgs);
-                } else {
-                    // Note: Here we sleep inside handle_command, blocking the actor.
-                    // Ideally this should be handled differently (e.g. parking request), 
-                    // but for compatibility with previous logic we keep it simple.
-                    // Since it's a ConsumeBatch with Wait, client expects blocking.
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(100))).await;
-                    let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
-                    for msg in &msgs {
-                        let _ = self.store.execute(StorageOp::UpdateState { 
-                            id: msg.id, 
-                            visible_at: msg.visible_at, 
-                            attempts: msg.attempts 
-                        }).await;
-                    }
-                    let _ = reply.send(msgs);
-                }
-            }
-            
-            QueueActorCommand::GetSnapshot { reply } => {
-                let snapshot = self.state.get_snapshot(&self.name);
-                let _ = reply.send(snapshot);
-            }
-            
-            QueueActorCommand::ProcessExpired => {
-                // Manual trigger (legacy or external)
-                self.process_expired().await;
-            }
-        }
-    }
-
-    async fn process_expired(&mut self) {
-        let (requeued, dlq_msgs) = self.state.process_expired(self.config.max_retries);
-        
-        for msg in requeued {
-            let _ = self.store.execute(StorageOp::UpdateState {
-                id: msg.id,
-                visible_at: 0,
-                attempts: msg.attempts
-            }).await;
-        }
-
-        for msg in dlq_msgs {
-            let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
-            let dlq_name = format!("{}_dlq", self.name);
-            let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
-                queue_name: dlq_name,
-                payload: msg.payload,
-                priority: msg.priority,
-            }).await;
-        }
-    }
 }
 
 // ==========================================
@@ -359,7 +139,7 @@ impl QueueManager {
         // Spawn actor
         let actor = QueueActor::new(name, config.clone(), rx, manager_tx);
         tokio::spawn(actor.run());
-
+        
         tx
     }
 

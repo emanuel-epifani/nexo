@@ -55,6 +55,8 @@ mod features {
         assert_eq!(m3.payload, Bytes::from("low"));
     }
 
+    // todo: FIFO? than priority?
+
     #[tokio::test]
     async fn test_scheduled_delivery() {
         let (manager, _tmp) = setup_manager().await;
