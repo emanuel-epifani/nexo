@@ -185,9 +185,20 @@ class StreamSubscription<T> {
         continue;
       }
 
-      for (const partition of this.assignedPartitions) {
-        if (!this.active) return;
-        await this.fetchAndProcess(partition, batchSize, callback);
+      const currentGenId = this.generationId;
+
+      try {
+        await runConcurrent(this.assignedPartitions, 4, async (partition) => {
+          if (this.generationId !== currentGenId) return;
+          await this.fetchAndProcess(partition, batchSize, callback, currentGenId);
+        });
+      } catch (e: any) {
+        if (this.isRebalanceError(e)) {
+          // Reset immediately to stop other workers
+          this.generationId = BigInt(0);
+          throw e; // Propagate to outer loop for rejoin
+        }
+        throw e;
       }
 
       await this.backoff(0); // Yield to event loop
@@ -197,8 +208,12 @@ class StreamSubscription<T> {
   private async fetchAndProcess(
     partition: number,
     batchSize: number,
-    callback: (data: T) => Promise<any> | any
+    callback: (data: T) => Promise<any> | any,
+    myGenId: bigint
   ): Promise<void> {
+    // 1. Check Pre-Fetch
+    if (this.generationId !== myGenId) return;
+
     const currentOffset = this.offsets.get(partition) ?? BigInt(0);
 
     try {
@@ -208,16 +223,22 @@ class StreamSubscription<T> {
         this.group,
         partition,
         currentOffset,
-        this.generationId,
+        myGenId,
         batchSize
       );
 
       if (messages.length === 0) return;
 
+      // 2. Check Post-Fetch
+      if (this.generationId !== myGenId) return;
+
       let lastProcessedOffset = currentOffset;
       let shouldCommit = true;
 
       for (const msg of messages) {
+        // 3. Check Pre-Callback
+        if (this.generationId !== myGenId) return;
+
         try {
           await callback(msg.data);
           lastProcessedOffset = msg.offset;
@@ -229,8 +250,9 @@ class StreamSubscription<T> {
         }
       }
 
-      if (shouldCommit && this.conn.isConnected) {
-        await this.commitOffset(partition, lastProcessedOffset + BigInt(1));
+      // 4. Check Pre-Commit
+      if (shouldCommit && this.conn.isConnected && this.generationId === myGenId) {
+        await this.commitOffset(partition, lastProcessedOffset + BigInt(1), myGenId);
       }
     } catch (e: any) {
       if (this.isRebalanceError(e)) throw e;
@@ -238,10 +260,12 @@ class StreamSubscription<T> {
     }
   }
 
-  private async commitOffset(partition: number, nextOffset: bigint): Promise<void> {
+  private async commitOffset(partition: number, nextOffset: bigint, myGenId: bigint): Promise<void> {
+    if (this.generationId !== myGenId) return;
+
     this.offsets.set(partition, nextOffset);
     try {
-      await StreamCommands.commit(this.conn, this.streamName, this.group, partition, nextOffset, this.generationId);
+      await StreamCommands.commit(this.conn, this.streamName, this.group, partition, nextOffset, myGenId);
     } catch (e: any) {
       if (this.isRebalanceError(e)) throw e;
       logger.error(`Commit failed P${partition}:${nextOffset}`, e);
@@ -297,4 +321,19 @@ export class NexoStream<T = any> {
       stop: () => subscription.stop()
     };
   }
+}
+
+async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
+  if (concurrency === 1) {
+    for (const item of items) await fn(item);
+    return;
+  }
+  const queue = [...items];
+  const workers = Array(Math.min(concurrency, items.length)).fill(null).map(async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (item !== undefined) await fn(item);
+    }
+  });
+  await Promise.all(workers);
 }
