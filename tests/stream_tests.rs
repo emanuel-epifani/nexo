@@ -1,7 +1,10 @@
 use nexo::brokers::stream::stream_manager::StreamManager;
-use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
+use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions};
 use bytes::Bytes;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+mod helpers;
+use helpers::Benchmark;
 
 
 mod features {
@@ -168,4 +171,197 @@ mod features {
         assert_eq!(*offsets.get(&pid).unwrap(), 100);
     }
 
+}
+
+mod persistence {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn test_write_and_recover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+        
+        let topic = "persist-recover";
+
+        // 1. Create & Publish (Sync)
+        {
+            let manager = StreamManager::new();
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg1")).await.unwrap();
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg2")).await.unwrap();
+            
+            // Drop Manager
+        }
+
+        // 2. Recovery
+        {
+            let manager = StreamManager::new();
+            // Topic auto-recovers if exists on disk? 
+            // Currently StreamManager::new() does NOT auto-scan disk to recreate actors. 
+            // It lazily creates them or we need to "re-create" topic to trigger recovery logic in Actor::new()
+            
+            // Re-call create to respawn actor (it should check existence or overwrite? Logic says: if !actors.contains_key)
+            // But Actor::new calls recover_topic. So we just need to spawn the actor.
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            let msgs = manager.read(topic, 0, 10).await;
+            assert_eq!(msgs.len(), 2);
+            assert_eq!(msgs[0].payload, Bytes::from("msg1"));
+            assert_eq!(msgs[1].payload, Bytes::from("msg2"));
+            assert_eq!(msgs[0].offset, 0);
+            assert_eq!(msgs[1].offset, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_commit_recovery() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+
+        let topic = "persist-commit";
+        let group = "g-persist";
+
+        {
+            let manager = StreamManager::new();
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            let (gen, parts, _) = manager.join_group(group, topic, "client-A").await.unwrap();
+            manager.commit_offset(group, topic, parts[0], 50, "client-A", gen).await.unwrap();
+        }
+
+        {
+            let manager = StreamManager::new();
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            let (_, _, offsets) = manager.join_group(group, topic, "client-A").await.unwrap();
+            assert_eq!(*offsets.get(&0).unwrap(), 50);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_corruption_integrity() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+
+        let topic = "persist-corrupt";
+
+        // 1. Write Data
+        {
+            let manager = StreamManager::new();
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("valid1")).await.unwrap();
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("valid2")).await.unwrap();
+        }
+
+        // 2. Corrupt Data (Append garbage)
+        // Wait a bit to ensure async file flush/creation has happened
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let log_path = temp_dir.path().join(topic).join("0.log");
+        let mut file = std::fs::OpenOptions::new().append(true).open(log_path).expect("Log file should exist");
+        file.write_all(b"GARBAGE_DATA_WITHOUT_HEADER").unwrap();
+
+        // 3. Recover
+        {
+            let manager = StreamManager::new();
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileSync),
+            }).await.unwrap();
+
+            let msgs = manager.read(topic, 0, 10).await;
+            // Should read 2 valid messages and stop at garbage
+            assert_eq!(msgs.len(), 2);
+            assert_eq!(msgs[0].payload, Bytes::from("valid1"));
+            assert_eq!(msgs[1].payload, Bytes::from("valid2"));
+        }
+    }
+}
+
+mod performance {
+    use super::*;
+    
+    // Reduce count for tests to be fast, but enough to see diff
+    // const COUNT: usize = 10_000;
+    const COUNT: usize = 200_000;
+
+    #[tokio::test]
+    async fn bench_stream_memory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+        
+        let manager = StreamManager::new();
+        let topic = "bench-mem";
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory) }).await.unwrap();
+
+        let mut bench = Benchmark::start("STREAM PUSH - Memory", COUNT);
+        for _ in 0..COUNT {
+            let start = Instant::now();
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
+            bench.record(start.elapsed());
+        }
+        bench.stop();
+    }
+
+    #[tokio::test]
+    async fn bench_stream_fsync() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+
+        let manager = StreamManager::new();
+        let topic = "bench-sync";
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync) }).await.unwrap();
+
+        let mut bench = Benchmark::start("STREAM PUSH - FSync", COUNT);
+        for _ in 0..COUNT {
+            let start = Instant::now();
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
+            bench.record(start.elapsed());
+        }
+        bench.stop();
+    }
+
+    #[tokio::test]
+    async fn bench_stream_fasync() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+
+        let manager = StreamManager::new();
+        let topic = "bench-async";
+        manager.create_topic(topic.to_string(), StreamCreateOptions { 
+            partitions: Some(1), 
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(100) }) 
+        }).await.unwrap();
+
+        let mut bench = Benchmark::start("STREAM PUSH - FAsync", COUNT);
+        for _ in 0..COUNT {
+            let start = Instant::now();
+            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
+            bench.record(start.elapsed());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        bench.stop();
+    }
 }
