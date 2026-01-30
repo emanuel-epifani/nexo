@@ -132,6 +132,30 @@ mod features {
         let dead = manager.pop(&dlq_name).await.expect("Should be in DLQ");
         assert_eq!(dead.payload, Bytes::from("fail_me"));
     }
+
+    #[tokio::test]
+    async fn test_delete_queue() {
+        let (manager, _tmp) = setup_manager().await;
+        let q = format!("adv_del_{}", Uuid::new_v4());
+        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+
+        manager.push(q.clone(), Bytes::from("msg"), 0, None).await.unwrap();
+        assert!(manager.exists(&q).await);
+
+        manager.delete_queue(q.clone()).await.unwrap();
+
+        assert!(!manager.exists(&q).await, "Queue should not exist in RAM");
+
+        // Try to pop -> None
+        assert!(manager.pop(&q).await.is_none());
+
+        // Restart to check disk cleanup
+        let manager2 = QueueManager::new();
+        // Since we can't easily check if file exists without knowing path logic,
+        // we check if declaring it again results in an empty queue (no recovery)
+        manager2.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        assert!(manager2.pop(&q).await.is_none(), "Queue should be empty after delete and recreation");
+    }
 }
 
 // =========================================================================================
@@ -245,6 +269,7 @@ mod advanced {
         // 1 Scheduled (s1)
         assert_eq!(queue_snap.scheduled.len(), 1);
     }
+
 }
 
 // =========================================================================================

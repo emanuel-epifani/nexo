@@ -30,6 +30,10 @@ pub enum ManagerCommand {
         payload: Bytes,
         priority: u8,
     },
+    DeleteQueue {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     GetSnapshot {
         reply: oneshot::Sender<QueueBrokerSnapshot>,
     },
@@ -106,6 +110,31 @@ impl QueueManager {
                         reply: reply_tx,
                     }).await;
                 }
+
+                ManagerCommand::DeleteQueue { name, reply } => {
+                    if let Some(actor_tx) = actors.remove(&name) {
+                        // 1. Stop Actor
+                        let (stop_tx, stop_rx) = oneshot::channel();
+                        if actor_tx.send(QueueActorCommand::Stop { reply: stop_tx }).await.is_ok() {
+                            let _ = stop_rx.await;
+                        }
+                    }
+                    
+                    // 2. Delete Persistence
+                    // We need to construct the path manually here or ask Config.
+                    // Ideally QueueStore::destroy(name) would be better but Manager knows path too.
+                    let base_path = std::path::PathBuf::from(&Config::global().queue.persistence_path);
+                    let db_path = base_path.join(format!("{}.db", name));
+                    let wal_path = base_path.join(format!("{}.db-wal", name));
+                    let shm_path = base_path.join(format!("{}.db-shm", name));
+
+                    // Best effort cleanup
+                    let _ = std::fs::remove_file(db_path);
+                    let _ = std::fs::remove_file(wal_path);
+                    let _ = std::fs::remove_file(shm_path);
+
+                    let _ = reply.send(Ok(()));
+                }
                 
                 ManagerCommand::GetSnapshot { reply } => {
                     let mut active_queues = Vec::new();
@@ -148,6 +177,14 @@ impl QueueManager {
     pub async fn declare_queue(&self, name: String, config: QueueConfig) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(ManagerCommand::CreateQueue { name, config, reply: tx })
+            .await
+            .map_err(|_| "Manager closed".to_string())?;
+        rx.await.map_err(|_| "No reply".to_string())?
+    }
+
+    pub async fn delete_queue(&self, name: String) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(ManagerCommand::DeleteQueue { name, reply: tx })
             .await
             .map_err(|_| "Manager closed".to_string())?;
         rx.await.map_err(|_| "No reply".to_string())?

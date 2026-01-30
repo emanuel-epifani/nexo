@@ -10,7 +10,7 @@ use crate::brokers::pub_sub::ClientId;
 // Import Command types from brokers
 use crate::brokers::store::commands::StoreCommand;
 use crate::brokers::store::map::commands::MapCommand;
-use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
+use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions, OP_Q_DELETE};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
 use crate::brokers::queues::QueueConfig;
@@ -164,6 +164,12 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
             match queue_manager.exists(&q_name).await {
                 true => Response::Ok,
                 false => Response::Error("Queue not found".to_string()),
+            }
+        }
+        QueueCommand::Delete { q_name } => {
+            match queue_manager.delete_queue(q_name).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
             }
         }
     }

@@ -8,6 +8,7 @@ export enum QueueOpcode {
   Q_CONSUME = 0x12,
   Q_ACK = 0x13,
   Q_EXISTS = 0x14,
+  Q_DELETE = 0x15,
 }
 
 export const QueueCommands = {
@@ -26,6 +27,9 @@ export const QueueCommands = {
       return false;
     }
   },
+
+  delete: (conn: NexoConnection, name: string) =>
+    conn.send(QueueOpcode.Q_DELETE, FrameCodec.string(name)),
 
   push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) =>
     conn.send(
@@ -112,6 +116,10 @@ export class NexoQueue<T = any> {
 
   async exists(): Promise<boolean> {
     return QueueCommands.exists(this.conn, this.name);
+  }
+
+  async delete(): Promise<void> {
+    await QueueCommands.delete(this.conn, this.name);
   }
 
   async push(data: T, options: QueuePushOptions = {}): Promise<void> {

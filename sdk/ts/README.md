@@ -44,6 +44,8 @@ const mailQ = await client.queue<MailJob>("emails").create();
 await mailQ.push({ to: "test@test.com" });
 // Subscribe
 await mailQ.subscribe((msg) => console.log(msg));
+// Delete queue 
+await mailQ.delete();
 ```
 
 <details>
@@ -64,7 +66,7 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
     // PERSISTENCE:
     // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
     // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
-    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) -> DEFAULT 
+    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) 
     // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
     persistence: {
         strategy: 'file_async',
@@ -167,7 +169,7 @@ const orders = await client.stream<Order>('orders').create({
     // PERSISTENCE:
     // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
     // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
-    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) -> DEFAULT 
+    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable)
     // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
     persistence: {
         strategy: 'file_async',

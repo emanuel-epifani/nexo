@@ -41,6 +41,9 @@ pub enum QueueActorCommand {
     GetSnapshot {
         reply: oneshot::Sender<QueueSummary>,
     },
+    Stop {
+        reply: oneshot::Sender<()>,
+    },
     ProcessExpired,
 }
 
@@ -112,7 +115,11 @@ impl QueueActor {
                 // 1. Handle Commands
                 maybe_cmd = self.rx.recv() => {
                     match maybe_cmd {
-                        Some(cmd) => self.handle_command(cmd).await,
+                        Some(cmd) => {
+                            if !self.handle_command(cmd).await {
+                                break;
+                            }
+                        }
                         None => break, // Channel closed
                     }
                 }
@@ -150,28 +157,21 @@ impl QueueActor {
         }
     }
 
-    async fn handle_command(&mut self, cmd: QueueActorCommand) {
+    async fn handle_command(&mut self, cmd: QueueActorCommand) -> bool {
         match cmd {
             QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
+                // ... (existing logic)
                 let msg = Message::new(payload, priority, delay_ms);
-                
-                // If there are waiters and message is ready (no delay), deliver immediately
                 if delay_ms.is_none() && !self.waiters.is_empty() {
-                    // Optimized: Deliver directly to waiter? 
-                    // No, for consistency, push to state then pop.
-                    // This ensures persistence and proper state transitions.
                     self.state.push(msg.clone());
                     let _ = self.store.execute(StorageOp::Insert(msg)).await;
-                    
-                    // Try to satisfy waiters immediately
                     self.process_waiters().await;
                 } else {
-                    // Standard path
                     self.state.push(msg.clone());
                     let _ = self.store.execute(StorageOp::Insert(msg)).await;
                 }
-                
                 let _ = reply.send(());
+                true
             }
             
             QueueActorCommand::Pop { reply } => {
@@ -184,6 +184,7 @@ impl QueueActor {
                     }).await;
                 }
                 let _ = reply.send(msg_opt);
+                true
             }
             
             QueueActorCommand::Ack { id, reply } => {
@@ -192,14 +193,12 @@ impl QueueActor {
                     let _ = self.store.execute(StorageOp::Delete(id)).await;
                 }
                 let _ = reply.send(result);
+                true
             }
             
             QueueActorCommand::ConsumeBatch { max, wait_ms, reply } => {
-                // Try to take immediately
                 let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
-                
                 if !msgs.is_empty() {
-                    // Persist state changes
                     for msg in &msgs {
                         let _ = self.store.execute(StorageOp::UpdateState { 
                             id: msg.id, 
@@ -209,26 +208,31 @@ impl QueueActor {
                     }
                     let _ = reply.send(msgs);
                 } else if wait_ms > 0 {
-                    // Park request
                     self.waiters.push_back(WaitingConsumer {
                         reply,
                         max,
                         expires_at: current_time_ms() + wait_ms,
                     });
-                    // Note: Loop will recalculate timeout and sleep until expires_at
                 } else {
-                    // No wait, return empty
                     let _ = reply.send(vec![]);
                 }
+                true
             }
             
             QueueActorCommand::GetSnapshot { reply } => {
                 let snapshot = self.state.get_snapshot(&self.name);
                 let _ = reply.send(snapshot);
+                true
             }
             
             QueueActorCommand::ProcessExpired => {
                 self.process_time_events().await;
+                true
+            }
+
+            QueueActorCommand::Stop { reply } => {
+                let _ = reply.send(());
+                false // Signal to break the loop
             }
         }
     }

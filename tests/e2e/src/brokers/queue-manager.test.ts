@@ -34,7 +34,7 @@ describe('QUEUE broker - Complete Feature Set', () => {
         it('should process all 100 messages with high concurrency without loss', async () => {
             const q = await nexo.queue('concurrency_test').create();
             const TOTAL = 100;
-            
+
             // Push 100 messages
             const pushPromises = [];
             for (let i = 0; i < TOTAL; i++) {
@@ -47,9 +47,9 @@ describe('QUEUE broker - Complete Feature Set', () => {
             const sub = await q.subscribe(async (data) => {
                 receivedIndices.add(data.index);
                 await new Promise(r => setTimeout(r, 5)); // Simulate work
-            }, { 
-                concurrency: 10, 
-                batchSize: 20 
+            }, {
+                concurrency: 10,
+                batchSize: 20
             });
 
             // Wait for completion
@@ -196,4 +196,22 @@ describe('QUEUE broker - Complete Feature Set', () => {
         });
     });
 
+    describe('7. Management', () => {
+        it('should create and then delete a queue', async () => {
+            const q = await nexo.queue('delete_test').create();
+
+            // Should exist
+            expect(await q.exists()).toBe(true);
+
+            // Delete
+            await q.delete();
+
+            // Should not exist
+            expect(await q.exists()).toBe(false);
+
+            // Re-create check
+            await q.create();
+            expect(await q.exists()).toBe(true);
+        });
+    });
 });

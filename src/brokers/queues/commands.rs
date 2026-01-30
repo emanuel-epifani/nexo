@@ -8,6 +8,7 @@ pub const OP_Q_PUSH: u8 = 0x11;
 pub const OP_Q_CONSUME: u8 = 0x12;
 pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
+pub const OP_Q_DELETE: u8 = 0x15;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "strategy")]
@@ -64,6 +65,10 @@ pub enum QueueCommand {
         q_name: String,
         options: QueueConsumeOptions,
     },
+    /// DELETE: [NameLen:4][Name]
+    Delete {
+        q_name: String,
+    },
     /// ACK: [ID:16][QNameLen:4][QName]
     Ack {
         id: Uuid,
@@ -115,6 +120,10 @@ impl QueueCommand {
             OP_Q_EXISTS => {
                 let q_name = cursor.read_string()?;
                 Ok(Self::Exists { q_name })
+            }
+            OP_Q_DELETE => {
+                let q_name = cursor.read_string()?;
+                Ok(Self::Delete { q_name })
             }
             _ => Err(format!("Unknown Queue opcode: 0x{:02X}", opcode)),
         }
