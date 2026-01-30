@@ -14,7 +14,7 @@ use crate::server::header_protocol::{
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
-use crate::brokers::pub_sub::ClientId;
+use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 
 /// Internal message type for the write loop
 enum WriteMessage {
@@ -38,7 +38,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     
     // Channel for PubSubManager to send push notifications to this client
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
-    let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Bytes>();
+    let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
     
     // Register with PubSub Manager & Hold the Guard
     let _pubsub_guard = engine.pubsub.connect(client_id.clone(), push_tx);
@@ -49,8 +49,11 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // Bridge Task: Forward Pushes to Main Write Loop
     let tx_bridge = tx.clone();
     tokio::spawn(async move {
-        while let Some(payload) = push_rx.recv().await {
+        while let Some(msg_arc) = push_rx.recv().await {
             // Forward push message to the main write loop
+            // Use network_cache to get pre-serialized bytes efficiently
+            let payload = msg_arc.get_network_packet().clone();
+            
             if tx_bridge.send(WriteMessage::Push(payload)).await.is_err() {
                 break;
             }

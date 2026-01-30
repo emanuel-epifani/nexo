@@ -13,7 +13,7 @@
 //! - Active Push to connected clients
 //! - Retained Messages (Last Value Caching)
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
@@ -27,6 +27,34 @@ use crate::dashboard::models::pubsub::TopicSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientId(pub String);
+
+#[derive(Debug)]
+pub struct PubSubMessage {
+    pub topic: String,
+    pub payload: Bytes,
+    network_cache: OnceLock<Bytes>,
+}
+
+impl PubSubMessage {
+    pub fn new(topic: String, payload: Bytes) -> Self {
+        Self {
+            topic,
+            payload,
+            network_cache: OnceLock::new(),
+        }
+    }
+
+    pub fn get_network_packet(&self) -> &Bytes {
+        self.network_cache.get_or_init(|| {
+            let topic_len = self.topic.len();
+            let mut buf = BytesMut::with_capacity(4 + topic_len + self.payload.len());
+            buf.put_u32(topic_len as u32);
+            buf.put_slice(self.topic.as_bytes());
+            buf.put_slice(&self.payload);
+            buf.freeze()
+        })
+    }
+}
 
 /// Session Guard for PubSub - RAII cleanup on drop
 pub struct PubSubSession {
@@ -406,7 +434,7 @@ impl RootActor {
 
 pub struct PubSubManager {
     actors: DashMap<String, mpsc::Sender<RootCommand>>,
-    clients: DashMap<ClientId, mpsc::UnboundedSender<Bytes>>,
+    clients: DashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
     client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
     global_hash_subscribers: RwLock<HashSet<ClientId>>,  // Subscribers to "#"
 }
@@ -422,7 +450,7 @@ impl PubSubManager {
     }
 
     /// Register a new client connection
-    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Bytes>) -> PubSubSession {
+    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) -> PubSubSession {
         self.clients.insert(client_id.clone(), sender);
         PubSubSession {
             client_id,
@@ -457,8 +485,8 @@ impl PubSubManager {
             if let Ok(retained) = rx.await {
                 if let Some(sender) = self.clients.get(&client) {
                     for (topic_str, payload) in retained {
-                        let push = Self::build_push_payload(&topic_str, &payload);
-                        let _ = sender.send(push);
+                        let msg = Arc::new(PubSubMessage::new(topic_str, payload));
+                        let _ = sender.send(msg);
                     }
                 }
             }
@@ -540,12 +568,12 @@ impl PubSubManager {
             .collect();
 
         // 3. Dispatch to all matched clients
-        let push_payload = Self::build_push_payload(topic, &data);
+        let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
         let mut sent = 0;
 
         for client_id in all_clients {
             if let Some(sender) = self.clients.get(&client_id) {
-                if sender.send(push_payload.clone()).is_ok() {
+                if sender.send(msg.clone()).is_ok() {
                     sent += 1;
                 }
             }
@@ -643,14 +671,5 @@ impl PubSubManager {
             tokio::spawn(actor.run());
             tx
         }).clone()
-    }
-
-    fn build_push_payload(topic: &str, data: &Bytes) -> Bytes {
-        let topic_len = topic.len();
-        let mut buf = BytesMut::with_capacity(4 + topic_len + data.len());
-        buf.put_u32(topic_len as u32);
-        buf.put_slice(topic.as_bytes());
-        buf.put_slice(data);
-        buf.freeze()
     }
 }
