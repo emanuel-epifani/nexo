@@ -12,7 +12,7 @@ use crate::NexoEngine;
 
 // Embed the frontend build directory
 #[derive(RustEmbed)]
-#[folder = "dashboard-web/dist/"] 
+#[folder = "dashboard/dist/"]
 struct Assets;
 
 pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {

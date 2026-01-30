@@ -2,78 +2,10 @@ use nexo::brokers::queues::{QueueManager, QueueConfig};
 use nexo::brokers::queues::persistence::types::PersistenceMode;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 use uuid::Uuid;
 
-// =========================================================================================
-// UTILS
-// =========================================================================================
-
-async fn setup_manager() -> (QueueManager, TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    // Set global config override for this test process (careful with parallel tests)
-    // NOTE: In Rust tests run in threads, environment variables are shared. 
-    // Ideally we would inject config, but Config::global() is a singleton.
-    // For this test file, we ensure unique queue names to avoid collision if path is shared,
-    // but better to set the env var once or assume isolation.
-    // Here we pass the path via Config injection if possible, or we rely on Config::global reading env.
-    // Since Config::global is OnceLock, we can't easily reset it.
-    // WORKAROUND: We will assume default path or that we can't change the path per test easily 
-    // without refactoring Config to be injectable. 
-    // HOWEVER, for these tests, we can rely on `QueueActor::new` reading `QUEUE_ROOT_PERSISTENCE_PATH`.
-    // We will set it, but since OnceLock might be initialized, this is tricky.
-    // LET'S RELY on unique Queue Names to isolate DB files within the same directory.
-    
-    // Actually, QueueActor::new reads Config::global().queue.persistence_path.
-    // If Config is already loaded, env var change won't help.
-    // BUT: QueueActor::new creates `path.join(name)`. So unique names are enough!
-    
-    let manager = QueueManager::new();
-    (manager, temp_dir)
-}
-
-struct Benchmark {
-    name: String,
-    start: Instant,
-    count: usize,
-    samples: Vec<Duration>,
-}
-
-impl Benchmark {
-    fn start(name: &str, count: usize) -> Self {
-        Self {
-            name: name.to_string(),
-            start: Instant::now(),
-            count,
-            samples: Vec::with_capacity(count),
-        }
-    }
-
-    fn record(&mut self, duration: Duration) {
-        self.samples.push(duration);
-    }
-
-    fn stop(mut self) {
-        let total_duration = self.start.elapsed();
-        let secs = total_duration.as_secs_f64();
-        let ops_sec = self.count as f64 / secs;
-        
-        self.samples.sort();
-        let len = self.samples.len();
-        
-        let p50 = self.samples.get(len * 50 / 100).unwrap_or(&Duration::ZERO).as_micros();
-        let p95 = self.samples.get(len * 95 / 100).unwrap_or(&Duration::ZERO).as_micros();
-        let p99 = self.samples.get(len * 99 / 100).unwrap_or(&Duration::ZERO).as_micros();
-        let max = self.samples.last().unwrap_or(&Duration::ZERO).as_micros();
-
-        println!("\n[{}]", self.name);
-        println!(" 🚀 Throughput:  {:.0} ops/sec", ops_sec);
-        println!(" ⏱️  Total Time:  {:.2?}", total_duration);
-        println!(" 📊 Latency (µs): p50: {} | p95: {} | p99: {} | MAX: {}", 
-            p50, p95, p99, max);
-        println!(" 📦 Count:       {}\n", self.count);
-    }
-}
+mod helpers;
+use helpers::{setup_manager, Benchmark};
 
 // =========================================================================================
 // 1. FEATURE TESTS (Happy Path + Advanced Logic)
@@ -253,44 +185,76 @@ mod persistence {
     }
 
     #[tokio::test]
-    async fn test_inflight_recovery_timeout() {
-        let q = format!("persist_inflight_{}", Uuid::new_v4());
+    async fn test_scheduled_persistence() {
+        let q = format!("persist_scheduled_{}", Uuid::new_v4());
 
         {
             let manager = QueueManager::new();
             let config = QueueConfig {
-                visibility_timeout_ms: 500, // Short timeout
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
             };
             manager.declare_queue(q.clone(), config).await.unwrap();
 
-            manager.push(q.clone(), Bytes::from("job"), 0, None).await.unwrap();
-
-            // Take it (make it InFlight)
-            let _ = manager.pop(&q).await.unwrap();
-
-            // Drop manager while message is InFlight (and not Acked)
+            // Push with delay 500ms
+            manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
+            
+            // Immediate check (should be empty)
+            assert!(manager.pop(&q).await.is_none());
         }
 
-        tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
-
+        // Restart immediately
         {
             let manager2 = QueueManager::new();
             let config = QueueConfig {
-                visibility_timeout_ms: 500,
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
             };
             manager2.declare_queue(q.clone(), config).await.unwrap();
 
-            // Should be visible again! (Recovery put it in waiting_for_ack, then expired)
-            // Note: Recovery runs, then process_expired runs.
-            // Depending on timing, we might need to wait a tick for process_expired.
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Should still be invisible (assuming less than 500ms passed)
+            assert!(manager2.pop(&q).await.is_none());
 
-            let msg = manager2.pop(&q).await.expect("InFlight message should expire and reappear");
-            assert_eq!(msg.payload, Bytes::from("job"));
+            // Wait for delay expiration
+            tokio::time::sleep(Duration::from_millis(600)).await;
+
+            // Now it should be visible
+            let msg = manager2.pop(&q).await.expect("Scheduled message should appear after delay");
+            assert_eq!(msg.payload, Bytes::from("future_job"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acked_persistence() {
+        let q = format!("persist_acked_{}", Uuid::new_v4());
+
+        {
+            let manager = QueueManager::new();
+            let config = QueueConfig {
+                persistence: PersistenceMode::Sync,
+                ..Default::default()
+            };
+            manager.declare_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("job_done"), 0, None).await.unwrap();
+            
+            let msg = manager.pop(&q).await.unwrap();
+            
+            // Ack it (Should delete from DB)
+            manager.ack(&q, msg.id).await;
+        }
+
+        // Restart
+        {
+            let manager2 = QueueManager::new();
+            let config = QueueConfig {
+                persistence: PersistenceMode::Sync,
+                ..Default::default()
+            };
+            manager2.declare_queue(q.clone(), config).await.unwrap();
+
+            // Should be empty (Ack was persisted)
+            assert!(manager2.pop(&q).await.is_none(), "Acked message should not reappear");
         }
     }
 }
@@ -314,7 +278,7 @@ mod performance {
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
 
-        let mut bench = Benchmark::start("PUSH - Memory", COUNT);
+        let mut bench = Benchmark::start("PUSH - Memory (no persistency)", COUNT);
         for _ in 0..COUNT {
             let start = Instant::now();
             manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
@@ -333,7 +297,7 @@ mod performance {
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
 
-        let mut bench = Benchmark::start("PUSH - FSync (SLOW)", COUNT);
+        let mut bench = Benchmark::start("PUSH - FSync (write on disdk once per message)", COUNT);
         for _ in 0..COUNT {
             let start = Instant::now();
             manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
@@ -352,7 +316,7 @@ mod performance {
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
 
-        let mut bench = Benchmark::start("PUSH - FAsync (Batch 100ms)", COUNT);
+        let mut bench = Benchmark::start("PUSH - FAsync (write on disk once every x ms)", COUNT);
         for _ in 0..COUNT {
             let start = Instant::now();
             manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();

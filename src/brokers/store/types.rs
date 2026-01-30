@@ -1,5 +1,5 @@
 use std::time::Instant;
-use crate::brokers::store::structures::map::MapValue;
+use crate::brokers::store::map::MapValue;
 
 #[derive(Clone, Debug)]
 pub enum Value {

@@ -1,71 +1,29 @@
 //! Store Manager: In-memory data store orchestrator
 
-use dashmap::DashMap;
-use std::time::{Duration, Instant};
-use bytes::Bytes;
-use std::sync::Arc;
-use tokio::time;
-
+use crate::brokers::store::map::MapStore;
 use crate::brokers::store::types::{Entry, Value};
-use crate::brokers::store::structures::map::{MapOperations, MapValue};
-use crate::config::Config;
+use crate::brokers::store::map::MapValue;
+use std::time::Instant;
 
 pub struct StoreManager {
-    store: Arc<DashMap<String, Entry>>,
+    pub map: MapStore,
 }
 
 impl StoreManager {
     pub fn new() -> Self {
-        let store = Arc::new(DashMap::new());
-        
-        let store_cleanup = Arc::clone(&store);
-        let cleanup_interval = Config::global().store.cleanup_interval_secs;
-        tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(cleanup_interval));
-            loop {
-                interval.tick().await;
-                let now = Instant::now();
-                store_cleanup.retain(|_, entry: &mut Entry| {
-                    if let Some(expiry) = entry.expires_at {
-                        return expiry > now;
-                    }
-                    true
-                });
-            }
-        });
-
-        Self { store }
-    }
-
-    pub fn map_set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
-        let expires_at = match ttl {
-            Some(0) | None => {
-                // Use default TTL from config
-                Some(Instant::now() + Duration::from_secs(Config::global().store.default_ttl_secs))
-            }
-            Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
-        };
-
-        MapOperations::set(&self.store, key, value, expires_at);
-        Ok(())
-    }
-
-    pub fn map_get(&self, key: &str) -> Result<Option<Bytes>, String> {
-        Ok(MapOperations::get(&self.store, key))
-    }
-
-    pub fn map_del(&self, key: &str) -> Result<bool, String> {
-        Ok(MapOperations::del(&self.store, key))
+        Self {
+            map: MapStore::new(),
+        }
     }
 
     pub fn get_snapshot(&self) -> crate::dashboard::models::store::StoreBrokerSnapshot {
         let mut keys_detail = Vec::new();
         let now = Instant::now();
         
-        for entry in self.store.iter() {
+        for entry in self.map.iter() {
             let val = entry.value();
             
-            // Skip expired keys
+            // Skip expired keys (double check, though MapStore handles this on get)
             if let Some(expiry) = val.expires_at {
                 if expiry <= now {
                     continue;

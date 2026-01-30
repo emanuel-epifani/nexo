@@ -3,8 +3,8 @@ target/
 .git
 .gitignore
 .env
-dashboard-web/node_modules
-dashboard-web/dist
+dashboard/node_modules
+dashboard/dist
 Dockerfile
 README.md
 debug/*

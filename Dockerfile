@@ -19,7 +19,7 @@ RUN mkdir src && \
     cargo build --release && \
     rm -rf src
 
-# 3. Ora copiamo tutto il resto (incluso il frontend dashboard-web per build.rs)
+# 3. Ora copiamo tutto il resto (incluso il frontend dashboard per build.rs)
 COPY . .
 
 # 4. Tocchiamo il main vero per forzare Cargo a ricompilare il codice sorgente (ma riutilizzando le deps)

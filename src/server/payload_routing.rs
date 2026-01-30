@@ -8,7 +8,8 @@ use bytes::Bytes;
 use crate::brokers::pub_sub::ClientId;
 
 // Import Command types from brokers
-use crate::brokers::store::commands::{StoreCommand, MapCommand};
+use crate::brokers::store::commands::StoreCommand;
+use crate::brokers::store::map::commands::MapCommand;
 use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions};
 use crate::brokers::pub_sub::commands::PubSubCommand;
 use crate::brokers::stream::commands::StreamCommand;
@@ -80,19 +81,18 @@ fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
         StoreCommand::Map(map_cmd) => match map_cmd {
             MapCommand::Set { key, options, value } => {
                 let ttl = options.ttl;
-                engine.store.map_set(key, value, ttl)
-                    .map(|_| Response::Ok)
-                    .unwrap_or_else(Response::Error)
+                // Updated to use the new nested structure
+                engine.store.map.set(key, value, ttl);
+                Response::Ok
             }
             MapCommand::Get { key } => {
-                engine.store.map_get(&key)
-                    .map(|res| res.map(Response::Data).unwrap_or(Response::Null))
-                    .unwrap_or_else(Response::Error)
+                engine.store.map.get(&key)
+                    .map(Response::Data)
+                    .unwrap_or(Response::Null)
             }
             MapCommand::Del { key } => {
-                engine.store.map_del(&key)
-                    .map(|_| Response::Ok)
-                    .unwrap_or_else(Response::Error)
+                engine.store.map.del(&key);
+                Response::Ok
             }
         }
     }

@@ -3,13 +3,13 @@ use std::path::Path;
 
 fn main() {
     // 1. Monitoriamo i file del frontend per rebuildare solo se cambia qualcosa
-    println!("cargo:rerun-if-changed=dashboard-web/src");
-    println!("cargo:rerun-if-changed=dashboard-web/public");
-    println!("cargo:rerun-if-changed=dashboard-web/index.html");
-    println!("cargo:rerun-if-changed=dashboard-web/package.json");
-    println!("cargo:rerun-if-changed=dashboard-web/vite.config.ts");
+    println!("cargo:rerun-if-changed=dashboard/src");
+    println!("cargo:rerun-if-changed=dashboard/public");
+    println!("cargo:rerun-if-changed=dashboard/index.html");
+    println!("cargo:rerun-if-changed=dashboard/package.json");
+    println!("cargo:rerun-if-changed=dashboard/vite.config.ts");
 
-    let dashboard_dir = "dashboard-web";
+    let dashboard_dir = "dashboard";
 
     // Verifica che la cartella esista (per sicurezza)
     if !Path::new(dashboard_dir).exists() {
@@ -45,5 +45,5 @@ fn main() {
     }
 
     // 4. Istruiamo Cargo di ricontrollare se la dist cambia (per rust-embed)
-    println!("cargo:rerun-if-changed=dashboard-web/dist");
+    println!("cargo:rerun-if-changed=dashboard/dist");
 }
