@@ -3,6 +3,7 @@ pub mod topic;
 pub mod group;
 pub mod message;
 pub mod commands;
+pub mod persistence;
 
 pub use stream_manager::StreamManager;
 
@@ -16,12 +17,12 @@ mod tests {
         let mut state = TopicState::new("test_topic".to_string(), 2);
         
         // 1. Publish (Partition 0)
-        let offset = state.publish(0, Bytes::from("msg1"));
+        let (offset, _) = state.publish(0, Bytes::from("msg1"));
         assert_eq!(offset, 0);
         assert_eq!(state.get_high_watermark(0), 1);
 
         // 2. Publish (Partition 1)
-        let offset = state.publish(1, Bytes::from("msg2"));
+        let (offset, _) = state.publish(1, Bytes::from("msg2"));
         assert_eq!(offset, 0);
 
         // 3. Read

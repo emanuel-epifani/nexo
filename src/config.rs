@@ -117,6 +117,8 @@ impl PubSubConfig {
 pub struct StreamConfig {
     pub default_partitions: u32,
     pub actor_channel_capacity: usize,
+    pub persistence_path: String,
+    pub default_flush_ms: u64,
 }
 
 impl StreamConfig {
@@ -124,6 +126,8 @@ impl StreamConfig {
         Self {
             default_partitions:     get_env("STREAM_PARTITIONS", "4"),
             actor_channel_capacity: get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
+            persistence_path:       get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
+            default_flush_ms:       get_env("STREAM_DEFAULT_FLUSH_MS", "100"),
         }
     }
 }

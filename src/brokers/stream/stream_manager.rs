@@ -15,6 +15,9 @@ use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
 use crate::config::Config;
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
+use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
+use crate::brokers::stream::persistence::types::PersistenceMode;
+
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -86,16 +89,38 @@ struct TopicActor {
     client_map: HashMap<String, Vec<String>>, 
     rx: mpsc::Receiver<TopicCommand>,
     last_partition: u32,
+    persistence_mode: PersistenceMode,
+    writer_tx: mpsc::Sender<WriterCommand>,
 }
 
 impl TopicActor {
-    fn new(name: String, partitions: u32, rx: mpsc::Receiver<TopicCommand>) -> Self {
+    fn new(name: String, partitions: u32, rx: mpsc::Receiver<TopicCommand>, mode: PersistenceMode) -> Self {
+        // 1. Recovery
+        let recovered = recover_topic(&name, partitions);
+        let state = TopicState::restore(name.clone(), partitions, recovered.partitions_data);
+        
+        let mut groups = HashMap::new();
+        // Restore Groups
+        for (gid, (gen_id, committed)) in recovered.groups_data {
+            let mut g = ConsumerGroup::new(gid.clone(), name.clone());
+            g.generation_id = gen_id;
+            g.committed_offsets = committed;
+            groups.insert(gid, g);
+        }
+
+        // 2. Spawn Writer
+        let (w_tx, w_rx) = mpsc::channel(1000);
+        let writer = StreamWriter::new(name.clone(), partitions, mode.clone(), w_rx);
+        tokio::spawn(writer.run());
+
         Self {
-            state: TopicState::new(name, partitions),
-            groups: HashMap::new(),
+            state,
+            groups,
             client_map: HashMap::new(),
             rx,
             last_partition: 0,
+            persistence_mode: mode,
+            writer_tx: w_tx,
         }
     }
 
@@ -118,8 +143,34 @@ impl TopicActor {
                         p
                     };
                     
-                    let offset = self.state.publish(partition, payload);
-                    let _ = reply.send(Ok(offset));
+                    let (offset, timestamp) = self.state.publish(partition, payload.clone());
+                    
+                    // Persistence
+                    let (tx, rx) = if let PersistenceMode::Sync = self.persistence_mode {
+                        let (tx, rx) = oneshot::channel();
+                        (Some(tx), Some(rx))
+                    } else {
+                        (None, None)
+                    };
+
+                    let op = StreamStorageOp::Append {
+                        partition,
+                        offset,
+                        timestamp,
+                        payload,
+                    };
+
+                    let _ = self.writer_tx.send(WriterCommand { op, reply: tx }).await;
+
+                    if let Some(wait_rx) = rx {
+                        match wait_rx.await {
+                            Ok(Ok(_)) => { let _ = reply.send(Ok(offset)); },
+                            Ok(Err(e)) => { let _ = reply.send(Err(e)); },
+                            Err(_) => { let _ = reply.send(Err("Writer died".to_string())); }
+                        }
+                    } else {
+                        let _ = reply.send(Ok(offset));
+                    }
                 },
                 TopicCommand::Fetch { group_id, client_id, generation_id, partition, offset, limit, reply } => {
                     if let (Some(gid), Some(cid), Some(gen_id)) = (group_id, client_id, generation_id) {
@@ -184,7 +235,38 @@ impl TopicActor {
                             if let Some(assign) = g.get_assignments(&client_id) {
                                 if assign.contains(&partition) {
                                     g.commit(partition, offset);
-                                    let _ = reply.send(Ok(()));
+                                    
+                                    // Persistence
+                                    // Commits are usually async even in sync mode? 
+                                    // Actually kafka commits can be sync or async.
+                                    // Here let's follow the mode.
+                                    
+                                    let (tx, rx) = if let PersistenceMode::Sync = self.persistence_mode {
+                                        let (tx, rx) = oneshot::channel();
+                                        (Some(tx), Some(rx))
+                                    } else {
+                                        (None, None)
+                                    };
+
+                                    let op = StreamStorageOp::Commit {
+                                        group: group_id.clone(),
+                                        partition,
+                                        offset,
+                                        generation_id,
+                                    };
+
+                                    let _ = self.writer_tx.send(WriterCommand { op, reply: tx }).await;
+
+                                    if let Some(wait_rx) = rx {
+                                        match wait_rx.await {
+                                            Ok(Ok(_)) => { let _ = reply.send(Ok(())); },
+                                            Ok(Err(e)) => { let _ = reply.send(Err(e)); },
+                                            Err(_) => { let _ = reply.send(Err("Writer died".to_string())); }
+                                        }
+                                    } else {
+                                        let _ = reply.send(Ok(()));
+                                    }
+
                                 } else {
                                     let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
                                 }
@@ -305,9 +387,11 @@ impl StreamManager {
                     ManagerCommand::CreateTopic { name, options, reply } => {
                         if !actors.contains_key(&name) {
                             let partitions = options.partitions.unwrap_or(default_partitions);
+                            let persistence: PersistenceMode = options.persistence.into();
+                            
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
-                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions", name, partitions);
-                            let actor = TopicActor::new(name.clone(), partitions, t_rx);
+                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions, mode {:?}", name, partitions, persistence);
+                            let actor = TopicActor::new(name.clone(), partitions, t_rx, persistence);
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
                         }

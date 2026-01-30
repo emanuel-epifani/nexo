@@ -22,12 +22,32 @@ impl TopicState {
         
         Self { name, partitions }
     }
+    
+    pub fn restore(name: String, partitions_count: u32, mut data: std::collections::HashMap<u32, VecDeque<Message>>) -> Self {
+        let partitions = (0..partitions_count)
+            .map(|id| {
+                let mut p = PartitionState::new(id);
+                if let Some(msgs) = data.remove(&id) {
+                    if let Some(last) = msgs.back() {
+                        p.next_offset = last.offset + 1;
+                        if let Some(first) = msgs.front() {
+                            p.start_offset = first.offset;
+                        }
+                    }
+                    p.log = msgs;
+                }
+                p
+            })
+            .collect();
+        
+        Self { name, partitions }
+    }
 
-    pub fn publish(&mut self, partition_id: u32, payload: Bytes) -> u64 {
+    pub fn publish(&mut self, partition_id: u32, payload: Bytes) -> (u64, u64) {
         if let Some(p) = self.partitions.get_mut(partition_id as usize) {
             p.append(payload)
         } else {
-            0
+            (0, 0)
         }
     }
 
@@ -56,7 +76,7 @@ pub struct PartitionState {
     pub id: u32,
     pub log: VecDeque<Message>,
     pub next_offset: u64,
-    start_offset: u64,
+    pub start_offset: u64,
     // Note: Notify is hard to keep in pure state if we want to be serializable,
     // but for now it's fine as runtime state.
     waiters: BTreeMap<u64, Vec<Weak<Notify>>>,
@@ -73,7 +93,7 @@ impl PartitionState {
         }
     }
 
-    pub fn append(&mut self, payload: Bytes) -> u64 {
+    pub fn append(&mut self, payload: Bytes) -> (u64, u64) {
         let offset = self.next_offset;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -88,8 +108,6 @@ impl PartitionState {
         self.next_offset += 1;
 
         // Wake waiters logic
-        // (In pure state we might return a "WaitersToNotify" list to the actor,
-        // but keeping it here for simplicity is okay for now)
         let future_waiters = self.waiters.split_off(&(offset + 1));
         
         for (_, batch) in self.waiters.iter() {
@@ -102,7 +120,7 @@ impl PartitionState {
         
         self.waiters = future_waiters;
         
-        offset
+        (offset, timestamp)
     }
 
     pub fn read(&self, offset: u64, limit: usize) -> Vec<Message> {

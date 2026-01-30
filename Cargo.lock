@@ -638,6 +638,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "crc32fast",
  "dashmap",
  "dotenv",
  "hashlink",
