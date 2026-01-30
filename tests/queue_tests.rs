@@ -68,14 +68,15 @@ mod features {
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
 
-        // Push with 200ms delay
-        manager.push(q.clone(), Bytes::from("future"), 0, Some(200)).await.unwrap();
+        let delay_ms = 200;
+        // Push with delay
+        manager.push(q.clone(), Bytes::from("future"), 0, Some(delay_ms)).await.unwrap();
 
         // Immediate Pop -> None
         assert!(manager.pop(&q).await.is_none());
 
-        // Wait (Delay 200ms + Pulse Loop latency)
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        // Wait (Delay + Buffer)
+        tokio::time::sleep(Duration::from_millis(delay_ms + 150)).await;
 
         // Pop -> Some
         let msg = manager.pop(&q).await.expect("Should appear after delay");
@@ -87,8 +88,9 @@ mod features {
         let (manager, _tmp) = setup_manager().await;
         let q = format!("feature_dlq_{}", Uuid::new_v4());
         
+        let visibility_timeout = 100;
         let config = QueueConfig {
-            visibility_timeout_ms: 100,
+            visibility_timeout_ms: visibility_timeout,
             max_retries: 3, // 3 Retries allow 3 attempts before failure? No. 
                             // Logic: attempts >= max_retries -> DLQ.
                             // If max_retries = 3:
@@ -105,23 +107,26 @@ mod features {
         // Attempt 1
         let m1 = manager.pop(&q).await.unwrap();
         assert_eq!(m1.attempts, 1);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        
+        // Wait for visibility timeout + buffer
+        tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
 
         // Attempt 2
         let m2 = manager.pop(&q).await.unwrap();
         assert_eq!(m2.attempts, 2); 
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
 
         // Attempt 3 (Last)
         let m3 = manager.pop(&q).await.unwrap();
         assert_eq!(m3.attempts, 3);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
 
         // Attempt 4 -> Should be gone from Main Queue
         assert!(manager.pop(&q).await.is_none(), "Should be moved to DLQ");
 
         // Check DLQ
         let dlq_name = format!("{}_dlq", q);
+        // Small wait for async DLQ move
         tokio::time::sleep(Duration::from_millis(50)).await;
         
         let dead = manager.pop(&dlq_name).await.expect("Should be in DLQ");

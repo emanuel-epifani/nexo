@@ -50,13 +50,14 @@ mod features {
         let (manager, _tmp) = setup_store_manager().await;
         let key = format!("key_ttl_{}", Uuid::new_v4());
         
-        manager.map.set(key.clone(), Bytes::from("temp"), Some(1));
+        let ttl_sec = 1;
+        manager.map.set(key.clone(), Bytes::from("temp"), Some(ttl_sec));
         
         let retrieved = manager.map.get(&key);
         assert!(retrieved.is_some());
 
-        // Wait > 1s
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Wait > TTL
+        tokio::time::sleep(Duration::from_millis((ttl_sec * 1000) + 100)).await;
 
         let after_ttl = manager.map.get(&key);
         // Should expire (either by lazy check or background, new implementation has lazy check!)
