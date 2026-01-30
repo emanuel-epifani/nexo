@@ -9,6 +9,7 @@ use bytes::{Bytes, BufMut};
 use crc32fast::Hasher;
 
 use super::types::{WriterCommand, StreamStorageOp, PersistenceMode};
+use crate::brokers::stream::commands::RetentionOptions;
 use crate::brokers::stream::message::Message;
 use crate::config::Config;
 
@@ -128,10 +129,12 @@ pub struct StreamWriter {
     batch: Vec<WriterCommand>,
     rx: mpsc::Receiver<WriterCommand>,
 
-    // Compaction & Segmentation
+    // Compaction & Segmentation & Retention
     ops_since_last_compaction: u64,
     compaction_threshold: u64,
     max_segment_size: u64,
+    retention: RetentionOptions,
+    retention_check_interval_ms: u64,
 }
 
 impl StreamWriter {
@@ -143,6 +146,8 @@ impl StreamWriter {
         base_path: PathBuf,
         compaction_threshold: u64,
         max_segment_size: u64,
+        retention: RetentionOptions,
+        retention_check_interval_ms: u64,
     ) -> Self {
         let base_path = base_path.join(&topic_name);
         
@@ -158,6 +163,8 @@ impl StreamWriter {
             ops_since_last_compaction: 0,
             compaction_threshold,
             max_segment_size,
+            retention,
+            retention_check_interval_ms,
         }
     }
 
@@ -194,6 +201,9 @@ impl StreamWriter {
         let mut timer = tokio::time::interval(flush_interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let mut retention_timer = tokio::time::interval(Duration::from_millis(self.retention_check_interval_ms));
+        retention_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 Some(cmd) = self.rx.recv() => {
@@ -215,6 +225,12 @@ impl StreamWriter {
                         self.flush_batch();
                     }
                 }
+
+                _ = retention_timer.tick() => {
+                    if let Err(e) = self.check_retention() {
+                        error!("Retention check failed for topic '{}': {}", self.topic_name, e);
+                    }
+                }
             }
 
             // Sync Check for Compaction
@@ -225,6 +241,92 @@ impl StreamWriter {
                 }
             }
         }
+    }
+
+    fn check_retention(&mut self) -> std::io::Result<()> {
+        // Se non c'è nessuna policy configurata, usciamo subito
+        if self.retention.max_age_ms.is_none() && self.retention.max_bytes.is_none() {
+            return Ok(());
+        }
+
+        info!("Starting retention check for topic '{}'", self.topic_name);
+
+        for p in 0..self.partitions_count {
+            let mut segments = match find_segments(&self.base_path, p) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Retention: Failed to list segments for P{}: {}", p, e);
+                    continue;
+                }
+            };
+
+            // ESCLUDI IL SEGMENTO ATTIVO (l'ultimo)
+            // Non cancelliamo mai il segmento su cui stiamo scrivendo.
+            if segments.len() <= 1 {
+                continue; 
+            }
+            let _active_segment = segments.pop(); 
+
+            // 1. TIME RETENTION
+            if let Some(max_age) = self.retention.max_age_ms {
+                let limit = std::time::SystemTime::now() - Duration::from_millis(max_age);
+                
+                // filter_map o retain non permettono facilmente IO fallibile con early exit, usiamo loop manuale
+                let mut survivors = Vec::new();
+                for seg in segments {
+                    let mut deleted = false;
+                    if let Ok(metadata) = fs::metadata(&seg.path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified < limit {
+                                info!("Retention (Time): Deleting segment {:?}", seg.path);
+                                if let Err(e) = fs::remove_file(&seg.path) {
+                                    error!("Failed to delete {:?}: {}", seg.path, e);
+                                    // If delete fails, we treat it as not deleted, so it stays in survivors
+                                } else {
+                                    deleted = true;
+                                }
+                            }
+                        }
+                    }
+                    if !deleted {
+                        survivors.push(seg);
+                    }
+                }
+                segments = survivors;
+            }
+
+            // 2. SIZE RETENTION
+            if let Some(max_bytes) = self.retention.max_bytes {
+                // Calcola dimensione totale ATTUALE (incluso il segmento attivo che abbiamo poppato)
+                let active_size = self.writers.get(&p).map(|(_, size)| *size).unwrap_or(0);
+                
+                let mut current_total_size: u64 = active_size;
+                // Aggiungi size dei segmenti chiusi
+                for seg in &segments {
+                    if let Ok(meta) = fs::metadata(&seg.path) {
+                        current_total_size += meta.len();
+                    }
+                }
+
+                // Cancella i più vecchi (primi della lista) finché Total > Max
+                let mut i = 0;
+                while current_total_size > max_bytes && i < segments.len() {
+                    let seg = &segments[i];
+                    if let Ok(meta) = fs::metadata(&seg.path) {
+                        let size = meta.len();
+                        info!("Retention (Size): Deleting {:?} (Total {} > Max {})", seg.path, current_total_size, max_bytes);
+                        
+                        if let Err(e) = fs::remove_file(&seg.path) {
+                             error!("Failed to delete {:?}: {}", seg.path, e);
+                        } else {
+                             current_total_size = current_total_size.saturating_sub(size);
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn init_files(&mut self) -> std::io::Result<()> {

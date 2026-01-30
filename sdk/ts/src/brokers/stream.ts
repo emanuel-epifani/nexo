@@ -18,9 +18,15 @@ export type PersistenceOptions =
   | { strategy: 'file_sync' }
   | { strategy: 'file_async'; flushIntervalMs?: number };
 
+export interface RetentionOptions {
+  maxAgeMs: number;
+  maxBytes: number;
+}
+
 export interface StreamCreateOptions {
   partitions?: number;
   persistence?: PersistenceOptions;
+  retention?: RetentionOptions;
 }
 
 export interface StreamPublishOptions {

@@ -1,5 +1,5 @@
-use nexo::brokers::stream::stream_manager::StreamManager;
-use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions};
+use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions, RetentionOptions};
+use nexo::brokers::stream::StreamManager;
 use nexo::config::{Config, StreamConfig};
 use bytes::Bytes;
 use std::collections::HashSet;
@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 mod helpers;
 use helpers::Benchmark;
 
-
 mod features {
     use super::*;
+    use nexo::brokers::stream::StreamManager;
 
     #[tokio::test]
     async fn test_stream_basic_flow() {
@@ -20,6 +20,7 @@ mod features {
         manager.create_topic(topic.to_string(), StreamCreateOptions {
             partitions: Some(2),
             persistence: None,
+            ..Default::default()
         }).await.unwrap();
 
         assert!(manager.exists(topic).await);
@@ -50,6 +51,7 @@ mod features {
         manager.create_topic(topic.to_string(), StreamCreateOptions {
             partitions: Some(4),
             persistence: None,
+            ..Default::default()
         }).await.unwrap();
 
         // 1. Client A Joins -> Should get ALL 4 partitions
@@ -83,6 +85,7 @@ mod features {
         manager.create_topic(topic.to_string(), StreamCreateOptions {
             partitions: Some(2),
             persistence: None,
+            ..Default::default()
         }).await.unwrap();
 
         // 1. Both Join
@@ -109,7 +112,7 @@ mod features {
         let topic = "epoch-fencing";
         let group = "g-epoch";
 
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(2), persistence: None }).await.unwrap();
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(2), persistence: None, ..Default::default() }).await.unwrap();
 
         // A joins -> Gen 1
         let (gen_1, _, _) = manager.join_group(group, topic, "client-A").await.unwrap();
@@ -134,7 +137,7 @@ mod features {
         let manager = StreamManager::new();
         let topic = "ordering-topic";
 
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: None }).await.unwrap();
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: None, ..Default::default() }).await.unwrap();
 
         // Publish 1, 2, 3
         for i in 1..=3 {
@@ -156,7 +159,7 @@ mod features {
         let topic = "commit-topic";
         let group = "g-commit";
 
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: None }).await.unwrap();
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: None, ..Default::default() }).await.unwrap();
 
         // Join
         let (gen, parts, _) = manager.join_group(group, topic, "client-A").await.unwrap();
@@ -178,6 +181,7 @@ mod persistence {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use nexo::brokers::stream::StreamManager;
 
     #[tokio::test]
     async fn test_write_and_recover() {
@@ -193,6 +197,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg1")).await.unwrap();
@@ -213,6 +218,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             let msgs = manager.read(topic, 0, 10).await;
@@ -238,6 +244,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             let (gen, parts, _) = manager.join_group(group, topic, "client-A").await.unwrap();
@@ -249,6 +256,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             let (_, _, offsets) = manager.join_group(group, topic, "client-A").await.unwrap();
@@ -270,6 +278,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("valid1")).await.unwrap();
@@ -297,6 +306,7 @@ mod persistence {
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
             }).await.unwrap();
 
             let msgs = manager.read(topic, 0, 10).await;
@@ -439,10 +449,72 @@ mod persistence {
         assert_eq!(msgs[0].payload, Bytes::from("msg1"));
         assert_eq!(msgs[3].payload, Bytes::from("msg4"));
     }
+
+    #[tokio::test]
+    async fn test_stream_log_retention() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
+        config.max_segment_size = 100; // Small segments (approx 2 msgs per segment)
+        config.retention_check_interval_ms = 100; // Check every 100ms
+        config.default_retention_bytes = 250; // Keep approx 2.5 segments
+
+        let manager = StreamManager::with_config(config);
+        let topic = "topic_retention";
+
+        manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileSync), // Use Sync to ensure writes happen
+            ..Default::default()
+        }).await.unwrap();
+
+        // 1. Write Messages to create segments
+        // Segment 1: Msg 1, Msg 2 (Size ~100-120)
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg1-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg2-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+        
+        // Segment 2: Msg 3, Msg 4
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg3-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg4-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+
+        // Segment 3: Msg 5, Msg 6
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg5-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg6-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+
+        // Segment 4: Msg 7 (Active)
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg7-50bytes-payload-0000000000000000000000000000")).await.unwrap();
+
+        // Total roughly: 4 segments.
+        // Seg 1 (~100), Seg 2 (~100), Seg 3 (~100), Seg 4 (~50). Total ~350.
+        // Limit 250.
+        // Expected: Seg 1 deleted. Seg 2 might be deleted if boundary is tight. 
+        // Let's wait for retention check.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // 2. Verify Filesystem
+        let topic_path = temp_dir.path().join(topic);
+        let mut files: Vec<String> = std::fs::read_dir(&topic_path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".log") && name != "commits.log")
+            .collect();
+        files.sort();
+
+        println!("Files after retention: {:?}", files);
+
+        // We expect fewer segments than created.
+        // Created: 0_0.log, 0_2.log, 0_4.log, 0_6.log
+        // If Retention worked, 0_0.log should be gone.
+        assert!(!files.contains(&"0_0.log".to_string()), "Oldest segment should be deleted");
+        assert!(files.contains(&"0_6.log".to_string()), "Newest segment should exist");
+    }
 }
 
 mod performance {
     use super::*;
+    use nexo::brokers::stream::StreamManager;
     
     // Reduce count for tests to be fast, but enough to see diff
     // const COUNT: usize = 10_000;
@@ -455,7 +527,7 @@ mod performance {
         
         let manager = StreamManager::new();
         let topic = "bench-mem";
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory) }).await.unwrap();
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory), ..Default::default() }).await.unwrap();
 
         let mut bench = Benchmark::start("STREAM PUSH - Memory", COUNT);
         for _ in 0..COUNT {
@@ -473,7 +545,7 @@ mod performance {
 
         let manager = StreamManager::new();
         let topic = "bench-sync";
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync) }).await.unwrap();
+        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync), ..Default::default() }).await.unwrap();
 
         let mut bench = Benchmark::start("STREAM PUSH - FSync", COUNT);
         for _ in 0..COUNT {
@@ -493,7 +565,8 @@ mod performance {
         let topic = "bench-async";
         manager.create_topic(topic.to_string(), StreamCreateOptions { 
             partitions: Some(1), 
-            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(100) }) 
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(100) }),
+            ..Default::default() 
         }).await.unwrap();
 
         let mut bench = Benchmark::start("STREAM PUSH - FAsync", COUNT);

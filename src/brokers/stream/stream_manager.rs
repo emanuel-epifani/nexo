@@ -14,7 +14,7 @@ use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
 use crate::config::{Config, StreamConfig};
-use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
+use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, RetentionOptions};
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
 
@@ -103,7 +103,9 @@ impl TopicActor {
         mode: PersistenceMode,
         base_path: String,
         compaction_threshold: u64,
-        max_segment_size: u64
+        max_segment_size: u64,
+        retention: RetentionOptions,
+        retention_check_ms: u64
     ) -> Self {
         // 1. Recovery
         let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
@@ -127,7 +129,9 @@ impl TopicActor {
             w_rx,
             PathBuf::from(base_path),
             compaction_threshold,
-            max_segment_size
+            max_segment_size,
+            retention,
+            retention_check_ms
         );
         tokio::spawn(writer.run());
 
@@ -386,6 +390,26 @@ impl TopicActor {
 // STREAM MANAGER (The Router)
 // ==========================================
 
+fn resolve_retention(
+    options: Option<RetentionOptions>, 
+    default_age: u64, 
+    default_bytes: u64
+) -> RetentionOptions {
+    options.map(|r| RetentionOptions {
+        max_age_ms: r.max_age_ms.map_or(
+            Some(default_age),
+            |v| if v == 0 { None } else { Some(v) }
+        ),
+        max_bytes: r.max_bytes.map_or(
+            Some(default_bytes),
+            |v| if v == 0 { None } else { Some(v) }
+        ),
+    }).unwrap_or(RetentionOptions {
+        max_age_ms: Some(default_age),
+        max_bytes: Some(default_bytes),
+    })
+}
+
 #[derive(Clone)]
 pub struct StreamManager {
     tx: mpsc::Sender<ManagerCommand>,
@@ -412,8 +436,15 @@ impl StreamManager {
                             let partitions = options.partitions.unwrap_or(default_partitions);
                             let persistence: PersistenceMode = options.persistence.into();
                             
+                            // Retention Resolution (Safe defaults)
+                            let retention = resolve_retention(
+                                options.retention, 
+                                actor_config.default_retention_age_ms, 
+                                actor_config.default_retention_bytes
+                            );
+
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
-                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions, mode {:?}", name, partitions, persistence);
+                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions, mode {:?}, retention {:?}", name, partitions, persistence, retention);
                             
                             let actor = TopicActor::new(
                                 name.clone(), 
@@ -422,7 +453,9 @@ impl StreamManager {
                                 persistence,
                                 actor_config.persistence_path.clone(),
                                 actor_config.compaction_threshold,
-                                actor_config.max_segment_size
+                                actor_config.max_segment_size,
+                                retention,
+                                actor_config.retention_check_interval_ms
                             );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);

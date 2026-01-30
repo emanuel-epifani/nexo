@@ -23,11 +23,19 @@ pub enum PersistenceOptions {
     },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionOptions {
+    pub max_age_ms: Option<u64>,
+    pub max_bytes: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
     pub partitions: Option<u32>,
     pub persistence: Option<PersistenceOptions>,
+    pub retention: Option<RetentionOptions>,
 }
 
 #[derive(Debug, Deserialize)]

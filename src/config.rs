@@ -121,17 +121,23 @@ pub struct StreamConfig {
     pub default_flush_ms: u64,
     pub compaction_threshold: u64,
     pub max_segment_size: u64,
+    pub retention_check_interval_ms: u64,
+    pub default_retention_bytes: u64,
+    pub default_retention_age_ms: u64,
 }
 
 impl StreamConfig {
     fn load() -> Self {
         Self {
-            default_partitions:     get_env("STREAM_PARTITIONS", "4"),
-            actor_channel_capacity: get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
-            persistence_path:       get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
-            default_flush_ms:       get_env("STREAM_DEFAULT_FLUSH_MS", "100"),
-            compaction_threshold:   get_env("STREAM_COMPACTION_THRESHOLD", "10000"),
-            max_segment_size:       get_env("STREAM_MAX_SEGMENT_SIZE", "104857600"), // 100MB
+            default_partitions:          get_env("STREAM_PARTITIONS", "4"),
+            actor_channel_capacity:      get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
+            persistence_path:            get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
+            default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", "100"),
+            compaction_threshold:        get_env("STREAM_COMPACTION_THRESHOLD", "10000"),
+            max_segment_size:            get_env("STREAM_MAX_SEGMENT_SIZE", "104857600"), // 100MB
+            retention_check_interval_ms: get_env("STREAM_RETENTION_CHECK_MS", "600000"),  // 10 minutes
+            default_retention_bytes:     get_env("STREAM_DEFAULT_RETENTION_BYTES", "1073741824"), // 1GB
+            default_retention_age_ms:    get_env("STREAM_DEFAULT_RETENTION_AGE_MS", "604800000"), // 7 days
         }
     }
 }
