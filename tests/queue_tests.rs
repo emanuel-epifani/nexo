@@ -130,6 +130,119 @@ mod features {
 }
 
 // =========================================================================================
+// 2. ADVANCED FEATURES (Batching, Long Polling, Snapshots)
+// =========================================================================================
+
+mod advanced {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_batch_consume() {
+        let (manager, _tmp) = setup_manager().await;
+        let q = format!("adv_batch_{}", Uuid::new_v4());
+        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+
+        // Push 10 messages
+        for i in 0..10 {
+            manager.push(q.clone(), Bytes::from(format!("msg_{}", i)), 0, None).await.unwrap();
+        }
+
+        // Consume 4
+        let batch1 = manager.consume_batch(q.clone(), Some(4), None).await.unwrap();
+        assert_eq!(batch1.len(), 4);
+        // Queue is FIFO for same priority
+        assert_eq!(batch1[0].payload, Bytes::from("msg_0"));
+
+        // Consume 6 (Remaining)
+        let batch2 = manager.consume_batch(q.clone(), Some(10), None).await.unwrap();
+        assert_eq!(batch2.len(), 6);
+
+        // Consume (Empty)
+        let batch3 = manager.consume_batch(q.clone(), Some(10), None).await.unwrap();
+        assert!(batch3.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_long_polling() {
+        let (manager, _tmp) = setup_manager().await;
+        let q = format!("adv_poll_{}", Uuid::new_v4());
+        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+
+        // Spawn consumer in background
+        let manager_clone = manager.clone();
+        let q_clone = q.clone();
+        
+        let handle = tokio::spawn(async move {
+            let start = Instant::now();
+            // Poll with 1000ms wait
+            let batch = manager_clone.consume_batch(q_clone, Some(1), Some(1000)).await.unwrap();
+            (batch, start.elapsed())
+        });
+
+        // Wait a bit to ensure consumer is parked
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Push message
+        manager.push(q.clone(), Bytes::from("wake_up"), 0, None).await.unwrap();
+
+        // Join consumer
+        let (batch, elapsed) = handle.await.unwrap();
+        
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].payload, Bytes::from("wake_up"));
+        // Should be roughly 200ms, definitely less than 1000ms
+        assert!(elapsed < Duration::from_millis(800), "Should wake up immediately on push");
+        assert!(elapsed >= Duration::from_millis(200), "Should wait until push");
+    }
+
+    #[tokio::test]
+    async fn test_long_polling_timeout() {
+        let (manager, _tmp) = setup_manager().await;
+        let q = format!("adv_poll_to_{}", Uuid::new_v4());
+        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+
+        let start = Instant::now();
+        // Wait 300ms, expect empty
+        let batch = manager.consume_batch(q.clone(), Some(1), Some(300)).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(batch.is_empty());
+        assert!(elapsed >= Duration::from_millis(300), "Should wait at least 300ms");
+        // Allow some scheduling jitter
+        assert!(elapsed < Duration::from_millis(450), "Should timeout reasonably fast");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_metrics() {
+        let (manager, _tmp) = setup_manager().await;
+        let q = format!("adv_snap_{}", Uuid::new_v4());
+        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+
+        // 3 Pending
+        manager.push(q.clone(), Bytes::from("p1"), 0, None).await.unwrap();
+        manager.push(q.clone(), Bytes::from("p2"), 0, None).await.unwrap();
+        manager.push(q.clone(), Bytes::from("p3"), 0, None).await.unwrap();
+
+        // 1 InFlight
+        let _ = manager.pop(&q).await.unwrap();
+
+        // 1 Scheduled
+        manager.push(q.clone(), Bytes::from("s1"), 0, Some(10000)).await.unwrap();
+
+        let snapshot = manager.get_snapshot().await;
+        let queue_snap = snapshot.active_queues.iter().find(|qs| qs.name == q).expect("Queue not found in snapshot");
+
+        // Verify counts based on vectors length in summary
+        // 2 Pending (p2, p3) - p1 was popped
+        assert_eq!(queue_snap.pending.len(), 2);
+        // 1 InFlight (p1)
+        assert_eq!(queue_snap.inflight.len(), 1);
+        // 1 Scheduled (s1)
+        assert_eq!(queue_snap.scheduled.len(), 1);
+    }
+}
+
+// =========================================================================================
 // 2. PERSISTENCE & RECOVERY
 // =========================================================================================
 
