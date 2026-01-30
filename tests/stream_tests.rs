@@ -175,6 +175,45 @@ mod features {
         assert_eq!(*offsets.get(&pid).unwrap(), 100);
     }
 
+    #[tokio::test]
+    async fn test_delete_topic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
+
+        let manager = StreamManager::with_config(config);
+        let topic = "delete-topic-test";
+
+        // 1. Create
+        manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileSync),
+            ..Default::default()
+        }).await.unwrap();
+
+        // 2. Publish (create some data on disk)
+        manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("msg1")).await.unwrap();
+
+        assert!(manager.exists(topic).await);
+        let topic_path = temp_dir.path().join(topic);
+        assert!(topic_path.exists());
+
+        // 3. Delete
+        manager.delete_topic(topic.to_string()).await.unwrap();
+
+        // 4. Verify in Memory
+        assert!(!manager.exists(topic).await);
+
+        // 5. Verify on Disk
+        assert!(!topic_path.exists());
+
+        // 6. Try to read (should be empty/fail)
+        let msgs = manager.read(topic, 0, 10).await;
+        assert!(msgs.is_empty());
+    }
+
 }
 
 mod persistence {
@@ -268,13 +307,15 @@ mod persistence {
     async fn test_corruption_integrity() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path_str = temp_dir.path().to_str().unwrap().to_string();
-        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
 
         let topic = "persist-corrupt";
 
         // 1. Write Data
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::with_config(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -302,7 +343,7 @@ mod persistence {
 
         // 3. Recover
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::with_config(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),

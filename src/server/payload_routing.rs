@@ -257,5 +257,11 @@ async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &Clie
                 false => Response::Error("Stream not found".to_string()),
             }
         }
+        StreamCommand::Delete { topic } => {
+            match stream.delete_topic(topic).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }

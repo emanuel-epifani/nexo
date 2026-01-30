@@ -8,6 +8,7 @@ pub const OP_S_FETCH: u8 = 0x32;
 pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_COMMIT: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
+pub const OP_S_DELETE: u8 = 0x36;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "strategy")]
@@ -82,6 +83,10 @@ pub enum StreamCommand {
     Exists {
         topic: String,
     },
+    /// DELETE: [TopicLen:4][Topic]
+    Delete {
+        topic: String,
+    },
 }
 
 impl StreamCommand {
@@ -134,6 +139,10 @@ impl StreamCommand {
             OP_S_EXISTS => {
                 let topic = cursor.read_string()?;
                 Ok(Self::Exists { topic })
+            }
+            OP_S_DELETE => {
+                let topic = cursor.read_string()?;
+                Ok(Self::Delete { topic })
             }
             _ => Err(format!("Unknown Stream opcode: 0x{:02X}", opcode)),
         }

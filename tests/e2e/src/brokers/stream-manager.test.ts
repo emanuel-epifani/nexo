@@ -87,6 +87,29 @@ describe('Stream Manager', () => {
 
             sub.stop();
         });
+
+        it('should create and then delete a topic', async () => {
+            const topic = `delete-test-${randomUUID()}`;
+            const s = clientA.stream(topic);
+
+            await s.create();
+            
+            // Should exist
+            expect(await s.exists()).toBe(true);
+            
+            // Publish something
+            await s.publish({ msg: 'test' });
+
+            // Delete
+            await s.delete();
+
+            // Should not exist
+            expect(await s.exists()).toBe(false);
+
+            // Re-create check
+            await s.create();
+            expect(await s.exists()).toBe(true);
+        });
     });
 
 

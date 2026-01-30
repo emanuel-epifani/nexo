@@ -57,6 +57,9 @@ pub enum TopicCommand {
     },
     GetSnapshot {
         reply: oneshot::Sender<crate::dashboard::models::stream::TopicSummary>,
+    },
+    Stop {
+        reply: oneshot::Sender<()>,
     }
 }
 
@@ -69,6 +72,10 @@ pub enum ManagerCommand {
         name: String,
         options: StreamCreateOptions,
         reply: oneshot::Sender<Result<(), String>>, // Ack
+    },
+    DeleteTopic {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     DisconnectClient {
         client_id: String,
@@ -380,7 +387,11 @@ impl TopicActor {
                              partitions: partitions_info,
                         };
                         let _ = reply.send(summary);
-                    }
+                    },
+                TopicCommand::Stop { reply } => {
+                    let _ = reply.send(());
+                    break;
+                }
             }
         }
     }
@@ -462,6 +473,25 @@ impl StreamManager {
                         }
                         let _ = reply.send(Ok(()));
                     },
+                    ManagerCommand::DeleteTopic { name, reply } => {
+                        if let Some(actor_tx) = actors.remove(&name) {
+                            // 1. Stop Actor
+                            let (stop_tx, stop_rx) = oneshot::channel();
+                            if actor_tx.send(TopicCommand::Stop { reply: stop_tx }).await.is_ok() {
+                                let _ = stop_rx.await;
+                            }
+                        }
+
+                        // 2. Delete Persistence
+                        let base_path = std::path::PathBuf::from(&actor_config.persistence_path);
+                        let topic_path = base_path.join(&name);
+                        
+                        if topic_path.exists() {
+                             let _ = std::fs::remove_dir_all(topic_path);
+                        }
+
+                        let _ = reply.send(Ok(()));
+                    },
                     ManagerCommand::GetTopicActor { topic, reply } => {
                         let _ = reply.send(actors.get(&topic).cloned());
                     },
@@ -515,6 +545,12 @@ impl StreamManager {
     pub async fn create_topic(&self, name: String, options: StreamCreateOptions) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(ManagerCommand::CreateTopic { name, options, reply: tx }).await.map_err(|_| "Server closed")?;
+        rx.await.map_err(|_| "No reply")?
+    }
+
+    pub async fn delete_topic(&self, name: String) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(ManagerCommand::DeleteTopic { name, reply: tx }).await.map_err(|_| "Server closed")?;
         rx.await.map_err(|_| "No reply")?
     }
 

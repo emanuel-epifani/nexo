@@ -9,6 +9,7 @@ export enum StreamOpcode {
   S_JOIN = 0x33,
   S_COMMIT = 0x34,
   S_EXISTS = 0x35,
+  S_DELETE = 0x36,
 }
 
 export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
@@ -49,6 +50,9 @@ export const StreamCommands = {
       return false;
     }
   },
+
+  delete: (conn: NexoConnection, name: string) =>
+    conn.send(StreamOpcode.S_DELETE, FrameCodec.string(name)),
 
   publish: (conn: NexoConnection, name: string, data: any, options: StreamPublishOptions) =>
     conn.send(
@@ -300,6 +304,10 @@ export class NexoStream<T = any> {
 
   async exists(): Promise<boolean> {
     return StreamCommands.exists(this.conn, this.name);
+  }
+
+  async delete(): Promise<void> {
+    await StreamCommands.delete(this.conn, this.name);
   }
 
   async publish(data: T, options: StreamPublishOptions = {}): Promise<void> {
