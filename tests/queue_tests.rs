@@ -197,7 +197,7 @@ mod persistence {
             manager.declare_queue(q.clone(), config).await.unwrap();
 
             // Push with delay 500ms
-            manager.push(q.clone(), Bytes::from("future_job"), 0, Some(2000)).await.unwrap();
+            manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
             
             // Immediate check (should be empty)
             assert!(manager.pop(&q).await.is_none());

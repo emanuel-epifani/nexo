@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{self, Instant}; // Add Instant
 use bytes::Bytes;
 use uuid::Uuid;
 use std::path::PathBuf;
@@ -123,103 +124,133 @@ impl QueueActor {
             }
         }
 
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
-                    let msg = Message::new(payload, priority, delay_ms);
-                    self.state.push(msg.clone());
-                    
-                    // Persist
-                    let _ = self.store.execute(StorageOp::Insert(msg)).await;
-                    
-                    let _ = reply.send(());
+        loop {
+            // Calculate next timeout
+            let sleep_until = if let Some(ts_ms) = self.state.next_timeout() {
+                let now_ms = crate::brokers::queues::queue::current_time_ms();
+                if ts_ms <= now_ms {
+                    // println!("Queue '{}': Event expired! ts={} now={}", self.name, ts_ms, now_ms);
+                    Instant::now()
+                } else {
+                    let delta = std::time::Duration::from_millis(ts_ms - now_ms);
+                    Instant::now() + delta
                 }
-                
-                QueueActorCommand::Pop { reply } => {
-                    let (msg_opt, _) = self.state.pop(self.config.visibility_timeout_ms);
-                    
-                    if let Some(msg) = &msg_opt {
-                        // Persist visibility update
+            } else {
+                // println!("Queue '{}': No scheduled events, sleeping forever", self.name);
+                Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600)
+            };
+
+            // Use tokio::select! to wait for either a command or the timeout
+            tokio::select! {
+                // 1. Handle Commands
+                maybe_cmd = self.rx.recv() => {
+                    match maybe_cmd {
+                        Some(cmd) => {
+                            // println!("Queue '{}': Received command", self.name);
+                            self.handle_command(cmd).await;
+                        },
+                        None => break, 
+                    }
+                }
+
+                // 2. Handle Timeout (Pulse)
+                _ = time::sleep_until(sleep_until), if self.state.next_timeout().is_some() => {
+                    ///println!("Queue '{}': Timer fired! Processing expired.", self.name);
+                    self.process_expired().await;
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, cmd: QueueActorCommand) {
+        match cmd {
+            QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
+                let msg = Message::new(payload, priority, delay_ms);
+                self.state.push(msg.clone());
+                let _ = self.store.execute(StorageOp::Insert(msg)).await;
+                let _ = reply.send(());
+            }
+            
+            QueueActorCommand::Pop { reply } => {
+                let (msg_opt, _) = self.state.pop(self.config.visibility_timeout_ms);
+                if let Some(msg) = &msg_opt {
+                    let _ = self.store.execute(StorageOp::UpdateState { 
+                        id: msg.id, 
+                        visible_at: msg.visible_at, 
+                        attempts: msg.attempts 
+                    }).await;
+                }
+                let _ = reply.send(msg_opt);
+            }
+            
+            QueueActorCommand::Ack { id, reply } => {
+                let result = self.state.ack(id);
+                if result {
+                    let _ = self.store.execute(StorageOp::Delete(id)).await;
+                }
+                let _ = reply.send(result);
+            }
+            
+            QueueActorCommand::ConsumeBatch { max, wait_ms, reply } => {
+                let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
+                if !msgs.is_empty() {
+                    for msg in &msgs {
                         let _ = self.store.execute(StorageOp::UpdateState { 
                             id: msg.id, 
                             visible_at: msg.visible_at, 
                             attempts: msg.attempts 
                         }).await;
                     }
-
-                    let _ = reply.send(msg_opt);
-                }
-                
-                QueueActorCommand::Ack { id, reply } => {
-                    let result = self.state.ack(id);
-                    if result {
-                        // Persist delete
-                        let _ = self.store.execute(StorageOp::Delete(id)).await;
-                    }
-                    let _ = reply.send(result);
-                }
-                
-                QueueActorCommand::ConsumeBatch { max, wait_ms, reply } => {
+                    let _ = reply.send(msgs);
+                } else {
+                    // Note: Here we sleep inside handle_command, blocking the actor.
+                    // Ideally this should be handled differently (e.g. parking request), 
+                    // but for compatibility with previous logic we keep it simple.
+                    // Since it's a ConsumeBatch with Wait, client expects blocking.
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(100))).await;
                     let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
-                    
-                    if !msgs.is_empty() {
-                        // Persist all visibility updates
-                        for msg in &msgs {
-                            let _ = self.store.execute(StorageOp::UpdateState { 
-                                id: msg.id, 
-                                visible_at: msg.visible_at, 
-                                attempts: msg.attempts 
-                            }).await;
-                        }
-                        let _ = reply.send(msgs);
-                    } else {
-                        // Wait with timeout, then retry
-                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms.min(100))).await;
-                        let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
-                        
-                        for msg in &msgs {
-                            let _ = self.store.execute(StorageOp::UpdateState { 
-                                id: msg.id, 
-                                visible_at: msg.visible_at, 
-                                attempts: msg.attempts 
-                            }).await;
-                        }
-                        let _ = reply.send(msgs);
-                    }
-                }
-                
-                QueueActorCommand::GetSnapshot { reply } => {
-                    let snapshot = self.state.get_snapshot(&self.name);
-                    let _ = reply.send(snapshot);
-                }
-                
-                QueueActorCommand::ProcessExpired => {
-                    let (requeued, dlq_msgs) = self.state.process_expired(self.config.max_retries);
-                    
-                    // Persist Requeued (Update State to Ready/0)
-                    for msg in requeued {
-                        let _ = self.store.execute(StorageOp::UpdateState {
-                            id: msg.id,
-                            visible_at: 0, // Ready
-                            attempts: msg.attempts
+                    for msg in &msgs {
+                        let _ = self.store.execute(StorageOp::UpdateState { 
+                            id: msg.id, 
+                            visible_at: msg.visible_at, 
+                            attempts: msg.attempts 
                         }).await;
                     }
-
-                    // Persist DLQ Moves (Delete from current DB, Push to new Queue)
-                    for msg in dlq_msgs {
-                        // 1. Delete from current Queue DB
-                        let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
-
-                        // 2. Push to DLQ Queue (via Manager)
-                        let dlq_name = format!("{}_dlq", self.name);
-                        let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
-                            queue_name: dlq_name,
-                            payload: msg.payload,
-                            priority: msg.priority,
-                        }).await;
-                    }
+                    let _ = reply.send(msgs);
                 }
             }
+            
+            QueueActorCommand::GetSnapshot { reply } => {
+                let snapshot = self.state.get_snapshot(&self.name);
+                let _ = reply.send(snapshot);
+            }
+            
+            QueueActorCommand::ProcessExpired => {
+                // Manual trigger (legacy or external)
+                self.process_expired().await;
+            }
+        }
+    }
+
+    async fn process_expired(&mut self) {
+        let (requeued, dlq_msgs) = self.state.process_expired(self.config.max_retries);
+        
+        for msg in requeued {
+            let _ = self.store.execute(StorageOp::UpdateState {
+                id: msg.id,
+                visible_at: 0,
+                attempts: msg.attempts
+            }).await;
+        }
+
+        for msg in dlq_msgs {
+            let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
+            let dlq_name = format!("{}_dlq", self.name);
+            let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
+                queue_name: dlq_name,
+                payload: msg.payload,
+                priority: msg.priority,
+            }).await;
         }
     }
 }
@@ -328,22 +359,7 @@ impl QueueManager {
         // Spawn actor
         let actor = QueueActor::new(name, config.clone(), rx, manager_tx);
         tokio::spawn(actor.run());
-        
-        // Spawn pulse loop for ProcessExpired
-        let pulse_tx = tx.clone();
-        let visibility_timeout = config.visibility_timeout_ms;
-        tokio::spawn(async move {
-            let check_interval = std::time::Duration::from_millis(
-                (visibility_timeout / 4).max(50).min(1000)
-            );
-            loop {
-                tokio::time::sleep(check_interval).await;
-                if pulse_tx.send(QueueActorCommand::ProcessExpired).await.is_err() {
-                    break;
-                }
-            }
-        });
-        
+
         tx
     }
 

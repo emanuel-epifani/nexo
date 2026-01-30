@@ -41,10 +41,11 @@ impl Message {
     pub fn new(payload: Bytes, priority: u8, delay_ms: Option<u64>) -> Self {
         let now = current_time_ms();
         
-        let state = if let Some(delay) = delay_ms {
-            MessageState::Scheduled(now + delay)
+        let (state, visible_at) = if let Some(delay) = delay_ms {
+            let ts = now + delay;
+            (MessageState::Scheduled(ts), ts)
         } else {
-            MessageState::Ready
+            (MessageState::Ready, 0)
         };
 
         Self {
@@ -53,7 +54,7 @@ impl Message {
             priority,
             attempts: 0,
             created_at: now,
-            visible_at: 0,
+            visible_at,
             delayed_until: delay_ms.map(|d| now + d),
             state,
         }
@@ -95,9 +96,21 @@ pub struct QueueState {
     waiting_for_time: BTreeMap<u64, LinkedHashSet<Uuid>>,
     /// In-flight messages by timeout time
     waiting_for_ack: BTreeMap<u64, LinkedHashSet<Uuid>>,
-}
 
+}
 impl QueueState {
+    /// Returns the earliest timestamp (ms) of the next scheduled event (Scheduled or Retry).
+    pub fn next_timeout(&self) -> Option<u64> {
+        let next_scheduled = self.waiting_for_time.keys().next().cloned();
+        let next_retry = self.waiting_for_ack.keys().next().cloned();
+
+        match (next_scheduled, next_retry) {
+            (Some(ts1), Some(ts2)) => Some(ts1.min(ts2)),
+            (Some(ts), None) => Some(ts),
+            (None, Some(ts)) => Some(ts),
+            (None, None) => None,
+        }
+    }
     pub fn new() -> Self {
         Self {
             registry: HashMap::new(),

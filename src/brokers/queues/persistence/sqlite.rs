@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, Result};
 use super::types::StorageOp;
 
-use crate::brokers::queues::queue::{Message, MessageState}; // Add MessageState import
+use crate::brokers::queues::queue::{Message, MessageState, current_time_ms}; // Add current_time_ms import
 use uuid::Uuid;
 
 pub fn init_db(conn: &Connection) -> Result<()> {
@@ -59,7 +59,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let attempts: u32 = row.get(4)?;
         let created_at = row.get::<_, i64>(5)? as u64;
 
-        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let now = current_time_ms();
         
         // Reconstruct State
         let state = if visible_at <= now {
@@ -125,7 +125,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                     msg.id.to_string(),
                     msg.payload.as_ref(),
                     reason,
-                    chrono::Utc::now().timestamp_millis()
+                    current_time_ms() as i64
                 ],
             )?;
         }
