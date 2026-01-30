@@ -13,7 +13,7 @@ use crate::brokers::stream::topic::TopicState;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
-use crate::config::Config;
+use crate::config::{Config, StreamConfig};
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions};
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
@@ -83,6 +83,8 @@ pub enum ManagerCommand {
 // TOPIC ACTOR (The Engine)
 // ==========================================
 
+use std::path::PathBuf;
+
 struct TopicActor {
     state: TopicState,
     groups: HashMap<String, ConsumerGroup>,
@@ -94,9 +96,16 @@ struct TopicActor {
 }
 
 impl TopicActor {
-    fn new(name: String, partitions: u32, rx: mpsc::Receiver<TopicCommand>, mode: PersistenceMode) -> Self {
+    fn new(
+        name: String, 
+        partitions: u32, 
+        rx: mpsc::Receiver<TopicCommand>, 
+        mode: PersistenceMode,
+        base_path: String,
+        compaction_threshold: u64
+    ) -> Self {
         // 1. Recovery
-        let recovered = recover_topic(&name, partitions);
+        let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
         let state = TopicState::restore(name.clone(), partitions, recovered.partitions_data);
         
         let mut groups = HashMap::new();
@@ -110,7 +119,14 @@ impl TopicActor {
 
         // 2. Spawn Writer
         let (w_tx, w_rx) = mpsc::channel(1000);
-        let writer = StreamWriter::new(name.clone(), partitions, mode.clone(), w_rx);
+        let writer = StreamWriter::new(
+            name.clone(), 
+            partitions, 
+            mode.clone(), 
+            w_rx,
+            PathBuf::from(base_path),
+            compaction_threshold
+        );
         tokio::spawn(writer.run());
 
         Self {
@@ -375,9 +391,14 @@ pub struct StreamManager {
 
 impl StreamManager {
     pub fn new() -> Self {
+        Self::with_config(Config::global().stream.clone())
+    }
+
+    pub fn with_config(config: StreamConfig) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
-        let actor_capacity = Config::global().stream.actor_channel_capacity;
-        let default_partitions = Config::global().stream.default_partitions;
+        let actor_capacity = config.actor_channel_capacity;
+        let default_partitions = config.default_partitions;
+        let actor_config = config.clone();
 
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
@@ -391,7 +412,15 @@ impl StreamManager {
                             
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
                             tracing::info!("[StreamManager] Creating topic '{}' with {} partitions, mode {:?}", name, partitions, persistence);
-                            let actor = TopicActor::new(name.clone(), partitions, t_rx, persistence);
+                            
+                            let actor = TopicActor::new(
+                                name.clone(), 
+                                partitions, 
+                                t_rx, 
+                                persistence,
+                                actor_config.persistence_path.clone(),
+                                actor_config.compaction_threshold
+                            );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
                         }

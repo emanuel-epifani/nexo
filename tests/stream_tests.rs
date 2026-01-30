@@ -1,5 +1,6 @@
 use nexo::brokers::stream::stream_manager::StreamManager;
 use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions};
+use nexo::config::{Config, StreamConfig};
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -297,6 +298,76 @@ mod persistence {
             assert_eq!(msgs[0].payload, Bytes::from("valid1"));
             assert_eq!(msgs[1].payload, Bytes::from("valid2"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_stream_log_compaction_persistence() {
+        // 1. SETUP: Usa config custom
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path_str = temp_dir.path().to_str().unwrap().to_string();
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
+        config.compaction_threshold = 2; // Trigger compaction after every 2 ops
+
+        let manager = StreamManager::with_config(config);
+        let topic = "topic_compaction";
+        let group = "group_compact";
+        let client = "client_1";
+
+        // Creazione Topic
+        manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }), // Flush veloce
+        }).await.unwrap();
+
+        // Join Group
+        let (gen_id, _, _) = manager.join_group(group, topic, client).await.unwrap();
+
+        // 2. ACTION: Eseguiamo 10 Commit progressivi
+        for i in 1..=10 {
+            manager.commit_offset(group, topic, 0, i, client, gen_id).await.unwrap();
+            // Un piccolo sleep per dare tempo al writer async di processare e compattare
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 3. RESTART: Simuliamo un riavvio del broker
+        drop(manager);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut recover_config = Config::global().stream.clone();
+        recover_config.persistence_path = path_str;
+        let recovered_manager = StreamManager::with_config(recover_config);
+
+        // 4. VERIFY: Verifichiamo lo stato recuperato
+        // Facciamo un join: dovremmo ricevere l'offset 10 come punto di partenza
+        // Nota: re-create topic necessario per spawnare l'attore (come negli altri test)
+        recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
+            partitions: Some(1),
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }),
+        }).await.unwrap();
+
+        let (_new_gen, _assignments, committed_offsets) = recovered_manager
+            .join_group(group, topic, client)
+            .await
+            .unwrap();
+
+        // Verifica
+        assert_eq!(
+            *committed_offsets.get(&0).unwrap(), 
+            10, 
+            "L'offset recuperato dopo la compattazione deve essere l'ultimo committato (10)"
+        );
+
+        // Opzionale: Verifica fisica che il file non sia esploso
+        let file_size = std::fs::metadata(temp_dir.path().join(topic).join("commits.log"))
+            .unwrap()
+            .len();
+        
+        println!("Final commits.log size: {} bytes", file_size);
+        // Un singolo record pesa circa 40-50 byte. 10 record sarebbero ~500. 1 record ~50.
+        // Diamo un margine ampio ma che esclude 10 record.
+        assert!(file_size < 300, "Il file commits.log dovrebbe essere compattato (piccolo)");
     }
 }
 
