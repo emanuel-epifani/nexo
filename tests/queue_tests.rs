@@ -197,7 +197,7 @@ mod persistence {
             manager.declare_queue(q.clone(), config).await.unwrap();
 
             // Push with delay 500ms
-            manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
+            manager.push(q.clone(), Bytes::from("future_job"), 0, Some(2000)).await.unwrap();
             
             // Immediate check (should be empty)
             assert!(manager.pop(&q).await.is_none());
@@ -255,6 +255,48 @@ mod persistence {
 
             // Should be empty (Ack was persisted)
             assert!(manager2.pop(&q).await.is_none(), "Acked message should not reappear");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inflight_recovery_timeout() {
+        let q = format!("persist_inflight_{}", Uuid::new_v4());
+
+        {
+            let manager = QueueManager::new();
+            let config = QueueConfig {
+                visibility_timeout_ms: 500, // Short timeout
+                persistence: PersistenceMode::Sync,
+                ..Default::default()
+            };
+            manager.declare_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("job"), 0, None).await.unwrap();
+
+            // Take it (make it InFlight)
+            let _ = manager.pop(&q).await.unwrap();
+
+            // Drop manager while message is InFlight (and not Acked)
+        }
+
+        tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
+
+        {
+            let manager2 = QueueManager::new();
+            let config = QueueConfig {
+                visibility_timeout_ms: 500,
+                persistence: PersistenceMode::Sync,
+                ..Default::default()
+            };
+            manager2.declare_queue(q.clone(), config).await.unwrap();
+
+            // Should be visible again! (Recovery put it in waiting_for_ack, then expired)
+            // Note: Recovery runs, then process_expired runs.
+            // Depending on timing, we might need to wait a tick for process_expired.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let msg = manager2.pop(&q).await.expect("InFlight message should expire and reappear");
+            assert_eq!(msg.payload, Bytes::from("job"));
         }
     }
 }
