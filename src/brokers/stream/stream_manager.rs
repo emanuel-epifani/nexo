@@ -112,11 +112,12 @@ impl TopicActor {
         compaction_threshold: u64,
         max_segment_size: u64,
         retention: RetentionOptions,
-        retention_check_ms: u64
+        retention_check_ms: u64,
+        max_ram_messages: usize
     ) -> Self {
         // 1. Recovery
         let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
-        let state = TopicState::restore(name.clone(), partitions, recovered.partitions_data);
+        let state = TopicState::restore(name.clone(), partitions, max_ram_messages, recovered.partitions_data);
         
         let mut groups = HashMap::new();
         // Restore Groups
@@ -466,7 +467,8 @@ impl StreamManager {
                                 actor_config.compaction_threshold,
                                 actor_config.max_segment_size,
                                 retention,
-                                actor_config.retention_check_interval_ms
+                                actor_config.retention_check_interval_ms,
+                                actor_config.max_ram_messages
                             );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);

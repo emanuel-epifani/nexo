@@ -124,6 +124,7 @@ pub struct StreamConfig {
     pub retention_check_interval_ms: u64,
     pub default_retention_bytes: u64,
     pub default_retention_age_ms: u64,
+    pub max_ram_messages: usize,
 }
 
 impl StreamConfig {
@@ -138,6 +139,7 @@ impl StreamConfig {
             retention_check_interval_ms: get_env("STREAM_RETENTION_CHECK_MS", "600000"),  // 10 minutes
             default_retention_bytes:     get_env("STREAM_DEFAULT_RETENTION_BYTES", "1073741824"), // 1GB
             default_retention_age_ms:    get_env("STREAM_DEFAULT_RETENTION_AGE_MS", "604800000"), // 7 days
+            max_ram_messages:            get_env("STREAM_MAX_RAM_MESSAGES", "20000"), // 2x default channel
         }
     }
 }

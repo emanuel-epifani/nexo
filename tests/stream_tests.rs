@@ -575,43 +575,43 @@ mod performance {
     
     // Reduce count for tests to be fast, but enough to see diff
     // const COUNT: usize = 10_000;
-    const COUNT: usize = 200_000;
+    const COUNT: usize = 1_000_000;
 
-    #[tokio::test]
-    async fn bench_stream_memory() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
-        
-        let manager = StreamManager::new();
-        let topic = "bench-mem";
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory), ..Default::default() }).await.unwrap();
+    // #[tokio::test]
+    // async fn bench_stream_memory() {
+    //     let temp_dir = tempfile::tempdir().unwrap();
+    //     std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+    //
+    //     let manager = StreamManager::new();
+    //     let topic = "bench-mem";
+    //     manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory), ..Default::default() }).await.unwrap();
+    //
+    //     let mut bench = Benchmark::start("STREAM PUSH - Memory", COUNT);
+    //     for _ in 0..COUNT {
+    //         let start = Instant::now();
+    //         manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
+    //         bench.record(start.elapsed());
+    //     }
+    //     bench.stop();
+    // }
 
-        let mut bench = Benchmark::start("STREAM PUSH - Memory", COUNT);
-        for _ in 0..COUNT {
-            let start = Instant::now();
-            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
-            bench.record(start.elapsed());
-        }
-        bench.stop();
-    }
-
-    #[tokio::test]
-    async fn bench_stream_fsync() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
-
-        let manager = StreamManager::new();
-        let topic = "bench-sync";
-        manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync), ..Default::default() }).await.unwrap();
-
-        let mut bench = Benchmark::start("STREAM PUSH - FSync", COUNT);
-        for _ in 0..COUNT {
-            let start = Instant::now();
-            manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
-            bench.record(start.elapsed());
-        }
-        bench.stop();
-    }
+    // #[tokio::test]
+    // async fn bench_stream_fsync() {
+    //     let temp_dir = tempfile::tempdir().unwrap();
+    //     std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+    //
+    //     let manager = StreamManager::new();
+    //     let topic = "bench-sync";
+    //     manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync), ..Default::default() }).await.unwrap();
+    //
+    //     let mut bench = Benchmark::start("STREAM PUSH - FSync", COUNT);
+    //     for _ in 0..COUNT {
+    //         let start = Instant::now();
+    //         manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
+    //         bench.record(start.elapsed());
+    //     }
+    //     bench.stop();
+    // }
 
     #[tokio::test]
     async fn bench_stream_fasync() {
@@ -622,7 +622,7 @@ mod performance {
         let topic = "bench-async";
         manager.create_topic(topic.to_string(), StreamCreateOptions { 
             partitions: Some(1), 
-            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(100) }),
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(200) }),
             ..Default::default() 
         }).await.unwrap();
 

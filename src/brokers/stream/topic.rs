@@ -17,18 +17,18 @@ pub struct TopicState {
 }
 
 impl TopicState {
-    pub fn new(name: String, partitions_count: u32) -> Self {
+    pub fn new(name: String, partitions_count: u32, max_ram_messages: usize) -> Self {
         let partitions = (0..partitions_count)
-            .map(|id| PartitionState::new(id))
+            .map(|id| PartitionState::new(id, max_ram_messages))
             .collect();
         
         Self { name, partitions }
     }
     
-    pub fn restore(name: String, partitions_count: u32, mut data: std::collections::HashMap<u32, (VecDeque<Message>, Vec<Segment>)>) -> Self {
+    pub fn restore(name: String, partitions_count: u32, max_ram_messages: usize, mut data: std::collections::HashMap<u32, (VecDeque<Message>, Vec<Segment>)>) -> Self {
         let partitions = (0..partitions_count)
             .map(|id| {
-                let mut p = PartitionState::new(id);
+                let mut p = PartitionState::new(id, max_ram_messages);
                 if let Some((msgs, segments)) = data.remove(&id) {
                     p.segments = segments;
                     
@@ -96,18 +96,17 @@ impl TopicState {
 pub struct PartitionState {
     pub id: u32,
     pub log: VecDeque<Message>,
-    pub segments: Vec<Segment>, // Indice dei segmenti su disco
-    pub next_offset: u64,       // Prossimo offset da scrivere (globale)
-    pub start_offset: u64,      // Offset minimo esistente (su disco)
-    pub ram_start_offset: u64,  // Offset del primo messaggio in RAM
+    pub segments: Vec<Segment>, 
+    pub next_offset: u64,       
+    pub start_offset: u64,      
+    pub ram_start_offset: u64, 
+    pub max_ram_messages: usize,
     
-    // Note: Notify is hard to keep in pure state if we want to be serializable,
-    // but for now it's fine as runtime state.
     waiters: BTreeMap<u64, Vec<Weak<Notify>>>,
 }
 
 impl PartitionState {
-    pub fn new(id: u32) -> Self {
+    pub fn new(id: u32, max_ram_messages: usize) -> Self {
         Self {
             id,
             log: VecDeque::new(),
@@ -115,6 +114,7 @@ impl PartitionState {
             next_offset: 0,
             start_offset: 0,
             ram_start_offset: 0,
+            max_ram_messages,
             waiters: BTreeMap::new(),
         }
     }
@@ -136,6 +136,13 @@ impl PartitionState {
             payload,
         });
         self.next_offset += 1;
+
+        // RAM EVICTION
+        while self.log.len() > self.max_ram_messages {
+            if let Some(removed) = self.log.pop_front() {
+                self.ram_start_offset = removed.offset + 1;
+            }
+        }
 
         // Wake waiters logic
         let future_waiters = self.waiters.split_off(&(offset + 1));
