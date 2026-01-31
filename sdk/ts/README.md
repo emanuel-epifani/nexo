@@ -176,7 +176,15 @@ const orders = await client.stream<Order>('orders').create({
     persistence: {
         strategy: 'file_async',
         flushIntervalMs: 200    
-    }
+    },
+
+    // RETENTION (Cleanup Policy)
+    // --------------------------
+    // Delete old data when EITHER limit is reached:
+    retention: {
+        maxAgeMs: 86400000,     // 1 Day (Default: 7 Days)
+        maxBytes: 536870912     // 512 MB (Default: 1 GB)
+    },
 });
 
 // ---------------------------------------------------------
@@ -199,7 +207,30 @@ await orders.subscribe('audit-log', (order) => saveAudit(order));
 </details>
 
 
+
 ---
+
+### ⚡️ Binary Payloads (Zero-Copy)
+All Nexo brokers (**Store, Queue, Stream, PubSub**) support raw binary data.
+Sending a `Buffer` instead of an object bypasses the JSON serialization layer entirely, drastically increasing throughput and reduce latency.
+
+Useful for: Video chunks, Images, Protobuf/MsgPack payloads, Encrypted blobs.
+
+```typescript
+const heavyPayload = Buffer.alloc(1024 * 1024);
+
+// 1. STREAM: Replayable Data (e.g. CCTV Recording, Event Sourcing)
+await client.stream('cctv-archive').publish(heavyPayload);
+
+// 2. PUBSUB: Ephemeral Live Data (e.g. VoIP, Real-time Sensor)
+await client.pubsub('live-audio-call').publish(heavyPayload);
+
+// 3. STORE (Cache Images)
+await client.store.map.set('user:avatar:1', heavyPayload);
+
+// 4. QUEUE (Process Files)
+await client.queue('pdf-processing').push(heavyPayload);
+```
 
 ## License
 
