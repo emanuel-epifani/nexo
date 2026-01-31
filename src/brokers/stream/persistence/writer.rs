@@ -17,18 +17,80 @@ use crate::config::Config;
 
 #[derive(Default)]
 pub struct RecoveredState {
-    // Partition ID -> Messages
-    pub partitions_data: HashMap<u32, VecDeque<Message>>,
+    // Partition ID -> (Active Messages, Segments Index)
+    pub partitions_data: HashMap<u32, (VecDeque<Message>, Vec<Segment>)>,
     // Group ID -> (GenerationID, Committed Offsets)
     pub groups_data: HashMap<String, (u64, HashMap<u32, u64>)>,
 }
 
-struct Segment {
-    path: PathBuf,
-    start_offset: u64,
+#[derive(Debug, Clone)]
+pub struct Segment {
+    pub path: PathBuf,
+    pub start_offset: u64,
 }
 
 // --- PUBLIC API ---
+
+pub fn read_log_segment(path: &PathBuf, start_offset: u64, limit: usize) -> Vec<Message> {
+    let mut msgs = Vec::new();
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Cold Read: Failed to open {:?}: {}", path, e);
+            return msgs;
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    let mut count = 0;
+
+    // TODO Optimization: Binary Search or Index file to skip directly to offset.
+    // Current implementation: Scan linearly until we find >= offset.
+    
+    loop {
+        // [Len: u32]
+        let mut len_buf = [0u8; 4];
+        if reader.read_exact(&mut len_buf).is_err() { break; }
+        let len = u32::from_be_bytes(len_buf);
+
+        // [CRC32: u32]
+        let mut crc_buf = [0u8; 4];
+        if reader.read_exact(&mut crc_buf).is_err() { break; }
+        let stored_crc = u32::from_be_bytes(crc_buf);
+
+        // Content
+        let mut content_buf = vec![0u8; len as usize];
+        if reader.read_exact(&mut content_buf).is_err() { break; }
+
+        // Skip CRC check on read for speed? Or check? Let's check for safety.
+        let mut hasher = Hasher::new();
+        hasher.update(&content_buf);
+        if hasher.finalize() != stored_crc {
+            error!("CRC Mismatch in Cold Read {:?}. Skipping.", path);
+            continue;
+        }
+
+        // Parse Offset [Offset: u64]...
+        if content_buf.len() < 8 { continue; }
+        let offset = u64::from_be_bytes(content_buf[0..8].try_into().unwrap());
+
+        if offset >= start_offset {
+            // Found it! Parse full message
+            if content_buf.len() < 16 { continue; }
+            let timestamp = u64::from_be_bytes(content_buf[8..16].try_into().unwrap());
+            let payload = Bytes::copy_from_slice(&content_buf[16..]);
+
+            msgs.push(Message { offset, timestamp, payload });
+            count += 1;
+            
+            if count >= limit {
+                break;
+            }
+        }
+    }
+
+    msgs
+}
 
 pub fn recover_topic(topic_name: &str, partitions_count: u32, base_path: PathBuf) -> RecoveredState {
     let base_path = base_path.join(topic_name);
@@ -40,15 +102,18 @@ pub fn recover_topic(topic_name: &str, partitions_count: u32, base_path: PathBuf
 
     // 1. Load Partitions (Segments)
     for i in 0..partitions_count {
-        // Troviamo tutti i segmenti: {i}_{offset}.log e anche {i}.log (vecchio formato)
         if let Ok(segments) = find_segments(&base_path, i) {
-            let mut all_msgs = VecDeque::new();
-            for segment in segments {
-                let msgs = load_partition_file(&segment.path);
-                info!("Topic '{}' P{} Segment {}: recovered {} messages", topic_name, i, segment.start_offset, msgs.len());
-                all_msgs.extend(msgs);
+            let mut active_msgs = VecDeque::new();
+            
+            // LAZY LOADING: Carica solo l'ultimo segmento
+            if let Some(last_segment) = segments.last() {
+                active_msgs = load_partition_file(&last_segment.path);
+                info!("Topic '{}' P{} Segment {}: LAZY LOADED {} messages (Active)", topic_name, i, last_segment.start_offset, active_msgs.len());
+            } else {
+                info!("Topic '{}' P{}: No segments found.", topic_name, i);
             }
-            state.partitions_data.insert(i, all_msgs);
+
+            state.partitions_data.insert(i, (active_msgs, segments));
         }
     }
 

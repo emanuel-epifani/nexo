@@ -470,7 +470,7 @@ mod persistence {
         assert!(files.len() >= 2, "Should have at least 2 segments");
         // Expecting something like: "0_0.log", "0_2.log" (assuming rotation happened at offset 2)
 
-        // 3. Verify Reading (Transparency)
+        // 3. Verify Reading (Transparency with Pagination)
         // Restart manager to force recovery from disk
         drop(manager);
         
@@ -485,10 +485,26 @@ mod persistence {
             ..Default::default()
         }).await.unwrap();
 
-        let msgs = recovered_manager.read(topic, 0, 10).await;
-        assert_eq!(msgs.len(), 4);
-        assert_eq!(msgs[0].payload, Bytes::from("msg1"));
-        assert_eq!(msgs[3].payload, Bytes::from("msg4"));
+        let mut all_msgs = Vec::new();
+        let mut next_offset = 0;
+
+        // Simulate a real client polling loop
+        // We expect 4 messages total.
+        while all_msgs.len() < 4 {
+            let batch = recovered_manager.read(topic, next_offset, 10).await;
+            if batch.is_empty() {
+                break; 
+            }
+            
+            for msg in batch {
+                next_offset = msg.offset + 1;
+                all_msgs.push(msg);
+            }
+        }
+
+        assert_eq!(all_msgs.len(), 4, "Should recover all 4 messages across segments");
+        assert_eq!(all_msgs[0].payload, Bytes::from("msg1"));
+        assert_eq!(all_msgs[3].payload, Bytes::from("msg4"));
     }
 
     #[tokio::test]

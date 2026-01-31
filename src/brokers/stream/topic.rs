@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use crate::brokers::stream::persistence::writer::{Segment, read_log_segment};
+
 pub struct TopicState {
     pub name: String,
     pub partitions: Vec<PartitionState>,
@@ -23,17 +25,36 @@ impl TopicState {
         Self { name, partitions }
     }
     
-    pub fn restore(name: String, partitions_count: u32, mut data: std::collections::HashMap<u32, VecDeque<Message>>) -> Self {
+    pub fn restore(name: String, partitions_count: u32, mut data: std::collections::HashMap<u32, (VecDeque<Message>, Vec<Segment>)>) -> Self {
         let partitions = (0..partitions_count)
             .map(|id| {
                 let mut p = PartitionState::new(id);
-                if let Some(msgs) = data.remove(&id) {
+                if let Some((msgs, segments)) = data.remove(&id) {
+                    p.segments = segments;
+                    
+                    // Recover Start Offset (Global) from segments
+                    if let Some(first_segment) = p.segments.first() {
+                        p.start_offset = first_segment.start_offset;
+                    }
+
+                    // Recover Next Offset
+                    // If we have RAM messages, next_offset is last_ram_msg.offset + 1
+                    // If we don't (empty active segment), next_offset is active_segment.start_offset
                     if let Some(last) = msgs.back() {
                         p.next_offset = last.offset + 1;
+                        // RAM start offset depends on where RAM messages start
                         if let Some(first) = msgs.front() {
-                            p.start_offset = first.offset;
+                            p.ram_start_offset = first.offset;
+                        }
+                    } else {
+                        // No messages in RAM, maybe new segment or just rotated?
+                        // Fallback to last segment start offset if exists
+                        if let Some(last_seg) = p.segments.last() {
+                            p.next_offset = last_seg.start_offset;
+                            p.ram_start_offset = last_seg.start_offset;
                         }
                     }
+                    
                     p.log = msgs;
                 }
                 p
@@ -75,8 +96,11 @@ impl TopicState {
 pub struct PartitionState {
     pub id: u32,
     pub log: VecDeque<Message>,
-    pub next_offset: u64,
-    pub start_offset: u64,
+    pub segments: Vec<Segment>, // Indice dei segmenti su disco
+    pub next_offset: u64,       // Prossimo offset da scrivere (globale)
+    pub start_offset: u64,      // Offset minimo esistente (su disco)
+    pub ram_start_offset: u64,  // Offset del primo messaggio in RAM
+    
     // Note: Notify is hard to keep in pure state if we want to be serializable,
     // but for now it's fine as runtime state.
     waiters: BTreeMap<u64, Vec<Weak<Notify>>>,
@@ -87,8 +111,10 @@ impl PartitionState {
         Self {
             id,
             log: VecDeque::new(),
+            segments: Vec::new(),
             next_offset: 0,
             start_offset: 0,
+            ram_start_offset: 0,
             waiters: BTreeMap::new(),
         }
     }
@@ -99,6 +125,10 @@ impl PartitionState {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
+
+        if self.log.is_empty() {
+            self.ram_start_offset = offset;
+        }
 
         self.log.push_back(Message {
             offset,
@@ -124,15 +154,49 @@ impl PartitionState {
     }
 
     pub fn read(&self, offset: u64, limit: usize) -> Vec<Message> {
-        if offset < self.start_offset {
-            self.log.iter().take(limit).cloned().collect()
-        } else {
-            let idx = (offset - self.start_offset) as usize;
-            if idx >= self.log.len() {
-                Vec::new()
-            } else {
-                self.log.iter().skip(idx).take(limit).cloned().collect()
+        // 1. Check RAM
+        if offset >= self.ram_start_offset && !self.log.is_empty() {
+            let idx = (offset - self.ram_start_offset) as usize;
+            if idx < self.log.len() {
+                // HOT READ
+                return self.log.iter().skip(idx).take(limit).cloned().collect();
             }
         }
+
+        // 2. COLD READ (Fallback)
+        // Scan segments index to find where `offset` lives
+        for segment in &self.segments {
+            // Un segmento copre da start_offset a... non sappiamo l'end esatto senza guardare il prossimo
+            // Ma sappiamo che se offset >= segment.start_offset, POTREBBE essere qui.
+            // Poiché segments è ordinato, cerchiamo il candidato migliore.
+            // La logica semplice: se offset >= segment.start_offset, controlla se è < next_segment.start_offset
+            
+            if offset >= segment.start_offset {
+                // Questo segmento è un candidato.
+                // Controlliamo se siamo "oltre" questo segmento guardando il prossimo?
+                // Oppure proviamo a leggere.
+                // Optimization: Se abbiamo next_segment, e offset >= next.start, allora NON è in questo.
+                
+                // Per ora implementazione "Naive robusta":
+                // Proviamo a leggere dal segmento che ha start_offset <= offset.
+                // Se segments è ordinato ASC, iteriamo reverse o forward?
+                // Iteriamo forward e teniamo l'ultimo valido.
+            }
+        }
+
+        // Better Logic: Find the segment with max(start_offset) such that start_offset <= offset
+        if let Some(segment) = self.segments.iter()
+            .filter(|s| s.start_offset <= offset)
+            .last() 
+        {
+            // Trovato il file che dovrebbe contenere l'offset.
+            // Eseguiamo la lettura sincrona.
+            let msgs = read_log_segment(&segment.path, offset, limit);
+            if !msgs.is_empty() {
+                return msgs;
+            }
+        }
+
+        Vec::new()
     }
 }
