@@ -19,7 +19,12 @@ pub struct QueueStore {
 }
 
 impl QueueStore {
-    pub fn new(db_path: PathBuf, mode: PersistenceMode) -> Self {
+    pub fn new(
+        db_path: PathBuf, 
+        mode: PersistenceMode, 
+        writer_channel_capacity: usize,
+        batch_size: usize
+    ) -> Self {
         if let PersistenceMode::Memory = mode {
             return Self {
                 sender: None,
@@ -28,13 +33,13 @@ impl QueueStore {
             };
         }
 
-        let (tx, rx) = mpsc::channel(10000); // Channel buffer
+        let (tx, rx) = mpsc::channel(writer_channel_capacity);
         
         let mode_clone = mode.clone();
         let path_clone = db_path.clone();
         // Spawn Writer Thread
         tokio::spawn(async move {
-            run_writer(rx, path_clone, mode_clone).await;
+            run_writer(rx, path_clone, mode_clone, batch_size).await;
         });
 
         Self {

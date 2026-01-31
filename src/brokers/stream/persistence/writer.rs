@@ -200,6 +200,7 @@ pub struct StreamWriter {
     max_segment_size: u64,
     retention: RetentionOptions,
     retention_check_interval_ms: u64,
+    batch_size: usize,
 }
 
 impl StreamWriter {
@@ -213,6 +214,7 @@ impl StreamWriter {
         max_segment_size: u64,
         retention: RetentionOptions,
         retention_check_interval_ms: u64,
+        batch_size: usize,
     ) -> Self {
         let base_path = base_path.join(&topic_name);
         
@@ -230,6 +232,7 @@ impl StreamWriter {
             max_segment_size,
             retention,
             retention_check_interval_ms,
+            batch_size,
         }
     }
 
@@ -276,7 +279,7 @@ impl StreamWriter {
 
                     let should_flush = match self.mode {
                         PersistenceMode::Sync => true,
-                        PersistenceMode::Async { .. } => self.batch.len() >= 1000, // Cap batch size
+                        PersistenceMode::Async { .. } => self.batch.len() >= self.batch_size, // Cap batch size
                         PersistenceMode::Memory => false,
                     };
 

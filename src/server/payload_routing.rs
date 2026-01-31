@@ -121,6 +121,8 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 max_retries: options.max_retries.unwrap_or(max_retries),
                 ttl_ms: options.ttl_ms.unwrap_or(ttl_ms),
                 persistence,
+                writer_channel_capacity: Config::global().queue.writer_channel_capacity,
+                writer_batch_size: Config::global().queue.writer_batch_size,
             };
 
             match queue_manager.declare_queue(q_name, config).await {

@@ -48,7 +48,7 @@ impl ServerConfig {
             host:           get_env("SERVER_HOST", "127.0.0.1"),
             port:           get_env("SERVER_PORT", "7654"),
             dashboard_port: get_env("DASHBOARD_PORT", "8080"),
-            log_level:      get_env("LOG_LEVEL", "info"),
+            log_level:      get_env("LOG_LEVEL", "error"),
         }
     }
 }
@@ -82,6 +82,9 @@ pub struct QueueConfig {
     // PERSISTENCE config
     pub persistence_path: String,
     pub default_flush_ms: u64,
+    pub actor_channel_capacity: usize,
+    pub writer_channel_capacity: usize,
+    pub writer_batch_size: usize,
 }
 
 impl QueueConfig {
@@ -93,7 +96,10 @@ impl QueueConfig {
             default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", "10"),
             default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", "0"),
             persistence_path:      get_env("QUEUE_ROOT_PERSISTENCE_PATH", "./data/queues"),
-            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", "100"),
+            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", "50"),
+            actor_channel_capacity: get_env("QUEUE_ACTOR_CHAN_CAP", "10000"),
+            writer_channel_capacity: get_env("QUEUE_WRITER_CHAN_CAP", "10000"),
+            writer_batch_size:     get_env("QUEUE_WRITER_BATCH_SIZE", "5000"),
         }
     }
 }
@@ -125,6 +131,8 @@ pub struct StreamConfig {
     pub default_retention_bytes: u64,
     pub default_retention_age_ms: u64,
     pub max_ram_messages: usize,
+    pub writer_channel_capacity: usize,
+    pub writer_batch_size: usize,
 }
 
 impl StreamConfig {
@@ -133,13 +141,15 @@ impl StreamConfig {
             default_partitions:          get_env("STREAM_PARTITIONS", "8"),
             actor_channel_capacity:      get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
             persistence_path:            get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
-            default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", "100"),
+            default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", "50"),
             compaction_threshold:        get_env("STREAM_COMPACTION_THRESHOLD", "10000"),
             max_segment_size:            get_env("STREAM_MAX_SEGMENT_SIZE", "104857600"), // 100MB
             retention_check_interval_ms: get_env("STREAM_RETENTION_CHECK_MS", "600000"),  // 10 minutes
             default_retention_bytes:     get_env("STREAM_DEFAULT_RETENTION_BYTES", "1073741824"), // 1GB
             default_retention_age_ms:    get_env("STREAM_DEFAULT_RETENTION_AGE_MS", "604800000"), // 7 days
             max_ram_messages:            get_env("STREAM_MAX_RAM_MESSAGES", "20000"), // 2x default channel
+            writer_channel_capacity:     get_env("STREAM_WRITER_CHAN_CAP", "10000"),
+            writer_batch_size:           get_env("STREAM_WRITER_BATCH_SIZE", "5000"),
         }
     }
 }

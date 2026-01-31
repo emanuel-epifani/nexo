@@ -11,6 +11,7 @@ pub async fn run_writer(
     mut rx: mpsc::Receiver<StoreCommand>,
     db_path: PathBuf,
     mode: PersistenceMode,
+    batch_size: usize,
 ) {
     let mut conn = match Connection::open(&db_path) {
         Ok(c) => c,
@@ -50,8 +51,8 @@ pub async fn run_writer(
                 }
                 batch.push(cmd.op);
 
-                // If Sync or buffer too full (e.g. 1000), flush immediately
-                if is_sync_req || batch.len() >= 1000 {
+                // If Sync or buffer too full, flush immediately
+                if is_sync_req || batch.len() >= batch_size {
                     flush_batch(&mut conn, &mut batch, &mut waiters);
                 }
             }

@@ -67,6 +67,9 @@ pub struct QueueConfig {
     pub max_retries: u32,
     pub ttl_ms: u64,
     pub persistence: PersistenceMode,
+    // Persistence Tuning
+    pub writer_channel_capacity: usize,
+    pub writer_batch_size: usize,
 }
 
 use crate::config::Config;
@@ -79,6 +82,8 @@ impl Default for QueueConfig {
             max_retries: global.max_retries,
             ttl_ms: global.ttl_ms,
             persistence: PersistenceMode::default(),
+            writer_channel_capacity: global.writer_channel_capacity,
+            writer_batch_size: global.writer_batch_size,
         }
     }
 }

@@ -50,7 +50,7 @@ pub struct QueueManager {
 
 impl QueueManager {
     pub fn new(system_config: crate::config::QueueConfig) -> Self {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
         let manager_tx = tx.clone();
         
         tokio::spawn(Self::run_manager_loop(rx, manager_tx, system_config.clone()));
@@ -96,6 +96,8 @@ impl QueueManager {
                             max_retries: system_config.max_retries,
                             ttl_ms: system_config.ttl_ms,
                             persistence: PersistenceMode::Memory,
+                            writer_channel_capacity: system_config.writer_channel_capacity,
+                            writer_batch_size: system_config.writer_batch_size,
                         };
                         let tx = Self::spawn_queue_actor(
                             queue_name.clone(),
@@ -168,7 +170,7 @@ impl QueueManager {
         manager_tx: mpsc::Sender<ManagerCommand>,
         system_config: &crate::config::QueueConfig,
     ) -> mpsc::Sender<QueueActorCommand> {
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
         
         // Spawn actor with path from system_config
         let path = std::path::PathBuf::from(&system_config.persistence_path);

@@ -113,7 +113,9 @@ impl TopicActor {
         max_segment_size: u64,
         retention: RetentionOptions,
         retention_check_ms: u64,
-        max_ram_messages: usize
+        max_ram_messages: usize,
+        writer_channel_capacity: usize,
+        writer_batch_size: usize,
     ) -> Self {
         // 1. Recovery
         let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
@@ -129,7 +131,7 @@ impl TopicActor {
         }
 
         // 2. Spawn Writer
-        let (w_tx, w_rx) = mpsc::channel(1000);
+        let (w_tx, w_rx) = mpsc::channel(writer_channel_capacity);
         let writer = StreamWriter::new(
             name.clone(), 
             partitions, 
@@ -139,7 +141,8 @@ impl TopicActor {
             compaction_threshold,
             max_segment_size,
             retention,
-            retention_check_ms
+            retention_check_ms,
+            writer_batch_size,
         );
         tokio::spawn(writer.run());
 
@@ -465,7 +468,9 @@ impl StreamManager {
                                 actor_config.max_segment_size,
                                 retention,
                                 actor_config.retention_check_interval_ms,
-                                actor_config.max_ram_messages
+                                actor_config.max_ram_messages,
+                                actor_config.writer_channel_capacity,
+                                actor_config.writer_batch_size,
                             );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
