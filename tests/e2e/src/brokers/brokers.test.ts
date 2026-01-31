@@ -549,7 +549,7 @@ describe('BROKER INTEGRATION', async () => {
         });
     });
 
-    describe('PERFORMANCE (Protocol & SDK Efficiency)', () => {
+    describe('PERFORMANCE', () => {
 
         it('Protocol Latency: Small Payload Round-Trip', async () => {
             const ITERATIONS = 5000;
@@ -611,48 +611,50 @@ describe('BROKER INTEGRATION', async () => {
             // 1MB transfer should be reasonably fast (e.g. < 50ms locally)
             expect(stats.p99).toBeLessThan(100);
         });
+
+        it('Stream vs PubSub (Binary 64KB)', async () => {
+            const PAYLOAD_SIZE = 64 * 1024; // 64KB
+            const COUNT = 5000;
+            const payload = Buffer.alloc(PAYLOAD_SIZE).fill('x');
+
+            // --- ROUND 1: STREAM ---
+            const streamTopic = `perf-stream-${randomUUID()}`;
+            await nexo.stream(streamTopic).create({ persistence: { strategy: 'memory' } });
+            const streamProd = nexo.stream(streamTopic);
+
+            const probeStream = new BenchmarkProbe('STREAM (64KB)', COUNT);
+            probeStream.startTimer();
+
+            // Stream è persistente, quindi l'await garantisce la scrittura (o almeno l'accettazione)
+            const pStream = [];
+            for (let i = 0; i < COUNT; i++) pStream.push(streamProd.publish(payload));
+            await Promise.all(pStream);
+
+            const resStream = probeStream.printResult();
+
+            // --- ROUND 2: PUBSUB ---
+            const pubsubTopic = `perf-pubsub-${randomUUID()}`;
+            const pubsubProd = nexo.pubsub(pubsubTopic);
+
+            // Nota: PubSub in Nexo è fire-and-forget lato server se non c'è retain,
+            // ma l'SDK aspetta comunque l'ACK di "Published" dal server.
+
+            const probePubsub = new BenchmarkProbe('PUBSUB (64KB)', COUNT);
+            probePubsub.startTimer();
+
+            const pPubsub = [];
+            for (let i = 0; i < COUNT; i++) pPubsub.push(pubsubProd.publish(payload));
+            await Promise.all(pPubsub);
+
+            const resPubsub = probePubsub.printResult();
+
+            // Confronto (Solo commento, non fail test se vince Stream per varianza)
+            console.log(`\n🏆 Winner: ${resPubsub.throughput > resStream.throughput ? 'PUBSUB' : 'STREAM'}`);
+            console.log(`📊 PubSub is ${(resPubsub.throughput / resStream.throughput).toFixed(2)}x faster`);
+        });
+
     });
 
-    it('SHOOTOUT: Stream vs PubSub (Binary 64KB)', async () => {
-        const PAYLOAD_SIZE = 64 * 1024; // 64KB
-        const COUNT = 5000;
-        const payload = Buffer.alloc(PAYLOAD_SIZE).fill('x');
-
-        // --- ROUND 1: STREAM ---
-        const streamTopic = `perf-stream-${randomUUID()}`;
-        await nexo.stream(streamTopic).create({ persistence: { strategy: 'memory' } });
-        const streamProd = nexo.stream(streamTopic);
-
-        const probeStream = new BenchmarkProbe('STREAM (64KB)', COUNT);
-        probeStream.startTimer();
-
-        // Stream è persistente, quindi l'await garantisce la scrittura (o almeno l'accettazione)
-        const pStream = [];
-        for (let i = 0; i < COUNT; i++) pStream.push(streamProd.publish(payload));
-        await Promise.all(pStream);
-
-        const resStream = probeStream.printResult();
-
-        // --- ROUND 2: PUBSUB ---
-        const pubsubTopic = `perf-pubsub-${randomUUID()}`;
-        const pubsubProd = nexo.pubsub(pubsubTopic);
-
-        // Nota: PubSub in Nexo è fire-and-forget lato server se non c'è retain,
-        // ma l'SDK aspetta comunque l'ACK di "Published" dal server.
-
-        const probePubsub = new BenchmarkProbe('PUBSUB (64KB)', COUNT);
-        probePubsub.startTimer();
-
-        const pPubsub = [];
-        for (let i = 0; i < COUNT; i++) pPubsub.push(pubsubProd.publish(payload));
-        await Promise.all(pPubsub);
-
-        const resPubsub = probePubsub.printResult();
-
-        // Confronto (Solo commento, non fail test se vince Stream per varianza)
-        console.log(`\n🏆 Winner: ${resPubsub.throughput > resStream.throughput ? 'PUBSUB' : 'STREAM'}`);
-        console.log(`📊 PubSub is ${(resPubsub.throughput / resStream.throughput).toFixed(2)}x faster`);
-    });
 
 });
 
