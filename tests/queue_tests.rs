@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 mod helpers;
-use helpers::{setup_manager, Benchmark};
+use helpers::{setup_queue_manager, Benchmark};
 
 // =========================================================================================
 // 1. FEATURE TESTS (Happy Path + Advanced Logic)
@@ -16,7 +16,7 @@ mod features {
 
     #[tokio::test]
     async fn test_basic_push_pop_ack() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_basic_{}", Uuid::new_v4());
         
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
@@ -37,7 +37,7 @@ mod features {
 
     #[tokio::test]
     async fn test_priority_ordering() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_priority_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -59,7 +59,7 @@ mod features {
 
     #[tokio::test]
     async fn test_scheduled_delivery() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_scheduled_{}", Uuid::new_v4());
         // Configure short visibility to ensure pulse loop runs frequently (min 50ms)
         let config = QueueConfig {
@@ -85,7 +85,7 @@ mod features {
 
     #[tokio::test]
     async fn test_retry_and_dlq() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_dlq_{}", Uuid::new_v4());
         
         let visibility_timeout = 100;
@@ -135,7 +135,7 @@ mod features {
 
     #[tokio::test]
     async fn test_delete_queue() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_del_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -171,7 +171,7 @@ mod advanced {
 
     #[tokio::test]
     async fn test_batch_consume() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_batch_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -197,7 +197,7 @@ mod advanced {
 
     #[tokio::test]
     async fn test_long_polling() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_poll_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -230,7 +230,7 @@ mod advanced {
 
     #[tokio::test]
     async fn test_long_polling_timeout() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_poll_to_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -247,7 +247,7 @@ mod advanced {
 
     #[tokio::test]
     async fn test_snapshot_metrics() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_snap_{}", Uuid::new_v4());
         manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
 
@@ -460,7 +460,7 @@ mod performance {
 
     #[tokio::test]
     async fn bench_memory_throughput() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_mem_{}", Uuid::new_v4());
         let config = QueueConfig {
             persistence: PersistenceMode::Memory,
@@ -479,7 +479,7 @@ mod performance {
 
     #[tokio::test]
     async fn bench_fsync_throughput() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_sync_{}", Uuid::new_v4());
         let config = QueueConfig {
             persistence: PersistenceMode::Sync,
@@ -498,7 +498,7 @@ mod performance {
 
     #[tokio::test]
     async fn bench_fasync_throughput() {
-        let (manager, _tmp) = setup_manager().await;
+        let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_async_{}", Uuid::new_v4());
         let config = QueueConfig {
             persistence: PersistenceMode::Async { flush_ms: 200 },

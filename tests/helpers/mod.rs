@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use std::time::{Duration, Instant};
 use nexo::brokers::pub_sub::PubSubManager;
 
-pub async fn setup_manager() -> (QueueManager, TempDir) {
+pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
