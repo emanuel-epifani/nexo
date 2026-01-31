@@ -1,5 +1,6 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec } from '../codec';
+import { logger } from '../utils/logger';
 
 enum PubSubOpcode {
   PUB = 0x21,
@@ -39,6 +40,17 @@ export class NexoPubSub {
 
   constructor(private conn: NexoConnection) {
     conn.onPush = (topic, data) => this.dispatch(topic, data);
+
+    conn.on('reconnect', async () => {
+      logger.info("[PubSub] Restoring subscriptions...");
+      for (const topic of this.handlers.keys()) {
+        try {
+          await PubSubCommands.subscribe(this.conn, topic);
+        } catch (e) {
+          logger.error(`[PubSub] Failed to resubscribe to ${topic}`, e);
+        }
+      }
+    });
   }
 
   async publish(topic: string, data: any, options?: PublishOptions): Promise<void> {

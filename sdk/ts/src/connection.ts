@@ -1,21 +1,23 @@
 import * as net from 'net';
+import { EventEmitter } from 'events';
 import { logger } from './utils/logger';
 import { FrameType, ResponseStatus } from './protocol';
 import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
+import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
 
 /** @internal */
-export class NexoConnection {
-  private socket: net.Socket;
+export class NexoConnection extends EventEmitter {
+  public socket: net.Socket;
   public isConnected = false;
   private nextId = 1;
-  private pending = new Map<number, { 
-    resolve: (res: { status: number, data: Buffer }) => void, 
+  private pending = new Map<number, {
+    resolve: (res: { status: number, data: Buffer }) => void,
     reject: (err: Error) => void,
     timer: NodeJS.Timeout
   }>();
   private readonly requestTimeoutMs: number;
-  
+
   public onPush?: (topic: string, data: any) => void;
 
   private buffer: Buffer = Buffer.alloc(0);
@@ -24,18 +26,34 @@ export class NexoConnection {
   private readonly host: string;
   private readonly port: number;
 
+  private shouldReconnect = true;
+  private isReconnecting = false;
+
   constructor(options: NexoOptions) {
+    super();
     this.host = options.host;
     this.port = options.port;
     this.socket = new net.Socket();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
-    this.setupListeners();
   }
 
   async connect(): Promise<void> {
+    this.shouldReconnect = true;
+    return this.createSocketAndConnect();
+  }
+
+  private createSocketAndConnect(): Promise<void> {
+    if (this.socket.destroyed || this.socket.connecting) {
+      this.socket.removeAllListeners();
+      this.socket = new net.Socket();
+    }
+
+    this.setupListeners();
+
     return new Promise((res, rej) => {
       this.socket.connect(this.port, this.host, () => {
-        this.isConnected = true; res();
+        this.isConnected = true;
+        res();
       });
       this.socket.once('error', rej);
     });
@@ -48,13 +66,46 @@ export class NexoConnection {
     });
 
     const cleanup = (err: any) => {
+      const wasConnected = this.isConnected;
       this.isConnected = false;
+
+      if (wasConnected || this.isReconnecting) {
+        logger.error(`[Connection] SOCKET CLOSED. Error: ${err ? err.message : 'Clean close'}. Reconnecting: ${this.shouldReconnect}`);
+      }
+
+      this.pending.forEach(p => {
+        clearTimeout(p.timer);
+        p.reject(new ConnectionClosedError());
+      });
       this.pending.clear();
       this.chunks = [];
+      this.buffer = Buffer.alloc(0);
+
+      if (this.shouldReconnect && !this.isReconnecting) {
+        this.startReconnectLoop();
+      }
     };
 
     this.socket.on('error', (err) => logger.error("Socket error", err));
     this.socket.on('close', cleanup);
+  }
+
+  private async startReconnectLoop() {
+    this.isReconnecting = true;
+    logger.warn("⚠️ Connection lost. Attempting to reconnect...");
+
+    while (this.shouldReconnect && !this.isConnected) {
+      await new Promise(r => setTimeout(r, 1500));
+
+      try {
+        await this.createSocketAndConnect();
+        logger.info("✅ Reconnected to Nexo Server");
+        this.isReconnecting = false;
+        this.emit('reconnect');
+      } catch (e) {
+        // Retry silently
+      }
+    }
   }
 
   private processBuffer() {
@@ -128,12 +179,12 @@ export class NexoConnection {
 
     return new Promise((resolve, reject) => {
       if (!this.isConnected) {
-        return reject(new Error("Client not connected"));
+        return reject(new NotConnectedError());
       }
 
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Request timeout after ${this.requestTimeoutMs}ms`));
+        reject(new RequestTimeoutError(this.requestTimeoutMs));
       }, this.requestTimeoutMs);
 
       this.pending.set(id, {
@@ -163,6 +214,8 @@ export class NexoConnection {
   }
 
   disconnect() {
+    this.shouldReconnect = false;
+    this.isReconnecting = false;
     for (const req of this.pending.values()) {
       clearTimeout(req.timer);
     }

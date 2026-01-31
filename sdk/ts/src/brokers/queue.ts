@@ -1,6 +1,7 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+import { ConnectionClosedError } from '../errors';
 
 enum QueueOpcode {
   Q_CREATE = 0x10,
@@ -143,9 +144,21 @@ export class NexoQueue<T = any> {
     let active = true;
 
     const loop = async () => {
-      while (active && this.conn.isConnected) {
+      while (active) {
+        if (!this.conn.isConnected) {
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+
+        // Add small jitter to avoid thundering herd on reconnect
+        await new Promise(r => setTimeout(r, Math.random() * 500));
+
         try {
+          // Double check before sending
+          if (!this.conn.isConnected) continue;
+
           const messages = await QueueCommands.consume<T>(this.conn, this.name, batchSize, waitMs);
+
           if (messages.length === 0) continue;
 
           await runConcurrent(messages, concurrency, async (msg) => {
@@ -159,16 +172,23 @@ export class NexoQueue<T = any> {
             }
           });
 
-        } catch (e) {
-          if (!active || !this.conn.isConnected) return;
-          logger.error(`Queue consume error in ${this.name}:`, e);
+        } catch (e: any) {
+          if (!active) break;
+          // Catch-all for connection issues to prevent Unhandled Rejection
+          if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
+            await new Promise(r => setTimeout(r, 500));
+            continue;
+          }
+          logger.error(`[QUEUE-LOOP:${this.name}] CRITICAL ERROR:`, e);
           await new Promise(r => setTimeout(r, 1000));
         }
       }
       this.isSubscribed = false;
     };
 
-    loop();
+    loop().catch(err => {
+      logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
+    });
 
     return { stop: () => { active = false; } };
   }

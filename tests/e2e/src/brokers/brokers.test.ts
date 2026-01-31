@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { NexoClient } from '../../../../sdk/ts/src/client';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
-import { nexo } from "../nexo";
-import {BenchmarkProbe} from "../utils/benchmark-misure";
+import { BenchmarkProbe } from "../utils/benchmark-misure";
+import { killServer, runNexoServer } from "../utils/server";
 
 
 describe('BROKER INTEGRATION', async () => {
@@ -12,6 +12,7 @@ describe('BROKER INTEGRATION', async () => {
     const SERVER_HOST = process.env.SERVER_HOST!;
 
     beforeAll(async () => {
+        await runNexoServer(SERVER_HOST, SERVER_PORT);
         nexo = await NexoClient.connect({
             host: process.env.SERVER_HOST!,
             port: parseInt(process.env.SERVER_PORT!, 10)
@@ -20,6 +21,64 @@ describe('BROKER INTEGRATION', async () => {
 
     afterAll(async () => {
         nexo.disconnect();
+        killServer();
+    });
+
+    describe('BINARY PAYLOAD SUPPORT', () => {
+        // Un buffer riconoscibile
+        const binaryPayload = Buffer.from([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF]);
+
+        it('STORE: Should store and retrieve raw Buffer', async () => {
+            const key = `bin-store-${randomUUID()}`;
+            await nexo.store.map.set(key, binaryPayload);
+
+            const retrieved = await nexo.store.map.get(key);
+
+            expect(Buffer.isBuffer(retrieved)).toBe(true);
+            expect(retrieved.equals(binaryPayload)).toBe(true);
+        });
+
+        it('QUEUE: Should push and pop raw Buffer', async () => {
+            const qName = `bin-queue-${randomUUID()}`;
+            const q = await nexo.queue(qName).create();
+
+            await q.push(binaryPayload);
+
+            const received: any[] = [];
+            const sub = await q.subscribe(msg => received.push(msg));
+
+            await waitFor(() => expect(received.length).toBe(1));
+            expect(Buffer.isBuffer(received[0])).toBe(true);
+            expect(received[0].equals(binaryPayload)).toBe(true);
+            sub.stop();
+        });
+
+        it('PUBSUB: Should publish and subscribe raw Buffer', async () => {
+            const topic = `bin-pubsub-${randomUUID()}`;
+            const received: any[] = [];
+
+            await nexo.pubsub(topic).subscribe(msg => received.push(msg));
+            await nexo.pubsub(topic).publish(binaryPayload);
+
+            await waitFor(() => expect(received.length).toBe(1));
+            expect(Buffer.isBuffer(received[0])).toBe(true);
+            expect(received[0].equals(binaryPayload)).toBe(true);
+        });
+
+        it('STREAM: Should stream raw Buffer', async () => {
+            const topic = `bin-stream-${randomUUID()}`;
+            await nexo.stream(topic).create();
+
+            await nexo.stream(topic).publish(binaryPayload);
+
+            const received: any[] = [];
+            const sub = await nexo.stream(topic).subscribe('g1', msg => received.push(msg));
+
+            await waitFor(() => expect(received.length).toBe(1));
+            expect(Buffer.isBuffer(received[0])).toBe(true);
+            expect(received[0].equals(binaryPayload)).toBe(true);
+            sub.stop();
+        });
     });
 
     describe('SYSTEM & PROTOCOL', () => {
@@ -177,6 +236,8 @@ describe('BROKER INTEGRATION', async () => {
             // 3. Verifica: devo avere SOLO il messaggio target
             await waitFor(() => expect(received.length).toBe(1));
             expect(received[0].msg).toBe('target');
+
+            await nexo.pubsub(targetTopic).unsubscribe();
         });
 
         it('should handle Single-Level Wildcard (+) with strict isolation', async () => {
@@ -203,6 +264,8 @@ describe('BROKER INTEGRATION', async () => {
             await waitFor(() => expect(received.length).toBe(2));
             const ids = received.map(r => r.id).sort();
             expect(ids).toEqual(['match-1', 'match-2']);
+
+            await nexo.pubsub(pattern).unsubscribe();
         });
 
         it('should handle Multi-Level Wildcard (#) correctly', async () => {
@@ -228,6 +291,8 @@ describe('BROKER INTEGRATION', async () => {
             await waitFor(() => expect(received.length).toBe(2));
             const ids = received.map(r => r.id).sort();
             expect(ids).toEqual(['deep', 'root']);
+
+            await nexo.pubsub(pattern).unsubscribe();
         });
     });
 
@@ -393,6 +458,97 @@ describe('BROKER INTEGRATION', async () => {
         });
     });
 
+    describe('SOCKET RECONNECTION', () => {
+        it('PUBSUB: Should auto-resubscribe after connection loss', async () => {
+            const topic = `reconnect-pubsub-${randomUUID()}`;
+            const received: string[] = [];
+
+            // 1. Subscribe
+            await nexo.pubsub(topic).subscribe(m => received.push(m));
+
+            // 2. Simulate Network Failure (Hard Close without disconnect logic)
+            // We access private socket to destroy it properly simulationg an error
+            const socket = (nexo as any).conn.socket;
+            socket.destroy();
+
+            // Wait for disconnect detection
+            await waitFor(() => expect((nexo as any).conn.isConnected).toBe(false));
+
+            // 3. Wait for Auto-Reconnect (Default interval 1500ms)
+            // We allow some buffer for the loop to kick in
+            await waitFor(() => expect((nexo as any).conn.isConnected).toBe(true), { timeout: 5000 });
+
+            // 4. Publish NEW message (Server must know about subscription again)
+            await nexo.pubsub(topic).publish('after-crash');
+
+            // 5. Verify reception
+            await waitFor(() => expect(received).toContain('after-crash'));
+        });
+
+        it('QUEUE: Should resume consuming after connection loss', async () => {
+            const qName = `reconnect-queue-${randomUUID()}`;
+            const q = await nexo.queue(qName).create();
+            const received: any[] = [];
+
+            // 1. Subscribe
+            await q.subscribe(msg => received.push(msg));
+
+            // 2. Kill Connection (Clean destroy to avoid noise)
+            (nexo as any).conn.socket.destroy();
+
+            // 3. Wait for Reconnect
+            await waitFor(() => expect((nexo as any).conn.isConnected).toBe(true), { timeout: 5000 });
+
+            // Give it a moment to stabilize
+            await new Promise(r => setTimeout(r, 500));
+
+            // 4. Push NEW message (with retry policy for robustness)
+            await waitFor(async () => {
+                try {
+                    await q.push({ status: 'recovered' });
+                    return true;
+                } catch {
+                    return false;
+                }
+            }, { timeout: 5000, interval: 500 });
+
+            // 5. Verify
+            await waitFor(() => expect(received).toContainEqual({ status: 'recovered' }));
+        });
+
+        it('STREAM: Should resume consuming after connection loss (Rejoin Group)', async () => {
+            const topic = `reconnect-stream-${randomUUID()}`;
+            const group = 'g-reconnect';
+            await nexo.stream(topic).create();
+            const received: any[] = [];
+
+            // 1. Subscribe
+            await nexo.stream(topic).subscribe(group, m => received.push(m));
+
+            // 2. Kill Connection
+            (nexo as any).conn.socket.destroy();
+
+            // 3. Wait for Reconnect
+            await waitFor(() => expect((nexo as any).conn.isConnected).toBe(true), { timeout: 5000 });
+
+            // Buffer
+            await new Promise(r => setTimeout(r, 500));
+
+            // 4. Publish NEW message (Robust retry)
+            await waitFor(async () => {
+                try {
+                    await nexo.stream(topic).publish({ status: 'recovered' });
+                    return true;
+                } catch {
+                    return false;
+                }
+            }, { timeout: 5000, interval: 500 });
+
+            // 5. Verify (Rejoin must have happened)
+            await waitFor(() => expect(received).toContainEqual({ status: 'recovered' }));
+        });
+    });
+
     describe('PERFORMANCE (Protocol & SDK Efficiency)', () => {
 
         it('Protocol Latency: Small Payload Round-Trip', async () => {
@@ -455,6 +611,47 @@ describe('BROKER INTEGRATION', async () => {
             // 1MB transfer should be reasonably fast (e.g. < 50ms locally)
             expect(stats.p99).toBeLessThan(100);
         });
+    });
+
+    it('SHOOTOUT: Stream vs PubSub (Binary 64KB)', async () => {
+        const PAYLOAD_SIZE = 64 * 1024; // 64KB
+        const COUNT = 5000;
+        const payload = Buffer.alloc(PAYLOAD_SIZE).fill('x');
+
+        // --- ROUND 1: STREAM ---
+        const streamTopic = `perf-stream-${randomUUID()}`;
+        await nexo.stream(streamTopic).create({ persistence: { strategy: 'memory' } });
+        const streamProd = nexo.stream(streamTopic);
+
+        const probeStream = new BenchmarkProbe('STREAM (64KB)', COUNT);
+        probeStream.startTimer();
+
+        // Stream è persistente, quindi l'await garantisce la scrittura (o almeno l'accettazione)
+        const pStream = [];
+        for (let i = 0; i < COUNT; i++) pStream.push(streamProd.publish(payload));
+        await Promise.all(pStream);
+
+        const resStream = probeStream.printResult();
+
+        // --- ROUND 2: PUBSUB ---
+        const pubsubTopic = `perf-pubsub-${randomUUID()}`;
+        const pubsubProd = nexo.pubsub(pubsubTopic);
+
+        // Nota: PubSub in Nexo è fire-and-forget lato server se non c'è retain,
+        // ma l'SDK aspetta comunque l'ACK di "Published" dal server.
+
+        const probePubsub = new BenchmarkProbe('PUBSUB (64KB)', COUNT);
+        probePubsub.startTimer();
+
+        const pPubsub = [];
+        for (let i = 0; i < COUNT; i++) pPubsub.push(pubsubProd.publish(payload));
+        await Promise.all(pPubsub);
+
+        const resPubsub = probePubsub.printResult();
+
+        // Confronto (Solo commento, non fail test se vince Stream per varianza)
+        console.log(`\n🏆 Winner: ${resPubsub.throughput > resStream.throughput ? 'PUBSUB' : 'STREAM'}`);
+        console.log(`📊 PubSub is ${(resPubsub.throughput / resStream.throughput).toFixed(2)}x faster`);
     });
 
 });

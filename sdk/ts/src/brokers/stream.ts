@@ -1,6 +1,7 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
+import { ConnectionClosedError } from '../errors';
 
 enum StreamOpcode {
   S_CREATE = 0x30,
@@ -154,12 +155,29 @@ class StreamSubscription<T> {
   }
 
   private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number) {
-    while (this.conn.isConnected && this.active) {
+    while (this.active) {
+      // Se la connessione è caduta (isConnected false o errore "Connection closed"), andiamo in loop di pausa
+      if (!this.conn.isConnected) {
+        await this.backoff(500);
+        continue;
+      }
+
+      // Jitter to avoid thundering herd
+      await this.backoff(Math.random() * 500);
+
       try {
+        if (!this.conn.isConnected) continue;
+
         await this.joinGroup();
         await this.pollLoop(callback, batchSize);
       } catch (e: any) {
-        if (!this.active || !this.conn.isConnected) break;
+        if (!this.active) break;
+
+        // Se la connessione è caduta (isConnected false o errore "Connection closed"), andiamo in loop di pausa
+        if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
+          await this.backoff(500);
+          continue;
+        }
 
         if (this.isRebalanceError(e)) {
           logger.warn(`[${this.streamName}:${this.group}] Rebalance. Re-joining...`);
