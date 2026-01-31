@@ -63,15 +63,6 @@ export class NexoClient {
     return t;
   }
 
-  get debug() {
-    return {
-      echo: async (data: any) => {
-        const res = await this.conn.send(0x00, FrameCodec.any(data));
-        return FrameCodec.decodeAny(res.cursor);
-      }
-    };
-  }
-
   private setupGracefulShutdown() {
     const shutdown = async () => {
       logger.info("Graceful shutdown triggered. Disconnecting...");
