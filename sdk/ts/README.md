@@ -67,10 +67,10 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
     // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
     // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
     // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) 
-    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
+    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 100 }
     persistence: {
         strategy: 'file_async',
-        flushIntervalMs: 100    
+        flushIntervalMs: 200    
     }
 });
 
@@ -153,6 +153,8 @@ const stream = await client.stream<UserEvent>('user-events').create();
 await stream.publish({ type: 'login', userId: 'u1' });
 // Consumer (must specify group)
 await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+// Delete topic
+await stream.delete();
 ```
 
 <details>
@@ -170,10 +172,10 @@ const orders = await client.stream<Order>('orders').create({
     // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
     // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
     // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable)
-    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 1000 }
+    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 100 }
     persistence: {
         strategy: 'file_async',
-        flushIntervalMs: 100    
+        flushIntervalMs: 200    
     }
 });
 
