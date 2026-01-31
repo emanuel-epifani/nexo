@@ -142,7 +142,7 @@ export function DashboardPage() {
         </div>
 
         {/* CONTENT AREA */}
-        <main className="h-[calc(100vh-12rem)] border-t border-slate-800/50 pt-6 pb-6 overflow-hidden">
+        <main className="h-[calc(100vh-11rem)] border-t border-slate-800/50 pt-6 overflow-hidden">
             {activeTab === 'store' && storeQuery.data && (
                 <div className="h-full">
                     <StoreView data={storeQuery.data} />
