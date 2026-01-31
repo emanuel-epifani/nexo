@@ -12,19 +12,21 @@ pub async fn setup_manager() -> (QueueManager, TempDir) {
     let mut config = nexo::config::Config::global().queue.clone();
     config.persistence_path = path;
     
-    let manager = QueueManager::with_config(config);
+    let manager = QueueManager::new(config);
     (manager, temp_dir)
 }
 
 pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(PubSubManager::new());
+    let config = nexo::config::Config::global().pubsub.clone();
+    let manager = Arc::new(PubSubManager::new(config));
     (manager, temp_dir)
 }
 
 pub async fn setup_store_manager() -> (StoreManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let manager = StoreManager::new();
+    let config = nexo::config::Config::global().store.clone();
+    let manager = StoreManager::new(config);
     (manager, temp_dir)
 }
 

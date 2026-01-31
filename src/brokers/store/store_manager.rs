@@ -4,15 +4,16 @@ use crate::brokers::store::map::MapStore;
 use crate::brokers::store::types::{Entry, Value};
 use crate::brokers::store::map::MapValue;
 use std::time::Instant;
+use crate::config::StoreConfig;
 
 pub struct StoreManager {
     pub map: MapStore,
 }
 
 impl StoreManager {
-    pub fn new() -> Self {
+    pub fn new(config: StoreConfig) -> Self {
         Self {
-            map: MapStore::new(),
+            map: MapStore::new(config),
         }
     }
 

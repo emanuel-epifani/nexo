@@ -12,19 +12,20 @@ use crate::config::Config;
 #[derive(Clone)]
 pub struct MapStore {
     inner: Arc<DashMap<String, Entry>>,
+    config: crate::config::StoreConfig,
 }
 
 #[derive(Debug, Clone)]
 pub struct MapValue(pub Bytes);
 
 impl MapStore {
-    pub fn new() -> Self {
+    pub fn new(config: crate::config::StoreConfig) -> Self {
         let inner = Arc::new(DashMap::new());
 
         // Weak reference for the cleanup thread
         // This prevents the thread from keeping the map alive if the StoreManager is dropped
         let weak_inner = Arc::downgrade(&inner);
-        let cleanup_interval = Config::global().store.cleanup_interval_secs;
+        let cleanup_interval = config.cleanup_interval_secs;
 
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(cleanup_interval));
@@ -51,14 +52,14 @@ impl MapStore {
             }
         });
 
-        Self { inner }
+        Self { inner, config }
     }
 
     pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) {
         let expires_at = match ttl {
             Some(0) | None => {
                 // Use default TTL from config
-                Some(Instant::now() + Duration::from_secs(Config::global().store.default_ttl_secs))
+                Some(Instant::now() + Duration::from_secs(self.config.default_ttl_secs))
             }
             Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
         };

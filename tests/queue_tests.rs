@@ -153,7 +153,7 @@ mod features {
         let path = _tmp.path().to_str().unwrap().to_string();
         let mut sys_config = nexo::config::Config::global().queue.clone();
         sys_config.persistence_path = path;
-        let manager2 = QueueManager::with_config(sys_config);
+        let manager2 = QueueManager::new(sys_config);
         
         // Since we can't easily check if file exists without knowing path logic,
         // we check if declaring it again results in an empty queue (no recovery)
@@ -293,7 +293,7 @@ mod persistence {
         let q = format!("persist_crash_{}", Uuid::new_v4());
 
         {
-            let manager1 = QueueManager::with_config(sys_config.clone());
+            let manager1 = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync, // Ensure written immediately
                 ..Default::default()
@@ -306,7 +306,7 @@ mod persistence {
 
         // Simulating Restart
         {
-            let manager2 = QueueManager::with_config(sys_config.clone());
+            let manager2 = QueueManager::new(sys_config.clone());
             // We must "redeclare" the queue to spawn the actor again,
             // but the actor should find the DB and recover.
             let config = QueueConfig {
@@ -329,7 +329,7 @@ mod persistence {
         sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::with_config(sys_config.clone());
+            let manager = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -345,7 +345,7 @@ mod persistence {
 
         // Restart immediately
         {
-            let manager2 = QueueManager::with_config(sys_config.clone());
+            let manager2 = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -373,7 +373,7 @@ mod persistence {
         sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::with_config(sys_config.clone());
+            let manager = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -390,7 +390,7 @@ mod persistence {
 
         // Restart
         {
-            let manager2 = QueueManager::with_config(sys_config.clone());
+            let manager2 = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -411,7 +411,7 @@ mod persistence {
         sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::with_config(sys_config.clone());
+            let manager = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 visibility_timeout_ms: 500, // Short timeout
                 persistence: PersistenceMode::Sync,
@@ -430,7 +430,7 @@ mod persistence {
         tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
 
         {
-            let manager2 = QueueManager::with_config(sys_config.clone());
+            let manager2 = QueueManager::new(sys_config.clone());
             let config = QueueConfig {
                 visibility_timeout_ms: 500,
                 persistence: PersistenceMode::Sync,

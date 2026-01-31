@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use crate::brokers::queues::queue::{QueueConfig, Message};
 use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queues::persistence::types::PersistenceMode;
-use crate::config::Config;
 use crate::dashboard::models::queues::QueueBrokerSnapshot;
 
 // ==========================================
@@ -46,20 +45,20 @@ pub enum ManagerCommand {
 #[derive(Clone)]
 pub struct QueueManager {
     tx: mpsc::Sender<ManagerCommand>,
+    config: crate::config::QueueConfig,
 }
 
 impl QueueManager {
-    pub fn new() -> Self {
-        Self::with_config(Config::global().queue.clone())
-    }
-
-    pub fn with_config(system_config: crate::config::QueueConfig) -> Self {
+    pub fn new(system_config: crate::config::QueueConfig) -> Self {
         let (tx, rx) = mpsc::channel(256);
         let manager_tx = tx.clone();
         
-        tokio::spawn(Self::run_manager_loop(rx, manager_tx, system_config));
+        tokio::spawn(Self::run_manager_loop(rx, manager_tx, system_config.clone()));
         
-        Self { tx }
+        Self { 
+            tx,
+            config: system_config,
+        }
     }
 
     async fn run_manager_loop(
@@ -230,8 +229,8 @@ impl QueueManager {
         let actor = self.get_actor(&queue_name).await
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
         
-        let max_val = max.unwrap_or(Config::global().queue.default_batch_size);
-        let wait_val = wait_ms.unwrap_or(Config::global().queue.default_wait_ms);
+        let max_val = max.unwrap_or(self.config.default_batch_size);
+        let wait_val = wait_ms.unwrap_or(self.config.default_wait_ms);
 
         let (tx, rx) = oneshot::channel();
         actor.send(QueueActorCommand::ConsumeBatch { max: max_val, wait_ms: wait_val, reply: tx })

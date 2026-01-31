@@ -13,7 +13,7 @@ use crate::brokers::stream::topic::TopicState;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
-use crate::config::{Config, StreamConfig};
+use crate::config::StreamConfig;
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, RetentionOptions};
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
@@ -425,14 +425,11 @@ fn resolve_retention(
 #[derive(Clone)]
 pub struct StreamManager {
     tx: mpsc::Sender<ManagerCommand>,
+    config: StreamConfig,
 }
 
 impl StreamManager {
-    pub fn new() -> Self {
-        Self::with_config(Config::global().stream.clone())
-    }
-
-    pub fn with_config(config: StreamConfig) -> Self {
+    pub fn new(config: StreamConfig) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
         let actor_capacity = config.actor_channel_capacity;
         let default_partitions = config.default_partitions;
@@ -532,7 +529,7 @@ impl StreamManager {
             }
         });
 
-        Self { tx }
+        Self { tx, config }
     }
 
     // --- Public API ---

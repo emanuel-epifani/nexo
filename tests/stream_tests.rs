@@ -11,9 +11,19 @@ mod features {
     use super::*;
     use nexo::brokers::stream::StreamManager;
 
+    fn get_test_config(path: Option<&str>) -> StreamConfig {
+        let mut config = Config::global().stream.clone();
+        if let Some(p) = path {
+            config.persistence_path = p.to_string();
+        }
+        config
+    }
+
     #[tokio::test]
     async fn test_stream_basic_flow() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "test-basic-flow";
 
         // 1. Create
@@ -43,7 +53,9 @@ mod features {
 
     #[tokio::test]
     async fn test_stream_group_rebalancing_scale_up() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "rebalance-scale-up";
         let group = "g-scale";
 
@@ -78,7 +90,9 @@ mod features {
 
     #[tokio::test]
     async fn test_stream_group_rebalancing_scale_down() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "rebalance-scale-down";
         let group = "g-down";
 
@@ -108,7 +122,9 @@ mod features {
 
     #[tokio::test]
     async fn test_stream_epoch_fencing() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "epoch-fencing";
         let group = "g-epoch";
 
@@ -134,7 +150,9 @@ mod features {
 
     #[tokio::test]
     async fn test_stream_ordering_per_partition() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "ordering-topic";
 
         manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: None, ..Default::default() }).await.unwrap();
@@ -155,7 +173,9 @@ mod features {
 
     #[tokio::test]
     async fn test_stream_commit_persistence() {
-        let manager = StreamManager::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+        let manager = StreamManager::new(config);
         let topic = "commit-topic";
         let group = "g-commit";
 
@@ -183,7 +203,7 @@ mod features {
         let mut config = Config::global().stream.clone();
         config.persistence_path = path_str.clone();
 
-        let manager = StreamManager::with_config(config);
+        let manager = StreamManager::new(config);
         let topic = "delete-topic-test";
 
         // 1. Create
@@ -226,13 +246,15 @@ mod persistence {
     async fn test_write_and_recover() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path_str = temp_dir.path().to_str().unwrap().to_string();
-        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
         
         let topic = "persist-recover";
 
         // 1. Create & Publish (Sync)
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::new(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -247,7 +269,7 @@ mod persistence {
 
         // 2. Recovery
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::new(config.clone());
             // Topic auto-recovers if exists on disk? 
             // Currently StreamManager::new() does NOT auto-scan disk to recreate actors. 
             // It lazily creates them or we need to "re-create" topic to trigger recovery logic in Actor::new()
@@ -273,13 +295,15 @@ mod persistence {
     async fn test_commit_recovery() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path_str = temp_dir.path().to_str().unwrap().to_string();
-        std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", &path_str);
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = path_str.clone();
 
         let topic = "persist-commit";
         let group = "g-persist";
 
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::new(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -291,7 +315,7 @@ mod persistence {
         }
 
         {
-            let manager = StreamManager::new();
+            let manager = StreamManager::new(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -315,7 +339,7 @@ mod persistence {
 
         // 1. Write Data
         {
-            let manager = StreamManager::with_config(config.clone());
+            let manager = StreamManager::new(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -343,7 +367,7 @@ mod persistence {
 
         // 3. Recover
         {
-            let manager = StreamManager::with_config(config.clone());
+            let manager = StreamManager::new(config.clone());
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
                 persistence: Some(PersistenceOptions::FileSync),
@@ -367,7 +391,7 @@ mod persistence {
         config.persistence_path = path_str.clone();
         config.compaction_threshold = 2; // Trigger compaction after every 2 ops
 
-        let manager = StreamManager::with_config(config);
+        let manager = StreamManager::new(config);
         let topic = "topic_compaction";
         let group = "group_compact";
         let client = "client_1";
@@ -395,7 +419,7 @@ mod persistence {
 
         let mut recover_config = Config::global().stream.clone();
         recover_config.persistence_path = path_str;
-        let recovered_manager = StreamManager::with_config(recover_config);
+        let recovered_manager = StreamManager::new(recover_config);
 
         // 4. VERIFY: Verifichiamo lo stato recuperato
         recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -435,7 +459,7 @@ mod persistence {
         // 1 message is around 50-60 bytes. Let's set it to 100 bytes to force rotation after ~2 messages.
         config.max_segment_size = 100; 
 
-        let manager = StreamManager::with_config(config);
+        let manager = StreamManager::new(config);
         let topic = "topic_segmentation";
 
         manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -476,7 +500,7 @@ mod persistence {
         
         let mut recover_config = Config::global().stream.clone();
         recover_config.persistence_path = path_str;
-        let recovered_manager = StreamManager::with_config(recover_config);
+        let recovered_manager = StreamManager::new(recover_config);
         
         // Trigger recovery
         recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -518,7 +542,7 @@ mod persistence {
         config.retention_check_interval_ms = 100; // Check every 100ms
         config.default_retention_bytes = 250; // Keep approx 2.5 segments
 
-        let manager = StreamManager::with_config(config);
+        let manager = StreamManager::new(config);
         let topic = "topic_retention";
 
         manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -580,8 +604,11 @@ mod performance {
     async fn bench_stream_memory() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
 
-        let manager = StreamManager::new();
+        let manager = StreamManager::new(config);
         let topic = "bench-mem";
         manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory), ..Default::default() }).await.unwrap();
 
@@ -598,8 +625,11 @@ mod performance {
     async fn bench_stream_fsync() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
 
-        let manager = StreamManager::new();
+        let manager = StreamManager::new(config);
         let topic = "bench-sync";
         manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::FileSync), ..Default::default() }).await.unwrap();
 
@@ -616,8 +646,11 @@ mod performance {
     async fn bench_stream_fasync() {
         let temp_dir = tempfile::tempdir().unwrap();
         std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
+        
+        let mut config = Config::global().stream.clone();
+        config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
 
-        let manager = StreamManager::new();
+        let manager = StreamManager::new(config);
         let topic = "bench-async";
         manager.create_topic(topic.to_string(), StreamCreateOptions { 
             partitions: Some(1), 
@@ -633,5 +666,56 @@ mod performance {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         bench.stop();
+    }
+}
+
+mod unit_tests {
+    use nexo::brokers::stream::topic::TopicState;
+    use bytes::Bytes;
+
+    #[test]
+    fn test_topic_state_pure_logic() {
+        let mut state = TopicState::new("test_topic".to_string(), 2, 1000);
+        
+        // 1. Publish (Partition 0)
+        let (offset, _) = state.publish(0, Bytes::from("msg1"));
+        assert_eq!(offset, 0);
+        assert_eq!(state.get_high_watermark(0), 1);
+
+        // 2. Publish (Partition 1)
+        let (offset, _) = state.publish(1, Bytes::from("msg2"));
+        assert_eq!(offset, 0);
+        
+        // 3. Read
+        let msgs = state.read(0, 0, 10);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload, Bytes::from("msg1"));
+        
+        let msgs = state.read(1, 0, 10);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].payload, Bytes::from("msg2"));
+    }
+
+    #[test]
+    fn test_read_offset_logic() {
+        let mut state = TopicState::new("test".to_string(), 1, 1000);
+        for i in 0..10 {
+            state.publish(0, Bytes::from(format!("msg{}", i)));
+        }
+
+        // Read all
+        let all = state.read(0, 0, 100);
+        assert_eq!(all.len(), 10);
+        assert_eq!(all[0].offset, 0);
+        assert_eq!(all[9].offset, 9);
+
+        // Read mid
+        let mid = state.read(0, 5, 100);
+        assert_eq!(mid.len(), 5);
+        assert_eq!(mid[0].offset, 5);
+        
+        // Read future
+        let future = state.read(0, 100, 100);
+        assert!(future.is_empty());
     }
 }

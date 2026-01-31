@@ -14,6 +14,7 @@ use crate::brokers::pub_sub::PubSubManager;
 use crate::brokers::stream::StreamManager;
 use crate::dashboard::models::system::SystemSnapshot;
 use crate::dashboard::models::system::BrokersSnapshot;
+use crate::config::Config;
 
 // ========================================
 // ENGINE (The Singleton)
@@ -29,12 +30,12 @@ pub struct NexoEngine {
 }
 
 impl NexoEngine {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
-            store: Arc::new(StoreManager::new()),
-            queue: Arc::new(QueueManager::new()),
-            pubsub: Arc::new(PubSubManager::new()),
-            stream: Arc::new(StreamManager::new()),
+            store: Arc::new(StoreManager::new(config.store.clone())),
+            queue: Arc::new(QueueManager::new(config.queue.clone())),
+            pubsub: Arc::new(PubSubManager::new(config.pubsub.clone())),
+            stream: Arc::new(StreamManager::new(config.stream.clone())),
             start_time: Instant::now(),
         }
     }
