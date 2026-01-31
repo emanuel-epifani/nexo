@@ -150,7 +150,11 @@ mod features {
         assert!(manager.pop(&q).await.is_none());
 
         // Restart to check disk cleanup
-        let manager2 = QueueManager::new();
+        let path = _tmp.path().to_str().unwrap().to_string();
+        let mut sys_config = nexo::config::Config::global().queue.clone();
+        sys_config.persistence_path = path;
+        let manager2 = QueueManager::with_config(sys_config);
+        
         // Since we can't easily check if file exists without knowing path logic,
         // we check if declaring it again results in an empty queue (no recovery)
         manager2.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
@@ -281,28 +285,15 @@ mod persistence {
 
     #[tokio::test]
     async fn test_crash_recovery_messages() {
-        // Need a fixed path for this test to simulate "same server"
         let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().to_str().unwrap().to_string();
-
-        // We override config via QueueConfig per queue, assuming we can pass path?
-        // Ah, QueueActor reads Global Config for path. This is a limitation for testing isolation.
-        // WE CANNOT easily change the path for just this test because Config is static OnceLock.
-        // HACK: We will use the default path but unique names, and rely on `Drop` not deleting files.
-        // BUT wait, QueueManager does not expose "Restart".
-        // To test recovery, we need to:
-        // 1. Create Manager, Push, Drop Manager (simulates crash).
-        // 2. Create NEW Manager (simulates restart).
-        // The problem is `QueueActor` constructor creates the DB.
-
-        // Since we can't change the root path per test easily, we will rely on the real "./data/queues".
-        // Ideally we should clean it up or use a test env var before running tests.
-        // For now, let's assume we can use a unique queue name.
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let mut sys_config = nexo::config::Config::global().queue.clone();
+        sys_config.persistence_path = path.clone();
 
         let q = format!("persist_crash_{}", Uuid::new_v4());
 
         {
-            let manager1 = QueueManager::new();
+            let manager1 = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync, // Ensure written immediately
                 ..Default::default()
@@ -315,7 +306,7 @@ mod persistence {
 
         // Simulating Restart
         {
-            let manager2 = QueueManager::new();
+            let manager2 = QueueManager::with_config(sys_config.clone());
             // We must "redeclare" the queue to spawn the actor again,
             // but the actor should find the DB and recover.
             let config = QueueConfig {
@@ -332,9 +323,13 @@ mod persistence {
     #[tokio::test]
     async fn test_scheduled_persistence() {
         let q = format!("persist_scheduled_{}", Uuid::new_v4());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let mut sys_config = nexo::config::Config::global().queue.clone();
+        sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::new();
+            let manager = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -350,7 +345,7 @@ mod persistence {
 
         // Restart immediately
         {
-            let manager2 = QueueManager::new();
+            let manager2 = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -372,9 +367,13 @@ mod persistence {
     #[tokio::test]
     async fn test_acked_persistence() {
         let q = format!("persist_acked_{}", Uuid::new_v4());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let mut sys_config = nexo::config::Config::global().queue.clone();
+        sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::new();
+            let manager = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -391,7 +390,7 @@ mod persistence {
 
         // Restart
         {
-            let manager2 = QueueManager::new();
+            let manager2 = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 persistence: PersistenceMode::Sync,
                 ..Default::default()
@@ -406,9 +405,13 @@ mod persistence {
     #[tokio::test]
     async fn test_inflight_recovery_timeout() {
         let q = format!("persist_inflight_{}", Uuid::new_v4());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().to_str().unwrap().to_string();
+        let mut sys_config = nexo::config::Config::global().queue.clone();
+        sys_config.persistence_path = path.clone();
 
         {
-            let manager = QueueManager::new();
+            let manager = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 visibility_timeout_ms: 500, // Short timeout
                 persistence: PersistenceMode::Sync,
@@ -427,7 +430,7 @@ mod persistence {
         tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
 
         {
-            let manager2 = QueueManager::new();
+            let manager2 = QueueManager::with_config(sys_config.clone());
             let config = QueueConfig {
                 visibility_timeout_ms: 500,
                 persistence: PersistenceMode::Sync,

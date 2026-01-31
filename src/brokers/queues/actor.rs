@@ -67,16 +67,16 @@ impl QueueActor {
     pub fn new(
         name: String,
         config: QueueConfig,
+        persistence_path: PathBuf,
         rx: mpsc::Receiver<QueueActorCommand>,
         manager_tx: mpsc::Sender<ManagerCommand>,
     ) -> Self {
-        let base_path = PathBuf::from(&Config::global().queue.persistence_path);
         
-        if let Err(e) = std::fs::create_dir_all(&base_path) {
-            error!("Failed to create queue data directory at {:?}: {}", base_path, e);
+        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
+            error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
         }
 
-        let db_path = base_path.join(format!("{}.db", name));
+        let db_path = persistence_path.join(format!("{}.db", name));
         let store = QueueStore::new(db_path, config.persistence.clone());
 
         Self {

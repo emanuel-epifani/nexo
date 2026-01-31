@@ -50,10 +50,14 @@ pub struct QueueManager {
 
 impl QueueManager {
     pub fn new() -> Self {
+        Self::with_config(Config::global().queue.clone())
+    }
+
+    pub fn with_config(system_config: crate::config::QueueConfig) -> Self {
         let (tx, rx) = mpsc::channel(256);
         let manager_tx = tx.clone();
         
-        tokio::spawn(Self::run_manager_loop(rx, manager_tx));
+        tokio::spawn(Self::run_manager_loop(rx, manager_tx, system_config));
         
         Self { tx }
     }
@@ -61,6 +65,7 @@ impl QueueManager {
     async fn run_manager_loop(
         mut rx: mpsc::Receiver<ManagerCommand>,
         manager_tx: mpsc::Sender<ManagerCommand>,
+        system_config: crate::config::QueueConfig,
     ) {
         let mut actors: HashMap<String, mpsc::Sender<QueueActorCommand>> = HashMap::new();
 
@@ -71,7 +76,8 @@ impl QueueManager {
                         let actor_tx = Self::spawn_queue_actor(
                             name.clone(), 
                             config, 
-                            manager_tx.clone()
+                            manager_tx.clone(),
+                            &system_config
                         );
                         actors.insert(name, actor_tx);
                     }
@@ -86,17 +92,17 @@ impl QueueManager {
                     let actor_tx = if let Some(tx) = actors.get(&queue_name) {
                         tx.clone()
                     } else {
-                        let global_config = &Config::global().queue;
                         let config = QueueConfig {
-                            visibility_timeout_ms: global_config.visibility_timeout_ms,
-                            max_retries: global_config.max_retries,
-                            ttl_ms: global_config.ttl_ms,
-                            persistence: PersistenceMode::Memory, // Default to memory for implcit DLQ
+                            visibility_timeout_ms: system_config.visibility_timeout_ms,
+                            max_retries: system_config.max_retries,
+                            ttl_ms: system_config.ttl_ms,
+                            persistence: PersistenceMode::Memory,
                         };
                         let tx = Self::spawn_queue_actor(
                             queue_name.clone(),
                             config,
-                            manager_tx.clone()
+                            manager_tx.clone(),
+                            &system_config
                         );
                         actors.insert(queue_name, tx.clone());
                         tx
@@ -121,9 +127,8 @@ impl QueueManager {
                     }
                     
                     // 2. Delete Persistence
-                    // We need to construct the path manually here or ask Config.
-                    // Ideally QueueStore::destroy(name) would be better but Manager knows path too.
-                    let base_path = std::path::PathBuf::from(&Config::global().queue.persistence_path);
+                    // Use system_config path
+                    let base_path = std::path::PathBuf::from(&system_config.persistence_path);
                     let db_path = base_path.join(format!("{}.db", name));
                     let wal_path = base_path.join(format!("{}.db-wal", name));
                     let shm_path = base_path.join(format!("{}.db-shm", name));
@@ -162,11 +167,13 @@ impl QueueManager {
         name: String,
         config: QueueConfig,
         manager_tx: mpsc::Sender<ManagerCommand>,
+        system_config: &crate::config::QueueConfig,
     ) -> mpsc::Sender<QueueActorCommand> {
         let (tx, rx) = mpsc::channel(256);
         
-        // Spawn actor
-        let actor = QueueActor::new(name, config.clone(), rx, manager_tx);
+        // Spawn actor with path from system_config
+        let path = std::path::PathBuf::from(&system_config.persistence_path);
+        let actor = QueueActor::new(name, config.clone(), path, rx, manager_tx);
         tokio::spawn(actor.run());
         
         tx

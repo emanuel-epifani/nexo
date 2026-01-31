@@ -7,7 +7,12 @@ use nexo::brokers::pub_sub::PubSubManager;
 
 pub async fn setup_manager() -> (QueueManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let manager = QueueManager::new();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+    
+    let mut config = nexo::config::Config::global().queue.clone();
+    config.persistence_path = path;
+    
+    let manager = QueueManager::with_config(config);
     (manager, temp_dir)
 }
 
