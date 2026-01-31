@@ -26,6 +26,8 @@ export function DashboardPage() {
           if (!response.ok) throw new Error('Failed to fetch store')
           return response.json()
         },
+        enabled: activeTab === 'store',
+        gcTime: 0
       },
       {
         queryKey: ['queue-snapshot'],
@@ -34,6 +36,8 @@ export function DashboardPage() {
           if (!response.ok) throw new Error('Failed to fetch queue')
           return response.json()
         },
+        enabled: activeTab === 'queue',
+        gcTime: 0
       },
       {
         queryKey: ['stream-snapshot'],
@@ -42,6 +46,8 @@ export function DashboardPage() {
           if (!response.ok) throw new Error('Failed to fetch stream')
           return response.json()
         },
+        enabled: activeTab === 'stream',
+        gcTime: 0
       },
       {
         queryKey: ['pubsub-snapshot'],
@@ -50,12 +56,25 @@ export function DashboardPage() {
           if (!response.ok) throw new Error('Failed to fetch pubsub')
           return response.json()
         },
+        enabled: activeTab === 'pubsub',
+        gcTime: 0
       },
     ],
   })
 
-  const isLoading = storeQuery.isLoading || queueQuery.isLoading || streamQuery.isLoading || pubsubQuery.isLoading
-  const hasError = storeQuery.error || queueQuery.error || streamQuery.error || pubsubQuery.error
+  // Loading state: Only consider the ACTIVE tab's loading state
+  const isLoading = 
+      (activeTab === 'store' && storeQuery.isLoading) ||
+      (activeTab === 'queue' && queueQuery.isLoading) ||
+      (activeTab === 'stream' && streamQuery.isLoading) ||
+      (activeTab === 'pubsub' && pubsubQuery.isLoading);
+
+  // Error state: Only consider the ACTIVE tab's error state
+  const hasError = 
+      (activeTab === 'store' && storeQuery.error) ||
+      (activeTab === 'queue' && queueQuery.error) ||
+      (activeTab === 'stream' && streamQuery.error) ||
+      (activeTab === 'pubsub' && pubsubQuery.error);
 
   if (isLoading) {
     return (
