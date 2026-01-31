@@ -2,7 +2,7 @@ import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
 
-export enum QueueOpcode {
+enum QueueOpcode {
   Q_CREATE = 0x10,
   Q_PUSH = 0x11,
   Q_CONSUME = 0x12,
@@ -11,7 +11,7 @@ export enum QueueOpcode {
   Q_DELETE = 0x15,
 }
 
-export const QueueCommands = {
+const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) =>
     conn.send(
       QueueOpcode.Q_CREATE,

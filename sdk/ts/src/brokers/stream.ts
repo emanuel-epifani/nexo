@@ -2,7 +2,7 @@ import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { logger } from '../utils/logger';
 
-export enum StreamOpcode {
+enum StreamOpcode {
   S_CREATE = 0x30,
   S_PUB = 0x31,
   S_FETCH = 0x32,
@@ -34,7 +34,7 @@ export interface StreamPublishOptions {
   key?: string;
 }
 
-export const StreamCommands = {
+const StreamCommands = {
   create: (conn: NexoConnection, name: string, options: StreamCreateOptions) =>
     conn.send(
       StreamOpcode.S_CREATE,

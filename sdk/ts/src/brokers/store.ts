@@ -2,13 +2,13 @@ import { NexoConnection } from '../connection';
 import { ResponseStatus } from '../protocol';
 import { FrameCodec } from '../codec';
 
-export enum StoreOpcode {
+enum StoreOpcode {
   MAP_SET = 0x02,
   MAP_GET = 0x03,
   MAP_DEL = 0x04,
 }
 
-export const StoreCommands = {
+const StoreCommands = {
   mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) =>
     conn.send(
       StoreOpcode.MAP_SET,

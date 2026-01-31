@@ -1,13 +1,13 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec } from '../codec';
 
-export enum PubSubOpcode {
+enum PubSubOpcode {
   PUB = 0x21,
   SUB = 0x22,
   UNSUB = 0x23,
 }
 
-export const PubSubCommands = {
+const PubSubCommands = {
   publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) =>
     conn.send(
       PubSubOpcode.PUB,
