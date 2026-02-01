@@ -452,12 +452,26 @@ impl StreamWriter {
                 error!("Failed to flush partition file: {}", e);
                 failed = true;
             }
+            // Explicit SYNC for Sync Mode
+            if let PersistenceMode::Sync = self.mode {
+                if let Err(e) = w.get_ref().sync_all() {
+                    error!("Failed to sync_all partition file: {}", e);
+                    failed = true;
+                }
+            }
         }
         // Flush commits
         if let Some(w) = &mut self.commit_file {
             if let Err(e) = w.flush() {
                 error!("Failed to flush commit file: {}", e);
                 failed = true;
+            }
+            // Explicit SYNC for Sync Mode
+            if let PersistenceMode::Sync = self.mode {
+                if let Err(e) = w.get_ref().sync_all() {
+                    error!("Failed to sync_all commit file: {}", e);
+                    failed = true;
+                }
             }
         }
 

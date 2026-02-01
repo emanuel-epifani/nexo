@@ -1,15 +1,22 @@
 use rusqlite::{params, Connection, Result};
-use super::types::StorageOp;
+use super::types::{StorageOp, PersistenceMode};
 
 use crate::brokers::queues::queue::{Message, MessageState, current_time_ms}; // Add current_time_ms import
 use uuid::Uuid;
 
-pub fn init_db(conn: &Connection) -> Result<()> {
-    // ... rest of init_db ...
+pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
+    let sync_pragma = match mode {
+        PersistenceMode::Sync => "FULL",
+        _ => "NORMAL",
+    };
+
     conn.execute_batch(
+        &format!(
         "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
+         PRAGMA synchronous = {};
          PRAGMA foreign_keys = ON;",
+         sync_pragma
+        )
     )?;
 
     // Main Queue Table

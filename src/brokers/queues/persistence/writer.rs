@@ -21,7 +21,7 @@ pub async fn run_writer(
         }
     };
 
-    if let Err(e) = init_db(&conn) {
+    if let Err(e) = init_db(&conn, &mode) {
         error!("FATAL: Failed to init DB schema: {}", e);
         return;
     }
