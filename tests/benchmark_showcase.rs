@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Barrier};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
-use nexo::brokers::queues::persistence::types::PersistenceMode;
+
 // --- UTILS ---
 
 pub struct Benchmark {
@@ -157,14 +157,12 @@ async fn bench_03_stream_publish_fasync() {
 async fn bench_04_pubsub_fanout() {
     // 10k messaggi * 1k subs = 10M delivery totali
     let msg_count = 10_000;
-    let sub_count = 1_000;
+    let sub_count = 1000;
     let total_delivery = msg_count * sub_count;
 
     let config = Config::global().pubsub.clone();
     let manager = Arc::new(PubSubManager::new(config));
     let topic = "fanout/global";
-
-    println!("🚀 PREPARING: PUBSUB Fanout 1->{} (Creating {} subscribers...)", sub_count, sub_count);
 
     // Shared counter for received messages
     let received_count = Arc::new(AtomicUsize::new(0));
@@ -200,8 +198,7 @@ async fn bench_04_pubsub_fanout() {
     // Wait for all subscribers to be ready
     barrier.wait().await;
     
-    println!("🚀 STARTING: PUBSUB: Fanout 1 Pub -> {} Subs, {} msgs (Total {} deliveries)", sub_count, msg_count, total_delivery);
-    
+
     let start_time = Instant::now();
     let payload = Bytes::from("broadcast_payload");
 
@@ -227,7 +224,7 @@ async fn bench_04_pubsub_fanout() {
     let secs = total_duration.as_secs_f64();
     let ops_sec = total_delivery as f64 / secs;
 
-    println!("\n📊 PUBSUB: Fanout 1->{} (10k msgs -> 10M deliveries)", sub_count);
+    println!("\n📊 PUBSUB: Fanout 1->{} (100k msgs -> 10M deliveries)", sub_count);
     println!("   Ingestion:   {:.0} msg/sec (Publish)", publish_ops_sec);
     println!("   Fanout:      {:.0} msg/sec (Delivery)", ops_sec);
     println!("   Total Time:  {:.2?}", total_duration);

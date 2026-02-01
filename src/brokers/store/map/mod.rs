@@ -77,9 +77,8 @@ impl MapStore {
                     return None; // Lazy expiration could happen here (delete on read)
                 }
             }
-            if let Value::Map(MapValue(val)) = &entry.value {
-                return Some(val.clone());
-            }
+            let Value::Map(MapValue(val)) = &entry.value;
+            return Some(val.clone());
         }
         None
     }
@@ -89,7 +88,7 @@ impl MapStore {
     }
 
     /// Used for snapshots and iterating
-    pub fn iter(&self) -> dashmap::iter::Iter<String, Entry> {
+    pub fn iter(&self) -> dashmap::iter::Iter<'_, String, Entry> {
         self.inner.iter()
     }
 }
