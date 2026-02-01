@@ -1,22 +1,19 @@
 <div align="center">
 
 # NEXO
-### The All-in-One Broker for High-Performance Scale-Ups
+### The High-Performance All-in-One Broker for Scale-Ups
 
-[![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Unified Infrastructure.** Zero overhead. Maximum velocity.
+**Unified Infrastructure.** One Binary. Four Brokers. Zero Operational Headaches.
 
-[Get Started](#getting-started) • [Documentation](docs/) • [Dashboard](#dashboard)
 
 </div>
 
 ---
 
 ## 📑 Table of Contents
-- [Overview](#-overview)
-- [Architecture](#-architecture)
+- [The Mission](#-the-mission)
+- [Architecture](#-arc)
 - [Core Brokers](#-core-brokers)
 - [Performance](#-performance)
 - [Why Nexo?](#-why-nexo)
@@ -24,18 +21,27 @@
 
 ---
 
-## 🎯 The Mission
-Modern backend architecture suffers from **Infrastructure Fatigue**. A typical startup stack needs:
-*   Redis for caching/sessions.
-*   RabbitMQ/SQS for background jobs.
-*   Mosquitto/MQTT for real-time events.
-*   Kafka for event sourcing.
+## The Mission
 
-**Nexo** is a pragmatic trade-off. It sacrifices "infinite horizontal scale" (distributed clustering complexities) for **operational simplicity** and **vertical performance**. It is designed to run on a single instance and handle millions of operations per second, serving the needs of 99% of scale-ups with zero operational overhead.
+Modern backend architecture suffers from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized systems—Redis for caching, RabbitMQ for jobs, Kafka for streams—each with its own protocol, configuration, and maintenance overhead.
+
+
+Nexo is the antidote. It is a pragmatic trade-off that sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**. Designed to run on a single instance, Nexo handles millions of operations per second, serving the needs of 99% of scale-ups with zero operational overhead.
+
+*   **Unified:** One TCP connection for Caching, Pub/Sub, Queues, and Streams.
+*   **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
+*   **Fast:** Built in Rust on top of Tokio for extreme throughput and low latency.
+*   **Efficient:** Hybrid storage engine uses RAM for speed and Disk for durability where it matters.
 
 ## Architecture
 
-Nexo sits at the heart of your stack, bridging your applications with the data patterns they need.
+Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in dashboard.
+
+*   **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
+*   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
+*   **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
+*   **Embedded Observability:** The server hosts its own Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
+
 
 ```
                                      ┌──────────────────────────────┐
@@ -43,19 +49,19 @@ Nexo sits at the heart of your stack, bridging your applications with the data p
                                      │                              │       ┌──────────────┐
                                      │   ┌──────────────────────┐   │──────▶│              │
                                      │   │   Store (Key-Value)  │   │       │     RAM      │
-                                     │   └──────────────────────┘   │       │  (Volatile)  │
-                                     │                              │       │              │
-              ┌─────────────┐        │   ┌──────────────────────┐   │       │              │
-              │             │        │   │  Pub/Sub (Realtime)  │   │──────▶└──────────────┘
-              │   Client    │───────▶│   └──────────────────────┘   │
-              │  (SDK/API)  │        │                              │
-              │             │        │   ┌──────────────────────┐   │       ┌──────────────┐
-              └─────────────┘        │   │   Queue (Buffered)   │   │──────▶│              │
+                                     │   └──────────────────────┘   │       │              │
+              ┌─────────────┐        │                              │       │  (Volatile)  │
+              │             │        │   ┌──────────────────────┐   │──────▶│              │
+              │   Client    │───────▶│   │  Pub/Sub (Realtime)  │   │       └──────────────┘
+              │  (SDK/API)  │        │   └──────────────────────┘   │
+              │             │        │                              │
+              └─────────────┘        │   ┌──────────────────────┐   │       ┌──────────────┐
+                                     │   │   Queue (Buffered)   │   │──────▶│              │
                                      │   └──────────────────────┘   │       │     DISK     │
-                                     │                              │       │   (Durable)  │
-                                     │   ┌──────────────────────┐   │       │              │
-                                     │   │    Stream (Ledger)   │   │──────▶└──────────────┘
-                                     │   └──────────────────────┘   │
+                                     │                              │       │              │
+                                     │   ┌──────────────────────┐   │       │   (Durable)  │
+                                     │   │    Stream (Ledger)   │   │──────▶│              │
+                                     │   └──────────────────────┘   │       └──────────────┘
                                      └──────────────┬───────────────┘
                                                     │
                                                     ▼
@@ -67,25 +73,56 @@ Nexo sits at the heart of your stack, bridging your applications with the data p
 
 ## BROKERS
 
-Everything you need to handle data flow, available instantly via a unified API.
+Nexo is built on the four pillars of modern event-driven architecture. Instead of managing four separate clusters, you get four specialized engines in one API.
 
+Each broker is purpose-built to solve a specific architectural pattern:
 
-### 1. STORE (Cache in memory)
-*   **Use Case:** Session storage, API caching, temporary state.
-*   **Features:** In-memory, O(1) access, TTL (Time-To-Live).
+*   **Store** replaces external caches (like Redis) for shared state.
+*   **Pub/Sub** replaces message buses (like MQTT/Redis PubSub) for real-time volatility.
+*   **Queue** replaces job queues (like RabbitMQ/SQS) for reliable background work.
+*   **Stream** replaces event logs (like Kafka) for durable history.
+
+Everything is available instantly via a unified Client.
+
+### 1. STORE (Shared State)
+**Use Case:** Ideal for high-velocity data that needs to be instantly accessible across all your services, such as user sessions, API rate-limiting counters, and temporary caching.
 
 ```text
 ┌──────────────┐     SET(key, val)      ┌──────────────────┐
-│   Client A   │───────────────────────▶│     NEXO MAP     │
-└──────────────┘                        │    (In-Memory)   │
+│   Client A   │───────────────────────▶│    NEXO STORE    │
+└──────────────┘                        │   (Shared RAM)   │
 ┌──────────────┐      GET(key)          │    [Map<K,V>]    │
 │   Client B   │◀───────────────────────│                  │
 └──────────────┘                        └──────────────────┘
 ```
 
-### 2. QUEUE (Job Processing)
-*   **Use Case:** Background jobs, email sending, video processing.
-*   **Features:** FIFO, At-least-once delivery, Manual ACK/NACK, Dead Letter Queues (DLQ), Retries.
+*   **Granular TTL:** Set expiration per-key or globally. Ideal for temporary API caches and rate-limiting counters.
+
+
+### 2. PUB/SUB (Real-Time Broadcast)
+
+**Transient message bus with Topic-based routing.**
+
+**Use Case:** Designed for "fire-and-forget" scenarios where low latency is critical and message persistence is not required, such as live chat updates, stock tickers, or multi-service notifications.
+
+```text
+┌──────────────┐       PUBLISH          ┌──────────────────┐      ⚡ msg
+│  Publisher   │───────────────────────▶│   TOPIC: "sub"   │─────▶ Sub 1
+└──────────────┘                        │    (Fan-Out)     │      ⚡ msg
+                                        │                  │─────▶ Sub 2
+                                        └──────────────────┘
+```
+
+*   **Fan-Out Routing:** Efficiently broadcasts a single incoming message to thousands of connected subscribers.
+*   **Wildcard Subscriptions:** Supports hierarchical patterns (e.g., `sensors/*/temp`) for flexible filtering.
+*   **Low Latency:** Optimized for maximum throughput with no disk I/O overhead.
+
+
+### 3. QUEUE (Job Processing)
+
+**Durable FIFO buffer with acknowledgments.**
+
+**Use Case:** Essential for load leveling and ensuring reliable background processing. Use it to decouple heavy tasks (like video transcoding or email sending) from your user-facing API.
 
 ```text
 ┌──────────────┐        PUSH            ┌──────────────────┐
@@ -98,21 +135,16 @@ Everything you need to handle data flow, available instantly via a unified API.
                                         └──────────────────┘
 ```
 
-### 3. PUBSUB (Realtime)
-*   **Use Case:** Chat systems, live updates, device coordination.
-*   **Features:** Hierarchical topics (`sensors/+/temp`), fan-out broadcasting, transient messaging.
+*   **At-Least-Once Delivery:** Jobs are only removed after explicit acknowledgment, preventing data loss on worker crashes.
+*   **Dead Letter Queues (DLQ):** Automatically isolates failing jobs after a configurable number of retries.
+*   **Disk Persistence:** Uses a Write-Ahead Log (WAL) to ensure jobs survive server restarts.
 
-```text
-┌──────────────┐       PUBLISH          ┌──────────────────┐      ⚡ msg
-│  Publisher   │───────────────────────▶│   TOPIC: "sub"   │─────▶ Sub 1
-└──────────────┘                        │    (Fan-Out)     │      ⚡ msg
-                                        │                  │─────▶ Sub 2
-                                        └──────────────────┘
-```
 
-### 4. STREAMS (Event Log)
-*   **Use Case:** Event Sourcing, Audit Logs.
-*   **Features:** Append-only persistence, Offset-based reading, Replayability.
+### 4. STREAM (Event Log)
+
+**Append-only immutable log with offset tracking.**
+
+**Use Case:** The source of truth for your system's history. Perfect for Event Sourcing, audit trails, and replaying historical data for analytics or debugging.
 
 ```text
 ┌──────────────┐       APPEND           ┌────────────────────────────────────┐
@@ -124,6 +156,10 @@ Everything you need to handle data flow, available instantly via a unified API.
                                      │ Consumer A │   │ Consumer B │
                                      └────────────┘   └────────────┘
 ```
+
+*   **Immutable History:** Events are strictly appended and never modified, ensuring a tamper-proof audit log.
+*   **Consumer Groups:** Maintains separate read cursors (offsets) for different consumers, allowing independent processing speeds.
+*   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
 
 ## 📊 Performance
@@ -148,6 +184,13 @@ Everything you need to handle data flow, available instantly via a unified API.
    Ingestion:   3864 msg/sec (Publish)
    Fanout:      3848881 msg/sec (Delivery)
 ```
+
+## 🎛️ Dashboard
+
+Nexo comes with a built-in, zero-config real-time dashboard exposed to debug/developing
+
+![Nexo Dashboard Screenshot](docs/assets/dashboard-preview.png)
+*(Monitor throughput, inspect queues, and debug streams in real-time)*
 
 
 ## 🚀 Why Nexo?
