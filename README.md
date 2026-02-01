@@ -106,16 +106,24 @@ Everything is available instantly via a unified Client.
 **Use Case:** Designed for "fire-and-forget" scenarios where low latency is critical and message persistence is not required, such as live chat updates, stock tickers, or multi-service notifications.
 
 ```text
-┌──────────────┐       PUBLISH          ┌──────────────────┐      ⚡ msg
-│  Publisher   │───────────────────────▶│   TOPIC: "sub"   │─────▶ Sub 1
-└──────────────┘                        │    (Fan-Out)     │      ⚡ msg
-                                        │                  │─────▶ Sub 2
-                                        └──────────────────┘
+                                           ┌───────────────────────────┐
+                                           │        NEXO PUBSUB        │
+                                           │                           │──────▶ Sub 1 (Exact)
+┌─────────────┐         PUBLISH            │  Topic: "home/kitchen/sw" │        "home/kitchen/sw"
+│  Publisher  │───────────────────────────▶│                           │
+└─────────────┘  msg: "home/kitchen/sw"    │  Topic: "home/+/sw"       │──────▶ Sub 2 (Wildcard +)
+                                           │                           │        "matches single level"
+                                           │  Topic: "home/#"          │
+                                           │                           │──────▶ Sub 3 (Wildcard #)       
+                                           └───────────────────────────┘        "matches everything under home"
 ```
 
 *   **Fan-Out Routing:** Efficiently broadcasts a single incoming message to thousands of connected subscribers.
-*   **Wildcard Subscriptions:** Supports hierarchical patterns (e.g., `sensors/*/temp`) for flexible filtering.
-*   **Low Latency:** Optimized for maximum throughput with no disk I/O overhead.
+*   **Pattern Matching:**
+    *   `+` **Single Level Wildcard:** Matches exactly one segment.
+        *   *Example:* `sensors/+/temp` matches `sensors/kitchen/temp`.
+    *   `#` **Multi Level Wildcard:** Matches all remaining segments to the end.
+        *   *Example:* `logs/#` matches `logs/error`, `logs/app/backend`, etc.
 
 
 ### 3. QUEUE (Job Processing)
