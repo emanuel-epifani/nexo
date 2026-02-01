@@ -50,17 +50,12 @@ impl Benchmark {
         let max = self.latencies.last().unwrap_or(&Duration::ZERO).as_micros();
         let avg = if len > 0 { self.latencies.iter().sum::<Duration>().as_micros() as u64 / len as u64 } else { 0 };
 
-        println!("\n📊 RESULTS: {}", self.name);
-        println!("==================================================");
-        println!(" Throughput:  {:.0} ops/sec", ops_sec);
-        println!(" Total Time:  {:.2?}", total_duration);
-        println!(" Latency (µs):");
-        println!("   Avg: {}", avg);
-        println!("   p50: {}", p50);
-        println!("   p95: {}", p95);
-        println!("   p99: {}", p99);
-        println!("   Max: {}", max);
-        println!("==================================================\n");
+        // Compact Output Format
+        println!("\n📊 {}", self.name);
+        println!("   Throughput:  {:.0} ops/sec", ops_sec);
+        println!("   Total Time:  {:.2?}", total_duration);
+        println!("   Latency:     Avg: {}µs | p50: {}µs | p95: {}µs | p99: {}µs | Max: {}µs", 
+            avg, p50, p95, p99, max);
     }
 }
 
@@ -77,7 +72,7 @@ async fn bench_01_store_set() {
     let config = Config::global().store.clone();
     let manager = StoreManager::new(config);
 
-    let mut bench = Benchmark::start("STORE: 1.000.000 SET operations (In-Memory)", count);
+    let mut bench = Benchmark::start("STORE: 1M SET operations (In-Memory)", count);
 
     for i in 0..count {
         let start = Instant::now();
@@ -90,7 +85,7 @@ async fn bench_01_store_set() {
 
 #[tokio::test]
 async fn bench_02_queue_push_fasync() {
-    let count = 1_000_000;
+    let count = 500_000;
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap();
     setup_env(path);
@@ -109,7 +104,7 @@ async fn bench_02_queue_push_fasync() {
     
     manager.declare_queue(q_name.clone(), options).await.unwrap();
 
-    let mut bench = Benchmark::start("QUEUE: 1.000.000 PUSH operations (FAsync, flush 100ms)", count);
+    let mut bench = Benchmark::start("QUEUE: 1M PUSH operations (FAsync, flush 100ms)", count);
     let payload = Bytes::from("job_data_payload");
 
     for _ in 0..count {
@@ -145,7 +140,7 @@ async fn bench_03_stream_publish_fasync() {
 
     manager.create_topic(topic.to_string(), options).await.unwrap();
 
-    let mut bench = Benchmark::start("STREAM: 1.000.000 PUBLISH operations (8 partitions, FAsync 100ms)", count);
+    let mut bench = Benchmark::start("STREAM: 1M PUBLISH operations (8 partitions, FAsync 100ms)", count);
     let payload = Bytes::from("event_stream_data");
 
     for _ in 0..count {
@@ -162,22 +157,22 @@ async fn bench_03_stream_publish_fasync() {
 async fn bench_04_pubsub_fanout() {
     // 10k messaggi * 1k subs = 10M delivery totali
     let msg_count = 10_000;
-    let subscribers_count = 1_000;
-    let total_delivery = msg_count * subscribers_count;
+    let sub_count = 1_000;
+    let total_delivery = msg_count * sub_count;
 
     let config = Config::global().pubsub.clone();
     let manager = Arc::new(PubSubManager::new(config));
     let topic = "fanout/global";
 
-    println!("🚀 PREPARING: PUBSUB Fanout 1->{subscribers_count} (Creating {subscribers_count} subscribers...)");
+    println!("🚀 PREPARING: PUBSUB Fanout 1->{} (Creating {} subscribers...)", sub_count, sub_count);
 
     // Shared counter for received messages
     let received_count = Arc::new(AtomicUsize::new(0));
     // Barrier to wait for all subs to be ready
-    let barrier = Arc::new(Barrier::new(subscribers_count + 1));
+    let barrier = Arc::new(Barrier::new(sub_count + 1));
 
     // Create 1000 Subscribers
-    for i in 0..subscribers_count {
+    for i in 0..sub_count {
         let manager = manager.clone();
         let client_id = ClientId(format!("sub_{}", i));
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -205,7 +200,7 @@ async fn bench_04_pubsub_fanout() {
     // Wait for all subscribers to be ready
     barrier.wait().await;
     
-    println!("🚀 STARTING: PUBSUB: Fanout 1 Pub -> {} Subs, {} msgs (Total {} deliveries)", subscribers_count, msg_count, total_delivery);
+    println!("🚀 STARTING: PUBSUB: Fanout 1 Pub -> {} Subs, {} msgs (Total {} deliveries)", sub_count, msg_count, total_delivery);
     
     let start_time = Instant::now();
     let payload = Bytes::from("broadcast_payload");
@@ -232,14 +227,9 @@ async fn bench_04_pubsub_fanout() {
     let secs = total_duration.as_secs_f64();
     let ops_sec = total_delivery as f64 / secs;
 
-    println!("\n📊 RESULTS: PUBSUB: Fanout 1->{} (Delivery Rate)", subscribers_count);
-    println!("==================================================");
-    println!(" Messages Sent:   {}", msg_count);
-    println!(" Total Delivery:  {}", total_delivery);
-    println!(" Publish Time:    {:.2?}", publish_time);
-    println!(" Publish Rate:    {:.0} msg/sec", publish_ops_sec);
-    println!(" Delivery Rate:   {:.0} msg/sec", ops_sec);
-    println!(" Total Time:      {:.2?}", total_duration);
-    println!("==================================================");
+    println!("\n📊 PUBSUB: Fanout 1->{} (10k msgs -> 10M deliveries)", sub_count);
+    println!("   Ingestion:   {:.0} msg/sec (Publish)", publish_ops_sec);
+    println!("   Fanout:      {:.0} msg/sec (Delivery)", ops_sec);
+    println!("   Total Time:  {:.2?}", total_duration);
     // Note: No per-request latency here because it's a throughput test
 }

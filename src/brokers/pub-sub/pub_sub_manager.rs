@@ -79,6 +79,7 @@ enum RootCommand {
     Subscribe {
         pattern: Vec<String>,  // Path segments after root (e.g., ["kitchen", "temp"])
         client: ClientId,
+        sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,
         reply: oneshot::Sender<Vec<(String, Bytes)>>,  // Retained messages to send
     },
     Unsubscribe {
@@ -90,7 +91,7 @@ enum RootCommand {
         full_topic: String,  // Full topic for push payload
         data: Bytes,
         retain: bool,
-        reply: oneshot::Sender<HashSet<ClientId>>,  // Matched clients
+        reply: oneshot::Sender<usize>,  // Matched clients
     },
     Disconnect {
         client: ClientId,
@@ -117,7 +118,7 @@ struct Node {
     hash_child: Option<Box<Node>>,
     
     // Clients subscribed exactly to the path ending at this node
-    subscribers: HashSet<ClientId>,
+    subscribers: HashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
     retained: Option<Bytes>,
 }
 
@@ -127,7 +128,7 @@ impl Node {
             children: HashMap::new(),
             plus_child: None,
             hash_child: None,
-            subscribers: HashSet::new(),
+            subscribers: HashMap::new(),
             retained: None,
         }
     }
@@ -165,16 +166,16 @@ impl RootActor {
     async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                RootCommand::Subscribe { pattern, client, reply } => {
-                    let retained = self.subscribe(&pattern, &client);
+                RootCommand::Subscribe { pattern, client, sender, reply } => {
+                    let retained = self.subscribe(&pattern, &client, sender);
                     let _ = reply.send(retained);
                 }
                 RootCommand::Unsubscribe { pattern, client } => {
                     self.unsubscribe(&pattern, &client);
                 }
                 RootCommand::Publish { parts, full_topic, data, retain, reply } => {
-                    let clients = self.publish(&parts, &full_topic, data, retain);
-                    let _ = reply.send(clients);
+                    let count = self.publish(&parts, &full_topic, data, retain);
+                    let _ = reply.send(count);
                 }
                 RootCommand::Disconnect { client } => {
                     self.disconnect(&client);
@@ -188,7 +189,7 @@ impl RootActor {
     }
 
     // --- SUBSCRIBE ---
-    fn subscribe(&mut self, pattern: &[String], client: &ClientId) -> Vec<(String, Bytes)> {
+    fn subscribe(&mut self, pattern: &[String], client: &ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) -> Vec<(String, Bytes)> {
         // Track pattern for cleanup
         let pattern_str = pattern.join("/");
         self.client_patterns
@@ -203,7 +204,7 @@ impl RootActor {
                 if current.hash_child.is_none() {
                     current.hash_child = Some(Box::new(Node::new()));
                 }
-                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone());
+                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone(), sender.clone());
                 
                 // Collect retained from current node down (not from root!)
                 // Navigate to the correct position first for collection
@@ -235,7 +236,7 @@ impl RootActor {
             }
         }
 
-        current.subscribers.insert(client.clone());
+        current.subscribers.insert(client.clone(), sender);
 
         // Collect retained matching this exact pattern
         let mut retained = Vec::new();
@@ -253,7 +254,7 @@ impl RootActor {
     }
 
     // --- PUBLISH ---
-    fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool) -> HashSet<ClientId> {
+    fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool) -> usize {
         // Update retained if needed
             if retain {
             let mut current = &mut self.tree;
@@ -263,10 +264,32 @@ impl RootActor {
             current.retained = Some(data.clone());
         }
 
-        // Match subscribers
-        let mut matched = HashSet::new();
-        Self::match_recursive(&self.tree, parts, &mut matched);
-        matched
+        // Match subscribers and collect senders
+        let mut senders = Vec::new();
+        Self::match_recursive(&self.tree, parts, &mut senders);
+        
+        // Send messages
+        let msg = Arc::new(PubSubMessage::new(full_topic.to_string(), data));
+        let mut sent_count = 0;
+        
+        // Identify zombies
+        let mut zombies = Vec::new();
+
+        for (client_id, sender) in senders {
+            if sender.send(msg.clone()).is_ok() {
+                sent_count += 1;
+            } else {
+                // Channel closed -> Zombie
+                zombies.push(client_id);
+            }
+        }
+        
+        // Cleanup zombies if any
+        for client_id in zombies {
+             self.disconnect(&client_id);
+        }
+
+        sent_count
     }
 
     // --- DISCONNECT ---
@@ -319,14 +342,18 @@ impl RootActor {
 
     // --- HELPERS ---
 
-    fn match_recursive(node: &Node, parts: &[String], results: &mut HashSet<ClientId>) {
+    fn match_recursive(node: &Node, parts: &[String], results: &mut Vec<(ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>)>) {
         // "#" matches everything from here
         if let Some(hash_node) = &node.hash_child {
-            results.extend(hash_node.subscribers.iter().cloned());
+            for (client, sender) in &hash_node.subscribers {
+                results.push((client.clone(), sender.clone()));
+            }
         }
 
         if parts.is_empty() {
-            results.extend(node.subscribers.iter().cloned());
+             for (client, sender) in &node.subscribers {
+                results.push((client.clone(), sender.clone()));
+            }
             return;
         }
 
@@ -431,11 +458,11 @@ impl RootActor {
 // PUBSUB MANAGER
 // ==========================================
 
-pub struct PubSubManager {
+    pub struct PubSubManager {
     actors: DashMap<String, mpsc::Sender<RootCommand>>,
     clients: DashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
     client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
-    global_hash_subscribers: RwLock<HashSet<ClientId>>,  // Subscribers to "#"
+    global_hash_subscribers: RwLock<HashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>>,  // Subscribers to "#"
     config: crate::config::PubSubConfig,
 }
 
@@ -445,7 +472,7 @@ impl PubSubManager {
             actors: DashMap::new(),
             clients: DashMap::new(),
             client_subscriptions: DashMap::new(),
-            global_hash_subscribers: RwLock::new(HashSet::new()),
+            global_hash_subscribers: RwLock::new(HashMap::new()),
             config,
         }
     }
@@ -471,20 +498,22 @@ impl PubSubManager {
 
         // Handle global "#" subscription
         if parts.len() == 1 && parts[0] == "#" {
-            self.global_hash_subscribers.write().await.insert(client);
+             if let Some(sender) = self.clients.get(&client) {
+                self.global_hash_subscribers.write().await.insert(client, sender.clone());
+             }
             return;
         }
 
         let root = parts[0].to_string();
         let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
-        let actor = self.get_or_create_actor(&root);
-        let (tx, rx) = oneshot::channel();
-        
-        if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), reply: tx }).await.is_ok() {
-            // Send retained messages
-            if let Ok(retained) = rx.await {
-                if let Some(sender) = self.clients.get(&client) {
+        if let Some(sender) = self.clients.get(&client) {
+            let actor = self.get_or_create_actor(&root);
+            let (tx, rx) = oneshot::channel();
+            
+            if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), sender: sender.clone(), reply: tx }).await.is_ok() {
+                // Send retained messages
+                if let Ok(retained) = rx.await {
                     for (topic_str, payload) in retained {
                         let msg = Arc::new(PubSubMessage::new(topic_str, payload));
                         let _ = sender.send(msg);
@@ -527,23 +556,22 @@ impl PubSubManager {
 
         let root = parts[0];
         let sub_parts: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+        let mut sent = 0;
 
-        // 1. Get matched clients from actor
-        let matched_clients = if let Some(actor) = self.actors.get(root) {
+        // 1. Dispatch to actor
+        if let Some(actor) = self.actors.get(root) {
             let (tx, rx) = oneshot::channel();
             if actor.send(RootCommand::Publish {
-                parts: sub_parts,
+                parts: sub_parts.clone(),
                 full_topic: topic.to_string(),
                 data: data.clone(),
                 retain,
                 reply: tx,
             }).await.is_ok() {
-                rx.await.unwrap_or_default()
-            } else {
-                HashSet::new()
+                sent += rx.await.unwrap_or_default();
             }
         } else if retain {
-            // Create actor for retained message even if no subscribers yet
+             // Create actor for retained message even if no subscribers yet
             let actor = self.get_or_create_actor(root);
             let (tx, rx) = oneshot::channel();
             if actor.send(RootCommand::Publish {
@@ -553,27 +581,15 @@ impl PubSubManager {
                 retain,
                 reply: tx,
             }).await.is_ok() {
-                rx.await.unwrap_or_default()
-            } else {
-                HashSet::new()
+                 sent += rx.await.unwrap_or_default();
             }
-        } else {
-            HashSet::new()
-        };
+        }
 
         // 2. Add global "#" subscribers
         let global_subs = self.global_hash_subscribers.read().await;
-        let all_clients: HashSet<_> = matched_clients.iter()
-            .chain(global_subs.iter())
-            .cloned()
-            .collect();
-
-        // 3. Dispatch to all matched clients
-        let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
-        let mut sent = 0;
-
-        for client_id in all_clients {
-            if let Some(sender) = self.clients.get(&client_id) {
+        if !global_subs.is_empty() {
+            let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
+            for sender in global_subs.values() {
                 if sender.send(msg.clone()).is_ok() {
                     sent += 1;
                 }
