@@ -88,7 +88,7 @@ async fn bench_02_queue_push_fasync() {
     let count = 500_000;
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap();
-    setup_env(path);
+    setup_env(path).await;
 
     let mut sys_config = Config::global().queue.clone();
     sys_config.persistence_path = path.to_string();
@@ -123,7 +123,7 @@ async fn bench_03_stream_publish_fasync() {
     let count = 1_000_000;
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap();
-    setup_env(path);
+    setup_env(path).await;
 
     let mut sys_config = Config::global().stream.clone();
     sys_config.persistence_path = path.to_string();

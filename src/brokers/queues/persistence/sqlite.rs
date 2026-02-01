@@ -14,7 +14,7 @@ pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
         &format!(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = {};
-         PRAGMA foreign_keys = ON;",
+         PRAGMA foreign_keys = ON;", // Tuned for high throughput
          sync_pragma
         )
     )?;
@@ -99,42 +99,44 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
 pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
         StorageOp::Insert(msg) => {
-            tx.execute(
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    msg.id.to_string(),
-                    msg.payload.as_ref(), // Bytes -> &[u8]
-                    msg.priority,
-                    msg.visible_at as i64,
-                    msg.attempts,
-                    msg.created_at as i64
-                ],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
+            stmt.execute(params![
+                msg.id.to_string(),
+                msg.payload.as_ref(), // Bytes -> &[u8]
+                msg.priority,
+                msg.visible_at as i64,
+                msg.attempts,
+                msg.created_at as i64
+            ])?;
         }
         StorageOp::Delete(id) => {
-            tx.execute("DELETE FROM queue WHERE id = ?1", params![id.to_string()])?;
+            let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
+            stmt.execute(params![id.to_string()])?;
         }
         StorageOp::UpdateState { id, visible_at, attempts } => {
-            tx.execute(
-                "UPDATE queue SET visible_at = ?1, attempts = ?2 WHERE id = ?3",
-                params![*visible_at as i64, *attempts, id.to_string()],
+            let mut stmt = tx.prepare_cached(
+                "UPDATE queue SET visible_at = ?1, attempts = ?2 WHERE id = ?3"
             )?;
+            stmt.execute(params![*visible_at as i64, *attempts, id.to_string()])?;
         }
         StorageOp::MoveToDlq { msg, reason } => {
             // Atomic: Delete from queue and insert into DLQ
-            tx.execute("DELETE FROM queue WHERE id = ?1", params![msg.id.to_string()])?;
+            let mut delete_stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
+            delete_stmt.execute(params![msg.id.to_string()])?;
             
-            tx.execute(
+            let mut insert_dlq = tx.prepare_cached(
                 "INSERT INTO dlq (id, payload, reason, moved_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    msg.id.to_string(),
-                    msg.payload.as_ref(),
-                    reason,
-                    current_time_ms() as i64
-                ],
+                 VALUES (?1, ?2, ?3, ?4)"
             )?;
+            insert_dlq.execute(params![
+                msg.id.to_string(),
+                msg.payload.as_ref(),
+                reason,
+                current_time_ms() as i64
+            ])?;
         }
     }
     Ok(())

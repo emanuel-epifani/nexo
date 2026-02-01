@@ -96,10 +96,10 @@ impl SystemQueueConfig {
             default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", "10"),
             default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", "0"),
             persistence_path:      get_env("QUEUE_ROOT_PERSISTENCE_PATH", "./data/queues"),
-            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", "50"),
+            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", "200"),
             actor_channel_capacity: get_env("QUEUE_ACTOR_CHAN_CAP", "10000"),
             writer_channel_capacity: get_env("QUEUE_WRITER_CHAN_CAP", "10000"),
-            writer_batch_size:     get_env("QUEUE_WRITER_BATCH_SIZE", "5000"),
+            writer_batch_size:     get_env("QUEUE_WRITER_BATCH_SIZE", "50000"),
         }
     }
 }
