@@ -4,36 +4,45 @@
 
 @layer base {
   :root {
-    /* Developer Dark Mode - High Contrast, Utilitarian */
-    --background: 222 47% 11%;     /* Slate 950 base */
-    --foreground: 213 31% 91%;     /* Slate 100 text */
+    /* Light Mode - High Definition Tech (Slate & Gray) */
+    
+    --background: 210 40% 96.1%	;   /* Slate 200/300 mix - Soft Grey Background (Not blinding) */
+    --foreground: 222.2 84% 4.9%;    /* Slate 950 */
 
-    --card: 222 47% 10%;           /* Slightly lighter than bg */
-    --card-foreground: 213 31% 91%;
+    --card: 0 0% 100%;               /* Pure white cards */
+    --card-foreground: 222.2 84% 4.9%;
 
-    --popover: 222 47% 10%;
-    --popover-foreground: 213 31% 91%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
 
-    --primary: 210 40% 98%;        /* White primary actions */
-    --primary-foreground: 222 47.4% 11.2%;
+    --primary: 222.2 47.4% 11.2%;    /* Slate 900 */
+    --primary-foreground: 210 40% 98%;
 
-    --secondary: 215 25% 20%;      /* Slate 800 for secondary elements */
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 214.3 31.8% 91.4%;  /* Slate 200 */
+    --secondary-foreground: 222.2 47.4% 11.2%;
 
-    --muted: 223 47% 11%;          /* Muted backgrounds */
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 212.7 26.8% 83.9%;      /* Slate 300 */
+    --muted-foreground: 215.4 16.3% 46.9%;
 
-    --accent: 216 34% 17%;
-    --accent-foreground: 210 40% 98%;
+    /* --- SEMANTIC AREAS --- */
+    --panel-bg: 0 0% 100%;             /* White - Main Widget Container */
+    --sidebar-bg: 210 40% 98%;         /* Slate 50 - Sidebar Background */
+    --section-header-bg: 210 40% 96.1%; /* Slate 100 - Headers */
+    --content-bg: 0 0% 100%;           /* White - Data Content Area */
+    --item-hover: 210 40% 96.1%;       /* Slate 100 - Row Hover */
+    --item-selected: 214.3 31.8% 91.4%; /* Slate 200 - Row Selected */
 
-    --destructive: 0 84% 60%;      /* Red for errors */
+    --accent: 214.3 31.8% 91.4%;     /* Slate 200 */
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 216 34% 17%;         /* Slate 800 borders */
-    --input: 216 34% 17%;
-    --ring: 213 31% 91%;
+    --border: 215.3 25% 74.5%	;     /* Slate 300 - Visible borders */
+    --input: 212.7 26.8% 83.9%;
+    --ring: 222.2 84% 4.9%;
 
-    --radius: 0.25rem;             /* 4px - Small, technical radius */
+    --radius: 0.5rem;
   }
 }
 
@@ -57,13 +66,13 @@
   height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a; 
+  background: #f1f5f9; 
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155; 
-  border: 2px solid #0f172a;
+  background: #cbd5e1; 
+  border: 2px solid #f1f5f9;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569; 
+  background: #94a3b8; 
 }

@@ -69,21 +69,21 @@ export function PubSubView({ data }: Props) {
   [selectedPath, topics, wildcards]);
 
   return (
-      <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+      <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
           
           {/* SIDEBAR */}
-          <div className="w-[400px] flex flex-col border-r border-slate-800 bg-slate-950/50">
-              <div className="flex border-b border-slate-800">
+          <div className="w-[400px] flex flex-col border-r-2 border-border bg-sidebar">
+              <div className="flex border-b-2 border-border">
                   <button 
                       onClick={() => setActiveTab('topics')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'topics' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'topics' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       Active Topics ({topics.length})
                   </button>
-                  <div className="w-[1px] bg-slate-800" />
+                  <div className="w-[1px] bg-border" />
                   <button 
                       onClick={() => setActiveTab('wildcards')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'wildcards' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'wildcards' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       Wildcards ({data.wildcards.multi_level.length + data.wildcards.single_level.length})
                   </button>
@@ -98,25 +98,25 @@ export function PubSubView({ data }: Props) {
           </div>
 
           {/* MAIN AREA */}
-          <div className="flex-1 bg-slate-950/30 flex flex-col min-w-0">
+          <div className="flex-1 bg-content flex flex-col min-w-0">
              {selectedItem ? (
                  <div className="flex flex-col h-full">
-                     <div className="p-4 border-b border-slate-800 bg-slate-900/20">
+                     <div className="p-4 border-b border-border bg-section-header">
                          <div className="flex items-center gap-2 mb-2">
                              {selectedItem.is_wildcard ? (
                                  <Hash className="h-4 w-4 text-amber-500" />
                              ) : (
                                  <Circle className="h-3 w-3 text-emerald-500" />
                              )}
-                             <h2 className="text-sm font-bold text-slate-100">{selectedItem.path}</h2>
+                             <h2 className="text-sm font-bold text-foreground">{selectedItem.path}</h2>
                          </div>
-                         <div className="flex gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
+                         <div className="flex gap-4 text-[10px] text-muted-foreground uppercase tracking-wide">
                              <div className="flex items-center gap-1.5">
                                  <Users className="h-3 w-3" />
                                  {selectedItem.subscribers} SUBSCRIBERS
                              </div>
                              {selectedItem.client_id && (
-                                 <div className="flex items-center gap-1.5 text-slate-400">
+                                 <div className="flex items-center gap-1.5 text-muted-foreground">
                                      <Zap className="h-3 w-3 text-amber-500" />
                                      CLIENT: {selectedItem.client_id}
                                  </div>
@@ -128,20 +128,20 @@ export function PubSubView({ data }: Props) {
                      {selectedItem.retained_value ? (
                          <div className="flex-1 relative group">
                              <div className="absolute inset-0 overflow-auto p-6 scrollbar-thin">
-                                <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre-wrap">
+                                <pre className="text-xs text-foreground font-mono leading-relaxed whitespace-pre-wrap">
                                     {JSON.stringify(selectedItem.retained_value, null, 2)}
                                 </pre>
                              </div>
                          </div>
                      ) : (
-                         <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                         <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                              <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_RETAINED_VALUE</p>
                          </div>
                      )}
 
                      {/* Footer Metadata */}
                      {selectedItem.retained_value && (
-                        <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/20 text-[10px] text-slate-500 flex justify-between font-mono uppercase">
+                        <div className="px-4 py-2 border-t border-border bg-section-header text-[10px] text-muted-foreground flex justify-between font-mono uppercase">
                             <div className="flex items-center gap-2">
                                 <Binary className="h-3 w-3" />
                                 <span>SIZE: {new Blob([JSON.stringify(selectedItem.retained_value)]).size} BYTES</span>
@@ -154,7 +154,7 @@ export function PubSubView({ data }: Props) {
                      )}
                  </div>
              ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                     <Radio className="h-12 w-12 opacity-20 mb-4" />
                     <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_TOPIC</p>
                 </div>
@@ -175,23 +175,23 @@ function TopicRow({ item, layout, selected, onSelect }: {
 }) {
   // Layout dinamico basato su type
   const containerClass = layout === 'topics' 
-    ? 'group grid grid-cols-[1fr_4rem_4rem] gap-4 items-center px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all min-h-9'
-    : 'group flex items-center gap-3 px-3 py-2 border-b border-slate-800/50 cursor-pointer transition-all min-h-9';
+    ? 'group grid grid-cols-[1fr_4rem_4rem] gap-4 items-center px-3 py-2 border-b border-border/50 cursor-pointer transition-all min-h-9'
+    : 'group flex items-center gap-3 px-3 py-2 border-b border-border/50 cursor-pointer transition-all min-h-9';
 
   return (
     <div
-      className={`${containerClass} ${selected ? 'bg-slate-800' : 'hover:bg-slate-900/50'}`}
+      className={`${containerClass} ${selected ? 'bg-secondary' : 'hover:bg-muted/50'}`}
       onClick={() => onSelect(item.path)}
     >
       {/* Topic Path - sempre presente */}
       <div className="flex flex-col gap-1 overflow-hidden min-w-0">
         <div className="flex items-center gap-2">
-          <span className={`font-mono text-xs truncate ${selected ? 'text-white' : 'text-slate-300'}`}>
+          <span className={`font-mono text-xs truncate ${selected ? 'text-foreground' : 'text-muted-foreground'}`}>
             {item.path}
           </span>
         </div>
         {item.client_id && (
-          <div className="text-[10px] text-slate-500 truncate">
+          <div className="text-[10px] text-muted-foreground truncate">
             Client: {item.client_id}
           </div>
         )}
@@ -203,22 +203,22 @@ function TopicRow({ item, layout, selected, onSelect }: {
           {/* Colonna Subscribers */}
           <div className="flex justify-center">
             {!item.is_wildcard && item.subscribers > 0 ? (
-              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-slate-900 text-slate-400 border-slate-700 rounded-sm">
+              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-muted text-muted-foreground border-border rounded-sm">
                 {item.subscribers}
               </Badge>
             ) : (
-              <span className="text-slate-700 text-[9px]">—</span>
+              <span className="text-muted-foreground text-[9px]">—</span>
             )}
           </div>
 
           {/* Colonna Retained */}
           <div className="flex justify-center">
             {item.retained_value ? (
-              <Badge variant="outline" className="h-4 px-1 text-[9px] border-purple-900 bg-purple-950/30 text-purple-400 rounded-sm">
+              <Badge variant="outline" className="h-4 px-1 text-[9px] border-purple-500/30 bg-purple-500/10 text-purple-500 rounded-sm">
                 RET
               </Badge>
             ) : (
-              <span className="text-slate-700 text-[9px]">—</span>
+              <span className="text-muted-foreground text-[9px]">—</span>
             )}
           </div>
         </>
@@ -288,14 +288,14 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
 
     return (
         <div className="flex flex-col h-full">
-            <div className="p-3 border-b border-slate-800 bg-slate-900/10">
+            <div className="p-3 border-b border-border bg-section-header">
                 <div className="relative">
-                    <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                    <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
                     <Input 
                         placeholder={type === 'topics' ? "Search path..." : "Search pattern..."}
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
-                        className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700 focus-visible:border-slate-700"
+                        className="h-9 pl-8 bg-background border-border text-xs font-mono placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
                     />
                 </div>
                 
@@ -306,8 +306,8 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                             onClick={() => setWildcardFilter('multi')}
                             className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
                                 wildcardFilter === 'multi'
-                                    ? 'bg-amber-950/30 text-amber-400 border border-amber-900'
-                                    : 'bg-slate-950 text-slate-500 border border-slate-800 hover:text-amber-400'
+                                    ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30'
+                                    : 'bg-background text-muted-foreground border border-border hover:text-amber-500'
                             }`}
                         >
                             # MULTI level ({list.filter((t: any) => t.path.includes('#')).length})
@@ -316,8 +316,8 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                             onClick={() => setWildcardFilter('single')}
                             className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
                                 wildcardFilter === 'single'
-                                    ? 'bg-blue-950/30 text-blue-400 border border-blue-900'
-                                    : 'bg-slate-950 text-slate-500 border border-slate-800 hover:text-blue-400'
+                                    ? 'bg-blue-500/10 text-blue-500 border border-blue-500/30'
+                                    : 'bg-background text-muted-foreground border border-border hover:text-blue-500'
                             }`}
                         >
                             + SINGLE level ({list.filter((t: any) => t.path.includes('+')).length})
@@ -329,7 +329,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             <div ref={parentRef} className="flex-1 overflow-y-auto w-full contain-strict">
                 {/* HEADER DIVERSO BASATO SU TYPE */}
                 {type === 'topics' ? (
-                    <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-[9px] font-bold uppercase text-slate-500 z-10">
+                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-[9px] font-bold uppercase text-muted-foreground z-10">
                         <div className="flex items-center gap-2">
                             <span>Topic Path</span>
                         </div>
@@ -337,7 +337,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                         <div className="w-16 text-center">Retained</div>
                     </div>
                 ) : (
-                    <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-3 py-2 text-[9px] font-bold uppercase text-slate-500 z-10">
+                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 text-[9px] font-bold uppercase text-muted-foreground z-10">
                         <div className="flex items-center gap-2">
                             <span>Wildcard Patterns</span>
                         </div>
@@ -346,7 +346,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                 
                 {filtered.length === 0 ? (
                     <div className="py-12 text-center">
-                        <p className="text-xs text-slate-600">NO_RESULTS</p>
+                        <p className="text-xs text-muted-foreground">NO_RESULTS</p>
                     </div>
                 ) : type === 'topics' ? (
                     <div
@@ -396,7 +396,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             </div>
 
             {/* Footer Count */}
-            <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
+            <div className="p-2 border-t border-border text-[10px] text-muted-foreground text-center uppercase">
                 {filter === ""
                     ? `${list.length} ${type === 'topics' ? 'TOPICS' : 'WILDCARDS'}`
                     : (type === 'topics' ? filteredTopics.length : filteredWildcards.length) >= FILTER_LIMIT

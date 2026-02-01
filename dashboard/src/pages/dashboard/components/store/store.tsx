@@ -22,11 +22,11 @@ export function StoreView({ data }: Props) {
   const [activeStructure, setActiveStructure] = useState<StructureType>('hashmap')
 
   return (
-      <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+      <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
           
           {/* SIDEBAR: Navigation */}
-          <div className="w-48 flex flex-col border-r border-slate-800 bg-slate-950/50">
-              <div className="p-3 border-b border-slate-800 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+          <div className="w-48 flex flex-col border-r-2 border-border bg-sidebar">
+              <div className="p-3 border-b-2 border-border text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
                   DATA_TYPES
               </div>
               <div className="p-2 space-y-0.5">
@@ -73,8 +73,8 @@ function NavButton({ label, icon, count, active, onClick, disabled }: any) {
             className={`
                 flex items-center justify-between w-full px-3 py-2 rounded-sm transition-all duration-200 group text-xs
                 ${active 
-                    ? 'bg-slate-800 text-white font-medium' 
-                    : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200'
+                    ? 'bg-secondary text-foreground font-medium' 
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 }
                 ${disabled && 'opacity-40 cursor-not-allowed hover:bg-transparent'}
             `}
@@ -84,7 +84,7 @@ function NavButton({ label, icon, count, active, onClick, disabled }: any) {
                 <span>{label}</span>
             </div>
             {count > 0 && (
-                <span className={`text-[9px] px-1.5 py-0.5 rounded-sm ${active ? 'bg-slate-700 text-white' : 'bg-slate-900 text-slate-500'}`}>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-sm ${active ? 'bg-primary/20 text-foreground' : 'bg-muted text-muted-foreground'}`}>
                     {count}
                 </span>
             )}
@@ -135,16 +135,16 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
   return (
     <div className="flex h-full">
       {/* COLUMN 1: Key List */}
-      <div className="w-[320px] flex flex-col border-r border-slate-800 bg-slate-900/10 flex-shrink-0">
+      <div className="w-[320px] flex flex-col border-r-2 border-border bg-sidebar flex-shrink-0">
         {/* Search Bar */}
-        <div className="p-3 border-b border-slate-800">
+        <div className="p-3 border-b-2 border-border">
             <div className="relative">
-                <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
                 <Input 
                     placeholder={`FILTER ${structure.toUpperCase()}...`}
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
-                    className="h-9 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700 focus-visible:border-slate-700"
+                    className="h-9 pl-8 bg-background border-border text-xs font-mono placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
                 />
             </div>
         </div>
@@ -153,8 +153,8 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         <div ref={parentRef} className="flex-1 overflow-y-auto w-full contain-strict">
             {filteredKeys.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center px-4">
-                    <Search className="h-6 w-6 text-slate-800 mb-3" />
-                    <p className="text-xs text-slate-600">NO_MATCHES</p>
+                    <Search className="h-6 w-6 text-muted-foreground mb-3" />
+                    <p className="text-xs text-muted-foreground">NO_MATCHES</p>
                 </div>
             ) : (
                 <div
@@ -178,10 +178,10 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                                     height: `${virtualRow.size}px`,
                                     transform: `translateY(${virtualRow.start}px)`,
                                 }}
-                                className={`text-left px-4 py-2 text-xs border-b border-slate-800/50 transition-colors truncate font-mono ${
+                                className={`text-left px-4 py-2 text-xs border-b border-border/60 transition-colors truncate font-mono ${
                                     selectedKey?.key === k.key 
-                                    ? "bg-slate-800 text-white" 
-                                    : "hover:bg-slate-900/50 text-slate-400 hover:text-slate-200"
+                                    ? "bg-secondary text-foreground" 
+                                    : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
                                 }`}
                             >
                                 {k.key}
@@ -193,7 +193,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         </div>
         
         {/* Footer Count */}
-        <div className="p-2 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase">
+        <div className="p-2 border-t border-border text-[10px] text-muted-foreground text-center uppercase">
             {filter === "" 
               ? `${data.keys.length} KEYS`
               : filteredKeys.length >= FILTER_LIMIT 
@@ -204,14 +204,14 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
       </div>
 
       {/* COLUMN 2: Value Inspector */}
-      <div className="flex-1 flex flex-col bg-slate-950/30 overflow-hidden">
+      <div className="flex-1 flex flex-col bg-content overflow-hidden">
         {selectedKey ? (
             <>
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/20">
+                <div className="p-4 border-b border-border flex justify-between items-center bg-section-header">
                     <div className="flex items-center gap-2">
-                        <h2 className="text-sm font-bold text-slate-100">{selectedKey.key}</h2>
+                        <h2 className="text-sm font-bold text-foreground">{selectedKey.key}</h2>
                     </div>
-                    <div className="flex items-center gap-4 text-[10px] text-slate-500 uppercase tracking-wide">
+                    <div className="flex items-center gap-4 text-[10px] text-muted-foreground uppercase tracking-wide">
                         <span className="flex items-center gap-1.5">
                             <Clock className="h-3 w-3" /> 
                             {new Date(selectedKey.expires_at).toLocaleString()}
@@ -221,14 +221,14 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
 
                 <div className="flex-1 overflow-auto">
                     <div className="p-6 min-w-0">
-                        <pre className="text-xs text-slate-300 font-mono leading-relaxed whitespace-pre min-w-0">
+                        <pre className="text-xs text-foreground font-mono leading-relaxed whitespace-pre min-w-0">
                             {tryFormatJson(selectedKey.value)}
                         </pre>
                     </div>
                 </div>
                 
                  {/* Footer Metadata */}
-                <div className="px-4 py-2 border-t border-slate-800 bg-slate-900/20 text-[10px] text-slate-500 flex justify-between font-mono uppercase">
+                <div className="px-4 py-2 border-t border-border bg-section-header text-[10px] text-muted-foreground flex justify-between font-mono uppercase">
                     <div className="flex items-center gap-2">
                         <Binary className="h-3 w-3" />
                         <span>SIZE: {new Blob([selectedKey.value]).size} BYTES</span>
@@ -240,7 +240,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 </div>
             </>
         ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50">
                 <Database className="h-12 w-12 opacity-20 mb-4" />
                 <p className="text-xs font-mono uppercase tracking-widest opacity-50">NO_KEY_SELECTED</p>
             </div>

@@ -76,10 +76,10 @@ export function DashboardPage() {
       (activeTab === 'stream' && streamQuery.error) ||
       (activeTab === 'pubsub' && pubsubQuery.error);
 
-  if (isLoading) {
+    if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-slate-950 font-mono text-sm">
-        <div className="flex items-center gap-2 text-slate-400">
+      <div className="flex h-screen items-center justify-center bg-background font-mono text-sm">
+        <div className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>CONNECTING_TO_BROKER...</span>
         </div>
@@ -89,15 +89,15 @@ export function DashboardPage() {
 
   if (hasError) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-slate-950 text-slate-200">
-        <ServerCrash className="h-12 w-12 text-rose-500" />
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background text-foreground">
+        <ServerCrash className="h-12 w-12 text-destructive" />
         <h2 className="text-xl font-mono">CONNECTION_LOST</h2>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-300 font-sans selection:bg-slate-700 selection:text-white">
+    <div className="flex flex-col h-screen bg-background text-foreground font-sans selection:bg-primary/20 selection:text-primary">
       {/* MAIN CONTAINER */}
       <div className="flex flex-col flex-1 max-w-[1600px] mx-auto w-full px-6 pt-6">
         
@@ -142,7 +142,7 @@ export function DashboardPage() {
         </div>
 
         {/* CONTENT AREA */}
-        <main className="h-[calc(100vh-11rem)] border-t border-slate-800/50 pt-6 overflow-hidden">
+        <main className="h-[calc(100vh-11rem)] border-t border-border pt-6 overflow-hidden">
             {activeTab === 'store' && storeQuery.data && (
                 <div className="h-full">
                     <StoreView data={storeQuery.data} />

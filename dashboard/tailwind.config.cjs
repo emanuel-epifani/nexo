@@ -2,10 +2,10 @@
 module.exports = {
   darkMode: ["class"],
   content: [
-    './pages/**/*.{ts,tsx}',
-    './components/**/*.{ts,tsx}',
-    './app/**/*.{ts,tsx}',
-    './src/**/*.{ts,tsx}',
+    "./pages/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./app/**/*.{ts,tsx}",
+    "./src/**/*.{ts,tsx}",
   ],
   theme: {
     container: {
@@ -50,6 +50,13 @@ module.exports = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Semantic Areas
+        panel: "hsl(var(--panel-bg))",
+        sidebar: "hsl(var(--sidebar-bg))",
+        "section-header": "hsl(var(--section-header-bg))",
+        content: "hsl(var(--content-bg))",
+        "item-hover": "hsl(var(--item-hover))",
+        "item-selected": "hsl(var(--item-selected))",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -73,5 +80,4 @@ module.exports = {
     },
   },
   plugins: [require("tailwindcss-animate")],
-}
-
+};

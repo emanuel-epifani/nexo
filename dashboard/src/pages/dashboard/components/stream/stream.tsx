@@ -63,18 +63,18 @@ export function StreamView({ data }: Props) {
     const hasTopics = data.topics.length > 0
 
     return (
-        <div className="flex h-full gap-0 border border-slate-800 rounded bg-slate-900/20 overflow-hidden font-mono text-sm">
+        <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
 
             {/* COL 1: SIDEBAR Topics List */}
-            <div className="w-[220px] flex flex-col border-r border-slate-800 bg-slate-950/50 shrink-0">
-                <div className="p-3 border-b border-slate-800">
+            <div className="w-[220px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
+                <div className="p-3 border-b-2 border-border">
                     <div className="relative">
-                        <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
+                        <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
                         <Input
                             placeholder="FILTER TOPICS..."
                             value={filter}
                             onChange={(e) => setFilter(e.target.value)}
-                            className="h-8 pl-8 bg-slate-950 border-slate-800 text-xs font-mono placeholder:text-slate-600 focus-visible:ring-1 focus-visible:ring-slate-700"
+                            className="h-8 pl-8 bg-background border-border text-xs font-mono placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
                         />
                     </div>
                 </div>
@@ -86,17 +86,17 @@ export function StreamView({ data }: Props) {
                                 key={t.name}
                                 onClick={() => setSelectedTopicName(t.name)}
                                 className={`
-                                  group flex items-center justify-between px-3 py-2.5 border-b border-slate-800/30 cursor-pointer transition-all
-                                  ${selectedTopicName === t.name ? 'bg-slate-800/80 border-l-2 border-l-indigo-500' : 'hover:bg-slate-900/50 border-l-2 border-l-transparent'}
+                                  group flex items-center justify-between px-3 py-2.5 border-b border-border/30 cursor-pointer transition-all
+                                  ${selectedTopicName === t.name ? 'bg-secondary border-l-2 border-l-primary' : 'hover:bg-muted/50 border-l-2 border-l-transparent'}
                               `}
                             >
                                 <div className="flex items-center gap-2 overflow-hidden">
-                                    <Box className={`h-3.5 w-3.5 ${selectedTopicName === t.name ? 'text-indigo-400' : 'text-slate-500'}`} />
-                                    <span className={`font-mono text-xs truncate ${selectedTopicName === t.name ? 'text-slate-100 font-medium' : 'text-slate-400'}`}>
+                                    <Box className={`h-3.5 w-3.5 ${selectedTopicName === t.name ? 'text-primary' : 'text-muted-foreground'}`} />
+                                    <span className={`font-mono text-xs truncate ${selectedTopicName === t.name ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
                                       {t.name}
                                   </span>
                                 </div>
-                                <span className="text-[9px] text-slate-600 font-mono">
+                                <span className="text-[9px] text-muted-foreground font-mono">
                                   {t.partitions.length}P
                               </span>
                             </div>
@@ -106,9 +106,9 @@ export function StreamView({ data }: Props) {
             </div>
 
             {/* COL 2: PARTITIONS LIST */}
-            <div className="w-[200px] flex flex-col border-r border-slate-800 bg-slate-950/50 shrink-0">
-                <div className="px-3 py-2 border-b border-slate-800 bg-slate-900/40">
-                    <span className="text-[9px] text-slate-500 uppercase font-bold tracking-wider">Partitions</span>
+            <div className="w-[200px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
+                <div className="px-3 py-2 border-b-2 border-border bg-section-header">
+                    <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-wider">Partitions</span>
                 </div>
                 {hasTopics && selectedTopic ? (
                     <ScrollArea className="flex-1">
@@ -118,17 +118,17 @@ export function StreamView({ data }: Props) {
                                     key={p.id}
                                     onClick={() => setSelectedPartitionId(p.id)}
                                     className={`
-                                        flex items-center justify-between px-3 py-2.5 border-b border-slate-800/30 cursor-pointer transition-all
-                                        ${selectedPartitionId === p.id ? 'bg-slate-800/80 border-l-2 border-l-indigo-500' : 'hover:bg-slate-900/50 border-l-2 border-l-transparent'}
+                                        flex items-center justify-between px-3 py-2.5 border-b border-border/30 cursor-pointer transition-all
+                                        ${selectedPartitionId === p.id ? 'bg-secondary border-l-2 border-l-primary' : 'hover:bg-muted/50 border-l-2 border-l-transparent'}
                                     `}
                                 >
                                     <div className="flex items-center gap-2">
-                                        <Layers className={`h-3.5 w-3.5 ${selectedPartitionId === p.id ? 'text-indigo-400' : 'text-slate-500'}`} />
-                                        <span className={`font-mono text-xs ${selectedPartitionId === p.id ? 'text-slate-100 font-medium' : 'text-slate-400'}`}>
+                                        <Layers className={`h-3.5 w-3.5 ${selectedPartitionId === p.id ? 'text-primary' : 'text-muted-foreground'}`} />
+                                        <span className={`font-mono text-xs ${selectedPartitionId === p.id ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
                                             {p.id}
                                         </span>
                                     </div>
-                                    <span className="text-[9px] text-slate-600 font-mono">
+                                    <span className="text-[9px] text-muted-foreground font-mono">
                                         {p.messages.length} messages
                                     </span>
                                 </div>
@@ -141,22 +141,22 @@ export function StreamView({ data }: Props) {
             </div>
 
             {/* COL 3: DETAILS (Consumer Groups + Messages with Tab Toggle) + PAYLOAD INSPECTOR */}
-            <div className="flex-1 flex min-w-0 bg-slate-950/30">
+            <div className="flex-1 flex min-w-0 bg-content">
                 {hasTopics && selectedTopic && currentPartition ? (
                     <>
                         {/* LEFT SECTION: Messages + Consumer Groups */}
-                        <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800">
+                        <div className="flex-1 flex flex-col min-w-0 border-r-2 border-border">
                             {/* HEADER */}
-                            <div className="px-5 py-3  border-b border-slate-800 bg-slate-900/40">
-                                <div className="text-[12px] text-slate-400 font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
-                                <div className="text-[12px] text-slate-400 font-mono font-medium">Consumer groups:</div>
+                            <div className="px-5 py-3  border-b-2 border-border bg-section-header">
+                                <div className="text-[12px] text-muted-foreground font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
+                                <div className="text-[12px] text-muted-foreground font-mono font-medium">Consumer groups:</div>
                                 {currentPartition.groups.length > 0 && (
                                     <div className="space-y-1">
                                         {currentPartition.groups.map((group: ConsumerGroupSummary) => {
                                             return (
-                                                <div key={group.id} className="grid grid-cols-3 gap-4 text-[11px] text-slate-400 font-mono">
+                                                <div key={group.id} className="grid grid-cols-3 gap-4 text-[11px] text-muted-foreground font-mono">
                                                     <div className="truncate ml-6 ">- {group.id}</div>
-                                                    <div className="text-right text-slate-500">Progress: {group.committed_offset}/{currentPartition.last_offset}</div>
+                                                    <div className="text-right text-muted-foreground">Progress: {group.committed_offset}/{currentPartition.last_offset}</div>
                                                 </div>
                                             )
                                         })}
@@ -165,8 +165,8 @@ export function StreamView({ data }: Props) {
                             </div>
 
                             {/* EVENTS LOG HEADER */}
-                            <div className="px-5 py-2 border-b border-slate-800 bg-slate-950/50 shrink-0">
-                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Events Log</span>
+                            <div className="px-5 py-2 border-b border-border bg-section-header shrink-0">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Events Log</span>
                             </div>
 
                             {/* CONTENT AREA */}
@@ -174,7 +174,7 @@ export function StreamView({ data }: Props) {
                                 {/* MESSAGES LOG */}
                                 <div className="flex-1 flex flex-col min-h-0">
                                     {/* HEADERS */}
-                                    <div className="flex items-center px-5 py-2 border-b border-slate-800 bg-slate-900/50 text-[10px] font-mono text-slate-500 uppercase shrink-0 tracking-wider">
+                                    <div className="flex items-center px-5 py-2 border-b border-border bg-section-header text-[10px] font-mono text-muted-foreground uppercase shrink-0 tracking-wider">
                                         <div className="w-16 shrink-0">Offset</div>
                                         <div className="flex-1">Timestamp</div>
                                     </div>
@@ -207,17 +207,17 @@ export function StreamView({ data }: Props) {
                                                             transform: `translateY(${virtualRow.start}px)`,
                                                         }}
                                                         className={`
-                                                         flex items-center px-5 border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40 transition-colors
-                                                         ${isSelected ? 'bg-indigo-500/10 border-indigo-500/30' : ''}
+                                                         flex items-center px-5 border-b border-border/50 cursor-pointer hover:bg-muted/40 transition-colors
+                                                         ${isSelected ? 'bg-primary/10 border-primary/30' : ''}
                                                      `}
                                                     >
-                                                        <div className={`w-16 shrink-0 font-mono text-[10px] ${isSelected ? 'text-indigo-300 font-bold' : 'text-slate-500'}`}>
+                                                        <div className={`w-16 shrink-0 font-mono text-[10px] ${isSelected ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
                                                             {msg.offset}
                                                         </div>
-                                                        <div className="flex-1 font-mono text-[10px] text-slate-400">
+                                                        <div className="flex-1 font-mono text-[10px] text-muted-foreground">
                                                             {timeStr}
                                                         </div>
-                                                        {isSelected && <ArrowRight className="h-3 w-3 text-indigo-500 ml-2" />}
+                                                        {isSelected && <ArrowRight className="h-3 w-3 text-primary ml-2" />}
                                                     </div>
                                                 )
                                             })}
@@ -228,22 +228,22 @@ export function StreamView({ data }: Props) {
                         </div>
 
                         {/* RIGHT SECTION: PAYLOAD INSPECTOR */}
-                        <div className="w-[420px] bg-slate-950 flex flex-col shadow-xl border-l border-slate-800 shrink-0">
-                            <div className="px-5 py-3 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between shrink-0">
-                                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Payload</span>
+                        <div className="w-[420px] bg-content flex flex-col shadow-xl border-l border-border shrink-0">
+                            <div className="px-5 py-3 border-b border-border bg-section-header flex items-center justify-between shrink-0">
+                                <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">Payload</span>
                                 {selectedMessage && (
-                                    <span className="text-[10px] font-mono text-slate-400">Offset {selectedMessage.offset}</span>
+                                    <span className="text-[10px] font-mono text-muted-foreground">Offset {selectedMessage.offset}</span>
                                 )}
                             </div>
 
                             <ScrollArea className="flex-1">
                                 <div className="p-5">
                                     {selectedMessage ? (
-                                        <div className="font-mono text-[11px] leading-relaxed text-slate-300 whitespace-pre-wrap break-all">
+                                        <div className="font-mono text-[11px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
                                             {JSON.stringify(selectedMessage.payload, null, 2)}
                                         </div>
                                     ) : (
-                                        <div className="flex flex-col items-center justify-center h-40 text-slate-700 mt-10">
+                                        <div className="flex flex-col items-center justify-center h-40 text-muted-foreground mt-10">
                                             <p className="text-[10px] text-center opacity-60">
                                                 Select a message
                                             </p>
@@ -254,7 +254,7 @@ export function StreamView({ data }: Props) {
                         </div>
                     </>
                 ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center text-slate-700">
+                    <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                         <Database className="h-10 w-10 mb-3 opacity-20" />
                         <p className="text-[10px] font-mono uppercase tracking-widest opacity-60">SELECT A PARTITION</p>
                     </div>
