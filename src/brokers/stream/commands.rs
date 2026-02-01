@@ -24,7 +24,7 @@ pub enum PersistenceOptions {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionOptions {
     pub max_age_ms: Option<u64>,

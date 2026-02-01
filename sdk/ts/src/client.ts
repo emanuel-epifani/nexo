@@ -1,4 +1,4 @@
-import { logger } from './utils/logger';
+import { Logger, LogHandler } from './utils/logger';
 import { NexoConnection } from './connection';
 import { NexoStore } from './brokers/store';
 import { NexoQueue, QueueConfig } from './brokers/queue';
@@ -10,6 +10,8 @@ export interface NexoOptions {
   host: string;
   port: number;
   requestTimeoutMs?: number;
+  logger?: LogHandler;
+  logLevel?: string;
 }
 
 export class NexoClient {
@@ -17,14 +19,16 @@ export class NexoClient {
   private queues = new Map<string, NexoQueue<any>>();
   private streams = new Map<string, NexoStream<any>>();
   private topics = new Map<string, NexoTopic<any>>();
+  private logger: Logger;
 
   public readonly store: NexoStore;
   private readonly pubsubBroker: NexoPubSub;
 
   constructor(options: NexoOptions) {
-    this.conn = new NexoConnection(options);
+    this.logger = new Logger({ handler: options.logger, level: options.logLevel });
+    this.conn = new NexoConnection(options, this.logger);
     this.store = new NexoStore(this.conn);
-    this.pubsubBroker = new NexoPubSub(this.conn);
+    this.pubsubBroker = new NexoPubSub(this.conn, this.logger);
     this.setupGracefulShutdown();
   }
 
@@ -39,7 +43,7 @@ export class NexoClient {
   queue<T = any>(name: string): NexoQueue<T> {
     let q = this.queues.get(name);
     if (!q) {
-      q = new NexoQueue<T>(this.conn, name);
+      q = new NexoQueue<T>(this.conn, name, this.logger);
       this.queues.set(name, q);
     }
     return q;
@@ -48,7 +52,7 @@ export class NexoClient {
   stream<T = any>(name: string): NexoStream<T> {
     let s = this.streams.get(name);
     if (!s) {
-      s = new NexoStream<T>(this.conn, name);
+      s = new NexoStream<T>(this.conn, name, this.logger);
       this.streams.set(name, s);
     }
     return s;
@@ -65,7 +69,7 @@ export class NexoClient {
 
   private setupGracefulShutdown() {
     const shutdown = async () => {
-      logger.info("Graceful shutdown triggered. Disconnecting...");
+      this.logger.info("Graceful shutdown triggered. Disconnecting...");
       this.disconnect();
       process.exit(0);
     };

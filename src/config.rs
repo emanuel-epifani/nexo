@@ -48,7 +48,7 @@ impl ServerConfig {
             host:           get_env("SERVER_HOST", "127.0.0.1"),
             port:           get_env("SERVER_PORT", "7654"),
             dashboard_port: get_env("DASHBOARD_PORT", "8080"),
-            log_level:      get_env("LOG_LEVEL", "error"),
+            log_level:      get_env("NEXO_LOG", "error"),
         }
     }
 }

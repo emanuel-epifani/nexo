@@ -1,6 +1,6 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
-import { logger } from '../utils/logger';
+import { Logger } from '../utils/logger';
 import { ConnectionClosedError } from '../errors';
 
 enum StreamOpcode {
@@ -133,7 +133,8 @@ class StreamSubscription<T> {
   constructor(
     private conn: NexoConnection,
     private streamName: string,
-    private group: string
+    private group: string,
+    private logger: Logger
   ) { }
 
   async start(
@@ -145,7 +146,7 @@ class StreamSubscription<T> {
 
     // Run loop in background (fire & forget promise)
     this.runConsumerLoop(callback, batchSize).catch(err => {
-      logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
+      this.logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
       this.active = false;
     });
   }
@@ -180,12 +181,12 @@ class StreamSubscription<T> {
         }
 
         if (this.isRebalanceError(e)) {
-          logger.warn(`[${this.streamName}:${this.group}] Rebalance. Re-joining...`);
+          this.logger.warn(`[${this.streamName}:${this.group}] Rebalance. Re-joining...`);
           await this.backoff(200);
           continue;
         }
 
-        logger.error(`[${this.streamName}:${this.group}] Error. Retrying in 1s...`, e);
+        this.logger.error(`[${this.streamName}:${this.group}] Error. Retrying in 1s...`, e);
         await this.backoff(1000);
       }
     }
@@ -203,7 +204,7 @@ class StreamSubscription<T> {
       this.offsets.set(p.id, p.offset);
     }
 
-    logger.debug(`[${this.streamName}:${this.group}] Joined Gen ${this.generationId}. Partitions: ${this.assignedPartitions}`);
+    this.logger.debug(`[${this.streamName}:${this.group}] Joined Gen ${this.generationId}. Partitions: ${this.assignedPartitions}`);
   }
 
   private async pollLoop(callback: (data: T) => Promise<any> | any, batchSize: number): Promise<void> {
@@ -272,7 +273,7 @@ class StreamSubscription<T> {
           lastProcessedOffset = msg.offset;
         } catch (e: any) {
           if (this.isRebalanceError(e)) throw e;
-          logger.error(`Error processing P${partition}:${msg.offset}. Stopping batch.`);
+          this.logger.error(`Error processing P${partition}:${msg.offset}. Stopping batch.`);
           shouldCommit = false;
           break;
         }
@@ -296,7 +297,7 @@ class StreamSubscription<T> {
       await StreamCommands.commit(this.conn, this.streamName, this.group, partition, nextOffset, myGenId);
     } catch (e: any) {
       if (this.isRebalanceError(e)) throw e;
-      logger.error(`Commit failed P${partition}:${nextOffset}`, e);
+      this.logger.error(`Commit failed P${partition}:${nextOffset}`, e);
     }
   }
 
@@ -312,7 +313,8 @@ class StreamSubscription<T> {
 export class NexoStream<T = any> {
   constructor(
     private conn: NexoConnection,
-    public readonly name: string
+    public readonly name: string,
+    private logger: Logger
   ) { }
 
   async create(options: StreamCreateOptions = {}): Promise<this> {
@@ -344,7 +346,7 @@ export class NexoStream<T = any> {
       throw new Error(`Stream '${this.name}' not found`);
     }
 
-    const subscription = new StreamSubscription<T>(this.conn, this.name, group);
+    const subscription = new StreamSubscription<T>(this.conn, this.name, group, this.logger);
 
     // Start the subscription loop (non-blocking)
     await subscription.start(callback, options);

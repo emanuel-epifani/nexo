@@ -1,5 +1,6 @@
+export type LogHandler = (level: string, message: string, ...args: any[]) => void;
 
-enum LogLevel {
+export enum LogLevel {
     TRACE = 0,
     DEBUG = 1,
     INFO = 2,
@@ -8,12 +9,14 @@ enum LogLevel {
     NONE = 5
 }
 
-class Logger {
+export class Logger {
     private readonly level: LogLevel;
+    private readonly handler: LogHandler;
 
-    constructor() {
-        const envLevel = process.env.NEXO_LOG?.toUpperCase() || process.env.LOG_LEVEL?.toUpperCase() || 'ERROR';
+    constructor(options?: { handler?: LogHandler, level?: string }) {
+        const envLevel = options?.level || process.env.NEXO_LOG?.toUpperCase() || 'ERROR';
         this.level = this.parseLevel(envLevel);
+        this.handler = options?.handler || this.defaultHandler;
     }
 
     private parseLevel(lvl: string): LogLevel {
@@ -28,40 +31,44 @@ class Logger {
         }
     }
 
+    private defaultHandler(level: string, msg: string, ...args: any[]) {
+        const timestamp = new Date().toISOString();
+        const prefix = `[SDK] [${timestamp}] ${level}`;
+
+        switch (level) {
+            case 'ERROR': console.error(prefix, msg, ...args); break;
+            case 'WARN': console.warn(prefix, msg, ...args); break;
+            default: console.log(prefix, msg, ...args); break;
+        }
+    }
+
     trace(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.TRACE) {
-            // Magenta per trace (simile a viola)
-            console.debug(`\x1b[35mTRACE\x1b[0m [SDK] ${msg}`, ...args);
+            this.handler('TRACE', msg, ...args);
         }
     }
 
     debug(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.DEBUG) {
-            // Ciano per examples
-            console.debug(`\x1b[36mDEBUG\x1b[0m [SDK] ${msg}`, ...args);
+            this.handler('DEBUG', msg, ...args);
         }
     }
 
     info(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.INFO) {
-            // Verde per info
-            console.log(`\x1b[32m INFO\x1b[0m [SDK] ${msg}`, ...args);
+            this.handler('INFO', msg, ...args);
         }
     }
 
     warn(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.WARN) {
-            // Giallo per warn
-            console.warn(`\x1b[33m WARN\x1b[0m [SDK] ${msg}`, ...args);
+            this.handler('WARN', msg, ...args);
         }
     }
 
     error(msg: string, ...args: any[]) {
         if (this.level <= LogLevel.ERROR) {
-            // Rosso per error
-            console.error(`\x1b[31mERROR\x1b[0m [SDK] ${msg}`, ...args);
+            this.handler('ERROR', msg, ...args);
         }
     }
 }
-
-export const logger = new Logger();

@@ -1,6 +1,6 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
-import { logger } from '../utils/logger';
+import { Logger } from '../utils/logger';
 import { ConnectionClosedError } from '../errors';
 
 enum QueueOpcode {
@@ -107,7 +107,8 @@ export class NexoQueue<T = any> {
 
   constructor(
     private conn: NexoConnection,
-    public readonly name: string
+    public readonly name: string,
+    private logger: Logger
   ) { }
 
   async create(config: QueueConfig = {}): Promise<this> {
@@ -168,7 +169,7 @@ export class NexoQueue<T = any> {
               await this.ack(msg.id);
             } catch (e) {
               if (!this.conn.isConnected) return;
-              logger.error(`Callback error in queue ${this.name}:`, e);
+              this.logger.error(`Callback error in queue ${this.name}:`, e);
             }
           });
 
@@ -179,7 +180,7 @@ export class NexoQueue<T = any> {
             await new Promise(r => setTimeout(r, 500));
             continue;
           }
-          logger.error(`[QUEUE-LOOP:${this.name}] CRITICAL ERROR:`, e);
+          this.logger.error(`[QUEUE-LOOP:${this.name}] CRITICAL ERROR:`, e);
           await new Promise(r => setTimeout(r, 1000));
         }
       }
@@ -187,7 +188,7 @@ export class NexoQueue<T = any> {
     };
 
     loop().catch(err => {
-      logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
+      this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 
     return { stop: () => { active = false; } };

@@ -1,6 +1,6 @@
 import * as net from 'net';
 import { EventEmitter } from 'events';
-import { logger } from './utils/logger';
+import { Logger } from './utils/logger';
 import { FrameType, ResponseStatus } from './protocol';
 import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
@@ -17,6 +17,7 @@ export class NexoConnection extends EventEmitter {
     timer: NodeJS.Timeout
   }>();
   private readonly requestTimeoutMs: number;
+  private readonly logger: Logger;
 
   public onPush?: (topic: string, data: any) => void;
 
@@ -29,10 +30,11 @@ export class NexoConnection extends EventEmitter {
   private shouldReconnect = true;
   private isReconnecting = false;
 
-  constructor(options: NexoOptions) {
+  constructor(options: NexoOptions, logger: Logger) {
     super();
     this.host = options.host;
     this.port = options.port;
+    this.logger = logger;
     this.socket = new net.Socket();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
   }
@@ -70,7 +72,7 @@ export class NexoConnection extends EventEmitter {
       this.isConnected = false;
 
       if (wasConnected || this.isReconnecting) {
-        logger.error(`[Connection] SOCKET CLOSED. Error: ${err ? err.message : 'Clean close'}. Reconnecting: ${this.shouldReconnect}`);
+        this.logger.error(`[Connection] SOCKET CLOSED. Error: ${err ? err.message : 'Clean close'}. Reconnecting: ${this.shouldReconnect}`);
       }
 
       this.pending.forEach(p => {
@@ -86,20 +88,20 @@ export class NexoConnection extends EventEmitter {
       }
     };
 
-    this.socket.on('error', (err) => logger.error("Socket error", err));
+    this.socket.on('error', (err) => this.logger.error("Socket error", err));
     this.socket.on('close', cleanup);
   }
 
   private async startReconnectLoop() {
     this.isReconnecting = true;
-    logger.warn("⚠️ Connection lost. Attempting to reconnect...");
+    this.logger.warn("⚠️ Connection lost. Attempting to reconnect...");
 
     while (this.shouldReconnect && !this.isConnected) {
       await new Promise(r => setTimeout(r, 1500));
 
       try {
         await this.createSocketAndConnect();
-        logger.info("✅ Reconnected to Nexo Server");
+        this.logger.info("✅ Reconnected to Nexo Server");
         this.isReconnecting = false;
         this.emit('reconnect');
       } catch (e) {
@@ -163,7 +165,7 @@ export class NexoConnection extends EventEmitter {
         break;
       }
       case FrameType.ERROR:
-        logger.error('Received Protocol Error');
+        this.logger.error('Received Protocol Error');
         break;
       case FrameType.PING:
         // Optional: Send PONG
@@ -195,7 +197,7 @@ export class NexoConnection extends EventEmitter {
             const errMsg = errCursor.readString();
             // Silence common expected errors
             if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
-              logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);
+              this.logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);
             }
             reject(new Error(errMsg));
           } else {
