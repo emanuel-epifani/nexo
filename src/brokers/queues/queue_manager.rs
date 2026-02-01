@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use crate::brokers::queues::queue::{QueueConfig, Message};
 use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
-use crate::brokers::queues::persistence::types::PersistenceMode;
+use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::dashboard::models::queues::QueueBrokerSnapshot;
+use crate::config::SystemQueueConfig;
 
 // ==========================================
 // MANAGER COMMANDS
@@ -17,7 +18,7 @@ use crate::dashboard::models::queues::QueueBrokerSnapshot;
 pub enum ManagerCommand {
     CreateQueue {
         name: String,
-        config: QueueConfig,
+        options: QueueCreateOptions,
         reply: oneshot::Sender<Result<(), String>>,
     },
     GetQueueActor {
@@ -45,11 +46,11 @@ pub enum ManagerCommand {
 #[derive(Clone)]
 pub struct QueueManager {
     tx: mpsc::Sender<ManagerCommand>,
-    config: crate::config::QueueConfig,
+    config: SystemQueueConfig,
 }
 
 impl QueueManager {
-    pub fn new(system_config: crate::config::QueueConfig) -> Self {
+    pub fn new(system_config: SystemQueueConfig) -> Self {
         let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
         let manager_tx = tx.clone();
         
@@ -64,14 +65,15 @@ impl QueueManager {
     async fn run_manager_loop(
         mut rx: mpsc::Receiver<ManagerCommand>,
         manager_tx: mpsc::Sender<ManagerCommand>,
-        system_config: crate::config::QueueConfig,
+        system_config: SystemQueueConfig,
     ) {
         let mut actors: HashMap<String, mpsc::Sender<QueueActorCommand>> = HashMap::new();
 
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                ManagerCommand::CreateQueue { name, config, reply } => {
+                ManagerCommand::CreateQueue { name, options, reply } => {
                     if !actors.contains_key(&name) {
+                        let config = QueueConfig::from_options(options, &system_config);
                         let actor_tx = Self::spawn_queue_actor(
                             name.clone(), 
                             config, 
@@ -91,14 +93,14 @@ impl QueueManager {
                     let actor_tx = if let Some(tx) = actors.get(&queue_name) {
                         tx.clone()
                     } else {
-                        let config = QueueConfig {
-                            visibility_timeout_ms: system_config.visibility_timeout_ms,
-                            max_retries: system_config.max_retries,
-                            ttl_ms: system_config.ttl_ms,
-                            persistence: PersistenceMode::Memory,
-                            writer_channel_capacity: system_config.writer_channel_capacity,
-                            writer_batch_size: system_config.writer_batch_size,
+                        let options = QueueCreateOptions {
+                            visibility_timeout_ms: None,
+                            max_retries: None,
+                            ttl_ms: None,
+                            persistence: Some(PersistenceOptions::Memory),
                         };
+                        let config = QueueConfig::from_options(options, &system_config);
+                        
                         let tx = Self::spawn_queue_actor(
                             queue_name.clone(),
                             config,
@@ -168,7 +170,7 @@ impl QueueManager {
         name: String,
         config: QueueConfig,
         manager_tx: mpsc::Sender<ManagerCommand>,
-        system_config: &crate::config::QueueConfig,
+        system_config: &SystemQueueConfig,
     ) -> mpsc::Sender<QueueActorCommand> {
         let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
         
@@ -182,9 +184,9 @@ impl QueueManager {
 
     // --- Public API ---
 
-    pub async fn declare_queue(&self, name: String, config: QueueConfig) -> Result<(), String> {
+    pub async fn declare_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::CreateQueue { name, config, reply: tx })
+        self.tx.send(ManagerCommand::CreateQueue { name, options, reply: tx })
             .await
             .map_err(|_| "Manager closed".to_string())?;
         rx.await.map_err(|_| "No reply".to_string())?

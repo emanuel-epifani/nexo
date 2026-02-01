@@ -13,6 +13,8 @@ use chrono::{DateTime, Utc};
 
 use crate::dashboard::models::queues::{QueueSummary, MessageSummary};
 use crate::brokers::queues::persistence::types::PersistenceMode;
+use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
+use crate::config::SystemQueueConfig;
 
 // ==========================================
 // MESSAGE & CONFIG
@@ -72,18 +74,24 @@ pub struct QueueConfig {
     pub writer_batch_size: usize,
 }
 
-use crate::config::Config;
+impl QueueConfig {
+    pub fn from_options(opts: QueueCreateOptions, sys: &SystemQueueConfig) -> Self {
+        let persistence = match opts.persistence {
+            Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
+            Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
+            Some(PersistenceOptions::FileAsync { flush_interval_ms }) => PersistenceMode::Async {
+                flush_ms: flush_interval_ms.unwrap_or(sys.default_flush_ms),
+            },
+            None => PersistenceMode::Async { flush_ms: sys.default_flush_ms },
+        };
 
-impl Default for QueueConfig {
-    fn default() -> Self {
-        let global = &Config::global().queue;
         Self {
-            visibility_timeout_ms: global.visibility_timeout_ms,
-            max_retries: global.max_retries,
-            ttl_ms: global.ttl_ms,
-            persistence: PersistenceMode::default(),
-            writer_channel_capacity: global.writer_channel_capacity,
-            writer_batch_size: global.writer_batch_size,
+            visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
+            max_retries: opts.max_retries.unwrap_or(sys.max_retries),
+            ttl_ms: opts.ttl_ms.unwrap_or(sys.ttl_ms),
+            persistence,
+            writer_channel_capacity: sys.writer_channel_capacity,
+            writer_batch_size: sys.writer_batch_size,
         }
     }
 }

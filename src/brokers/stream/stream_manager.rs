@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
-use crate::brokers::stream::topic::TopicState;
+use crate::brokers::stream::topic::{TopicState, TopicConfig};
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
-use crate::config::StreamConfig;
+use crate::config::SystemStreamConfig;
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, RetentionOptions};
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
@@ -105,21 +105,12 @@ struct TopicActor {
 impl TopicActor {
     fn new(
         name: String, 
-        partitions: u32, 
         rx: mpsc::Receiver<TopicCommand>, 
-        mode: PersistenceMode,
-        base_path: String,
-        compaction_threshold: u64,
-        max_segment_size: u64,
-        retention: RetentionOptions,
-        retention_check_ms: u64,
-        max_ram_messages: usize,
-        writer_channel_capacity: usize,
-        writer_batch_size: usize,
+        config: TopicConfig,
     ) -> Self {
         // 1. Recovery
-        let recovered = recover_topic(&name, partitions, PathBuf::from(base_path.clone()));
-        let state = TopicState::restore(name.clone(), partitions, max_ram_messages, recovered.partitions_data);
+        let recovered = recover_topic(&name, config.partitions, PathBuf::from(config.persistence_path.clone()));
+        let state = TopicState::restore(name.clone(), config.partitions, config.max_ram_messages, recovered.partitions_data);
         
         let mut groups = HashMap::new();
         // Restore Groups
@@ -131,18 +122,18 @@ impl TopicActor {
         }
 
         // 2. Spawn Writer
-        let (w_tx, w_rx) = mpsc::channel(writer_channel_capacity);
+        let (w_tx, w_rx) = mpsc::channel(config.writer_channel_capacity);
         let writer = StreamWriter::new(
             name.clone(), 
-            partitions, 
-            mode.clone(), 
+            config.partitions, 
+            config.persistence_mode.clone(), 
             w_rx,
-            PathBuf::from(base_path),
-            compaction_threshold,
-            max_segment_size,
-            retention,
-            retention_check_ms,
-            writer_batch_size,
+            PathBuf::from(config.persistence_path),
+            config.compaction_threshold,
+            config.max_segment_size,
+            config.retention,
+            config.retention_check_ms,
+            config.writer_batch_size,
         );
         tokio::spawn(writer.run());
 
@@ -152,7 +143,7 @@ impl TopicActor {
             client_map: HashMap::new(),
             rx,
             last_partition: 0,
-            persistence_mode: mode,
+            persistence_mode: config.persistence_mode,
             writer_tx: w_tx,
         }
     }
@@ -405,38 +396,17 @@ impl TopicActor {
 // STREAM MANAGER (The Router)
 // ==========================================
 
-fn resolve_retention(
-    options: Option<RetentionOptions>, 
-    default_age: u64, 
-    default_bytes: u64
-) -> RetentionOptions {
-    options.map(|r| RetentionOptions {
-        max_age_ms: r.max_age_ms.map_or(
-            Some(default_age),
-            |v| if v == 0 { None } else { Some(v) }
-        ),
-        max_bytes: r.max_bytes.map_or(
-            Some(default_bytes),
-            |v| if v == 0 { None } else { Some(v) }
-        ),
-    }).unwrap_or(RetentionOptions {
-        max_age_ms: Some(default_age),
-        max_bytes: Some(default_bytes),
-    })
-}
-
 #[derive(Clone)]
 pub struct StreamManager {
     tx: mpsc::Sender<ManagerCommand>,
-    config: StreamConfig,
+    config: SystemStreamConfig,
 }
 
 impl StreamManager {
-    pub fn new(config: StreamConfig) -> Self {
+    pub fn new(config: SystemStreamConfig) -> Self {
         let (tx, mut rx) = mpsc::channel(100);
         let actor_capacity = config.actor_channel_capacity;
-        let default_partitions = config.default_partitions;
-        let actor_config = config.clone();
+        let system_config = config.clone();
 
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
@@ -445,32 +415,15 @@ impl StreamManager {
                 match cmd {
                     ManagerCommand::CreateTopic { name, options, reply } => {
                         if !actors.contains_key(&name) {
-                            let partitions = options.partitions.unwrap_or(default_partitions);
-                            let persistence: PersistenceMode = options.persistence.into();
-                            
-                            // Retention Resolution (Safe defaults)
-                            let retention = resolve_retention(
-                                options.retention, 
-                                actor_config.default_retention_age_ms, 
-                                actor_config.default_retention_bytes
-                            );
-
+                            let topic_config = TopicConfig::from_options(options, &system_config);
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
-                            tracing::info!("[StreamManager] Creating topic '{}' with {} partitions, mode {:?}, retention {:?}", name, partitions, persistence, retention);
+                            
+                            tracing::info!("[StreamManager] Creating topic '{}' with config {:?}", name, topic_config);
                             
                             let actor = TopicActor::new(
                                 name.clone(), 
-                                partitions, 
                                 t_rx, 
-                                persistence,
-                                actor_config.persistence_path.clone(),
-                                actor_config.compaction_threshold,
-                                actor_config.max_segment_size,
-                                retention,
-                                actor_config.retention_check_interval_ms,
-                                actor_config.max_ram_messages,
-                                actor_config.writer_channel_capacity,
-                                actor_config.writer_batch_size,
+                                topic_config
                             );
                             tokio::spawn(actor.run());
                             actors.insert(name, t_tx);
@@ -487,7 +440,7 @@ impl StreamManager {
                         }
 
                         // 2. Delete Persistence
-                        let base_path = std::path::PathBuf::from(&actor_config.persistence_path);
+                        let base_path = std::path::PathBuf::from(&system_config.persistence_path);
                         let topic_path = base_path.join(&name);
                         
                         if topic_path.exists() {

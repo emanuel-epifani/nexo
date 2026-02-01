@@ -24,7 +24,7 @@ pub enum PersistenceOptions {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,

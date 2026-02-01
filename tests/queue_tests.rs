@@ -1,5 +1,5 @@
-use nexo::brokers::queues::{QueueManager, QueueConfig};
-use nexo::brokers::queues::persistence::types::PersistenceMode;
+use nexo::brokers::queues::{QueueManager};
+use nexo::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -19,7 +19,7 @@ mod features {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_basic_{}", Uuid::new_v4());
         
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
         
         // Push
         manager.push(q.clone(), Bytes::from("payload"), 0, None).await.unwrap();
@@ -39,7 +39,7 @@ mod features {
     async fn test_priority_ordering() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_priority_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         manager.push(q.clone(), Bytes::from("low"), 0, None).await.unwrap();
         manager.push(q.clone(), Bytes::from("high"), 10, None).await.unwrap();
@@ -62,8 +62,8 @@ mod features {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("feature_scheduled_{}", Uuid::new_v4());
         // Configure short visibility to ensure pulse loop runs frequently (min 50ms)
-        let config = QueueConfig {
-            visibility_timeout_ms: 200, 
+        let config = QueueCreateOptions {
+            visibility_timeout_ms: Some(200), 
             ..Default::default()
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
@@ -89,16 +89,16 @@ mod features {
         let q = format!("feature_dlq_{}", Uuid::new_v4());
         
         let visibility_timeout = 100;
-        let config = QueueConfig {
-            visibility_timeout_ms: visibility_timeout,
-            max_retries: 3, // 3 Retries allow 3 attempts before failure? No. 
+        let config = QueueCreateOptions {
+            visibility_timeout_ms: Some(visibility_timeout),
+            max_retries: Some(3), // 3 Retries allow 3 attempts before failure? No. 
                             // Logic: attempts >= max_retries -> DLQ.
                             // If max_retries = 3:
                             // Pop 1 (att=1). Timeout. 1 < 3 -> Requeue.
                             // Pop 2 (att=2). Timeout. 2 < 3 -> Requeue.
                             // Pop 3 (att=3). Timeout. 3 >= 3 -> DLQ.
-            ttl_ms: 60000,
-            persistence: PersistenceMode::Memory,
+            ttl_ms: Some(60000),
+            persistence: Some(PersistenceOptions::Memory),
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
 
@@ -137,7 +137,7 @@ mod features {
     async fn test_delete_queue() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_del_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         manager.push(q.clone(), Bytes::from("msg"), 0, None).await.unwrap();
         assert!(manager.exists(&q).await);
@@ -157,7 +157,7 @@ mod features {
         
         // Since we can't easily check if file exists without knowing path logic,
         // we check if declaring it again results in an empty queue (no recovery)
-        manager2.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager2.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
         assert!(manager2.pop(&q).await.is_none(), "Queue should be empty after delete and recreation");
     }
 }
@@ -173,7 +173,7 @@ mod advanced {
     async fn test_batch_consume() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_batch_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         // Push 10 messages
         for i in 0..10 {
@@ -199,7 +199,7 @@ mod advanced {
     async fn test_long_polling() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_poll_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         // Spawn consumer in background
         let manager_clone = manager.clone();
@@ -232,7 +232,7 @@ mod advanced {
     async fn test_long_polling_timeout() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_poll_to_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         let start = Instant::now();
         // Wait 300ms, expect empty
@@ -249,7 +249,7 @@ mod advanced {
     async fn test_snapshot_metrics() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("adv_snap_{}", Uuid::new_v4());
-        manager.declare_queue(q.clone(), QueueConfig::default()).await.unwrap();
+        manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
         // 3 Pending
         manager.push(q.clone(), Bytes::from("p1"), 0, None).await.unwrap();
@@ -294,8 +294,8 @@ mod persistence {
 
         {
             let manager1 = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync, // Ensure written immediately
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync), // Ensure written immediately
                 ..Default::default()
             };
             manager1.declare_queue(q.clone(), config).await.unwrap();
@@ -309,8 +309,8 @@ mod persistence {
             let manager2 = QueueManager::new(sys_config.clone());
             // We must "redeclare" the queue to spawn the actor again,
             // but the actor should find the DB and recover.
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager2.declare_queue(q.clone(), config).await.unwrap();
@@ -330,8 +330,8 @@ mod persistence {
 
         {
             let manager = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager.declare_queue(q.clone(), config).await.unwrap();
@@ -346,8 +346,8 @@ mod persistence {
         // Restart immediately
         {
             let manager2 = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager2.declare_queue(q.clone(), config).await.unwrap();
@@ -374,8 +374,8 @@ mod persistence {
 
         {
             let manager = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager.declare_queue(q.clone(), config).await.unwrap();
@@ -391,8 +391,8 @@ mod persistence {
         // Restart
         {
             let manager2 = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager2.declare_queue(q.clone(), config).await.unwrap();
@@ -412,9 +412,9 @@ mod persistence {
 
         {
             let manager = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                visibility_timeout_ms: 500, // Short timeout
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(500), // Short timeout
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager.declare_queue(q.clone(), config).await.unwrap();
@@ -431,9 +431,9 @@ mod persistence {
 
         {
             let manager2 = QueueManager::new(sys_config.clone());
-            let config = QueueConfig {
-                visibility_timeout_ms: 500,
-                persistence: PersistenceMode::Sync,
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(500),
+                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager2.declare_queue(q.clone(), config).await.unwrap();
@@ -462,8 +462,8 @@ mod performance {
     async fn bench_memory_throughput() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_mem_{}", Uuid::new_v4());
-        let config = QueueConfig {
-            persistence: PersistenceMode::Memory,
+        let config = QueueCreateOptions {
+            persistence: Some(PersistenceOptions::Memory),
             ..Default::default()
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
@@ -481,8 +481,8 @@ mod performance {
     async fn bench_fsync_throughput() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_sync_{}", Uuid::new_v4());
-        let config = QueueConfig {
-            persistence: PersistenceMode::Sync,
+        let config = QueueCreateOptions {
+            persistence: Some(PersistenceOptions::FileSync),
             ..Default::default()
         };
         manager.declare_queue(q.clone(), config).await.unwrap();
@@ -500,8 +500,8 @@ mod performance {
     async fn bench_fasync_throughput() {
         let (manager, _tmp) = setup_queue_manager().await;
         let q = format!("bench_async_{}", Uuid::new_v4());
-        let config = QueueConfig {
-            persistence: PersistenceMode::Async { flush_ms: 200 },
+        let config = QueueCreateOptions {
+            persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(200) }),
             ..Default::default()
         };
         manager.declare_queue(q.clone(), config).await.unwrap();

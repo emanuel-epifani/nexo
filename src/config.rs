@@ -9,9 +9,9 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 pub struct Config {
     pub server: ServerConfig,
     pub store: StoreConfig,
-    pub queue: QueueConfig,
+    pub queue: SystemQueueConfig,
     pub pubsub: PubSubConfig,
-    pub stream: StreamConfig,
+    pub stream: SystemStreamConfig,
 }
 
 impl Config {
@@ -24,9 +24,9 @@ impl Config {
         Self {
             server: ServerConfig::load(),
             store: StoreConfig::load(),
-            queue: QueueConfig::load(),
+            queue: SystemQueueConfig::load(),
             pubsub: PubSubConfig::load(),
-            stream: StreamConfig::load(),
+            stream: SystemStreamConfig::load(),
         }
     }
 }
@@ -71,7 +71,7 @@ impl StoreConfig {
 
 // QUEUE
 #[derive(Debug, Clone)]
-pub struct QueueConfig {
+pub struct SystemQueueConfig {
     // CREATE config
     pub visibility_timeout_ms: u64,
     pub max_retries: u32,
@@ -87,7 +87,7 @@ pub struct QueueConfig {
     pub writer_batch_size: usize,
 }
 
-impl QueueConfig {
+impl SystemQueueConfig {
     fn load() -> Self {
         Self {
             visibility_timeout_ms: get_env("QUEUE_VISIBILITY_MS", "30000"),
@@ -120,7 +120,7 @@ impl PubSubConfig {
 
 // STREAM
 #[derive(Debug, Clone)]
-pub struct StreamConfig {
+pub struct SystemStreamConfig {
     pub default_partitions: u32,
     pub actor_channel_capacity: usize,
     pub persistence_path: String,
@@ -135,7 +135,7 @@ pub struct StreamConfig {
     pub writer_batch_size: usize,
 }
 
-impl StreamConfig {
+impl SystemStreamConfig {
     fn load() -> Self {
         Self {
             default_partitions:          get_env("STREAM_PARTITIONS", "8"),

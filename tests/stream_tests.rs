@@ -1,6 +1,6 @@
 use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions, RetentionOptions};
 use nexo::brokers::stream::StreamManager;
-use nexo::config::{Config, StreamConfig};
+use nexo::config::{Config, SystemStreamConfig};
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ mod features {
     use super::*;
     use nexo::brokers::stream::StreamManager;
 
-    fn get_test_config(path: Option<&str>) -> StreamConfig {
+    fn get_test_config(path: Option<&str>) -> SystemStreamConfig {
         let mut config = Config::global().stream.clone();
         if let Some(p) = path {
             config.persistence_path = p.to_string();

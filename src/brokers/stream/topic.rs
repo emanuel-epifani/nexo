@@ -10,6 +10,66 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use crate::brokers::stream::persistence::writer::{Segment, read_log_segment};
+use crate::brokers::stream::persistence::types::PersistenceMode;
+use crate::brokers::stream::commands::{StreamCreateOptions, RetentionOptions, PersistenceOptions};
+use crate::config::SystemStreamConfig;
+
+#[derive(Debug, Clone)]
+pub struct TopicConfig {
+    pub partitions: u32,
+    pub persistence_mode: PersistenceMode,
+    pub persistence_path: String,
+    pub compaction_threshold: u64,
+    pub max_segment_size: u64,
+    pub retention: RetentionOptions,
+    pub retention_check_ms: u64,
+    pub max_ram_messages: usize,
+    pub writer_channel_capacity: usize,
+    pub writer_batch_size: usize,
+}
+
+impl TopicConfig {
+    pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
+         let persistence_mode = match opts.persistence {
+            Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
+            Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
+            Some(PersistenceOptions::FileAsync { flush_interval_ms }) => PersistenceMode::Async {
+                flush_ms: flush_interval_ms.unwrap_or(sys.default_flush_ms),
+            },
+            None => PersistenceMode::Async { flush_ms: sys.default_flush_ms },
+        };
+        
+        let retention = match opts.retention {
+             Some(r) => RetentionOptions {
+                max_age_ms: r.max_age_ms.map_or(
+                    Some(sys.default_retention_age_ms),
+                    |v| if v == 0 { None } else { Some(v) }
+                ),
+                max_bytes: r.max_bytes.map_or(
+                    Some(sys.default_retention_bytes),
+                    |v| if v == 0 { None } else { Some(v) }
+                ),
+             },
+             None => RetentionOptions {
+                max_age_ms: Some(sys.default_retention_age_ms),
+                max_bytes: Some(sys.default_retention_bytes),
+             }
+        };
+
+        Self {
+            partitions: opts.partitions.unwrap_or(sys.default_partitions),
+            persistence_mode,
+            persistence_path: sys.persistence_path.clone(),
+            compaction_threshold: sys.compaction_threshold,
+            max_segment_size: sys.max_segment_size,
+            retention,
+            retention_check_ms: sys.retention_check_interval_ms,
+            max_ram_messages: sys.max_ram_messages,
+            writer_channel_capacity: sys.writer_channel_capacity,
+            writer_batch_size: sys.writer_batch_size,
+        }
+    }
+}
 
 pub struct TopicState {
     pub name: String,
