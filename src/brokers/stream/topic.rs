@@ -33,8 +33,8 @@ impl TopicConfig {
          let persistence_mode = match opts.persistence {
             Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
             Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
-            Some(PersistenceOptions::FileAsync { flush_interval_ms }) => PersistenceMode::Async {
-                flush_ms: flush_interval_ms.unwrap_or(sys.default_flush_ms),
+            Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
+                flush_ms: sys.default_flush_ms,
             },
             None => PersistenceMode::Async { flush_ms: sys.default_flush_ms },
         };

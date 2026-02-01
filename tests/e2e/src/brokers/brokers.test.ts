@@ -619,7 +619,7 @@ describe('BROKER INTEGRATION', async () => {
 
             // --- ROUND 1: STREAM ---
             const streamTopic = `perf-stream-${randomUUID()}`;
-            await nexo.stream(streamTopic).create({ persistence: { strategy: 'memory' } });
+            await nexo.stream(streamTopic).create({ persistence: 'memory' });
             const streamProd = nexo.stream(streamTopic);
 
             const probeStream = new BenchmarkProbe('STREAM (64KB)', COUNT);

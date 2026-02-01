@@ -11,17 +11,11 @@ pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "strategy")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum PersistenceOptions {
-    #[serde(rename = "memory")]
     Memory,
-    #[serde(rename = "file_sync")]
     FileSync,
-    #[serde(rename = "file_async")]
-    FileAsync {
-        flush_interval_ms: Option<u64>,
-    },
+    FileAsync,
 }
 
 #[derive(Debug, Deserialize, Clone)]

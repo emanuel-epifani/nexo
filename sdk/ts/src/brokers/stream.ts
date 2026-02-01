@@ -15,11 +15,6 @@ enum StreamOpcode {
 
 export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
 
-export type PersistenceOptions =
-  | { strategy: 'memory' }
-  | { strategy: 'file_sync' }
-  | { strategy: 'file_async'; flushIntervalMs?: number };
-
 export interface RetentionOptions {
   maxAgeMs: number;
   maxBytes: number;
@@ -27,7 +22,7 @@ export interface RetentionOptions {
 
 export interface StreamCreateOptions {
   partitions?: number;
-  persistence?: PersistenceOptions;
+  persistence?: PersistenceStrategy;
   retention?: RetentionOptions;
 }
 

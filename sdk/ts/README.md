@@ -5,7 +5,7 @@ High-performance TypeScript client for [Nexo Broker](https://github.com/emanuel-
 ## Quick Start
 
 
-### Run NEXO server
+### Run server
 ```bash
 docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo:latest
 ```
@@ -64,14 +64,11 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
     ttlMs: 60000,               // Message expires if not consumed in 60s   (default=7days)
 
     // PERSISTENCE:
-    // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
-    // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
-    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable) 
-    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 100 }
-    persistence: {
-        strategy: 'file_async',
-        flushIntervalMs: 200    
-    }
+    // - 'memory':     Volatile (Fastest, lost on restart)
+    // - 'file_sync':  Save every message (Safest, Slowest)
+    // - 'file_async': Flush periodically (Fast & Durable) - 
+    // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs
+    persistence: 'file_sync',
 });
 
 
@@ -103,7 +100,7 @@ await criticalQueue.subscribe(
 ```
 </details>
 
-### 3. PUB/SUB 
+### 3. PUB/SUB
 
 ```typescript
 // Define topic (not need to create, auto-created on first publish)
@@ -169,14 +166,11 @@ const orders = await client.stream<Order>('orders').create({
     partitions: 4,              // Max concurrent consumers per group on same topic (default=8)
 
     // PERSISTENCE:
-    // - strategy: 'memory'     -> Volatile (Fastest, lost on restart)
-    // - strategy: 'file_sync'  -> Save every message (Safest, Slowest)
-    // - strategy: 'file_async' -> Buffer & flush periodically (Fast & Durable)
-    // DEFAULT: { strategy: 'file_async', flushIntervalMs: 100 }
-    persistence: {
-        strategy: 'file_async',
-        flushIntervalMs: 200    
-    },
+    // - 'memory':     Volatile (Fastest, lost on restart)
+    // - 'file_sync':  Save every message (Safest, Slowest)
+    // - 'file_async': Flush periodically (Fast & Durable) - 
+    // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs
+    persistence: 'file_sync',
 
     // RETENTION (Cleanup Policy)
     // --------------------------
@@ -211,6 +205,8 @@ await orders.subscribe('audit-log', (order) => saveAudit(order));
 ---
 
 ### ⚡️ Binary Payloads (Zero-Copy)
+### ⚡ Raw Binary
+
 All Nexo brokers (**Store, Queue, Stream, PubSub**) support raw binary data.
 Sending a `Buffer` instead of an object bypasses the JSON serialization layer entirely, drastically increasing throughput and reduce latency.
 
@@ -231,6 +227,8 @@ await client.store.map.set('user:avatar:1', heavyPayload);
 // 4. QUEUE (Process Files)
 await client.queue('pdf-processing').push(heavyPayload);
 ```
+
+---
 
 ## License
 

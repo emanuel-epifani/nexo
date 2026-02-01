@@ -15,8 +15,8 @@ impl From<Option<PersistenceOptions>> for PersistenceMode {
         match opts {
             Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
             Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
-            Some(PersistenceOptions::FileAsync { flush_interval_ms }) => PersistenceMode::Async {
-                flush_ms: flush_interval_ms.unwrap_or(Config::global().stream.default_flush_ms),
+            Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
+                flush_ms: Config::global().stream.default_flush_ms,
             },
             None => PersistenceMode::Async {
                 flush_ms: Config::global().stream.default_flush_ms,

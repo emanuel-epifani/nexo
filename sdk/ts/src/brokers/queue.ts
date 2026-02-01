@@ -67,16 +67,11 @@ const QueueCommands = {
 
 export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
 
-export type PersistenceOptions =
-  | { strategy: 'memory' }
-  | { strategy: 'file_sync' }
-  | { strategy: 'file_async'; flushIntervalMs?: number };
-
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
   ttlMs?: number;
-  persistence?: PersistenceOptions;
+  persistence?: PersistenceStrategy;
 }
 
 export interface QueueSubscribeOptions {
