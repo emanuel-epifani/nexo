@@ -1,6 +1,6 @@
 # Nexo Client SDK
 
-High-performance TypeScript client for [Nexo Broker](https://github.com/emanuel-epifani/nexo).
+High-performance TypeScript client for [Nexo](https://github.com/emanuel-epifani/nexo).
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ await mailQ.delete();
 ```
 
 <details>
-<summary><strong>Advanced Queue Features (Retry, Delay, Priority, Concurrency)</strong></summary>
+<summary><strong>Advanced Features (Persistence, Retry, Delay, Priority)</strong></summary>
 
 ```typescript
 // -------------------------------------------------------------
@@ -155,7 +155,7 @@ await stream.delete();
 ```
 
 <details>
-<summary><strong>Consumer Groups & Scaling</strong></summary>
+<summary><strong>Advanced Features (Consumer Groups, Persistence, Retention)</strong></summary>
 
 ```typescript
 // ---------------------------------------------------------
@@ -204,15 +204,15 @@ await orders.subscribe('audit-log', (order) => saveAudit(order));
 
 ---
 
-### ⚡️ Binary Payloads (Zero-Copy)
-### ⚡ Raw Binary
+### Binary Payloads (Zero-Overhead)
 
-All Nexo brokers (**Store, Queue, Stream, PubSub**) support raw binary data.
-Sending a `Buffer` instead of an object bypasses the JSON serialization layer entirely, drastically increasing throughput and reduce latency.
+All Nexo brokers (**Store, Queue, Stream, PubSub**) natively support raw binary data (`Buffer`).    
+Bypassing JSON serialization drastically reduces Latency, increases Throughput, and saves Bandwidth (~30% smaller payloads) .
 
-Useful for: Video chunks, Images, Protobuf/MsgPack payloads, Encrypted blobs.
+**Perfect for:** Video chunks, Images, Protobuf/MsgPack, Encrypted blobs.
 
 ```typescript
+// Send 1MB raw buffer (30% smaller than JSON/Base64)
 const heavyPayload = Buffer.alloc(1024 * 1024);
 
 // 1. STREAM: Replayable Data (e.g. CCTV Recording, Event Sourcing)

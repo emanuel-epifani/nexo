@@ -1,6 +1,6 @@
 {
   "name": "@emanuelepifani/nexo-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "High-performance TypeScript Client for Nexo Broker",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,12 +20,20 @@
     "url": "https://github.com/emanuel-epifani/nexo.git"
   },
   "keywords": [
-    "nexo",
-    "broker",
+    "microservices",
+    "event-driven",
+    "message-broker",
     "queue",
+    "job-queue",
     "stream",
+    "event-streaming",
+    "event-sourcing",
     "pubsub",
-    "store"
+    "realtime",
+    "store",
+    "key-value-store",
+    "typescript",
+    "high-performance"
   ],
   "devDependencies": {
     "@types/node": "^20.10.0",
