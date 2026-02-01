@@ -135,18 +135,17 @@ Everything is available instantly via a unified Client.
 ```text
 ┌──────────────┐        PUSH            ┌──────────────────┐
 │   Producer   │───────────────────────▶│ 1. [ Job A ]     │
-└──────────────┘                        │ 2. [ Job B ]     │───┐ POP
-                                        └──────────────────┘   │
-                                                               ▼
-                                        ┌──────────────────┐ ACK
+└──────────────┘                        │ 2. [ Job B ]     │───┐
+                                        └────────▲─────────┘   │ POP
+                                                 │             │
+                                             ACK │             │
+                                        ┌────────┴─────────┐   │
                                         │     Consumer     │◀──┘
                                         └──────────────────┘
 ```
-
-*   **At-Least-Once Delivery:** Jobs are only removed after explicit acknowledgment, preventing data loss on worker crashes.
-*   **Dead Letter Queues (DLQ):** Automatically isolates failing jobs after a configurable number of retries.
-*   **Disk Persistence:** Uses a Write-Ahead Log (WAL) to ensure jobs survive server restarts.
-
+*   **Smart Scheduling:** Supports **Delayed Jobs** (process in the future) and **Priority Queues** (urgent jobs first).
+*   **Failure Recovery:** Automatically retries failed jobs and isolates permanent failures in **Dead Letter Queues (DLQ)**.
+*   **Disk Persistence:** Safely persists all jobs to a Write-Ahead Log (WAL) to ensure data survival across restarts.
 
 ### 4. STREAM (Event Log)
 
