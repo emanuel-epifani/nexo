@@ -85,6 +85,8 @@ Each broker is purpose-built to solve a specific architectural pattern:
 Everything is available instantly via a unified Client.
 
 ### 1. STORE (Shared State)
+**In-memory concurrent data structures.**
+
 **Use Case:** Ideal for high-velocity data that needs to be instantly accessible across all your services, such as user sessions, API rate-limiting counters, and temporary caching.
 
 ```text
@@ -169,7 +171,7 @@ Everything is available instantly via a unified Client.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
 
-## 📊 Performance
+##  Performance
 
 
 ```shell
@@ -192,21 +194,9 @@ Everything is available instantly via a unified Client.
    Fanout:      3848881 msg/sec (Delivery)
 ```
 
-## 🎛️ Dashboard
+##  Dashboard
 
 Nexo comes with a built-in, zero-config real-time dashboard exposed to debug/developing
 
 ![Nexo Dashboard Screenshot](docs/assets/dashboard-preview.png)
 *(Monitor throughput, inspect queues, and debug streams in real-time)*
-
-
-## 🚀 Why Nexo?
-
-**One Binary. Four Brokers. Zero Headaches.**
-
-Nexo is the antidote to **Infrastructure Fatigue**. Instead of stitching together three different systems (Cache, Queue, Stream) with three different protocols, Nexo provides a **Unified Infrastructure** for your entire data flow.
-
-*   **Unified:** One connection for Caching, Pub/Sub, Queues, and Streams.
-*   **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
-*   **Fast:** Built in Rust on top of Tokio for extreme throughput and low latency.
-*   **Efficient:** Hybrid storage engine uses RAM for speed and Disk for durability where it matters.
