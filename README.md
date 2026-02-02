@@ -253,3 +253,13 @@ await stream.subscribe('analytics', (msg) => console.log("Event:", msg));
 ```
 
 > **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Node.js SDK Guide**](https://www.npmjs.com/package/@emanuelepifani/nexo-client).
+
+---
+
+<div align="center">
+
+**Built for performance, designed for simplicity.**
+<br />
+Crafted with ❤️ by [Emanuel Epifani](https://github.com/emanuel-epifani).
+
+</div>
