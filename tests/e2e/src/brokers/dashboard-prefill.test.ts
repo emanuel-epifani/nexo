@@ -642,4 +642,22 @@ describe('DASHBOARD PREFILL - Complete Data Visualization', () => {
         systemSub.stop();
     });
 
+
+    it('STREAM PERSISTENCE TEST', async () => {
+        // 1. Crea topic e pubblica SOLO messaggi
+        await nexo.stream('test_persistence').create();
+        const producer = nexo.stream('test_persistence');
+
+        await producer.publish({ test: 'message1', timestamp: Date.now() });
+        await producer.publish({ test: 'message2', timestamp: Date.now() });
+
+        // 2. NESSUN consumer - solo per testare scrittura su disco
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // 3. Verifica snapshot
+        const snapshot = await fetchBrokerSnapshot('/api/stream');
+        console.log('MESSAGES:', JSON.stringify(snapshot, null, 2));
+
+        // Dovresti vedere 2 messaggi nel topic 'test_persistence'
+    });
 });

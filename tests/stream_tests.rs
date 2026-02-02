@@ -597,6 +597,82 @@ mod stream_tests {
             assert!(!files.contains(&"0_0.log".to_string()), "Oldest segment should be deleted");
             assert!(files.contains(&"0_6.log".to_string()), "Newest segment should exist");
         }
+
+        #[tokio::test]
+        async fn test_warm_start_auto_restore() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path_str = temp_dir.path().to_str().unwrap().to_string();
+
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = path_str.clone();
+
+            let topic1 = "warm_topic1";
+            let topic2 = "warm_topic2";
+            let group = "warm_group";
+
+            // Phase 1: Create topics, publish messages, and commit offsets
+            {
+                let manager = StreamManager::new(config.clone());
+                
+                manager.create_topic(topic1.to_string(), StreamCreateOptions {
+                    partitions: Some(2),
+                    persistence: Some(PersistenceOptions::FileSync),
+                    ..Default::default()
+                }).await.unwrap();
+
+                manager.create_topic(topic2.to_string(), StreamCreateOptions {
+                    partitions: Some(1),
+                    persistence: Some(PersistenceOptions::FileSync),
+                    ..Default::default()
+                }).await.unwrap();
+
+                // Publish messages
+                manager.publish(topic1, StreamPublishOptions { key: None }, Bytes::from("msg1_t1")).await.unwrap();
+                manager.publish(topic1, StreamPublishOptions { key: None }, Bytes::from("msg2_t1")).await.unwrap();
+                manager.publish(topic2, StreamPublishOptions { key: None }, Bytes::from("msg1_t2")).await.unwrap();
+
+                // Join group and commit offset
+                let (gen, parts, _) = manager.join_group(group, topic1, "client-A").await.unwrap();
+                manager.commit_offset(group, topic1, parts[0], 1, "client-A", gen).await.unwrap();
+
+                // Drop manager (simulating server shutdown)
+            }
+
+            // Small delay to ensure files are flushed
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Phase 2: Restart manager WITHOUT calling create_topic
+            // Warm start should automatically discover and restore topics
+            {
+                let manager2 = StreamManager::new(config.clone());
+
+                // Wait a bit for warm start to complete
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                // Verify topics exist (warm start should have restored them)
+                assert!(manager2.exists(topic1).await, "Topic 1 should be auto-restored");
+                assert!(manager2.exists(topic2).await, "Topic 2 should be auto-restored");
+
+                // Verify messages are recovered
+                let msgs1 = manager2.read(topic1, 0, 10).await;
+                assert!(!msgs1.is_empty(), "Should recover messages from topic1");
+                
+                let msgs2 = manager2.read(topic2, 0, 10).await;
+                assert_eq!(msgs2.len(), 1, "Should recover 1 message from topic2");
+                assert_eq!(msgs2[0].payload, Bytes::from("msg1_t2"));
+
+                // Verify committed offsets are recovered
+                let (_, _, offsets) = manager2.join_group(group, topic1, "client-A").await.unwrap();
+                assert_eq!(*offsets.get(&0).unwrap_or(&0), 1, "Committed offset should be restored");
+
+                // Verify snapshot includes restored topics
+                let snapshot = manager2.get_snapshot().await;
+                let topic_names: Vec<String> = snapshot.topics.iter().map(|t| t.name.clone()).collect();
+                assert!(topic_names.contains(&topic1.to_string()), "Snapshot should include topic1");
+                assert!(topic_names.contains(&topic2.to_string()), "Snapshot should include topic2");
+                assert_eq!(snapshot.total_topics, 2, "Should have 2 topics restored");
+            }
+        }
     }
 
     mod performance {

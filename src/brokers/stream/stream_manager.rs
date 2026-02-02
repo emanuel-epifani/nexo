@@ -411,6 +411,31 @@ impl StreamManager {
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
             
+            // WARM START: Discover and restore topics from filesystem
+            let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
+            if persistence_path.exists() {
+                if let Ok(entries) = std::fs::read_dir(&persistence_path) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if let Some(topic_name) = path.file_name().and_then(|n| n.to_str()) {
+                                let topic_config = TopicConfig::from_options(StreamCreateOptions::default(), &system_config);
+                                let (t_tx, t_rx) = mpsc::channel(actor_capacity);
+                                
+                                let actor = TopicActor::new(
+                                    topic_name.to_string(),
+                                    t_rx,
+                                    topic_config
+                                );
+                                tokio::spawn(actor.run());
+                                actors.insert(topic_name.to_string(), t_tx);
+                                tracing::info!("[StreamManager] Warm start: Restored topic '{}'", topic_name);
+                            }
+                        }
+                    }
+                }
+            }
+            
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     ManagerCommand::CreateTopic { name, options, reply } => {

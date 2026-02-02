@@ -69,6 +69,32 @@ impl QueueManager {
     ) {
         let mut actors: HashMap<String, mpsc::Sender<QueueActorCommand>> = HashMap::new();
 
+        // WARM START: Discover and restore queues from filesystem
+        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
+        if persistence_path.exists() {
+            if let Ok(entries) = std::fs::read_dir(&persistence_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                            if filename.ends_with(".db") && !filename.ends_with(".db-wal") && !filename.ends_with(".db-shm") {
+                                let queue_name = filename.trim_end_matches(".db").to_string();
+                                let config = QueueConfig::from_options(QueueCreateOptions::default(), &system_config);
+                                let actor_tx = Self::spawn_queue_actor(
+                                    queue_name.clone(),
+                                    config,
+                                    manager_tx.clone(),
+                                    &system_config
+                                );
+                                actors.insert(queue_name.clone(), actor_tx);
+                                tracing::info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 ManagerCommand::CreateQueue { name, options, reply } => {

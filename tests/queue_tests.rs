@@ -453,6 +453,68 @@ mod queue_tests {
                 assert_eq!(msg.payload, Bytes::from("job"));
             }
         }
+
+        #[tokio::test]
+        async fn test_warm_start_auto_restore() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q1 = format!("warm_q1_{}", Uuid::new_v4());
+            let q2 = format!("warm_q2_{}", Uuid::new_v4());
+
+            // Phase 1: Create queues and add messages
+            {
+                let manager = QueueManager::new(sys_config.clone());
+                
+                let config = QueueCreateOptions {
+                    persistence: Some(PersistenceOptions::FileSync),
+                    ..Default::default()
+                };
+                
+                manager.declare_queue(q1.clone(), config.clone()).await.unwrap();
+                manager.declare_queue(q2.clone(), config.clone()).await.unwrap();
+
+                manager.push(q1.clone(), Bytes::from("msg1_q1"), 0, None).await.unwrap();
+                manager.push(q1.clone(), Bytes::from("msg2_q1"), 0, None).await.unwrap();
+                manager.push(q2.clone(), Bytes::from("msg1_q2"), 0, None).await.unwrap();
+
+                // Drop manager (simulating server shutdown)
+            }
+
+            // Small delay to ensure files are flushed
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Phase 2: Restart manager WITHOUT calling create_queue
+            // Warm start should automatically discover and restore queues
+            {
+                let manager2 = QueueManager::new(sys_config.clone());
+
+                // Wait a bit for warm start to complete
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                // Verify queues exist (warm start should have restored them)
+                assert!(manager2.exists(&q1).await, "Queue 1 should be auto-restored");
+                assert!(manager2.exists(&q2).await, "Queue 2 should be auto-restored");
+
+                // Verify messages are recovered
+                let msg1 = manager2.pop(&q1).await.expect("Should recover msg1_q1");
+                assert_eq!(msg1.payload, Bytes::from("msg1_q1"));
+
+                let msg2 = manager2.pop(&q1).await.expect("Should recover msg2_q1");
+                assert_eq!(msg2.payload, Bytes::from("msg2_q1"));
+
+                let msg3 = manager2.pop(&q2).await.expect("Should recover msg1_q2");
+                assert_eq!(msg3.payload, Bytes::from("msg1_q2"));
+
+                // Verify snapshot includes restored queues
+                let snapshot = manager2.get_snapshot().await;
+                let queue_names: Vec<String> = snapshot.active_queues.iter().map(|q| q.name.clone()).collect();
+                assert!(queue_names.contains(&q1), "Snapshot should include q1");
+                assert!(queue_names.contains(&q2), "Snapshot should include q2");
+            }
+        }
     }
 
     // =========================================================================================
