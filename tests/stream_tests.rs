@@ -405,7 +405,7 @@ mod stream_tests {
             // Creazione Topic
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
-                persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }),
+                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             }).await.unwrap();
 
@@ -430,7 +430,7 @@ mod stream_tests {
             // 4. VERIFY: Verifichiamo lo stato recuperato
             recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
-                persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(10) }),
+                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             }).await.unwrap();
 
@@ -736,7 +736,7 @@ mod stream_tests {
             let topic = "bench-async";
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 partitions: Some(1),
-                persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(200) }),
+                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             }).await.unwrap();
 

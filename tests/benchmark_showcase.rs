@@ -101,7 +101,7 @@ async fn bench_02_queue_push_fasync() {
         ..Default::default()
     };
     
-    manager.declare_queue(q_name.clone(), options).await.unwrap();
+    manager.create_queue(q_name.clone(), options).await.unwrap();
 
     let mut bench = Benchmark::start("QUEUE: 1M PUSH operations (FAsync, flush 100ms)", count);
     let payload = Bytes::from("job_data_payload");

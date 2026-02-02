@@ -22,9 +22,9 @@ async fn main() {
         .without_time()
         .init();
 
-    tracing::info!("--- CONFIGURATION LOADED ---");
-    tracing::info!("{:#?}", config);
-    tracing::info!("----------------------------");
+    tracing::debug!("--- CONFIGURATION LOADED ---");
+    tracing::debug!("{:#?}", config);
+    tracing::debug!("----------------------------");
 
     let engine = NexoEngine::new(&config);
     
@@ -41,7 +41,7 @@ async fn main() {
         tracing::info!("🚫 Dashboard disabled by config");
     }
 
-    tracing::info!(host = %config.server.host, port = %config.server.port, "🚀 Nexo Server v0.2 Starting...");
+    tracing::info!(host = %config.server.host, port = %config.server.port, "🚀 Nexo Server Starting...");
 
     let listener = TcpListener::bind(&addr)
         .await

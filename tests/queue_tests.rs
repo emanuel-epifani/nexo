@@ -25,7 +25,7 @@ mod queue_tests {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("feature_basic_{}", Uuid::new_v4());
 
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             // Push
             manager.push(q.clone(), Bytes::from("payload"), 0, None).await.unwrap();
@@ -45,7 +45,7 @@ mod queue_tests {
         async fn test_priority_ordering() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("feature_priority_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             manager.push(q.clone(), Bytes::from("low"), 0, None).await.unwrap();
             manager.push(q.clone(), Bytes::from("high"), 10, None).await.unwrap();
@@ -72,7 +72,7 @@ mod queue_tests {
                 visibility_timeout_ms: Some(200),
                 ..Default::default()
             };
-            manager.declare_queue(q.clone(), config).await.unwrap();
+            manager.create_queue(q.clone(), config).await.unwrap();
 
             let delay_ms = 200;
             // Push with delay
@@ -106,7 +106,7 @@ mod queue_tests {
                 ttl_ms: Some(60000),
                 persistence: Some(PersistenceOptions::Memory),
             };
-            manager.declare_queue(q.clone(), config).await.unwrap();
+            manager.create_queue(q.clone(), config).await.unwrap();
 
             manager.push(q.clone(), Bytes::from("fail_me"), 0, None).await.unwrap();
 
@@ -143,7 +143,7 @@ mod queue_tests {
         async fn test_delete_queue() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_del_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             manager.push(q.clone(), Bytes::from("msg"), 0, None).await.unwrap();
             assert!(manager.exists(&q).await);
@@ -163,7 +163,7 @@ mod queue_tests {
 
             // Since we can't easily check if file exists without knowing path logic,
             // we check if declaring it again results in an empty queue (no recovery)
-            manager2.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
             assert!(manager2.pop(&q).await.is_none(), "Queue should be empty after delete and recreation");
         }
     }
@@ -179,7 +179,7 @@ mod queue_tests {
         async fn test_batch_consume() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_batch_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             // Push 10 messages
             for i in 0..10 {
@@ -205,7 +205,7 @@ mod queue_tests {
         async fn test_long_polling() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_poll_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             // Spawn consumer in background
             let manager_clone = manager.clone();
@@ -238,7 +238,7 @@ mod queue_tests {
         async fn test_long_polling_timeout() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_poll_to_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             let start = Instant::now();
             // Wait 300ms, expect empty
@@ -255,7 +255,7 @@ mod queue_tests {
         async fn test_snapshot_metrics() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_snap_{}", Uuid::new_v4());
-            manager.declare_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             // 3 Pending
             manager.push(q.clone(), Bytes::from("p1"), 0, None).await.unwrap();
@@ -304,7 +304,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync), // Ensure written immediately
                     ..Default::default()
                 };
-                manager1.declare_queue(q.clone(), config).await.unwrap();
+                manager1.create_queue(q.clone(), config).await.unwrap();
 
                 manager1.push(q.clone(), Bytes::from("survivor"), 0, None).await.unwrap();
                 // Drop manager1 (Actor stops)
@@ -319,7 +319,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager2.declare_queue(q.clone(), config).await.unwrap();
+                manager2.create_queue(q.clone(), config).await.unwrap();
 
                 let msg = manager2.pop(&q).await.expect("Message should survive crash");
                 assert_eq!(msg.payload, Bytes::from("survivor"));
@@ -340,7 +340,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager.declare_queue(q.clone(), config).await.unwrap();
+                manager.create_queue(q.clone(), config).await.unwrap();
 
                 // Push with delay 500ms
                 manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
@@ -356,7 +356,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager2.declare_queue(q.clone(), config).await.unwrap();
+                manager2.create_queue(q.clone(), config).await.unwrap();
 
                 // Should still be invisible (assuming less than 500ms passed)
                 assert!(manager2.pop(&q).await.is_none());
@@ -384,7 +384,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager.declare_queue(q.clone(), config).await.unwrap();
+                manager.create_queue(q.clone(), config).await.unwrap();
 
                 manager.push(q.clone(), Bytes::from("job_done"), 0, None).await.unwrap();
 
@@ -401,7 +401,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager2.declare_queue(q.clone(), config).await.unwrap();
+                manager2.create_queue(q.clone(), config).await.unwrap();
 
                 // Should be empty (Ack was persisted)
                 assert!(manager2.pop(&q).await.is_none(), "Acked message should not reappear");
@@ -423,7 +423,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager.declare_queue(q.clone(), config).await.unwrap();
+                manager.create_queue(q.clone(), config).await.unwrap();
 
                 manager.push(q.clone(), Bytes::from("job"), 0, None).await.unwrap();
 
@@ -442,7 +442,7 @@ mod queue_tests {
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
-                manager2.declare_queue(q.clone(), config).await.unwrap();
+                manager2.create_queue(q.clone(), config).await.unwrap();
 
                 // Should be visible again! (Recovery put it in waiting_for_ack, then expired)
                 // Note: Recovery runs, then process_expired runs.
@@ -473,8 +473,8 @@ mod queue_tests {
                     ..Default::default()
                 };
                 
-                manager.declare_queue(q1.clone(), config.clone()).await.unwrap();
-                manager.declare_queue(q2.clone(), config.clone()).await.unwrap();
+                manager.create_queue(q1.clone(), config.clone()).await.unwrap();
+                manager.create_queue(q2.clone(), config.clone()).await.unwrap();
 
                 manager.push(q1.clone(), Bytes::from("msg1_q1"), 0, None).await.unwrap();
                 manager.push(q1.clone(), Bytes::from("msg2_q1"), 0, None).await.unwrap();
@@ -534,7 +534,7 @@ mod queue_tests {
                 persistence: Some(PersistenceOptions::Memory),
                 ..Default::default()
             };
-            manager.declare_queue(q.clone(), config).await.unwrap();
+            manager.create_queue(q.clone(), config).await.unwrap();
 
             let mut bench = Benchmark::start("PUSH - Memory (no persistency)", COUNT);
             for _ in 0..COUNT {
@@ -553,7 +553,7 @@ mod queue_tests {
                 persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
-            manager.declare_queue(q.clone(), config).await.unwrap();
+            manager.create_queue(q.clone(), config).await.unwrap();
 
             let mut bench = Benchmark::start("PUSH - FSync (write on disdk once per message)", COUNT);
             for _ in 0..COUNT {
@@ -569,10 +569,10 @@ mod queue_tests {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("bench_async_{}", Uuid::new_v4());
             let config = QueueCreateOptions {
-                persistence: Some(PersistenceOptions::FileAsync { flush_interval_ms: Some(200) }),
+                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             };
-            manager.declare_queue(q.clone(), config).await.unwrap();
+            manager.create_queue(q.clone(), config).await.unwrap();
 
             let mut bench = Benchmark::start("PUSH - FAsync (write on disk once every x ms)", COUNT);
             for _ in 0..COUNT {

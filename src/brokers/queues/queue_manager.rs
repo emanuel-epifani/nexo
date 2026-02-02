@@ -210,7 +210,7 @@ impl QueueManager {
 
     // --- Public API ---
 
-    pub async fn declare_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
+    pub async fn create_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(ManagerCommand::CreateQueue { name, options, reply: tx })
             .await

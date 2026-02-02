@@ -100,7 +100,7 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
 
     match cmd {
         QueueCommand::Create { options, q_name } => {
-            match queue_manager.declare_queue(q_name, options).await {
+            match queue_manager.create_queue(q_name, options).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

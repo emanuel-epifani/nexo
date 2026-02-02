@@ -10,7 +10,7 @@ pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
 pub const OP_Q_DELETE: u8 = 0x15;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceOptions {
     Memory,
@@ -18,7 +18,7 @@ pub enum PersistenceOptions {
     FileAsync,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
