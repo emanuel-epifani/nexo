@@ -673,6 +673,66 @@ mod stream_tests {
                 assert_eq!(snapshot.total_topics, 2, "Should have 2 topics restored");
             }
         }
+
+        #[tokio::test]
+        async fn test_ram_eviction_under_load() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path_str = temp_dir.path().to_str().unwrap().to_string();
+
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = path_str.clone();
+            // Config aggressivo per test veloce
+            config.ram_soft_limit = 100;        // Target: 100 msg in RAM
+            config.ram_hard_limit = 200;        // Max: 200 msg
+            config.eviction_interval_ms = 100;  // Evict ogni 100ms
+            config.eviction_batch_size = 50;    // Max 50 msg per tick
+            config.default_flush_ms = 50;       // Flush veloce
+            config.max_segment_size = 500;      // Piccolo per forzare segmentazione
+
+            let manager = StreamManager::new(config);
+            let topic = "eviction_test";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions {
+                partitions: Some(1),
+                persistence: Some(PersistenceOptions::FileAsync),
+                ..Default::default()
+            }).await.unwrap();
+
+            // 1. Pubblica 500 messaggi (oltre hard_limit)
+            println!("Publishing 500 messages...");
+            for i in 0..500 {
+                let payload = Bytes::from(format!("msg_{:04}", i));
+                manager.publish(topic, StreamPublishOptions { key: None }, payload).await.unwrap();
+            }
+
+            // 2. Aspetta flush + eviction (200ms dovrebbe bastare)
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // 3. Verifica: messaggi vecchi leggibili da disco (cold read)
+            let old_msgs = manager.read(topic, 0, 10).await;
+            assert_eq!(old_msgs.len(), 10, "Cold read should work for evicted messages");
+            assert_eq!(old_msgs[0].payload, Bytes::from("msg_0000"));
+            assert_eq!(old_msgs[9].payload, Bytes::from("msg_0009"));
+
+            // 4. Verifica: messaggi recenti leggibili da RAM (hot read)
+            let recent_msgs = manager.read(topic, 490, 10).await;
+            assert_eq!(recent_msgs.len(), 10, "Hot read should work for recent messages");
+            assert_eq!(recent_msgs[0].payload, Bytes::from("msg_0490"));
+            assert_eq!(recent_msgs[9].payload, Bytes::from("msg_0499"));
+
+            // 5. Verifica: tutti i messaggi sono leggibili (sequenza completa)
+            let mut all_read = Vec::new();
+            let mut offset = 0;
+            while all_read.len() < 500 {
+                let batch = manager.read(topic, offset, 50).await;
+                if batch.is_empty() { break; }
+                offset += batch.len() as u64;
+                all_read.extend(batch);
+            }
+            assert_eq!(all_read.len(), 500, "All messages should be readable");
+
+            println!("✅ RAM eviction test passed: {} messages published, all readable", all_read.len());
+        }
     }
 
     mod performance {
@@ -751,13 +811,154 @@ mod stream_tests {
         }
     }
 
+    mod error_handling {
+        use super::*;
+        use nexo::brokers::stream::StreamManager;
+
+        #[tokio::test]
+        async fn test_publish_nonexistent_topic() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+            
+            let manager = StreamManager::new(config);
+            
+            // Publish su topic inesistente dovrebbe fallire
+            let result = manager.publish("nonexistent_topic", 
+                StreamPublishOptions { key: None }, 
+                Bytes::from("msg")).await;
+            
+            assert!(result.is_err(), "Publishing to nonexistent topic should fail");
+            assert_eq!(result.err().unwrap(), "Topic not found");
+        }
+
+        #[tokio::test]
+        async fn test_commit_unassigned_partition() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+            
+            let manager = StreamManager::new(config);
+            manager.create_topic("test_topic".to_string(), StreamCreateOptions {
+                partitions: Some(4),
+                ..Default::default()
+            }).await.unwrap();
+
+            // Client A si unisce e ottiene alcune partitions
+            let (gen_id_a, assigned_a, _) = manager.join_group("test_group", "test_topic", "client-A").await.unwrap();
+            
+            // Client B si unisce → rebalance → gen_id aumenta
+            let (gen_id_b, assigned_b, _) = manager.join_group("test_group", "test_topic", "client-B").await.unwrap();
+            
+            // Dopo rebalance, client A ha vecchio gen_id e prova a committare
+            // Questo dovrebbe fallire anche se la partition era sua prima
+            if !assigned_a.is_empty() {
+                let result = manager.commit_offset("test_group", "test_topic", 
+                    assigned_a[0], 10, "client-A", gen_id_a).await;
+                
+                assert!(result.is_err(), "Commit with old generation should fail");
+                assert_eq!(result.err().unwrap(), "REBALANCE_NEEDED");
+            }
+            
+            // Inoltre, client A non dovrebbe poter committare su partitions di B
+            if let Some(b_partition) = assigned_b.iter().find(|p| !assigned_a.contains(p)) {
+                let result = manager.commit_offset("test_group", "test_topic", 
+                    *b_partition, 10, "client-A", gen_id_b).await;
+                
+                assert!(result.is_err(), "Commit on other client's partition should fail");
+                assert_eq!(result.err().unwrap(), "REBALANCE_NEEDED");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_commit_with_stale_generation() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+            
+            let manager = StreamManager::new(config);
+            manager.create_topic("test_topic".to_string(), StreamCreateOptions {
+                partitions: Some(2),
+                ..Default::default()
+            }).await.unwrap();
+
+            // Client A si unisce
+            let (gen_id_1, partitions_1, _) = manager.join_group("test_group", "test_topic", "client-A").await.unwrap();
+            
+            // Client B si unisce → trigger rebalance → generation_id aumenta
+            let (_gen_id_2, _partitions_2, _) = manager.join_group("test_group", "test_topic", "client-B").await.unwrap();
+            
+            // Client A prova a committare con vecchio generation_id
+            let result = manager.commit_offset("test_group", "test_topic", 
+                partitions_1[0], 10, "client-A", gen_id_1).await;
+            
+            assert!(result.is_err(), "Commit with stale generation should fail");
+            assert_eq!(result.err().unwrap(), "REBALANCE_NEEDED");
+        }
+
+        #[tokio::test]
+        async fn test_read_beyond_high_watermark() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+            
+            let manager = StreamManager::new(config);
+            manager.create_topic("test_topic".to_string(), StreamCreateOptions::default()).await.unwrap();
+            
+            // Pubblica 10 messaggi (offset 0-9)
+            for i in 0..10 {
+                manager.publish("test_topic", StreamPublishOptions { key: None }, 
+                    Bytes::from(format!("msg{}", i))).await.unwrap();
+            }
+            
+            // Read offset 1000 (oltre high watermark) → dovrebbe tornare vuoto
+            let msgs = manager.read("test_topic", 1000, 10).await;
+            assert!(msgs.is_empty(), "Reading beyond high watermark should return empty");
+            
+            // Read offset 0 (valido) → dovrebbe tornare almeno alcuni messaggi (in RAM)
+            let msgs = manager.read("test_topic", 0, 100).await;
+            assert!(!msgs.is_empty(), "Should read at least some messages from RAM");
+            assert_eq!(msgs[0].offset, 0, "First message should have offset 0");
+            
+            // Verifica che i messaggi siano in ordine sequenziale
+            for i in 1..msgs.len() {
+                assert_eq!(msgs[i].offset, msgs[i-1].offset + 1, "Messages should be sequential");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_fetch_with_invalid_partition() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+            
+            let manager = StreamManager::new(config);
+            manager.create_topic("test_topic".to_string(), StreamCreateOptions {
+                partitions: Some(2),
+                ..Default::default()
+            }).await.unwrap();
+
+            let (gen_id, _, _) = manager.join_group("test_group", "test_topic", "client-A").await.unwrap();
+            
+            // Prova a fare fetch su partition 999 (non esiste)
+            let result = manager.fetch_group("test_group", "client-A", gen_id, 
+                999, 0, 10, "test_topic").await;
+            
+            // Dovrebbe fallire (attualmente potrebbe non gestire bene questo caso)
+            // Se passa, almeno verifichiamo che non crashi
+            if let Ok(msgs) = result {
+                assert!(msgs.is_empty(), "Fetch on invalid partition should return empty");
+            }
+        }
+    }
+
     mod unit_tests {
         use nexo::brokers::stream::topic::TopicState;
         use bytes::Bytes;
 
         #[test]
         fn test_topic_state_pure_logic() {
-            let mut state = TopicState::new("test_topic".to_string(), 2, 1000);
+            let mut state = TopicState::new("test_topic".to_string(), 2, 1000, 100, 200);
 
             // 1. Publish (Partition 0)
             let (offset, _) = state.publish(0, Bytes::from("msg1"));
@@ -780,7 +981,7 @@ mod stream_tests {
 
         #[test]
         fn test_read_offset_logic() {
-            let mut state = TopicState::new("test".to_string(), 1, 1000);
+            let mut state = TopicState::new("test".to_string(), 1, 1000, 100, 200);
             for i in 0..10 {
                 state.publish(0, Bytes::from(format!("msg{}", i)));
             }

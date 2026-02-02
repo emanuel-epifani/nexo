@@ -201,6 +201,8 @@ pub struct StreamWriter {
     retention: RetentionOptions,
     retention_check_interval_ms: u64,
     batch_size: usize,
+    
+    ack_tx: mpsc::Sender<super::super::stream_manager::TopicCommand>,
 }
 
 impl StreamWriter {
@@ -215,6 +217,7 @@ impl StreamWriter {
         retention: RetentionOptions,
         retention_check_interval_ms: u64,
         batch_size: usize,
+        ack_tx: mpsc::Sender<super::super::stream_manager::TopicCommand>,
     ) -> Self {
         let base_path = base_path.join(&topic_name);
         
@@ -233,6 +236,7 @@ impl StreamWriter {
             retention,
             retention_check_interval_ms,
             batch_size,
+            ack_tx,
         }
     }
 
@@ -406,12 +410,18 @@ impl StreamWriter {
             // Cerchiamo file del tipo: {i}_{offset}.log
             // Se non ne troviamo, creiamo {i}_0.log
             let active_segment = find_active_segment(&self.base_path, i)?;
-            let path = active_segment.path;
+            let path = active_segment.path.clone();
             
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             let size = file.metadata()?.len();
             
             self.writers.insert(i, (BufWriter::new(file), size));
+            
+            // Notifica TopicActor del segmento iniziale
+            let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::SegmentRotated {
+                partition: i,
+                segment: active_segment,
+            });
         }
 
         // Open Commit Log
@@ -430,6 +440,7 @@ impl StreamWriter {
 
         let mut failed = false;
         let mut error_msg = String::new();
+        let mut last_offsets: HashMap<u32, u64> = HashMap::new();
 
         // 1. Write everything to buffers
         for cmd in &current_batch {
@@ -437,6 +448,13 @@ impl StreamWriter {
                 error!("Failed to write op: {}", e);
                 failed = true;
                 error_msg = e.to_string();
+            }
+
+            // Track last offset per partition for ACK
+            if let StreamStorageOp::Append { partition, offset, .. } = cmd.op {
+                last_offsets.entry(partition)
+                    .and_modify(|o| *o = (*o).max(offset))
+                    .or_insert(offset);
             }
 
             // Track commits for compaction
@@ -475,7 +493,17 @@ impl StreamWriter {
             }
         }
 
-        // 3. Reply to waiters
+        // 3. Send ACK to TopicActor (non-blocking)
+        if !failed {
+            for (partition, last_offset) in last_offsets {
+                let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::PersistenceAck {
+                    partition,
+                    last_persisted_offset: last_offset,
+                });
+            }
+        }
+
+        // 4. Reply to waiters
         // Use into_iter to consume the local batch
         for cmd in current_batch {
             if let Some(reply) = cmd.reply {
@@ -507,6 +535,16 @@ impl StreamWriter {
                         *writer = BufWriter::new(new_file);
                         *current_size = 0;
                         info!("Rotated log for partition {} to offset {}", partition, offset);
+                        
+                        // Notifica TopicActor del nuovo segmento
+                        let segment = Segment {
+                            path: new_path.clone(),
+                            start_offset: *offset,
+                        };
+                        let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::SegmentRotated {
+                            partition: *partition,
+                            segment,
+                        });
                     }
 
                     let mut hasher = Hasher::new();

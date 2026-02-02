@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use crate::brokers::stream::topic::{TopicState, TopicConfig};
-use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
+use crate::brokers::stream::group::ConsumerGroup;
 use crate::dashboard::models::stream::StreamBrokerSnapshot;
 use crate::config::SystemStreamConfig;
 use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, RetentionOptions};
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
-
+use crate::brokers::stream::persistence::writer::Segment;
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -53,11 +53,20 @@ pub enum TopicCommand {
     },
     LeaveGroup {
         client_id: String,
-        reply: oneshot::Sender<()>, // Ack needed for clean shutdown
+        reply: oneshot::Sender<()>,
     },
     GetSnapshot {
         reply: oneshot::Sender<crate::dashboard::models::stream::TopicSummary>,
     },
+    PersistenceAck {
+        partition: u32,
+        last_persisted_offset: u64,
+    },
+    SegmentRotated {
+        partition: u32,
+        segment: Segment,
+    },
+    EvictOldMessages,
     Stop {
         reply: oneshot::Sender<()>,
     }
@@ -100,17 +109,27 @@ struct TopicActor {
     last_partition: u32,
     persistence_mode: PersistenceMode,
     writer_tx: mpsc::Sender<WriterCommand>,
+    self_tx: mpsc::Sender<TopicCommand>,
+    eviction_batch_size: usize,
 }
 
 impl TopicActor {
     fn new(
         name: String, 
-        rx: mpsc::Receiver<TopicCommand>, 
+        rx: mpsc::Receiver<TopicCommand>,
+        self_tx: mpsc::Sender<TopicCommand>,
         config: TopicConfig,
     ) -> Self {
         // 1. Recovery
         let recovered = recover_topic(&name, config.partitions, PathBuf::from(config.persistence_path.clone()));
-        let state = TopicState::restore(name.clone(), config.partitions, config.max_ram_messages, recovered.partitions_data);
+        let state = TopicState::restore(
+            name.clone(), 
+            config.partitions, 
+            config.max_ram_messages,
+            config.ram_soft_limit,
+            config.ram_hard_limit,
+            recovered.partitions_data
+        );
         
         let mut groups = HashMap::new();
         // Restore Groups
@@ -134,6 +153,7 @@ impl TopicActor {
             config.retention,
             config.retention_check_ms,
             config.writer_batch_size,
+            self_tx.clone(),
         );
         tokio::spawn(writer.run());
 
@@ -145,10 +165,23 @@ impl TopicActor {
             last_partition: 0,
             persistence_mode: config.persistence_mode,
             writer_tx: w_tx,
+            self_tx,
+            eviction_batch_size: config.eviction_batch_size,
         }
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, eviction_interval_ms: u64) {
+        // Spawn eviction timer task
+        let eviction_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(eviction_interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let _ = eviction_tx.send(TopicCommand::EvictOldMessages).await;
+            }
+        });
+
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 TopicCommand::Publish { options, payload, reply } => {
@@ -383,6 +416,39 @@ impl TopicActor {
                         };
                         let _ = reply.send(summary);
                     },
+                TopicCommand::PersistenceAck { partition, last_persisted_offset } => {
+                    if let Some(p) = self.state.partitions.get_mut(partition as usize) {
+                        p.persisted_offset = last_persisted_offset;
+                    }
+                },
+                TopicCommand::SegmentRotated { partition, segment } => {
+                    if let Some(p) = self.state.partitions.get_mut(partition as usize) {
+                        p.segments.push(segment);
+                        p.segments.sort_by_key(|s| s.start_offset);
+                    }
+                },
+                TopicCommand::EvictOldMessages => {
+                    for partition in &mut self.state.partitions {
+                        let target_evict = partition.log.len().saturating_sub(partition.soft_limit);
+                        let evict_count = target_evict.min(self.eviction_batch_size);
+                        
+                        for _ in 0..evict_count {
+                            let should_evict = if let Some(front) = partition.log.front() {
+                                front.offset < partition.persisted_offset
+                            } else {
+                                false
+                            };
+                            
+                            if should_evict {
+                                if let Some(removed) = partition.log.pop_front() {
+                                    partition.ram_start_offset = removed.offset + 1;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                },
                 TopicCommand::Stop { reply } => {
                     let _ = reply.send(());
                     break;
@@ -421,13 +487,15 @@ impl StreamManager {
                             if let Some(topic_name) = path.file_name().and_then(|n| n.to_str()) {
                                 let topic_config = TopicConfig::from_options(StreamCreateOptions::default(), &system_config);
                                 let (t_tx, t_rx) = mpsc::channel(actor_capacity);
+                                let eviction_interval = topic_config.eviction_interval_ms;
                                 
                                 let actor = TopicActor::new(
                                     topic_name.to_string(),
                                     t_rx,
+                                    t_tx.clone(),
                                     topic_config
                                 );
-                                tokio::spawn(actor.run());
+                                tokio::spawn(actor.run(eviction_interval));
                                 actors.insert(topic_name.to_string(), t_tx);
                                 tracing::info!("[StreamManager] Warm start: Restored topic '{}'", topic_name);
                             }
@@ -442,15 +510,17 @@ impl StreamManager {
                         if !actors.contains_key(&name) {
                             let topic_config = TopicConfig::from_options(options, &system_config);
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
+                            let eviction_interval = topic_config.eviction_interval_ms;
                             
                             tracing::info!("[StreamManager] Creating topic '{}' with config {:?}", name, topic_config);
                             
                             let actor = TopicActor::new(
                                 name.clone(), 
-                                t_rx, 
+                                t_rx,
+                                t_tx.clone(),
                                 topic_config
                             );
-                            tokio::spawn(actor.run());
+                            tokio::spawn(actor.run(eviction_interval));
                             actors.insert(name, t_tx);
                         }
                         let _ = reply.send(Ok(()));

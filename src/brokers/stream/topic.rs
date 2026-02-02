@@ -26,6 +26,10 @@ pub struct TopicConfig {
     pub max_ram_messages: usize,
     pub writer_channel_capacity: usize,
     pub writer_batch_size: usize,
+    pub eviction_interval_ms: u64,
+    pub eviction_batch_size: usize,
+    pub ram_soft_limit: usize,
+    pub ram_hard_limit: usize,
 }
 
 impl TopicConfig {
@@ -67,6 +71,10 @@ impl TopicConfig {
             max_ram_messages: sys.max_ram_messages,
             writer_channel_capacity: sys.writer_channel_capacity,
             writer_batch_size: sys.writer_batch_size,
+            eviction_interval_ms: sys.eviction_interval_ms,
+            eviction_batch_size: sys.eviction_batch_size,
+            ram_soft_limit: sys.ram_soft_limit,
+            ram_hard_limit: sys.ram_hard_limit,
         }
     }
 }
@@ -77,18 +85,18 @@ pub struct TopicState {
 }
 
 impl TopicState {
-    pub fn new(name: String, partitions_count: u32, max_ram_messages: usize) -> Self {
+    pub fn new(name: String, partitions_count: u32, max_ram_messages: usize, soft_limit: usize, hard_limit: usize) -> Self {
         let partitions = (0..partitions_count)
-            .map(|id| PartitionState::new(id, max_ram_messages))
+            .map(|id| PartitionState::new(id, max_ram_messages, soft_limit, hard_limit))
             .collect();
         
         Self { name, partitions }
     }
     
-    pub fn restore(name: String, partitions_count: u32, max_ram_messages: usize, mut data: std::collections::HashMap<u32, (VecDeque<Message>, Vec<Segment>)>) -> Self {
+    pub fn restore(name: String, partitions_count: u32, max_ram_messages: usize, soft_limit: usize, hard_limit: usize, mut data: std::collections::HashMap<u32, (VecDeque<Message>, Vec<Segment>)>) -> Self {
         let partitions = (0..partitions_count)
             .map(|id| {
-                let mut p = PartitionState::new(id, max_ram_messages);
+                let mut p = PartitionState::new(id, max_ram_messages, soft_limit, hard_limit);
                 if let Some((msgs, segments)) = data.remove(&id) {
                     p.segments = segments;
                     
@@ -161,12 +169,16 @@ pub struct PartitionState {
     pub start_offset: u64,      
     pub ram_start_offset: u64, 
     pub max_ram_messages: usize,
+    // for eviction log in RAM
+    pub soft_limit: usize, // for hot read
+    pub hard_limit: usize, // for burst
+    pub persisted_offset: u64, //last log can clea
     
     waiters: BTreeMap<u64, Vec<Weak<Notify>>>,
 }
 
 impl PartitionState {
-    pub fn new(id: u32, max_ram_messages: usize) -> Self {
+    pub fn new(id: u32, max_ram_messages: usize, soft_limit: usize, hard_limit: usize) -> Self {
         Self {
             id,
             log: VecDeque::new(),
@@ -175,6 +187,9 @@ impl PartitionState {
             start_offset: 0,
             ram_start_offset: 0,
             max_ram_messages,
+            soft_limit,
+            hard_limit,
+            persisted_offset: 0,
             waiters: BTreeMap::new(),
         }
     }
@@ -196,13 +211,6 @@ impl PartitionState {
             payload,
         });
         self.next_offset += 1;
-
-        // RAM EVICTION
-        while self.log.len() > self.max_ram_messages {
-            if let Some(removed) = self.log.pop_front() {
-                self.ram_start_offset = removed.offset + 1;
-            }
-        }
 
         // Wake waiters logic
         let future_waiters = self.waiters.split_off(&(offset + 1));

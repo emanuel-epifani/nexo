@@ -139,6 +139,10 @@ pub struct SystemStreamConfig {
     pub max_ram_messages: usize,
     pub writer_channel_capacity: usize,
     pub writer_batch_size: usize,
+    pub eviction_interval_ms: u64,
+    pub eviction_batch_size: usize,
+    pub ram_soft_limit: usize,
+    pub ram_hard_limit: usize,
 }
 
 impl SystemStreamConfig {
@@ -156,6 +160,10 @@ impl SystemStreamConfig {
             max_ram_messages:            get_env("STREAM_MAX_RAM_MESSAGES", "20000"), // 2x default channel
             writer_channel_capacity:     get_env("STREAM_WRITER_CHAN_CAP", "10000"),
             writer_batch_size:           get_env("STREAM_WRITER_BATCH_SIZE", "5000"),
+            eviction_interval_ms:        get_env("STREAM_EVICTION_INTERVAL_MS", "500"),
+            eviction_batch_size:         get_env("STREAM_EVICTION_BATCH_SIZE", "10000"),
+            ram_soft_limit:              get_env("STREAM_RAM_SOFT_LIMIT", "1000"),
+            ram_hard_limit:              get_env("STREAM_RAM_HARD_LIMIT", "20000"),
         }
     }
 }

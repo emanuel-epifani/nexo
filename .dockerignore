@@ -1,12 +1,26 @@
+# Build artifacts
 target/
 **/*.rs.bk
+
+# Git
 .git
 .gitignore
+
+# Environment & Secrets
 .env
+
+# Frontend dev files
 dashboard/node_modules
 dashboard/dist
+
+# Docker & Docs
 Dockerfile
 README.md
 debug/*
 examples/*
 .idea/*
+ai-rules/*
+docs/*
+
+# Tests (non servono per release build)
+tests/*
