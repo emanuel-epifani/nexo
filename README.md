@@ -1,10 +1,10 @@
 <div align="center">
 
 # NEXO
-### The High-Performance All-in-One Broker for Scale-Ups
+### The High-Performance All-in-One Broker
 
 
-**Unified Infrastructure.** One Binary. Four Brokers. Zero Operational Headaches.
+One Binary. Four Brokers. Zero Operational Headaches.
 
 
 </div>
@@ -173,32 +173,83 @@ Everything is available instantly via a unified Client.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
 
+
 ##  Performance
+*Benchmarks run on MacBook Pro M4 (Single Node).*
 
-
-```shell
-# Benchmarks run on MacBook Pro M4.
-
-📊 STORE: SET operations (In-Memory)
-   Throughput:  4576941 ops/sec
-   Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 518µs
-
-📊 QUEUE: PUSH operations (FAsync, flush every 100ms)
-   Throughput:  159281 ops/sec
-   Latency:     Avg: 5µs | p50: 2µs | p95: 2µs | p99: 3µs | Max: 213853µs
-
-📊 STREAM: PUBLISH operations (FAsync, flush every 100ms)
-   Throughput:  658667 ops/sec
-   Latency:     Avg: 1µs | p50: 1µs | p95: 1µs | p99: 1µs | Max: 1079µs
-
-📊 PUBSUB: Fanout 1->1000 (10k msgs -> 10M deliveries)
-   Ingestion:   3864 msg/sec (Publish)
-   Fanout:      3848881 msg/sec (Delivery)
-```
+| Engine     | Throughput       | Latency (p99) | Workload / Config                       |
+|:-----------|:-----------------|:--------------|:----------------------------------------|
+| **STORE**  | **4.5M** ops/sec | < 1 µs        | `SET` operations (In-Memory)            |
+| **PUBSUB** | **3.8M** msg/sec | < 1 µs        | `FANOUT`: 1 Publisher -> 1k Subscribers |
+| **STREAM** | **650k** ops/sec | 1 µs          | `PUBLISH` (Persisted to Disk)           |
+| **QUEUE**  | **160k** ops/sec | 3 µs          | `PUSH` (Persisted)                      |
 
 ##  Dashboard
 
-Nexo comes with a built-in, zero-config real-time dashboard exposed to debug/developing
+Nexo comes with a built-in, zero-config dashboard exposed to local development.
+Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time. No more `print` debugging or blind guesses.
 
 ![Nexo Dashboard Screenshot](docs/assets/dashboard-preview.png)
-*(Monitor throughput, inspect queues, and debug streams in real-time)*
+
+## Getting Started
+
+### 1. Run the Server
+
+**Option A: Quick Start (Ephemeral)**
+Run in-memory for quick testing. Data persists across restarts but is lost if the container is removed.
+```bash
+docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo
+```
+This exposes:
+- Port 7654 (TCP): Main server socket for SDK clients.
+- Port 8080 (HTTP): Web Dashboard with status of all brokers.
+
+**Option B: Production Mode (Persistent)**
+Mount volumes to persist data. You can split Queues and Streams onto different disks.
+```bash
+docker run -d \
+  --name nexo \
+  -p 7654:7654 \                                     # Expose only TCP socket (Dashboard is OFF in prod)
+  -v $(pwd)/nexo_queue:/storage/queue \              # Volume 1 (e.g. fast SSD)
+  -v $(pwd)/nexo_stream:/storage/stream \            # Volume 2 (e.g. large HDD)
+  -e QUEUE_ROOT_PERSISTENCE_PATH=/storage/queue \    # Map Queue persistency to Volume 1
+  -e STREAM_ROOT_PERSISTENCE_PATH=/storage/stream \  # Map Stream persistency to Volume 2
+  -e NEXO_ENV=prod \                                 # Set Production Mode (Dashboard OFF)
+  nexobroker/nexo:latest
+```
+
+### 2. Install the SDK
+
+```bash
+npm install @emanuelepifani/nexo-client
+```
+
+### 3. Usage Example
+Connect, execute operations, inspect data via the dashboard at `http://localhost:8080`.
+
+```typescript
+import { NexoClient } from '@emanuelepifani/nexo-client';
+
+const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
+
+// --- 1. Store ---
+await client.store.map.set("user:1", { name: "Max", role: "admin" });
+const user = await client.store.map.get("user:1");
+
+// --- 2. Pub/Sub ---
+const alerts = client.pubsubAlertMsg>("system-alerts");
+await alerts.subscribe((msg) => console.log(msg));
+await alerts.publish({ level: "high" });
+
+// --- 3. Queue ---
+const mailQ = await client.queue<MailJob>("emails").create();
+await mailQ.push({ to: "test@test.com" });
+await mailQ.subscribe((msg) => console.log("Processing email:", msg));
+
+// --- 4. Stream ---
+const stream = await client.stream<UserEvent>('user-events').create();
+await stream.publish({ type: 'login', userId: 'u1' });
+await stream.subscribe('analytics', (msg) => console.log("Event:", msg));
+```
+
+> **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Node.js SDK Guide**](https://www.npmjs.com/package/@emanuelepifani/nexo-client).

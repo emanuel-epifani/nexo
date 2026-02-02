@@ -31,9 +31,15 @@ async fn main() {
     let addr = format!("{}:{}", config.server.host, config.server.port);
 
     let engine_clone_for_dashboard = engine.clone();
-    tokio::spawn(async move {
-        dashboard::server::start_dashboard_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
-    });
+
+    if config.server.dashboard_enabled {
+        tracing::info!(port = config.server.dashboard_port, "📊 Dashboard enabled");
+        tokio::spawn(async move {
+            dashboard::server::start_dashboard_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
+        });
+    } else {
+        tracing::info!("🚫 Dashboard disabled by config");
+    }
 
     tracing::info!(host = %config.server.host, port = %config.server.port, "🚀 Nexo Server v0.2 Starting...");
 

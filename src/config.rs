@@ -40,15 +40,21 @@ pub struct ServerConfig {
     pub port: u16,
     pub dashboard_port: u16,
     pub log_level: String,
+    pub dashboard_enabled: bool,
 }
 
 impl ServerConfig {
     fn load() -> Self {
+        let env_mode = get_env::<String>("NEXO_ENV", "dev");
+
+        let def_dashboard_enabled = if env_mode == "prod" { "false" } else { "true" };
+
         Self {
-            host:           get_env("SERVER_HOST", "127.0.0.1"),
+            host:           get_env("SERVER_HOST", "0.0.0.0"),
             port:           get_env("SERVER_PORT", "7654"),
             dashboard_port: get_env("DASHBOARD_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "error"),
+            dashboard_enabled: get_env("NEXO_DASHBOARD_ENABLED", def_dashboard_enabled),
         }
     }
 }
