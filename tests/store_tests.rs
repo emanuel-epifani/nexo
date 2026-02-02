@@ -99,7 +99,6 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
 
             // Pre-fill
-            println!("Pre-filling {} keys...", COUNT);
             for i in 0..COUNT {
                 let key = i.to_string();
                 manager.map.set(key, Bytes::from("data"), None);

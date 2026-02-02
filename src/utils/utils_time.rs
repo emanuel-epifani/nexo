@@ -12,6 +12,5 @@ pub fn time_start(label: &'static str) {
 
 pub fn time_end(label: &'static str) {
     if let Some(start) = TIMERS.lock().unwrap().remove(label) {
-        println!("{}: {:?}", label, start.elapsed());
     }
 }

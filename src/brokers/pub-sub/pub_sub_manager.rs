@@ -630,24 +630,17 @@ impl PubSubManager {
     pub async fn get_snapshot(&self) -> crate::dashboard::models::pubsub::PubSubBrokerSnapshot {
         use crate::dashboard::models::pubsub::{PubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
 
-        println!("🔍 DEBUG: Clients in manager: {}", self.clients.len());
-        println!("🔍 DEBUG: Client subscriptions: {}", self.client_subscriptions.len());
-        println!("🔍 DEBUG: Actors: {}", self.actors.len());
-
         let mut multi_level = Vec::new();
         let mut single_level = Vec::new();
         for entry in self.client_subscriptions.iter() {
             let client_id = entry.key().0.clone();
-            println!("🔍 DEBUG: Client {} has {} subscriptions", client_id, entry.value().len());
             for pattern in entry.value().iter() {
                 if pattern.contains('#') {
-                    println!("🔍 DEBUG: Found multi-level wildcard: {} for client {}", pattern, client_id);
                     multi_level.push(WildcardSubscription {
                         pattern: pattern.clone(),
                         client_id: client_id.clone(),
                     });
                 } else if pattern.contains('+') {
-                    println!("🔍 DEBUG: Found single-level wildcard: {} for client {}", pattern, client_id);
                     single_level.push(WildcardSubscription {
                         pattern: pattern.clone(),
                         client_id: client_id.clone(),
@@ -659,11 +652,9 @@ impl PubSubManager {
         // Build flat topics list by querying each actor
         let mut all_topics = Vec::new();
         for entry in self.actors.iter() {
-            println!("🔍 DEBUG: Querying actor for root: {}", entry.key());
             let (tx, rx) = oneshot::channel();
             if entry.value().send(RootCommand::GetFlatSnapshot { reply: tx }).await.is_ok() {
                 if let Ok(topics) = rx.await {
-                    println!("🔍 DEBUG: Actor {} returned {} topics", entry.key(), topics.len());
                     all_topics.extend(topics);
                 }
             }

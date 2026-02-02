@@ -23,7 +23,6 @@ pub struct Benchmark {
 
 impl Benchmark {
     pub fn start(name: &str, count: usize) -> Self {
-        println!("🚀 STARTING: {}", name);
         Self {
             name: name.to_string(),
             start: Instant::now(),
