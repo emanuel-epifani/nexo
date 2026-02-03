@@ -31,10 +31,23 @@ pub struct NexoEngine {
 
 impl NexoEngine {
     pub fn new(config: &Config) -> Self {
+        let pubsub = Arc::new(PubSubManager::new(config.pubsub.clone()));
+        
+        // Start background cleanup task for expired retained messages
+        let pubsub_clone = pubsub.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // Skip first immediate tick
+            loop {
+                interval.tick().await;
+                pubsub_clone.cleanup_expired_retained().await;
+            }
+        });
+        
         Self {
             store: Arc::new(StoreManager::new(config.store.clone())),
             queue: Arc::new(QueueManager::new(config.queue.clone())),
-            pubsub: Arc::new(PubSubManager::new(config.pubsub.clone())),
+            pubsub,
             stream: Arc::new(StreamManager::new(config.stream.clone())),
             start_time: Instant::now(),
         }

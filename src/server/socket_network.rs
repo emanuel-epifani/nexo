@@ -40,8 +40,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
     
-    // Register with PubSub Manager & Hold the Guard
-    let _pubsub_guard = engine.pubsub.connect(client_id.clone(), push_tx);
+    // Register with PubSub Manager
+    engine.pubsub.connect(client_id.clone(), push_tx);
 
     // Register with Stream Manager & Hold the Guard
     let _stream_guard = engine.stream.register_session(client_id.0.clone());
@@ -147,13 +147,18 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         }
     }
 
-    // Cleanup: Explicitly disconnect from stream manager (synchronous)
-    // This ensures rebalance happens before the connection handler returns
+    // Cleanup: Explicitly disconnect from managers
+    // This ensures cleanup happens before the connection handler returns
+    tracing::debug!("Client {:?} disconnected", client_id);
+    
+    // Disconnect from PubSub (cleanup subscriptions, actors)
+    engine.pubsub.disconnect(&client_id).await;
+    
+    // Disconnect from Stream (rebalance)
     engine.stream.disconnect(client_id.0.clone()).await;
     
     // Drop guards and wait for write task
     drop(_stream_guard);
-    drop(_pubsub_guard);
     drop(tx);
     let _ = write_task.await;
     Ok(())

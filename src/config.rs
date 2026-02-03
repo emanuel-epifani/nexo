@@ -116,6 +116,7 @@ pub struct PubSubConfig {
     pub actor_channel_capacity: usize,
     pub persistence_path: String,
     pub default_retained_ttl_seconds: u64,
+    pub cleanup_interval_seconds: u64,
 }
 
 impl PubSubConfig {
@@ -124,6 +125,7 @@ impl PubSubConfig {
             actor_channel_capacity: get_env("PUBSUB_ACTOR_CHAN_CAP", "10000"),
             persistence_path: get_env("PUBSUB_PERSISTENCE_PATH", "data"),
             default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", "3600"),
+            cleanup_interval_seconds: get_env("PUBSUB_CLEANUP_INTERVAL_SECS", "60"),
         }
     }
 }

@@ -58,22 +58,6 @@ impl PubSubMessage {
     }
 }
 
-/// Session Guard for PubSub - RAII cleanup on drop
-pub struct PubSubSession {
-    client_id: ClientId,
-    manager: Arc<PubSubManager>,
-}
-
-impl Drop for PubSubSession {
-    fn drop(&mut self) {
-        let manager = self.manager.clone();
-        let client_id = self.client_id.clone();
-        tokio::spawn(async move {
-            manager.disconnect(&client_id).await;
-        });
-    }
-}
-
 // ==========================================
 // ACTOR COMMANDS
 // ==========================================
@@ -99,6 +83,7 @@ enum RootCommand {
     },
     Disconnect {
         client: ClientId,
+        reply: oneshot::Sender<()>,  // Acknowledge completion
     },
     GetFlatSnapshot {
         reply: oneshot::Sender<Vec<crate::dashboard::models::pubsub::TopicSnapshot>>,
@@ -106,6 +91,7 @@ enum RootCommand {
     IsEmpty {
         reply: oneshot::Sender<bool>,
     },
+    CleanupExpired,
 }
 
 // ==========================================
@@ -224,48 +210,38 @@ impl RootActor {
     }
 
     async fn run(mut self) {
-        // Start internal cleanup timer
-        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        
-        loop {
-            tokio::select! {
-                // Handle commands
-                cmd = self.rx.recv() => {
-                    match cmd {
-                        Some(RootCommand::Subscribe { pattern, client, sender, reply }) => {
-                            let retained = self.subscribe(&pattern, &client, sender);
-                            let _ = reply.send(retained);
-                        }
-                        Some(RootCommand::Unsubscribe { pattern, client }) => {
-                            self.unsubscribe(&pattern, &client);
-                        }
-                        Some(RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply }) => {
-                            let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
-                            let _ = reply.send(count);
-                        }
-                        Some(RootCommand::Disconnect { client }) => {
-                            self.disconnect(&client);
-                        }
-                        Some(RootCommand::GetFlatSnapshot { reply }) => {
-                            let flat_snapshot = self.build_flat_snapshot();
-                            let _ = reply.send(flat_snapshot);
-                        }
-                        Some(RootCommand::IsEmpty { reply }) => {
-                            let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
-                            let _ = reply.send(is_empty);
-                        }
-                        None => {
-                            // Channel closed, exit loop
-                            break;
-                        }
-                    }
+        while let Some(cmd) = self.rx.recv().await {
+            match cmd {
+                RootCommand::Subscribe { pattern, client, sender, reply } => {
+                    let retained = self.subscribe(&pattern, &client, sender);
+                    let _ = reply.send(retained);
                 }
-                // Periodic cleanup
-                _ = cleanup_interval.tick() => {
+                RootCommand::Unsubscribe { pattern, client } => {
+                    self.unsubscribe(&pattern, &client);
+                }
+                RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply } => {
+                    let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
+                    let _ = reply.send(count);
+                }
+                RootCommand::Disconnect { client, reply } => {
+                    self.disconnect(&client);
+                    let _ = reply.send(());
+                }
+                RootCommand::GetFlatSnapshot { reply } => {
+                    let flat_snapshot = self.build_flat_snapshot();
+                    let _ = reply.send(flat_snapshot);
+                }
+                RootCommand::IsEmpty { reply } => {
+                    let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
+                    tracing::debug!("RootActor '{}' IsEmpty check: {}", self.name, is_empty);
+                    let _ = reply.send(is_empty);
+                }
+                RootCommand::CleanupExpired => {
                     self.cleanup_expired_retained();
                 }
             }
         }
+        tracing::debug!("RootActor '{}' channel closed, exiting", self.name);
     }
 
     // --- SUBSCRIBE ---
@@ -359,6 +335,15 @@ impl RootActor {
         let mut senders = Vec::new();
         Self::match_recursive(&self.tree, parts, &mut senders);
         
+        // Deduplicate by ClientId (MQTT standard: same client receives message only once)
+        let mut seen = HashSet::new();
+        let mut unique_senders = Vec::new();
+        for (client_id, sender) in senders {
+            if seen.insert(client_id.clone()) {
+                unique_senders.push((client_id, sender));
+            }
+        }
+        
         // Send messages
         let msg = Arc::new(PubSubMessage::new(full_topic.to_string(), data));
         let mut sent_count = 0;
@@ -366,7 +351,7 @@ impl RootActor {
         // Identify zombies
         let mut zombies = Vec::new();
 
-        for (client_id, sender) in senders {
+        for (client_id, sender) in unique_senders {
             if sender.send(msg.clone()).is_ok() {
                 sent_count += 1;
             } else {
@@ -385,6 +370,7 @@ impl RootActor {
 
     // --- DISCONNECT ---
     fn disconnect(&mut self, client: &ClientId) {
+        tracing::debug!("RootActor '{}' disconnecting client {:?}", self.name, client);
         if let Some(patterns) = self.client_patterns.remove(client) {
             for pattern_str in patterns {
                 let parts: Vec<String> = pattern_str.split('/').map(|s| s.to_string()).collect();
@@ -675,7 +661,7 @@ impl RootActor {
 // PUBSUB MANAGER
 // ==========================================
 
-    pub struct PubSubManager {
+pub struct PubSubManager {
     actors: DashMap<String, mpsc::Sender<RootCommand>>,
     clients: DashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
     client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
@@ -685,22 +671,34 @@ impl RootActor {
 
 impl PubSubManager {
     pub fn new(config: crate::config::PubSubConfig) -> Self {
-        Self {
+        let manager = Self {
             actors: DashMap::new(),
             clients: DashMap::new(),
             client_subscriptions: DashMap::new(),
             global_hash_subscribers: RwLock::new(HashMap::new()),
-            config,
-        }
+            config: config.clone(),
+        };
+        
+        // Spawn background cleanup task
+        let actors = manager.actors.clone();
+        let cleanup_interval = std::time::Duration::from_secs(config.cleanup_interval_seconds);
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            
+            loop {
+                interval.tick().await;
+                Self::background_cleanup_empty_actors(&actors).await;
+            }
+        });
+        
+        manager
     }
 
     /// Register a new client connection
-    pub fn connect(self: &Arc<Self>, client_id: ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) -> PubSubSession {
+    pub fn connect(&self, client_id: ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
         self.clients.insert(client_id.clone(), sender);
-        PubSubSession {
-            client_id,
-            manager: self.clone(),
-        }
+        self.client_subscriptions.insert(client_id, HashSet::new());
     }
 
     /// Subscribe to a topic pattern
@@ -821,13 +819,9 @@ impl PubSubManager {
     /// Disconnect a client and cleanup subscriptions
     pub async fn disconnect(&self, client_id: &ClientId) {
         self.clients.remove(client_id);
-
-        // Remove from global "#" subscribers
         self.global_hash_subscribers.write().await.remove(client_id);
 
-        // Get all subscriptions for this client
         if let Some((_, topics)) = self.client_subscriptions.remove(client_id) {
-            // Group by root
             let mut roots: HashSet<String> = HashSet::new();
             for topic in &topics {
                 let parts: Vec<&str> = topic.split('/').collect();
@@ -836,17 +830,31 @@ impl PubSubManager {
                 }
             }
 
-            // Send disconnect to each relevant actor
-            for root in roots.clone() {
+            // Send disconnect and wait for confirmation from all actors
+            let mut waits = Vec::new();
+            for root in roots {
                 if let Some(actor) = self.actors.get(&root) {
-                    let _ = actor.send(RootCommand::Disconnect { client: client_id.clone() }).await;
+                    let (tx, rx) = oneshot::channel();
+                    if actor.send(RootCommand::Disconnect { 
+                        client: client_id.clone(),
+                        reply: tx 
+                    }).await.is_ok() {
+                        waits.push(rx);
+                    }
                 }
             }
             
-            // Cleanup empty actors
-            for root in roots {
-                self.maybe_cleanup_actor(&root).await;
+            // Wait for all actors to confirm disconnect
+            for rx in waits {
+                let _ = rx.await;
             }
+        }
+    }
+
+    /// Cleanup expired retained messages in all actors
+    pub async fn cleanup_expired_retained(&self) {
+        for entry in self.actors.iter() {
+            let _ = entry.value().send(RootCommand::CleanupExpired).await;
         }
     }
 
@@ -910,15 +918,51 @@ impl PubSubManager {
         }).clone()
     }
 
-    async fn maybe_cleanup_actor(&self, root: &str) {
-        if let Some(actor) = self.actors.get(root) {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
-                if let Ok(true) = rx.await {
-                    // Actor is empty, remove it
-                    self.actors.remove(root);
+    /// Background task: cleanup empty actors in parallel
+    async fn background_cleanup_empty_actors(actors: &DashMap<String, mpsc::Sender<RootCommand>>) {
+        let start = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        
+        // Spawn parallel cleanup task for each actor
+        for entry in actors.iter() {
+            let root = entry.key().clone();
+            let actor = entry.value().clone();
+            let actors_ref = actors.clone();
+            
+            let task = tokio::spawn(async move {
+                let (tx, rx) = oneshot::channel();
+                
+                if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), rx).await {
+                        Ok(Ok(true)) => {
+                            actors_ref.remove(&root);
+                            Some(root)
+                        }
+                        _ => None
+                    }
+                } else {
+                    None
                 }
+            });
+            
+            tasks.push(task);
+        }
+        
+        // Wait for all cleanup tasks to complete
+        let mut removed = Vec::new();
+        for task in tasks {
+            if let Ok(Some(root)) = task.await {
+                removed.push(root);
             }
+        }
+        
+        if !removed.is_empty() {
+            tracing::info!(
+                "Background cleanup: removed {} empty actors in {:?}: {:?}",
+                removed.len(),
+                start.elapsed(),
+                removed
+            );
         }
     }
 }
