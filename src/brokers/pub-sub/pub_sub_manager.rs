@@ -15,9 +15,12 @@
 
 use std::sync::{Arc, OnceLock};
 use std::collections::{HashMap, HashSet};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
+use serde::{Serialize, Deserialize};
 use crate::dashboard::models::pubsub::TopicSnapshot;
 
 // ==========================================
@@ -91,6 +94,7 @@ enum RootCommand {
         full_topic: String,  // Full topic for push payload
         data: Bytes,
         retain: bool,
+        ttl_seconds: Option<u64>,
         reply: oneshot::Sender<usize>,  // Matched clients
     },
     Disconnect {
@@ -102,6 +106,49 @@ enum RootCommand {
     IsEmpty {
         reply: oneshot::Sender<bool>,
     },
+}
+
+// ==========================================
+// RETAINED MESSAGE
+// ==========================================
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RetainedMessage {
+    data: Bytes,
+    #[serde(skip)]
+    expires_at: Option<Instant>,
+    // For serialization: store as unix timestamp
+    expires_at_unix: Option<u64>,
+}
+
+impl RetainedMessage {
+    fn new(data: Bytes, ttl_seconds: Option<u64>) -> Self {
+        let expires_at = ttl_seconds.map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
+        let expires_at_unix = ttl_seconds.map(|secs| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() + secs
+        });
+        Self { data, expires_at, expires_at_unix }
+    }
+    
+    fn is_expired(&self) -> bool {
+        self.expires_at.map_or(false, |exp| Instant::now() >= exp)
+    }
+    
+    fn from_persisted(data: Bytes, expires_at_unix: Option<u64>) -> Self {
+        let expires_at = expires_at_unix.and_then(|unix_ts| {
+            let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            if unix_ts > now_unix {
+                let remaining = unix_ts - now_unix;
+                Some(Instant::now() + std::time::Duration::from_secs(remaining))
+            } else {
+                None  // Already expired
+            }
+        });
+        Self { data, expires_at, expires_at_unix }
+    }
 }
 
 // ==========================================
@@ -122,7 +169,7 @@ struct Node {
     
     // Clients subscribed exactly to the path ending at this node
     subscribers: HashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
-    retained: Option<Bytes>,
+    retained: Option<RetainedMessage>,
 }
 
 impl Node {
@@ -176,8 +223,8 @@ impl RootActor {
                 RootCommand::Unsubscribe { pattern, client } => {
                     self.unsubscribe(&pattern, &client);
                 }
-                RootCommand::Publish { parts, full_topic, data, retain, reply } => {
-                    let count = self.publish(&parts, &full_topic, data, retain);
+                RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply } => {
+                    let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
                     let _ = reply.send(count);
                 }
                 RootCommand::Disconnect { client } => {
@@ -261,14 +308,20 @@ impl RootActor {
     }
 
     // --- PUBLISH ---
-    fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool) -> usize {
+    fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
         // Update retained if needed
-            if retain {
+        if retain {
             let mut current = &mut self.tree;
             for part in parts {
                 current = current.children.entry(part.clone()).or_insert_with(Node::new);
             }
-            current.retained = Some(data.clone());
+            
+            // MQTT standard: empty payload clears retained
+            if data.is_empty() {
+                current.retained = None;
+            } else {
+                current.retained = Some(RetainedMessage::new(data.clone(), ttl_seconds));
+            }
         }
 
         // Match subscribers and collect senders
@@ -321,8 +374,9 @@ impl RootActor {
             full_path: base_path.to_string(),
             subscribers: node.subscribers.len(),
             retained_value: node.retained.as_ref()
-                .and_then(|bytes| {
-                    let payload_withouht_datatype = &bytes[1..];
+                .filter(|r| !r.is_expired())
+                .and_then(|retained| {
+                    let payload_withouht_datatype = &retained.data[1..];
                     let json_str = String::from_utf8_lossy(payload_withouht_datatype);
                     serde_json::from_str(&json_str).ok()
                 }),
@@ -380,8 +434,10 @@ impl RootActor {
 
     fn collect_retained_for_pattern(node: &Node, pattern: &[String], current_path: &str, results: &mut Vec<(String, Bytes)>) {
         if pattern.is_empty() {
-            if let Some(val) = &node.retained {
-                results.push((current_path.to_string(), val.clone()));
+            if let Some(retained) = &node.retained {
+                if !retained.is_expired() {
+                    results.push((current_path.to_string(), retained.data.clone()));
+                }
             }
             return;
         }
@@ -408,8 +464,10 @@ impl RootActor {
     }
 
     fn collect_all_retained(node: &Node, current_path: &str, results: &mut Vec<(String, Bytes)>) {
-        if let Some(val) = &node.retained {
-                results.push((current_path.to_string(), val.clone()));
+        if let Some(retained) = &node.retained {
+            if !retained.is_expired() {
+                results.push((current_path.to_string(), retained.data.clone()));
+            }
         }
         for (key, child) in &node.children {
             let next_path = format!("{}/{}", current_path, key);
@@ -554,7 +612,7 @@ impl PubSubManager {
     }
 
     /// Publish a message
-    pub async fn publish(&self, topic: &str, data: Bytes, retain: bool) -> usize {
+    pub async fn publish(&self, topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
         let parts: Vec<&str> = topic.split('/').collect();
         
         if parts.is_empty() {
@@ -573,6 +631,7 @@ impl PubSubManager {
                 full_topic: topic.to_string(),
                 data: data.clone(),
                 retain,
+                ttl_seconds,
                 reply: tx,
             }).await.is_ok() {
                 sent += rx.await.unwrap_or_default();
@@ -586,6 +645,7 @@ impl PubSubManager {
                 full_topic: topic.to_string(),
                 data: data.clone(),
                 retain,
+                ttl_seconds,
                 reply: tx,
             }).await.is_ok() {
                  sent += rx.await.unwrap_or_default();

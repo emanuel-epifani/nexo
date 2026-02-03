@@ -159,7 +159,8 @@ async fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &Clie
     match cmd {
         PubSubCommand::Publish { options, topic, payload } => {
             let retain = options.retain.unwrap_or(false);
-            let _count = pubsub.publish(&topic, payload, retain).await;
+            let ttl_seconds = options.ttl;
+            let _count = pubsub.publish(&topic, payload, retain, ttl_seconds).await;
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {

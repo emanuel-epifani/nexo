@@ -10,6 +10,7 @@ pub const OP_UNSUB: u8 = 0x23;
 #[serde(rename_all = "camelCase")]
 pub struct PubSubPublishOptions {
     pub retain: Option<bool>,
+    pub ttl: Option<u64>,  // TTL in seconds
 }
 
 #[derive(Debug)]
