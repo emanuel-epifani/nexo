@@ -6,6 +6,9 @@
 
 One Binary. Four Brokers. Zero Operational Headaches.
 
+### STORE • PUB/SUB • QUEUE • STREAM
+
+
 
 </div>
 
@@ -29,13 +32,13 @@ One Binary. Four Brokers. Zero Operational Headaches.
 
 Modern backend architecture suffers from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized systems—Redis for caching, RabbitMQ for jobs, Kafka for streams—each with its own protocol, configuration, and maintenance overhead.
 
+Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**.
 
-Nexo is the antidote. It is a pragmatic trade-off that sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**. Designed to run on a single instance, Nexo handles millions of operations per second, serving the needs of 99% of scale-ups with zero operational overhead.
-
+Here's the reality: most scale-ups will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 99%—companies that need **high throughput without operational complexity**.
 *   **Unified:** One TCP connection for Caching, Pub/Sub, Queues, and Streams.
 *   **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
-*   **Fast:** Built in Rust on top of Tokio for extreme throughput and low latency.
-*   **Efficient:** Hybrid storage engine uses RAM for speed and Disk for durability where it matters.
+*   **Fast:** Built in Rust on top of Tokio for extreme throughput and incredible low latency.
+*   **Dev Dashboard:** Built-in Web UI for local development. Inspect all brokers in real-time. (Auto-disabled in production)
 
 ## Architecture
 

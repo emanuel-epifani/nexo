@@ -14,7 +14,10 @@ pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
         &format!(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = {};
-         PRAGMA foreign_keys = ON;", // Tuned for high throughput
+         PRAGMA foreign_keys = ON;
+         PRAGMA cache_size = -64000;
+         PRAGMA temp_store = MEMORY;
+         ", // Tuned for high throughput
          sync_pragma
         )
     )?;

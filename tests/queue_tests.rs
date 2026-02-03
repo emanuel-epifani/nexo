@@ -521,6 +521,7 @@ mod queue_tests {
     // 3. PERFORMANCE BENCHMARKS
     // =========================================================================================
 
+    // cargo test --release --test queue_tests performance -- --test-threads=1 --nocapture
     mod performance {
         use super::*;
 
