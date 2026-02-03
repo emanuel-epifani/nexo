@@ -99,6 +99,9 @@ enum RootCommand {
     GetFlatSnapshot {
         reply: oneshot::Sender<Vec<crate::dashboard::models::pubsub::TopicSnapshot>>,
     },
+    IsEmpty {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 // ==========================================
@@ -183,6 +186,10 @@ impl RootActor {
                 RootCommand::GetFlatSnapshot { reply } => {
                     let flat_snapshot = self.build_flat_snapshot();
                     let _ = reply.send(flat_snapshot);
+                }
+                RootCommand::IsEmpty { reply } => {
+                    let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
+                    let _ = reply.send(is_empty);
                 }
             }
         }
@@ -618,10 +625,15 @@ impl PubSubManager {
             }
 
             // Send disconnect to each relevant actor
-            for root in roots {
+            for root in roots.clone() {
                 if let Some(actor) = self.actors.get(&root) {
                     let _ = actor.send(RootCommand::Disconnect { client: client_id.clone() }).await;
                 }
+            }
+            
+            // Cleanup empty actors
+            for root in roots {
+                self.maybe_cleanup_actor(&root).await;
             }
         }
     }
@@ -679,5 +691,17 @@ impl PubSubManager {
             tokio::spawn(actor.run());
             tx
         }).clone()
+    }
+
+    async fn maybe_cleanup_actor(&self, root: &str) {
+        if let Some(actor) = self.actors.get(root) {
+            let (tx, rx) = oneshot::channel();
+            if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
+                if let Ok(true) = rx.await {
+                    // Actor is empty, remove it
+                    self.actors.remove(root);
+                }
+            }
+        }
     }
 }
