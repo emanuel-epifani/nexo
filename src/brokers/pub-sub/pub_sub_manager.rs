@@ -230,29 +230,33 @@ impl RootActor {
         loop {
             tokio::select! {
                 // Handle commands
-                Some(cmd) = self.rx.recv() => {
+                cmd = self.rx.recv() => {
                     match cmd {
-                        RootCommand::Subscribe { pattern, client, sender, reply } => {
+                        Some(RootCommand::Subscribe { pattern, client, sender, reply }) => {
                             let retained = self.subscribe(&pattern, &client, sender);
                             let _ = reply.send(retained);
                         }
-                        RootCommand::Unsubscribe { pattern, client } => {
+                        Some(RootCommand::Unsubscribe { pattern, client }) => {
                             self.unsubscribe(&pattern, &client);
                         }
-                        RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply } => {
+                        Some(RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply }) => {
                             let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
                             let _ = reply.send(count);
                         }
-                        RootCommand::Disconnect { client } => {
+                        Some(RootCommand::Disconnect { client }) => {
                             self.disconnect(&client);
                         }
-                        RootCommand::GetFlatSnapshot { reply } => {
+                        Some(RootCommand::GetFlatSnapshot { reply }) => {
                             let flat_snapshot = self.build_flat_snapshot();
                             let _ = reply.send(flat_snapshot);
                         }
-                        RootCommand::IsEmpty { reply } => {
+                        Some(RootCommand::IsEmpty { reply }) => {
                             let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
                             let _ = reply.send(is_empty);
+                        }
+                        None => {
+                            // Channel closed, exit loop
+                            break;
                         }
                     }
                 }
@@ -347,7 +351,7 @@ impl RootActor {
                 current.retained = Some(RetainedMessage::new(data.clone(), Some(effective_ttl)));
             }
             
-            // Save to disk asynchronously
+            // Save to disk asynchronously (also when clearing)
             self.save_retained_async();
         }
 

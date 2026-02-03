@@ -325,7 +325,7 @@ describe('BROKER INTEGRATION', async () => {
             sub.stop();
         });
 
-        it('should deliver messages to independent Consumer Groups', async () => {
+        it('Independent CONSUMER GRUP => should deliver foreach all messages', async () => {
             const topic = `stream-groups-${randomUUID()}`;
             await nexo.stream(topic).create();
 
@@ -341,6 +341,43 @@ describe('BROKER INTEGRATION', async () => {
                 expect(recvA.length).toBe(1);
                 expect(recvB.length).toBe(1);
             });
+
+            subA.stop();
+            subB.stop();
+        });
+
+        it('Same CONSUMER GRUOP => should distribute messages without duplicates', async () => {
+            const topic = `parallel-consumers-${randomUUID()}`;
+            const group = 'parallel_group';
+            await nexo.stream(topic).create({ partitions: 4 });
+
+            const receivedA = new Set<number>();
+            const receivedB = new Set<number>();
+
+            // Start 2 consumers in same group
+            const subA = await clientA.stream(topic).subscribe(group, (d) => {
+                if (receivedA.has(d.id)) throw new Error(`Duplicate in A: ${d.id}`);
+                receivedA.add(d.id);
+            });
+
+            const subB = await clientB.stream(topic).subscribe(group, (d) => {
+                if (receivedB.has(d.id)) throw new Error(`Duplicate in B: ${d.id}`);
+                receivedB.add(d.id);
+            });
+
+            // Wait for rebalance
+            await new Promise(r => setTimeout(r, 500));
+
+            // Publish 1000 messages
+            for (let i = 0; i < 1000; i++) {
+                await nexo.stream(topic).publish({ id: i });
+            }
+
+            await waitFor(() => expect(receivedA.size + receivedB.size).toBe(1000));
+
+            // Verify NO overlap
+            const overlap = [...receivedA].filter(id => receivedB.has(id));
+            expect(overlap.length).toBe(0, 'No duplicates between consumers');
 
             subA.stop();
             subB.stop();

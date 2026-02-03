@@ -13,6 +13,22 @@ pub struct PubSubPublishOptions {
     pub ttl: Option<u64>,  // TTL in seconds
 }
 
+/// Resolved publish configuration after merging client options with system defaults
+#[derive(Debug)]
+pub struct PubSubPublishConfig {
+    pub retain: bool,
+    pub ttl_seconds: u64,
+}
+
+impl PubSubPublishConfig {
+    pub fn from_options(opts: PubSubPublishOptions, sys: &crate::config::PubSubConfig) -> Self {
+        Self {
+            retain: opts.retain.unwrap_or(false),
+            ttl_seconds: opts.ttl.unwrap_or(sys.default_retained_ttl_seconds),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum PubSubCommand {
     /// PUB: [TopicLen:4][Topic][JSONLen:4][JSON][Data...]

@@ -18,7 +18,11 @@ pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
 
 pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let config = nexo::config::Config::global().pubsub.clone();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+    
+    let mut config = nexo::config::Config::global().pubsub.clone();
+    config.persistence_path = path;
+    
     let manager = Arc::new(PubSubManager::new(config));
     (manager, temp_dir)
 }

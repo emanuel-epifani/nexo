@@ -11,7 +11,7 @@ use crate::brokers::pub_sub::ClientId;
 use crate::brokers::store::commands::StoreCommand;
 use crate::brokers::store::map::commands::MapCommand;
 use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions, OP_Q_DELETE};
-use crate::brokers::pub_sub::commands::PubSubCommand;
+use crate::brokers::pub_sub::commands::{PubSubCommand, PubSubPublishConfig};
 use crate::brokers::stream::commands::StreamCommand;
 use crate::config::Config;
 
@@ -158,9 +158,8 @@ async fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &Clie
 
     match cmd {
         PubSubCommand::Publish { options, topic, payload } => {
-            let retain = options.retain.unwrap_or(false);
-            let ttl_seconds = options.ttl;
-            let _count = pubsub.publish(&topic, payload, retain, ttl_seconds).await;
+            let config = PubSubPublishConfig::from_options(options, &Config::global().pubsub);
+            let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds)).await;
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {
