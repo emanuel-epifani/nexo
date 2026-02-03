@@ -114,12 +114,16 @@ impl SystemQueueConfig {
 #[derive(Debug, Clone)]
 pub struct PubSubConfig {
     pub actor_channel_capacity: usize,
+    pub persistence_path: String,
+    pub default_retained_ttl_seconds: u64,
 }
 
 impl PubSubConfig {
     fn load() -> Self {
         Self {
             actor_channel_capacity: get_env("PUBSUB_ACTOR_CHAN_CAP", "10000"),
+            persistence_path: get_env("PUBSUB_PERSISTENCE_PATH", "data"),
+            default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", "3600"),
         }
     }
 }
