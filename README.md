@@ -12,12 +12,16 @@ One Binary. Four Brokers. Zero Operational Headaches.
 ---
 
 ## 📑 Table of Contents
-- [The Mission](#-the-mission)
-- [Architecture](#-arc)
-- [Core Brokers](#-core-brokers)
-- [Performance](#-performance)
-- [Why Nexo?](#-why-nexo)
-- [Getting Started](#-getting-started)
+- [The Mission](#the-mission)
+- [Architecture](#architecture)
+- [Brokers](#brokers)
+  - [STORE (Shared State)](#1-store-shared-state)
+  - [PUB/SUB (Real-Time Broadcast)](#2-pubsub-real-time-broadcast)
+  - [QUEUE (Job Processing)](#3-queue-job-processing)
+  - [STREAM (Event Log)](#4-stream-event-log)
+- [Performance](#performance)
+- [Dashboard](#dashboard)
+- [Getting Started](#getting-started)
 
 ---
 
@@ -187,7 +191,7 @@ Everything is available instantly via a unified Client.
 ##  Dashboard
 
 Nexo comes with a built-in, zero-config dashboard exposed to local development.
-Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time. No more `print` debugging or blind guesses.
+Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
 
 ![Nexo Dashboard Screenshot](docs/assets/dashboard-preview.png)
 
