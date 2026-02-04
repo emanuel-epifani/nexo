@@ -180,7 +180,7 @@ export function StreamView({ data }: Props) {
                                     </div>
 
                                     {/* LIST */}
-                                    <div className="flex-1 w-full" ref={parentRef}>
+                                    <div className="flex-1 w-full overflow-y-auto" ref={parentRef}>
                                         <div
                                             style={{
                                                 height: `${rowVirtualizer.getTotalSize()}px`,

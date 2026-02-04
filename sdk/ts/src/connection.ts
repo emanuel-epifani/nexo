@@ -36,7 +36,7 @@ export class NexoConnection extends EventEmitter {
     this.port = options.port;
     this.logger = logger;
     this.socket = new net.Socket();
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 10000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 15000;
   }
 
   async connect(): Promise<void> {
