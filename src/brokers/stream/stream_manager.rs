@@ -501,8 +501,15 @@ impl StreamManager {
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     ManagerCommand::CreateTopic { name, options, reply } => {
+                        let topic_config = TopicConfig::from_options(options, &system_config);
+                        
+                        // Fail Fast: Hard Limit on Partitions to prevent FD exhaustion
+                        if topic_config.partitions > system_config.max_partitions {
+                            let _ = reply.send(Err(format!("Too much partitions requested ({}). Allowed max {} partitions for each topic.", topic_config.partitions, system_config.max_partitions)));
+                            continue;
+                        }
+
                         if !actors.contains_key(&name) {
-                            let topic_config = TopicConfig::from_options(options, &system_config);
                             let (t_tx, t_rx) = mpsc::channel(actor_capacity); 
                             let eviction_interval = topic_config.eviction_interval_ms;
                             

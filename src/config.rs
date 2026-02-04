@@ -134,6 +134,7 @@ impl PubSubConfig {
 #[derive(Debug, Clone)]
 pub struct SystemStreamConfig {
     pub default_partitions: u32,
+    pub max_partitions: u32,
     pub actor_channel_capacity: usize,
     pub persistence_path: String,
     pub default_flush_ms: u64,
@@ -154,7 +155,8 @@ pub struct SystemStreamConfig {
 impl SystemStreamConfig {
     fn load() -> Self {
         Self {
-            default_partitions:          get_env("STREAM_PARTITIONS", "8"),
+            default_partitions:          get_env("STREAM_PARTITIONS", "4"),
+            max_partitions:              get_env("STREAM_MAX_PARTITIONS", "32"),
             actor_channel_capacity:      get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
             persistence_path:            get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
             default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", "50"),
