@@ -692,6 +692,275 @@ describe('BROKER INTEGRATION', async () => {
 
     });
 
+    describe('MEMORY STRESS & CLEANUP VERIFICATION', () => {
+        // Test per verificare che la memoria schizzi in alto e poi si abbassi
+        // grazie ai meccanismi di cleanup automatico di ogni broker
+
+        it('STORE: Memory spike and cleanup (TTL expiration)', async () => {
+            console.log('\n🔥 STORE STRESS: Creating 500k keys with 5s TTL (500MB+ data)...');
+            
+            // Crea 500k chiavi da 1KB = ~500MB di dati
+            const promises = [];
+            for (let i = 0; i < 500000; i++) {
+                promises.push(nexo.store.map.set(`stress-store-${i}`, {
+                    data: 'x'.repeat(1000), // 1KB per chiave
+                    index: i,
+                    timestamp: Date.now()
+                }, { ttl: 5 }));
+            }
+            
+            console.log('📤 Sending 500k SET commands to server...');
+            await Promise.all(promises);
+            console.log('✅ All keys sent! Server should be at peak memory now.');
+            
+            // Aspetta che TTL scada + cleanup
+            console.log('⏳ Waiting 8s for TTL expiration + cleanup...');
+            await new Promise(r => setTimeout(r, 8000));
+            
+            console.log('📉 Server should have cleaned up expired keys. Check Docker stats!');
+        }, 30000); // 30s timeout
+
+        it('QUEUE: Memory spike and cleanup (DLQ + Ack)', async () => {
+            console.log('\n🔥 QUEUE STRESS: Pushing 200k messages (100MB+ data)...');
+            const qName = `stress-queue-${randomUUID()}`;
+            const q = await nexo.queue(qName).create({ 
+                maxRetries: 0,
+                visibilityTimeoutMs: 100 
+            });
+            
+            // Push 200k messaggi da 500 bytes = ~100MB
+            const pushPromises = [];
+            for (let i = 0; i < 200000; i++) {
+                pushPromises.push(q.push({
+                    task: 'process',
+                    data: 'y'.repeat(500), // 500 bytes
+                    id: i,
+                    timestamp: Date.now()
+                }));
+            }
+            
+            console.log('📤 Sending 200k PUSH commands to server...');
+            await Promise.all(pushPromises);
+            console.log('✅ All messages pushed! Server should be at peak memory now.');
+            
+            // Consuma e ACK tutti i messaggi rapidamente
+            console.log('⚡ Consuming and ACKing all messages (concurrency 200)...');
+            let consumed = 0;
+            const sub = await q.subscribe(async (msg) => {
+                consumed++;
+                // Auto-ACK quando ritorna
+            }, { concurrency: 200 });
+            
+            await waitFor(() => expect(consumed).toBe(200000), { timeout: 30000 });
+            sub.stop();
+            
+            console.log('✅ All messages consumed and ACKed!');
+            console.log('⏳ Waiting 3s for server cleanup...');
+            await new Promise(r => setTimeout(r, 3000));
+            
+            console.log('📉 Server should have freed queue memory. Check Docker stats!');
+        }, 60000); // 60s timeout
+
+        it('PUBSUB: Memory spike and cleanup (Disconnect subscribers)', async () => {
+            console.log('\n🔥 PUBSUB STRESS: Creating 50k subscribers + 1M messages (1GB+ data)...');
+            const baseTopic = `stress-pubsub-${randomUUID()}`;
+            
+            // Crea 50k subscriber su topic diversi
+            console.log('📤 Creating 50k subscribers...');
+            const subscriptions = [];
+            for (let i = 0; i < 50000; i++) {
+                const topic = `${baseTopic}/topic-${i}`;
+                subscriptions.push(nexo.pubsub(topic).subscribe(() => {}));
+            }
+            await Promise.all(subscriptions);
+            console.log('✅ 50k subscribers created!');
+            
+            // Pubblica 1M messaggi su topic random (1KB ciascuno = 1GB)
+            console.log('📤 Publishing 1M messages (1GB data)...');
+            const publishPromises = [];
+            for (let i = 0; i < 1000000; i++) {
+                const topic = `${baseTopic}/topic-${Math.floor(Math.random() * 50000)}`;
+                publishPromises.push(nexo.pubsub(topic).publish({
+                    msg: 'z'.repeat(1000), // 1KB per messaggio
+                    id: i,
+                    timestamp: Date.now()
+                }));
+            }
+            await Promise.all(publishPromises);
+            console.log('✅ 1M messages published! Server should be at PEAK memory now (check Docker stats!)');
+            
+            // Unsubscribe tutti (simula disconnect)
+            console.log('🔌 Unsubscribing all 50k subscribers...');
+            const unsubPromises = [];
+            for (let i = 0; i < 50000; i++) {
+                const topic = `${baseTopic}/topic-${i}`;
+                unsubPromises.push(nexo.pubsub(topic).unsubscribe());
+            }
+            await Promise.all(unsubPromises);
+            console.log('✅ All subscribers disconnected!');
+            
+            // Aspetta background cleanup (60s interval)
+            console.log('⏳ Waiting 90s for background actor cleanup (runs every 60s)...');
+            await new Promise(r => setTimeout(r, 90000));
+            
+            console.log('📉 Server should have cleaned up empty actors. Memory should be back down!');
+        }, 180000); // Timeout 3 minuti
+
+        it('STREAM: Memory spike and cleanup (Consumer group leave)', async () => {
+            console.log('\n🔥 STREAM STRESS: Creating 200 partitions + 500k messages (500MB+ data)...');
+            const topic = `stress-stream-${randomUUID()}`;
+            await nexo.stream(topic).create({ partitions: 200 });
+            
+            // Pubblica 500k messaggi da 1KB = ~500MB
+            const producer = nexo.stream(topic);
+            const publishPromises = [];
+            for (let i = 0; i < 500000; i++) {
+                publishPromises.push(producer.publish({
+                    data: 'w'.repeat(1000), // 1KB
+                    id: i,
+                    timestamp: Date.now()
+                }));
+            }
+            
+            console.log('📤 Publishing 500k messages to stream...');
+            await Promise.all(publishPromises);
+            console.log('✅ All messages published! Server should be at peak memory now.');
+            
+            // Crea 20 consumer che consumano rapidamente
+            console.log('⚡ Starting 20 consumers to drain messages...');
+            const clients = [];
+            const subs = [];
+            
+            for (let i = 0; i < 20; i++) {
+                const client = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
+                clients.push(client);
+                const sub = await client.stream(topic).subscribe(`stress-group-${i}`, () => {});
+                subs.push(sub);
+            }
+            
+            // Aspetta che consumino
+            console.log('⏳ Waiting 10s for consumers to drain...');
+            await new Promise(r => setTimeout(r, 10000));
+            
+            // Disconnetti tutti i consumer
+            console.log('🔌 Disconnecting all 20 consumers...');
+            for (const sub of subs) {
+                sub.stop();
+            }
+            for (const client of clients) {
+                await client.disconnect();
+            }
+            
+            console.log('⏳ Waiting 5s for server cleanup...');
+            await new Promise(r => setTimeout(r, 5000));
+            
+            console.log('📉 Server should have freed stream memory. Check Docker stats!');
+        }, 90000); // 90s timeout
+
+        it('ALL BROKERS: Combined stress test (NUKE THE SERVER - 5GB+ data)', async () => {
+            console.log('\n🔥🔥🔥 COMBINED STRESS: All 4 brokers simultaneously - MAXIMUM LOAD!');
+            console.log('💣 Target: Push server to ~5-6GB memory usage, then watch cleanup...\n');
+            
+            // Parallelo: stress ESTREMO su tutti e 4 i broker
+            await Promise.all([
+                // STORE: 1M keys x 1KB = 1GB
+                (async () => {
+                    console.log('📦 STORE: Pushing 1M keys (1GB)...');
+                    const promises = [];
+                    for (let i = 0; i < 1000000; i++) {
+                        promises.push(nexo.store.map.set(`nuke-store-${i}`, { 
+                            data: 'x'.repeat(1000),
+                            index: i 
+                        }, { ttl: 10 }));
+                    }
+                    await Promise.all(promises);
+                    console.log('✅ STORE: 1M keys pushed!');
+                })(),
+                
+                // QUEUE: 500k messages x 2KB = 1GB
+                // (async () => {
+                //     console.log('📬 QUEUE: Pushing 500k messages (1GB)...');
+                //     const qName = `nuke-queue-${randomUUID()}`;
+                //     const q = await nexo.queue(qName).create();
+                //     const promises = [];
+                //     for (let i = 0; i < 500000; i++) {
+                //         promises.push(q.push({
+                //             data: 'y'.repeat(2000), // 2KB
+                //             id: i
+                //         }));
+                //     }
+                //     await Promise.all(promises);
+                //     console.log('✅ QUEUE: 500k messages pushed!');
+                //
+                //     // Consuma rapidamente
+                //     const sub = await q.subscribe(() => {}, { concurrency: 500 });
+                //     await new Promise(r => setTimeout(r, 10000));
+                //     sub.stop();
+                //     console.log('✅ QUEUE: All consumed!');
+                // })(),
+                
+                // PUBSUB: 100k subscribers + 2M messages x 1KB = 2GB
+                (async () => {
+                    console.log('📡 PUBSUB: Creating 100k subscribers + 2M messages (2GB)...');
+                    const base = `nuke-pubsub-${randomUUID()}`;
+                    const subs = [];
+                    for (let i = 0; i < 100000; i++) {
+                        subs.push(nexo.pubsub(`${base}/t-${i}`).subscribe(() => {}));
+                    }
+                    await Promise.all(subs);
+                    console.log('✅ PUBSUB: 100k subscribers created!');
+                    
+                    const pubs = [];
+                    for (let i = 0; i < 2000000; i++) {
+                        pubs.push(nexo.pubsub(`${base}/t-${Math.floor(Math.random() * 100000)}`).publish({ 
+                            data: 'z'.repeat(1000), // 1KB
+                            id: i 
+                        }));
+                    }
+                    await Promise.all(pubs);
+                    console.log('✅ PUBSUB: 2M messages published!');
+                    
+                    // Unsubscribe
+                    const unsubs = [];
+                    for (let i = 0; i < 100000; i++) {
+                        unsubs.push(nexo.pubsub(`${base}/t-${i}`).unsubscribe());
+                    }
+                    await Promise.all(unsubs);
+                    console.log('✅ PUBSUB: All unsubscribed!');
+                })(),
+                
+                // STREAM: 300 partitions + 1M messages x 1KB = 1GB
+                (async () => {
+                    console.log('🌊 STREAM: Creating 300 partitions + 1M messages (1GB)...');
+                    const topic = `nuke-stream-${randomUUID()}`;
+                    await nexo.stream(topic).create({ partitions: 300 });
+                    const producer = nexo.stream(topic);
+                    
+                    const pubs = [];
+                    for (let i = 0; i < 1000000; i++) {
+                        pubs.push(producer.publish({ 
+                            data: 'w'.repeat(1000), // 1KB
+                            id: i 
+                        }));
+                    }
+                    await Promise.all(pubs);
+                    console.log('✅ STREAM: 1M messages published!');
+                })()
+            ]);
+            
+            console.log('\n💥 ALL DATA SENT! Server should be at MAXIMUM memory now (5-6GB)!');
+            console.log('📊 Check Docker stats NOW - memory should be peaked!\n');
+            
+            // Aspetta cleanup di tutti i broker
+            console.log('⏳ Waiting 120s for all brokers to cleanup (TTL expiration + background tasks)...');
+            await new Promise(r => setTimeout(r, 120000)); // 2 minuti
+            
+            console.log('\n📉 Server should have cleaned up significantly!');
+            console.log('📊 Check Docker stats NOW - memory should be back down!');
+            console.log('✅ If memory dropped from ~5-6GB to ~500MB-1GB, cleanup is working! 🎉');
+        }); // Timeout 5 minuti
+    });
+
 
 });
 
