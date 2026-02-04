@@ -5,6 +5,7 @@ use crate::brokers::store::types::{Entry, Value};
 use crate::brokers::store::map::MapValue;
 use std::time::Instant;
 use crate::config::StoreConfig;
+use crate::server::protocol::payload_to_dashboard_value;
 
 pub struct StoreManager {
     pub map: MapStore,
@@ -33,14 +34,7 @@ impl StoreManager {
             
             let value = match &val.value {
                 Value::Map(MapValue(b)) => {
-                    let data_type = b[0];
-                    let content = &b[1..];
-                    
-                    match data_type {
-                        2 => serde_json::from_slice(content).unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(content).to_string())),
-                        0 => serde_json::Value::String(format!("0x{}", hex::encode(content))),
-                        _ => serde_json::Value::String(String::from_utf8_lossy(content).to_string()),
-                    }
+                    payload_to_dashboard_value(b)
                 }
             };
 

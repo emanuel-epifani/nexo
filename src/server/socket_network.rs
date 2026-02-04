@@ -15,6 +15,7 @@ use crate::server::header_protocol::{
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
+use crate::server::protocol::{NETWORK_BUFFER_READ_SIZE, NETWORK_BUFFER_WRITE_SIZE, CHANNEL_CAPACITY_SOCKET_WRITE};
 
 /// Internal message type for the write loop
 enum WriteMessage {
@@ -31,10 +32,10 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let client_id = ClientId(client_uuid.to_string());
     
     // BATCHING: Wrap writer in a BufWriter for automatic OS-level batching
-    let mut buffered_writer = BufWriter::with_capacity(16 * 1024, writer);
+    let mut buffered_writer = BufWriter::with_capacity(NETWORK_BUFFER_WRITE_SIZE, writer);
     
     // Main channel for writing to the socket
-    let (tx, mut rx) = mpsc::channel::<WriteMessage>(1024);
+    let (tx, mut rx) = mpsc::channel::<WriteMessage>(CHANNEL_CAPACITY_SOCKET_WRITE);
     
     // Channel for PubSubManager to send push notifications to this client
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
@@ -82,7 +83,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     
     // --- READ LOOP ---
     // Use a larger buffer to allow for more data in a single read syscall
-    let mut buffer = BytesMut::with_capacity(64 * 1024);
+    let mut buffer = BytesMut::with_capacity(NETWORK_BUFFER_READ_SIZE);
     let engine = Arc::new(engine);
 
     loop {

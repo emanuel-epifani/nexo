@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
+use crate::server::protocol::payload_to_dashboard_value;
 
 use crate::dashboard::models::queues::{QueueSummary, MessageSummary};
 use crate::brokers::queues::persistence::types::PersistenceMode;
@@ -313,11 +314,7 @@ impl QueueState {
         let mut scheduled = Vec::new();
 
         let parse_payload = |msg: &Message| {
-            match msg.payload[0] {
-                2 => serde_json::from_slice(&msg.payload[1..]).unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&msg.payload[1..]).to_string())),
-                0 => serde_json::Value::String(format!("0x{}", hex::encode(&msg.payload[1..]))),
-                _ => serde_json::Value::String(String::from_utf8_lossy(&msg.payload[1..]).to_string()),
-            }
+            payload_to_dashboard_value(&msg.payload)
         };
 
         // Pending

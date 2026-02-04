@@ -18,6 +18,7 @@ use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
 use crate::brokers::stream::persistence::writer::Segment;
+use crate::server::protocol::payload_to_dashboard_value;
 
 // ==========================================
 // COMMANDS (The Internal Protocol)
@@ -379,23 +380,12 @@ impl TopicActor {
                                 .iter()
                                 .rev()
                                 .map(|msg| {
-                                    let data_type = msg.payload[0];
-                                    let content = &msg.payload[1..];
-
-                                    let payload_json = match data_type {
-                                        2 => serde_json::from_slice(content).unwrap_or_else(|_| {
-                                            serde_json::Value::String(String::from_utf8_lossy(content).to_string())
-                                        }),
-                                        0 => serde_json::Value::String(format!("0x{}", hex::encode(content))),
-                                        _ => serde_json::Value::String(String::from_utf8_lossy(content).to_string()),
-                                    };
-
                                     crate::dashboard::models::stream::MessagePreview {
                                         offset: msg.offset,
                                         timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
                                             .unwrap_or_default()
                                             .to_rfc3339(),
-                                        payload: payload_json,
+                                        payload: payload_to_dashboard_value(&msg.payload),
                                     }
                                 })
                                 .collect();

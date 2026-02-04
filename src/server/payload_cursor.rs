@@ -1,3 +1,4 @@
+use crate::server::protocol::*;
 use bytes::Bytes;
 use std::convert::TryInto;
 
@@ -16,29 +17,29 @@ impl PayloadCursor {
     }
 
     pub fn read_u8(&mut self) -> Result<u8, String> {
-        if !self.has_remaining(1) {
+        if !self.has_remaining(SIZE_U8) {
             return Err("Payload too short for u8".to_string());
         }
         let val = self.data[self.offset];
-        self.offset += 1;
+        self.offset += SIZE_U8;
         Ok(val)
     }
 
     pub fn read_u32(&mut self) -> Result<u32, String> {
-        if !self.has_remaining(4) {
+        if !self.has_remaining(SIZE_U32) {
             return Err("Payload too short for u32".to_string());
         }
-        let val = u32::from_be_bytes(self.data[self.offset..self.offset + 4].try_into().unwrap());
-        self.offset += 4;
+        let val = u32::from_be_bytes(self.data[self.offset..self.offset + SIZE_U32].try_into().unwrap());
+        self.offset += SIZE_U32;
         Ok(val)
     }
 
     pub fn read_u64(&mut self) -> Result<u64, String> {
-        if !self.has_remaining(8) {
+        if !self.has_remaining(SIZE_U64) {
             return Err("Payload too short for u64".to_string());
         }
-        let val = u64::from_be_bytes(self.data[self.offset..self.offset + 8].try_into().unwrap());
-        self.offset += 8;
+        let val = u64::from_be_bytes(self.data[self.offset..self.offset + SIZE_U64].try_into().unwrap());
+        self.offset += SIZE_U64;
         Ok(val)
     }
 
@@ -60,11 +61,11 @@ impl PayloadCursor {
     }
 
     pub fn read_uuid_bytes(&mut self) -> Result<[u8; 16], String> {
-        if !self.has_remaining(16) {
+        if !self.has_remaining(SIZE_UUID) {
             return Err("Payload too short for UUID".to_string());
         }
-        let val = self.data[self.offset..self.offset + 16].try_into().unwrap();
-        self.offset += 16;
+        let val = self.data[self.offset..self.offset + SIZE_UUID].try_into().unwrap();
+        self.offset += SIZE_UUID;
         Ok(val)
     }
 

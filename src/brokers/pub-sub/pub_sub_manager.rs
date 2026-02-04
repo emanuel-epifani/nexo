@@ -22,6 +22,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use crate::dashboard::models::pubsub::TopicSnapshot;
+use crate::server::protocol::payload_to_dashboard_value;
 
 // ==========================================
 // PUBLIC TYPES
@@ -392,15 +393,7 @@ impl RootActor {
             subscribers: node.subscribers.len(),
             retained_value: node.retained.as_ref()
                 .filter(|r| !r.is_expired())
-                .and_then(|retained| {
-                    let data_type = retained.data[0];
-                    let content = &retained.data[1..];
-                    match data_type {
-                        2 => serde_json::from_slice(content).ok(),
-                        0 => Some(serde_json::Value::String(format!("0x{}", hex::encode(content)))),
-                        _ => Some(serde_json::Value::String(String::from_utf8_lossy(content).to_string())),
-                    }
-                }),
+                .map(|retained| payload_to_dashboard_value(&retained.data)),
         });
 
         // Process exact match children

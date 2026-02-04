@@ -1,6 +1,7 @@
 //! Request Router: Routes opcodes to broker handlers
 //! Uses specific Command enums for each broker to ensure type safety and clean parsing.
 
+use crate::server::protocol::*;
 use crate::server::header_protocol::*;
 use crate::server::payload_cursor::PayloadCursor;
 use crate::NexoEngine;
@@ -26,39 +27,39 @@ pub const OP_DEBUG_ECHO: u8 = 0x00;
 
 pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
     if payload.is_empty() { return Response::Error("Empty payload".to_string()); }
-    let opcode = payload[0];
-    let mut cursor = PayloadCursor::new(payload.slice(1..));
+    let opcode = payload[PAYLOAD_OFFSET_OPCODE];
+    let mut cursor = PayloadCursor::new(payload.slice((PAYLOAD_OFFSET_OPCODE + 1)..));
 
     match opcode {
         // DEBUG
         OP_DEBUG_ECHO => { Response::Data(cursor.read_remaining()) }
 
-        // STORE (0x02 - 0x0F)
-        0x02..=0x0F => {
+        // STORE
+        OPCODE_MIN_STORE..=OPCODE_MAX_STORE => {
             match StoreCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_store(cmd, engine),
                 Err(e) => Response::Error(e),
             }
         }
 
-        // QUEUE (0x10 - 0x1F)
-        0x10..=0x1F => {
+        // QUEUE
+        OPCODE_MIN_QUEUE..=OPCODE_MAX_QUEUE => {
             match QueueCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_queue(cmd, engine).await,
                 Err(e) => Response::Error(e),
             }
         }
 
-        // PUBSUB (0x21 - 0x2F)
-        0x21..=0x2F => {
+        // PUBSUB
+        OPCODE_MIN_PUBSUB..=OPCODE_MAX_PUBSUB => {
             match PubSubCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_pubsub(cmd, engine, client_id).await,
                 Err(e) => Response::Error(e),
             }
         }
 
-        // STREAM (0x30 - 0x3F)
-        0x30..=0x3F => {
+        // STREAM
+        OPCODE_MIN_STREAM..=OPCODE_MAX_STREAM => {
             match StreamCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_stream(cmd, engine, client_id).await,
                 Err(e) => Response::Error(e),
