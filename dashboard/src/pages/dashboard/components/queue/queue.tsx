@@ -123,16 +123,6 @@ export function QueueView({ data }: Props) {
       setTimeout(() => setCopiedId(null), 2000)
   }
 
-  // Parse payload JSON safely
-  const parsedPayload = useMemo(() => {
-      if (!selectedMessage?.payload) return null
-      try {
-          return JSON.parse(selectedMessage.payload)
-      } catch {
-          return null
-      }
-  }, [selectedMessage?.payload])
-
   // Virtualization setup
   const virtualizer = useVirtualizer({
       count: filteredMessages.length,
@@ -380,15 +370,11 @@ export function QueueView({ data }: Props) {
                           <h4 className="text-[13px] font-bold uppercase text-muted-foreground mb-2 flex-shrink-0">PAYLOAD</h4>
                           <ScrollArea className="flex-1 border border-border rounded bg-muted/50">
                               <div className="p-3">
-                                  {parsedPayload ? (
-                                      <pre className="font-mono text-[13px] text-foreground whitespace-pre-wrap break-words">
-                                          {JSON.stringify(parsedPayload, null, 2)}
-                                      </pre>
-                                  ) : (
-                                      <div className="font-mono text-[13px] text-muted-foreground whitespace-pre-wrap break-words">
-                                          {selectedMessage.payload}
-                                      </div>
-                                  )}
+                                  <pre className="font-mono text-[13px] text-foreground whitespace-pre-wrap break-words">
+                                      {typeof selectedMessage.payload === 'string' 
+                                          ? selectedMessage.payload 
+                                          : JSON.stringify(selectedMessage.payload, null, 2)}
+                                  </pre>
                               </div>
                           </ScrollArea>
                       </div>

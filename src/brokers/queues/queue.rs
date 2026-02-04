@@ -312,13 +312,21 @@ impl QueueState {
         let mut inflight = Vec::new();
         let mut scheduled = Vec::new();
 
+        let parse_payload = |msg: &Message| {
+            match msg.payload[0] {
+                2 => serde_json::from_slice(&msg.payload[1..]).unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&msg.payload[1..]).to_string())),
+                0 => serde_json::Value::String(format!("0x{}", hex::encode(&msg.payload[1..]))),
+                _ => serde_json::Value::String(String::from_utf8_lossy(&msg.payload[1..]).to_string()),
+            }
+        };
+
         // Pending
         for (priority, queue) in &self.waiting_for_dispatch {
             for id in queue {
                 if let Some(msg) = self.registry.get(id) {
                     pending.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
+                        payload: parse_payload(msg),
                         state: "Pending".to_string(),
                         priority: *priority,
                         attempts: msg.attempts,
@@ -334,7 +342,7 @@ impl QueueState {
                 if let Some(msg) = self.registry.get(id) {
                     inflight.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
+                        payload: parse_payload(msg),
                         state: "InFlight".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,
@@ -350,7 +358,7 @@ impl QueueState {
                 if let Some(msg) = self.registry.get(id) {
                     scheduled.push(MessageSummary {
                         id: msg.id,
-                        payload: String::from_utf8_lossy(&msg.payload[1..]).to_string(),
+                        payload: parse_payload(msg),
                         state: "Scheduled".to_string(),
                         priority: msg.priority,
                         attempts: msg.attempts,

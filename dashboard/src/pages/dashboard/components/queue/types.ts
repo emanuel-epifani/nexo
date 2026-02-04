@@ -12,7 +12,7 @@ export interface QueueSummary {
 
 export interface MessageSummary {
   id: string; // UUID
-  payload: string;
+  payload: any;
   state: string; // "Pending", "InFlight", "Scheduled"
   priority: number; // u8
   attempts: number; // u32

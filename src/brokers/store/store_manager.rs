@@ -33,18 +33,13 @@ impl StoreManager {
             
             let value = match &val.value {
                 Value::Map(MapValue(b)) => {
-                    if b.is_empty() {
-                        "[Empty]".to_string()
-                    } else {
-                        let data_type = b[0];  // First byte = DataType (0=RAW, 1=STRING, 2=JSON)
-                        let content = &b[1..]; // Rest = actual data
-                        
-                        match data_type {
-                            0 => format!("0x{}", hex::encode(content)),     // RAW → hex
-                            1 => String::from_utf8_lossy(content).to_string(), // STRING → text
-                            2 => String::from_utf8_lossy(content).to_string(), // JSON → text
-                            _ => format!("[Unknown type: {}] 0x{}", data_type, hex::encode(content)),
-                        }
+                    let data_type = b[0];
+                    let content = &b[1..];
+                    
+                    match data_type {
+                        2 => serde_json::from_slice(content).unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(content).to_string())),
+                        0 => serde_json::Value::String(format!("0x{}", hex::encode(content))),
+                        _ => serde_json::Value::String(String::from_utf8_lossy(content).to_string()),
                     }
                 }
             };

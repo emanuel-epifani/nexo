@@ -222,7 +222,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 <div className="flex-1 overflow-auto">
                     <div className="p-6 min-w-0">
                         <pre className="text-xs text-foreground font-mono leading-relaxed whitespace-pre min-w-0">
-                            {tryFormatJson(selectedKey.value)}
+                            {typeof selectedKey.value === 'string' ? selectedKey.value : JSON.stringify(selectedKey.value, null, 2)}
                         </pre>
                     </div>
                 </div>
@@ -231,11 +231,11 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 <div className="px-4 py-2 border-t border-border bg-section-header text-[10px] text-muted-foreground flex justify-between font-mono uppercase">
                     <div className="flex items-center gap-2">
                         <Binary className="h-3 w-3" />
-                        <span>SIZE: {new Blob([selectedKey.value]).size} BYTES</span>
+                        <span>SIZE: {new Blob([typeof selectedKey.value === 'string' ? selectedKey.value : JSON.stringify(selectedKey.value)]).size} BYTES</span>
                     </div>
                     <div className="flex items-center gap-2">
                         <FileJson className="h-3 w-3" />
-                        <span>{selectedKey.value.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
+                        <span>{typeof selectedKey.value === 'string' && selectedKey.value.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
                     </div>
                 </div>
             </>
@@ -248,13 +248,4 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
       </div>
     </div>
   )
-}
-
-function tryFormatJson(str: string) {
-    try {
-        if (str.startsWith("{") || str.startsWith("[")) {
-            return JSON.stringify(JSON.parse(str), null, 2)
-        }
-    } catch (e) {}
-    return str
 }

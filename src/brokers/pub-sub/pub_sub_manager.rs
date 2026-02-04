@@ -393,9 +393,13 @@ impl RootActor {
             retained_value: node.retained.as_ref()
                 .filter(|r| !r.is_expired())
                 .and_then(|retained| {
-                    let payload_withouht_datatype = &retained.data[1..];
-                    let json_str = String::from_utf8_lossy(payload_withouht_datatype);
-                    serde_json::from_str(&json_str).ok()
+                    let data_type = retained.data[0];
+                    let content = &retained.data[1..];
+                    match data_type {
+                        2 => serde_json::from_slice(content).ok(),
+                        0 => Some(serde_json::Value::String(format!("0x{}", hex::encode(content)))),
+                        _ => Some(serde_json::Value::String(String::from_utf8_lossy(content).to_string())),
+                    }
                 }),
         });
 

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Serialize)]
 pub struct StoreBrokerSnapshot {
@@ -8,6 +9,6 @@ pub struct StoreBrokerSnapshot {
 #[derive(Serialize)]
 pub struct KeyDetail {
     pub key: String,
-    pub value: String,
+    pub value: Value,
     pub expires_at: String, // ISO8601
 }

@@ -4,6 +4,6 @@ export interface StoreBrokerSnapshot {
 
 export interface KeyDetail {
   key: string;
-  value: string;
+  value: any;
   expires_at: string; // ISO8601
 }

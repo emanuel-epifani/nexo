@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Serialize)]
@@ -18,7 +19,7 @@ pub struct QueueSummary {
 #[derive(Serialize)]
 pub struct MessageSummary {
     pub id: Uuid,
-    pub payload: String,
+    pub payload: Value,
     pub state: String, // "Pending", "InFlight", "Scheduled"
     pub priority: u8,
     pub attempts: u32,

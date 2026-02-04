@@ -379,18 +379,16 @@ impl TopicActor {
                                 .iter()
                                 .rev()
                                 .map(|msg| {
-                                    // Skip first byte (datatype indicator)
-                                    let payload_bytes = if msg.payload.len() > 0 {
-                                        &msg.payload[1..]
-                                    } else {
-                                        &msg.payload[..]
-                                    };
+                                    let data_type = msg.payload[0];
+                                    let content = &msg.payload[1..];
 
-                                    // Try to parse as JSON, fallback to String
-                                    let payload_json: serde_json::Value = serde_json::from_slice(payload_bytes)
-                                        .unwrap_or_else(|_| {
-                                            serde_json::Value::String(String::from_utf8_lossy(payload_bytes).to_string())
-                                        });
+                                    let payload_json = match data_type {
+                                        2 => serde_json::from_slice(content).unwrap_or_else(|_| {
+                                            serde_json::Value::String(String::from_utf8_lossy(content).to_string())
+                                        }),
+                                        0 => serde_json::Value::String(format!("0x{}", hex::encode(content))),
+                                        _ => serde_json::Value::String(String::from_utf8_lossy(content).to_string()),
+                                    };
 
                                     crate::dashboard::models::stream::MessagePreview {
                                         offset: msg.offset,
