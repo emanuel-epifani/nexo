@@ -11,6 +11,8 @@ use crate::brokers::queues::queue::Message;
 use sqlite::load_all_messages;
 use rusqlite::Connection;
 
+use crate::brokers::queues::persistence::sqlite::init_db; // Import init_db
+
 #[derive(Clone)]
 pub struct QueueStore {
     sender: Option<mpsc::Sender<StoreCommand>>,
@@ -31,6 +33,17 @@ impl QueueStore {
                 mode,
                 db_path,
             };
+        }
+
+        // 1. SYNCHRONOUS INIT: Ensure DB schema exists before anything else
+        // This prevents race conditions where recover() runs before Writer creates tables.
+        if let Ok(conn) = Connection::open(&db_path) {
+            if let Err(e) = init_db(&conn, &mode) {
+                tracing::error!("FATAL: Failed to initialize Queue DB at {:?}: {}", db_path, e);
+                // We proceed, but the actor will likely fail later.
+            }
+        } else {
+             tracing::error!("FATAL: Failed to open Queue DB for initialization at {:?}", db_path);
         }
 
         let (tx, rx) = mpsc::channel(writer_channel_capacity);
