@@ -10,5 +10,5 @@ pub struct StoreBrokerSnapshot {
 pub struct KeyDetail {
     pub key: String,
     pub value: Value,
-    pub expires_at: String, // ISO8601
+    pub exp_at: String, // ISO8601
 }

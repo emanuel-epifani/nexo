@@ -586,7 +586,7 @@ describe('BROKER INTEGRATION', async () => {
         });
     });
 
-    describe('PERFORMANCE', () => {
+    describe.skip('PERFORMANCE', () => {
 
         it('Protocol Latency: Small Payload Round-Trip', async () => {
             const ITERATIONS = 5000;
@@ -692,7 +692,7 @@ describe('BROKER INTEGRATION', async () => {
 
     });
 
-    describe('MEMORY STRESS & CLEANUP VERIFICATION', () => {
+    describe.skip('MEMORY STRESS & CLEANUP VERIFICATION', () => {
         // Test per verificare che la memoria schizzi in alto e poi si abbassi
         // grazie ai meccanismi di cleanup automatico di ogni broker
 

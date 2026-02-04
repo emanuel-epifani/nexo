@@ -48,7 +48,7 @@ impl StoreManager {
             keys_detail.push(crate::dashboard::models::store::KeyDetail {
                 key: entry.key().clone(),
                 value,
-                expires_at: expires_at_str,
+                exp_at: expires_at_str,
             });
         }
         
