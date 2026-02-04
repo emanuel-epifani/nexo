@@ -236,27 +236,40 @@ Connect, execute operations, inspect data via the dashboard at `http://localhost
 
 ```typescript
 import { NexoClient } from '@emanuelepifani/nexo-client';
-
+// Connect once
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 
-// --- 1. Store ---
+
+// --- 1. Store (Shared state Redis-like) ---
 await client.store.map.set("user:1", { name: "Max", role: "admin" });
-const user = await client.store.map.get("user:1");
+const user = await client.store.map.get<User>("user:1");
+await client.store.map.del("user:1");
 
-// --- 2. Pub/Sub ---
-const alerts = client.pubsubAlertMsg>("system-alerts");
-await alerts.subscribe((msg) => console.log(msg));
-await alerts.publish({ level: "high" });
 
-// --- 3. Queue ---
+// --- 2. Pub/Sub (Realtime events MQTT-style + wildcards) ---
+client.pubsub<Heartbeat>('edge/42/hb').publish({ ts: Date.now() });
+await client.pubsub<Heartbeat>('edge/+/hb').subscribe(hb => console.log('edge alive:', hb.ts));
+await client.pubsub<EdgeEvent>('edge/42/#').subscribe(ev => console.log('edge event:', ev.type));
+
+
+// --- 3. Queue (Reliable background jobs) ---
 const mailQ = await client.queue<MailJob>("emails").create();
 await mailQ.push({ to: "test@test.com" });
-await mailQ.subscribe((msg) => console.log("Processing email:", msg));
+await mailQ.subscribe((msg) => console.log(msg));
 
-// --- 4. Stream ---
+
+// --- 4. Stream (Durable history Event Log) ---
 const stream = await client.stream<UserEvent>('user-events').create();
 await stream.publish({ type: 'login', userId: 'u1' });
-await stream.subscribe('analytics', (msg) => console.log("Event:", msg));
+await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+
+
+//Every broker support Binary format (zero JSON overhead)
+const chunk = Buffer.alloc(1024 * 1024);
+await client.store.map.set("blob", chunk);
+client.pubsub<Buffer>('edge/42/video').publish(chunk);
+client.stream<Buffer>('video-archive').publish(chunk);
+client.queue<Buffer>('video-processing').push(chunk);
 ```
 
 > **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Node.js SDK Guide**](https://www.npmjs.com/package/@emanuelepifani/nexo-client).
