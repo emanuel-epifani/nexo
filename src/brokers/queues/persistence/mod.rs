@@ -55,10 +55,8 @@ impl QueueStore {
             return Ok(Vec::new());
         }
 
-        let conn = Connection::open_with_flags(
-            &self.db_path, 
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        ).map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
+        let conn = Connection::open(&self.db_path)
+            .map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
 
         load_all_messages(&conn).map_err(|e| format!("Failed to load messages: {}", e))
     }

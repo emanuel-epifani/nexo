@@ -70,7 +70,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
-                tracing::error!(error = %e, "[Network] Write error");
+                tracing::debug!(error = %e, "[Network] Write error");
                 break;
             }
 
