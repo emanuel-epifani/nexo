@@ -121,7 +121,13 @@ impl TopicActor {
         self_tx: mpsc::Sender<TopicCommand>,
         config: TopicConfig,
     ) -> Self {
-        // 1. Recovery
+        // 1. Recovery (SYNCHRONOUS DIRECTORY CREATION)
+        let persistence_path = PathBuf::from(&config.persistence_path).join(&name);
+        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
+            tracing::error!("FATAL: Failed to create topic directory at {:?}: {}", persistence_path, e);
+            // We proceed, but the writer will likely fail. At least we logged it early.
+        }
+
         let recovered = recover_topic(&name, config.partitions, PathBuf::from(config.persistence_path.clone()));
         let state = TopicState::restore(
             name.clone(), 
