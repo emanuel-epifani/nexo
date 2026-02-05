@@ -212,15 +212,17 @@ This exposes:
 - Port 8080 (HTTP): Web Dashboard with status of all brokers.
 
 **Option B: Production Mode (Persistent)**
-Mount volumes to persist data. You can split Queues and Streams onto different disks.
+Mount volumes to persist data. You can split Queues, Streams, and PubSub retained messages onto different disks.
 ```bash
 docker run -d \
   --name nexo \
   -p 7654:7654 \                                     # Expose only TCP socket (Dashboard is OFF in prod)
   -v $(pwd)/nexo_queue:/storage/queue \              # Volume 1 (e.g. fast SSD)
   -v $(pwd)/nexo_stream:/storage/stream \            # Volume 2 (e.g. large HDD)
+  -v $(pwd)/nexo_pubsub:/storage/pubsub \            # Volume 3 for PubSub retained messages
   -e QUEUE_ROOT_PERSISTENCE_PATH=/storage/queue \    # Map Queue persistency to Volume 1
   -e STREAM_ROOT_PERSISTENCE_PATH=/storage/stream \  # Map Stream persistency to Volume 2
+  -e PUBSUB_PERSISTENCE_PATH=/storage/pubsub \       # Map PubSub retained messages to Volume 3
   -e NEXO_ENV=prod \                                 # Set Production Mode (Dashboard OFF)
   nexobroker/nexo:latest
 ```
