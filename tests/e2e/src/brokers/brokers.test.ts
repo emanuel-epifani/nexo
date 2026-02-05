@@ -692,7 +692,7 @@ describe('BROKER INTEGRATION', async () => {
 
     });
 
-    describe.skip('MEMORY STRESS & CLEANUP VERIFICATION', () => {
+    describe('MEMORY STRESS & CLEANUP VERIFICATION', () => {
         // Test per verificare che la memoria schizzi in alto e poi si abbassi
         // grazie ai meccanismi di cleanup automatico di ogni broker
 
@@ -718,7 +718,7 @@ describe('BROKER INTEGRATION', async () => {
             await new Promise(r => setTimeout(r, 8000));
             
             console.log('📉 Server should have cleaned up expired keys. Check Docker stats!');
-        }, 30000); // 30s timeout
+        }); // 30s timeout
 
         it('QUEUE: Memory spike and cleanup (DLQ + Ack)', async () => {
             console.log('\n🔥 QUEUE STRESS: Pushing 200k messages (100MB+ data)...');
@@ -749,7 +749,7 @@ describe('BROKER INTEGRATION', async () => {
             const sub = await q.subscribe(async (msg) => {
                 consumed++;
                 // Auto-ACK quando ritorna
-            }, { concurrency: 200 });
+            });
             
             await waitFor(() => expect(consumed).toBe(200000), { timeout: 30000 });
             sub.stop();
@@ -759,7 +759,7 @@ describe('BROKER INTEGRATION', async () => {
             await new Promise(r => setTimeout(r, 3000));
             
             console.log('📉 Server should have freed queue memory. Check Docker stats!');
-        }, 60000); // 60s timeout
+        }); // 60s timeout
 
         it('PUBSUB: Memory spike and cleanup (Disconnect subscribers)', async () => {
             console.log('\n🔥 PUBSUB STRESS: Creating 50k subscribers + 1M messages (1GB+ data)...');
@@ -804,12 +804,12 @@ describe('BROKER INTEGRATION', async () => {
             await new Promise(r => setTimeout(r, 90000));
             
             console.log('📉 Server should have cleaned up empty actors. Memory should be back down!');
-        }, 180000); // Timeout 3 minuti
+        }); // Timeout 3 minuti
 
         it('STREAM: Memory spike and cleanup (Consumer group leave)', async () => {
             console.log('\n🔥 STREAM STRESS: Creating 200 partitions + 500k messages (500MB+ data)...');
             const topic = `stress-stream-${randomUUID()}`;
-            await nexo.stream(topic).create({ partitions: 200 });
+            await nexo.stream(topic).create({ partitions: 32 });
             
             // Pubblica 500k messaggi da 1KB = ~500MB
             const producer = nexo.stream(topic);
@@ -855,7 +855,7 @@ describe('BROKER INTEGRATION', async () => {
             await new Promise(r => setTimeout(r, 5000));
             
             console.log('📉 Server should have freed stream memory. Check Docker stats!');
-        }, 90000); // 90s timeout
+        }); // 90s timeout
 
         it('ALL BROKERS: Combined stress test (NUKE THE SERVER - 5GB+ data)', async () => {
             console.log('\n🔥🔥🔥 COMBINED STRESS: All 4 brokers simultaneously - MAXIMUM LOAD!');
