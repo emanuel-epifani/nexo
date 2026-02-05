@@ -5,7 +5,6 @@ use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub enum PersistenceMode {
-    Memory,
     Sync,
     Async { flush_ms: u64 },
 }
@@ -13,7 +12,6 @@ pub enum PersistenceMode {
 impl From<Option<PersistenceOptions>> for PersistenceMode {
     fn from(opts: Option<PersistenceOptions>) -> Self {
         match opts {
-            Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
             Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
             Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
                 flush_ms: Config::global().stream.default_flush_ms,

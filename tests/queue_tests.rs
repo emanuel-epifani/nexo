@@ -104,7 +104,7 @@ mod queue_tests {
                 // Pop 2 (att=2). Timeout. 2 < 3 -> Requeue.
                 // Pop 3 (att=3). Timeout. 3 >= 3 -> DLQ.
                 ttl_ms: Some(60000),
-                persistence: Some(PersistenceOptions::Memory),
+                persistence: Some(PersistenceOptions::FileSync),
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
@@ -515,6 +515,82 @@ mod queue_tests {
                 assert!(queue_names.contains(&q2), "Snapshot should include q2");
             }
         }
+
+        #[tokio::test]
+        async fn test_dlq_persistence_after_restart() {
+            // Test that ensures DLQ (implicitly created) survives a restart
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("dlq_test_{}", Uuid::new_v4());
+            let dlq_name = format!("{}_dlq", q);
+
+            // Phase 1: Trigger DLQ creation
+            {
+                let manager = QueueManager::new(sys_config.clone());
+                // Create with max_retries = 0 (1st timeout -> DLQ immediately)
+                // Persistence FileSync to be sure
+                let config = QueueCreateOptions {
+                    visibility_timeout_ms: Some(100), // Increased visibility timeout
+                    max_retries: Some(0),
+                    persistence: Some(PersistenceOptions::FileSync),
+                    ..Default::default()
+                };
+                manager.create_queue(q.clone(), config).await.unwrap();
+
+                // Push message destined to fail
+                manager.push(q.clone(), Bytes::from("bad_msg"), 0, None).await.unwrap();
+
+                // Attempt 1 (and only attempt allowed)
+                let _ = manager.pop(&q).await.unwrap();
+                
+                // Wait for visibility timeout (100ms) + Pulse margin + Actor processing
+                tokio::time::sleep(Duration::from_millis(250)).await;
+
+                // Verify it's in DLQ
+                assert!(manager.exists(&dlq_name).await, "DLQ should exist");
+                
+                // Retry loop to be safe against disk flush latencies
+                let mut dead = None;
+                for _ in 0..20 {
+                    if let Some(msg) = manager.pop(&dlq_name).await {
+                        dead = Some(msg);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let dead = dead.expect("Message should be in DLQ after timeout");
+                
+                manager.ack(&dlq_name, dead.id).await;
+
+                // Push a new one that will stay in DLQ untouched
+                // We push to main queue, pop it, let it fail -> move to DLQ.
+                manager.push(q.clone(), Bytes::from("stay_in_dlq"), 0, None).await.unwrap();
+                let _ = manager.pop(&q).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await; // Wait for move to DLQ
+                
+                // Check if it's there (peek would be nice, but we check existence via side effect or just trust timing)
+                // We assume it's there because the first one went there.
+            }
+
+            // Small delay for flush
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Phase 2: Restart
+            {
+                let manager2 = QueueManager::new(sys_config.clone());
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                // DLQ should be auto-discovered
+                assert!(manager2.exists(&dlq_name).await, "DLQ should survive restart");
+
+                // Check message
+                let msg = manager2.pop(&dlq_name).await.expect("DLQ message should survive");
+                assert_eq!(msg.payload, Bytes::from("stay_in_dlq"));
+            }
+        }
     }
 
     // =========================================================================================
@@ -526,25 +602,6 @@ mod queue_tests {
         use super::*;
 
         const COUNT: usize = 200_000;
-
-        #[tokio::test]
-        async fn bench_memory_throughput() {
-            let (manager, _tmp) = setup_queue_manager().await;
-            let q = format!("bench_mem_{}", Uuid::new_v4());
-            let config = QueueCreateOptions {
-                persistence: Some(PersistenceOptions::Memory),
-                ..Default::default()
-            };
-            manager.create_queue(q.clone(), config).await.unwrap();
-
-            let mut bench = Benchmark::start("PUSH - Memory (no persistency)", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
 
         #[tokio::test]
         async fn bench_fsync_throughput() {

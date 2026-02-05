@@ -656,7 +656,7 @@ describe('BROKER INTEGRATION', async () => {
 
             // --- ROUND 1: STREAM ---
             const streamTopic = `perf-stream-${randomUUID()}`;
-            await nexo.stream(streamTopic).create({ persistence: 'memory' });
+            await nexo.stream(streamTopic).create({ persistence: 'file_async' });
             const streamProd = nexo.stream(streamTopic);
 
             const probeStream = new BenchmarkProbe('STREAM (64KB)', COUNT);
@@ -715,7 +715,7 @@ describe('BROKER INTEGRATION', async () => {
             
             // Aspetta che TTL scada + cleanup
             console.log('⏳ Waiting 8s for TTL expiration + cleanup...');
-            await new Promise(r => setTimeout(r, 8000));
+            // await new Promise(r => setTimeout(r, 8000));
             
             console.log('📉 Server should have cleaned up expired keys. Check Docker stats!');
         }); // 30s timeout

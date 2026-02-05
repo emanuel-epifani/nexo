@@ -6,7 +6,6 @@ use crate::brokers::queues::queue::Message;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PersistenceMode {
-    Memory,
     Sync,
     Async { flush_ms: u64 },
 }

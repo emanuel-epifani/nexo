@@ -13,7 +13,7 @@ enum StreamOpcode {
   S_DELETE = 0x36,
 }
 
-export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
+export type PersistenceStrategy = 'file_sync' | 'file_async';
 
 export interface RetentionOptions {
   maxAgeMs: number;

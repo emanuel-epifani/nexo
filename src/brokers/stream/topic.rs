@@ -35,7 +35,6 @@ pub struct TopicConfig {
 impl TopicConfig {
     pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
          let persistence_mode = match opts.persistence {
-            Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
             Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
             Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
                 flush_ms: sys.default_flush_ms,

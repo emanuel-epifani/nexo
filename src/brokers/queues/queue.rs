@@ -78,7 +78,6 @@ pub struct QueueConfig {
 impl QueueConfig {
     pub fn from_options(opts: QueueCreateOptions, sys: &SystemQueueConfig) -> Self {
         let persistence = match opts.persistence {
-            Some(PersistenceOptions::Memory) => PersistenceMode::Memory,
             Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
             Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
                 flush_ms: sys.default_flush_ms,

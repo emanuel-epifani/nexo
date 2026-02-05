@@ -24,17 +24,17 @@ pub async fn run_writer(
     info!("Queue Persistence Writer started for {:?}", db_path);
 
     // Flush Configuration
-    let flush_interval = match mode {
-        PersistenceMode::Async { flush_ms } => Duration::from_millis(flush_ms),
-        PersistenceMode::Sync | PersistenceMode::Memory => Duration::from_secs(3600),
+    let mut flush_timer = match mode {
+        PersistenceMode::Async { flush_ms } => {
+            let mut t = tokio::time::interval(Duration::from_millis(flush_ms));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            Some(t)
+        }
+        PersistenceMode::Sync => None,
     };
 
     let mut batch = Vec::new();
     let mut waiters = Vec::new();
-    let mut timer = tokio::time::interval(flush_interval);
-    
-    // To avoid CPU spin if empty in Async
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -52,7 +52,13 @@ pub async fn run_writer(
                 }
             }
             
-            _ = timer.tick() => {
+            _ = async {
+                if let Some(timer) = &mut flush_timer {
+                    timer.tick().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 // Timer tick (only Async mode)
                 if !batch.is_empty() {
                     flush_batch(&mut conn, &mut batch, &mut waiters);

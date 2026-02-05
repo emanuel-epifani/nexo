@@ -27,14 +27,6 @@ impl QueueStore {
         writer_channel_capacity: usize,
         batch_size: usize
     ) -> Self {
-        if let PersistenceMode::Memory = mode {
-            return Self {
-                sender: None,
-                mode,
-                db_path,
-            };
-        }
-
         // 1. SYNCHRONOUS INIT: Ensure DB schema exists before anything else
         // This prevents race conditions where recover() runs before Writer creates tables.
         if let Ok(conn) = Connection::open(&db_path) {
@@ -64,10 +56,6 @@ impl QueueStore {
 
     /// Recover all messages from DB (Read-Only connection)
     pub fn recover(&self) -> Result<Vec<Message>, String> {
-        if let PersistenceMode::Memory = self.mode {
-            return Ok(Vec::new());
-        }
-
         let conn = Connection::open(&self.db_path)
             .map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
 
@@ -75,11 +63,6 @@ impl QueueStore {
     }
 
     pub async fn execute(&self, op: StorageOp) -> Result<(), String> {
-        // If Memory mode, just return success immediately (no-op)
-        if let PersistenceMode::Memory = self.mode {
-            return Ok(());
-        }
-
         let sender = self.sender.as_ref().ok_or("Store uninitialized")?;
 
         match self.mode {
@@ -99,7 +82,6 @@ impl QueueStore {
                     .map_err(|_| "Writer channel closed".to_string())?;
                 Ok(())
             }
-            PersistenceMode::Memory => Ok(()), // Should be unreachable due to first check, but safe
         }
     }
 }

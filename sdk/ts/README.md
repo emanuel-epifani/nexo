@@ -64,7 +64,6 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
     ttlMs: 60000,               // Message expires if not consumed in 60s   (default=7days)
 
     // PERSISTENCE:
-    // - 'memory':     Volatile (Fastest, lost on restart)
     // - 'file_sync':  Save every message (Safest, Slowest)
     // - 'file_async': Flush periodically (Fast & Durable) - 
     // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs
@@ -166,7 +165,6 @@ const orders = await client.stream<Order>('orders').create({
     partitions: 4,              // Max concurrent consumers per group on same topic (default=8)
 
     // PERSISTENCE:
-    // - 'memory':     Volatile (Fastest, lost on restart)
     // - 'file_sync':  Save every message (Safest, Slowest)
     // - 'file_async': Flush periodically (Fast & Durable) - 
     // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs

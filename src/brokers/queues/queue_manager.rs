@@ -123,7 +123,7 @@ impl QueueManager {
                             visibility_timeout_ms: None,
                             max_retries: None,
                             ttl_ms: None,
-                            persistence: Some(PersistenceOptions::Memory),
+                            persistence: Some(PersistenceOptions::FileSync),
                         };
                         let config = QueueConfig::from_options(options, &system_config);
                         

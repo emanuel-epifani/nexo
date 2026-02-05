@@ -65,7 +65,7 @@ const QueueCommands = {
     conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
 };
 
-export type PersistenceStrategy = 'memory' | 'file_sync' | 'file_async';
+export type PersistenceStrategy = 'file_sync' | 'file_async';
 
 export interface QueueConfig {
   visibilityTimeoutMs?: number;

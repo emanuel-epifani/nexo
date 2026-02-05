@@ -13,7 +13,6 @@ pub const OP_S_DELETE: u8 = 0x36;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceOptions {
-    Memory,
     FileSync,
     FileAsync,
 }

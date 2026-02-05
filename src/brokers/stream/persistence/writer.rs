@@ -241,16 +241,6 @@ impl StreamWriter {
     }
 
     pub async fn run(mut self) {
-        if let PersistenceMode::Memory = self.mode {
-            // In Memory mode, we just drain the channel to avoid blocking actors
-            while let Some(cmd) = self.rx.recv().await {
-                if let Some(reply) = cmd.reply {
-                    let _ = reply.send(Ok(()));
-                }
-            }
-            return;
-        }
-
         // 1. Init Files (Eager)
         if let Err(e) = self.init_files() {
             error!("FATAL: Failed to init persistence for topic '{}': {}", self.topic_name, e);
@@ -265,13 +255,14 @@ impl StreamWriter {
 
         info!("Stream Persistence Writer started for '{}' ({:?})", self.topic_name, self.mode);
 
-        let flush_interval = match self.mode {
-            PersistenceMode::Async { flush_ms } => Duration::from_millis(flush_ms),
-            PersistenceMode::Sync | PersistenceMode::Memory => Duration::from_secs(3600),
+        let mut flush_timer = match self.mode {
+            PersistenceMode::Async { flush_ms } => {
+                let mut t = tokio::time::interval(Duration::from_millis(flush_ms));
+                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                Some(t)
+            }
+            PersistenceMode::Sync => None,
         };
-
-        let mut timer = tokio::time::interval(flush_interval);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut retention_timer = tokio::time::interval(Duration::from_millis(self.retention_check_interval_ms));
         retention_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -284,7 +275,6 @@ impl StreamWriter {
                     let should_flush = match self.mode {
                         PersistenceMode::Sync => true,
                         PersistenceMode::Async { .. } => self.batch.len() >= self.batch_size, // Cap batch size
-                        PersistenceMode::Memory => false,
                     };
 
                     if should_flush {
@@ -292,7 +282,13 @@ impl StreamWriter {
                     }
                 }
                 
-                _ = timer.tick() => {
+                _ = async {
+                    if let Some(timer) = &mut flush_timer {
+                        timer.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
                     if !self.batch.is_empty() {
                         self.flush_batch();
                     }

@@ -743,27 +743,6 @@ mod stream_tests {
         const COUNT: usize = 10_000;
 
         #[tokio::test]
-        async fn bench_stream_memory() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
-
-            let mut config = Config::global().stream.clone();
-            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-
-            let manager = StreamManager::new(config);
-            let topic = "bench-mem";
-            manager.create_topic(topic.to_string(), StreamCreateOptions { partitions: Some(1), persistence: Some(PersistenceOptions::Memory), ..Default::default() }).await.unwrap();
-
-            let mut bench = Benchmark::start("STREAM PUSH - Memory", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.publish(topic, StreamPublishOptions { key: None }, Bytes::from("data")).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
-
-        #[tokio::test]
         async fn bench_stream_fsync() {
             let temp_dir = tempfile::tempdir().unwrap();
             std::env::set_var("STREAM_ROOT_PERSISTENCE_PATH", temp_dir.path().to_str().unwrap());
