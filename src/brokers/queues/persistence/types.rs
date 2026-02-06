@@ -31,11 +31,6 @@ pub enum StorageOp {
         visible_at: u64,
         attempts: u32,
     },
-    /// Move to DLQ (Delete from queue -> Insert into dlq)
-    MoveToDlq {
-        msg: Message,
-        reason: String,
-    },
 }
 
 /// The command sent to the Writer Thread

@@ -35,16 +35,6 @@ pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
         [],
     )?;
 
-    // Dead Letter Queue Table
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS dlq (
-            id TEXT PRIMARY KEY,
-            payload BLOB NOT NULL,
-            reason TEXT,
-            moved_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
 
     // Crucial index for fast POP
     conn.execute(
@@ -124,22 +114,6 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 "UPDATE queue SET visible_at = ?1, attempts = ?2 WHERE id = ?3"
             )?;
             stmt.execute(params![*visible_at as i64, *attempts, id.to_string()])?;
-        }
-        StorageOp::MoveToDlq { msg, reason } => {
-            // Atomic: Delete from queue and insert into DLQ
-            let mut delete_stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            delete_stmt.execute(params![msg.id.to_string()])?;
-            
-            let mut insert_dlq = tx.prepare_cached(
-                "INSERT INTO dlq (id, payload, reason, moved_at)
-                 VALUES (?1, ?2, ?3, ?4)"
-            )?;
-            insert_dlq.execute(params![
-                msg.id.to_string(),
-                msg.payload.as_ref(),
-                reason,
-                current_time_ms() as i64
-            ])?;
         }
     }
     Ok(())
