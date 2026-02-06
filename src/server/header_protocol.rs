@@ -97,42 +97,31 @@ pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError>
 
 /// Encodes a Response enum into binary bytes for the wire
 pub fn encode_response(id: u32, response: &Response) -> Bytes {
-    // Pre-calculate extra payload size based on response type
-    let extra_len = match response {
-        Response::Ok | Response::Null => 0,
-        Response::Error(msg) => SIZE_STRING_PREFIX + msg.len(),
-        Response::Data(data) => data.len(),
-    };
-    
-    // Total: Header + Status + extra
-    let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + SIZE_STATUS + extra_len);
-    
-    // Header: [Type:1][Opcode:1][ID:4][Len:4]
-    buf.put_u8(TYPE_RESPONSE);
-    buf.put_u8(0x00); // Opcode = 0 for responses (unused)
-    buf.put_u32(id);
-    
-    match response {
-        Response::Ok => { 
-            buf.put_u32(SIZE_STATUS as u32);
-            buf.put_u8(STATUS_OK); 
-        }
+    // Extract status and payload from response
+    let (status, payload) = match response {
+        Response::Ok => (STATUS_OK, Bytes::new()),
+        Response::Null => (STATUS_NULL, Bytes::new()),
         Response::Error(msg) => {
-            buf.put_u32((SIZE_STATUS + SIZE_STRING_PREFIX + msg.len()) as u32);
-            buf.put_u8(STATUS_ERR);
+            let mut buf = BytesMut::with_capacity(SIZE_STRING_PREFIX + msg.len());
             buf.put_u32(msg.len() as u32);
             buf.put_slice(msg.as_bytes());
+            (STATUS_ERR, buf.freeze())
         }
-        Response::Null => { 
-            buf.put_u32(SIZE_STATUS as u32);
-            buf.put_u8(STATUS_NULL); 
-        }
-        Response::Data(data) => {
-            buf.put_u32((SIZE_STATUS + data.len()) as u32);
-            buf.put_u8(STATUS_DATA);
-            buf.put_slice(data);
-        }
-    }
+        Response::Data(data) => (STATUS_DATA, data.clone()),
+    };
+    
+    // Allocate buffer: Header + Payload
+    let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + payload.len());
+    
+    // Header: [Type:1][Status:1][ID:4][Len:4]
+    buf.put_u8(TYPE_RESPONSE);
+    buf.put_u8(status);
+    buf.put_u32(id);
+    buf.put_u32(payload.len() as u32);
+    
+    // Payload (if any)
+    buf.put_slice(&payload);
+    
     buf.freeze()
 }
 

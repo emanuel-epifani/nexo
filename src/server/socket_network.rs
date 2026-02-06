@@ -116,6 +116,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         } {
             let id = frame_ref.header.id;
             let frame_type = frame_ref.header.frame_type;
+            let opcode = frame_ref.header.opcode;
 
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
             let frame_data = buffer.split_to(consumed).freeze();
@@ -126,14 +127,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
             // Parallel execution: One task per request
             tokio::spawn(async move {
-                // DEBUG: Print captured values (Safe, no reparsing)
-
                 match frame_type {
                     TYPE_REQUEST => {
-                        // Extract opcode from header and payload
-                        let opcode = frame_ref.header.opcode;
                         let payload = frame_data.slice(RequestHeader::SIZE..);
-                        // Route request
                         let response = route(opcode, payload, &engine_clone, &client_id_clone).await;
                         
                         let _ = tx_clone.send(WriteMessage::Response(id, response)).await;

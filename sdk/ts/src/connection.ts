@@ -140,7 +140,7 @@ export class NexoConnection extends EventEmitter {
   private handleFrame(frame: Buffer) {
     const cursor = new Cursor(frame);
     const type = cursor.readU8();
-    const opcode = cursor.readU8(); // Opcode (unused in responses)
+    const opcodeOrStatus = cursor.readU8(); // Opcode for requests, Status for responses
     const id = cursor.readU32();
     cursor.readU32(); // Skip payloadLen
 
@@ -151,8 +151,8 @@ export class NexoConnection extends EventEmitter {
         const req = this.pending.get(id);
         if (req) {
           this.pending.delete(id);
-          // Payload: [Status:1][Data...]
-          req.resolve({ status: payload[0], data: payload.subarray(1) });
+          // Status is in header (byte 1), payload is clean data
+          req.resolve({ status: opcodeOrStatus, data: payload });
         }
         break;
       }

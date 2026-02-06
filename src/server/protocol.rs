@@ -1,10 +1,12 @@
 //! Nexo Binary Protocol Specification
 //!
-//! Binary Frame Structure (Total Header: 10 bytes):
+//! Request Frame (Total Header: 10 bytes):
 //! [FrameType: 1 byte] [Opcode: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
+//! Payload: [...args (JSON strings)] [Data (if applicable)]
 //!
-//! Payload Structure:
-//! [...args (JSON strings)] [Data (if applicable)]
+//! Response Frame (Total Header: 10 bytes):
+//! [FrameType: 1 byte] [Status: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
+//! Payload: [Data...] (no status byte, status is in header)
 //!
 //! Data Structure (auto-contained):
 //! [TypeFlags: 1 byte] [Bytes...]
@@ -46,25 +48,23 @@ pub const SIZE_OPCODE: usize = SIZE_U8;
 // HEADER GEOMETRY (Sizes in bytes)
 // ========================================
 pub const HEADER_SIZE_FRAME_TYPE: usize     = SIZE_U8;
-pub const HEADER_SIZE_OPCODE: usize         = SIZE_U8;
+pub const HEADER_SIZE_OPCODE_OR_STATUS: usize = SIZE_U8;  // Opcode for requests, Status for responses
 pub const HEADER_SIZE_CORRELATION_ID: usize = SIZE_U32;
 pub const HEADER_SIZE_PAYLOAD_LEN: usize    = SIZE_U32;
 
 /// Total size of the binary header (Sum of all header fields)
-pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_OPCODE + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
+pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_OPCODE_OR_STATUS + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
 
 // Offsets within the header
 pub const HEADER_OFFSET_FRAME_TYPE: usize     = 0;
 pub const HEADER_OFFSET_OPCODE: usize         = HEADER_OFFSET_FRAME_TYPE + HEADER_SIZE_FRAME_TYPE;
-pub const HEADER_OFFSET_CORRELATION_ID: usize = HEADER_OFFSET_OPCODE + HEADER_SIZE_OPCODE;
+pub const HEADER_OFFSET_STATUS: usize         = HEADER_OFFSET_FRAME_TYPE + HEADER_SIZE_FRAME_TYPE;  // Same position as opcode
+pub const HEADER_OFFSET_CORRELATION_ID: usize = HEADER_OFFSET_OPCODE + HEADER_SIZE_OPCODE_OR_STATUS;
 pub const HEADER_OFFSET_PAYLOAD_LEN: usize    = HEADER_OFFSET_CORRELATION_ID + HEADER_SIZE_CORRELATION_ID;
 
 // ========================================
 // PAYLOAD GEOMETRY
 // ========================================
-/// Response payloads start with a Status byte
-pub const PAYLOAD_OFFSET_STATUS: usize = 0;
-
 /// For data carrying TypeFlags, the first byte indicates type and flags
 pub const DATA_OFFSET_TYPE_FLAGS: usize = 0;
 
@@ -79,7 +79,7 @@ pub const TYPE_PING: u8     = 0x05;
 pub const TYPE_PONG: u8     = 0x06;
 
 // ========================================
-// RESPONSE STATUS (Inside Response Payload)
+// RESPONSE STATUS (In Response Header, byte 1)
 // ========================================
 pub const STATUS_OK: u8   = 0x00;
 pub const STATUS_ERR: u8  = 0x01;
