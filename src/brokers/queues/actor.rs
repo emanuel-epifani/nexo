@@ -259,13 +259,13 @@ impl QueueActor {
                 }
 
                 for msg in dlq_msgs {
-                    let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
                     let dlq_name = format!("{}_dlq", self.name);
                     let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
                         queue_name: dlq_name,
                         payload: msg.payload,
                         priority: msg.priority,
                     }).await;
+                    let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
                 }
                 
                 // Since messages might have become Ready, check waiters
