@@ -15,10 +15,11 @@ pub enum ParseError {
     Invalid(String),
 }
 
-/// Fixed-size Header: [FrameType: 1] [CorrelationID: 4] [PayloadLen: 4]
+/// Fixed-size Header: [FrameType: 1] [Opcode: 1] [CorrelationID: 4] [PayloadLen: 4]
 #[derive(Debug, Clone, Copy)]
 pub struct RequestHeader {
     pub frame_type: u8,
+    pub opcode: u8,
     pub id: u32,
     pub payload_len: u32,
 }
@@ -35,6 +36,7 @@ impl RequestHeader {
 
         // Field extraction based on protocol geometry
         let frame_type = buf[HEADER_OFFSET_FRAME_TYPE];
+        let opcode = buf[HEADER_OFFSET_OPCODE];
         
         let id_start = HEADER_OFFSET_CORRELATION_ID;
         let id_end = id_start + HEADER_SIZE_CORRELATION_ID;
@@ -46,6 +48,7 @@ impl RequestHeader {
 
         Ok(Some(Self {
             frame_type,
+            opcode,
             id,
             payload_len,
         }))
@@ -104,8 +107,9 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
     // Total: Header + Status + extra
     let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + SIZE_STATUS + extra_len);
     
-    // Header
+    // Header: [Type:1][Opcode:1][ID:4][Len:4]
     buf.put_u8(TYPE_RESPONSE);
+    buf.put_u8(0x00); // Opcode = 0 for responses (unused)
     buf.put_u32(id);
     
     match response {
@@ -136,6 +140,7 @@ pub fn encode_response(id: u32, response: &Response) -> Bytes {
 pub fn encode_push(id: u32, payload: &[u8]) -> Bytes {
     let mut buf = BytesMut::with_capacity(RequestHeader::SIZE + payload.len());
     buf.put_u8(TYPE_PUSH);
+    buf.put_u8(0x00); // Opcode = 0 for push (unused)
     buf.put_u32(id);
     buf.put_u32(payload.len() as u32);
     buf.put_slice(payload);

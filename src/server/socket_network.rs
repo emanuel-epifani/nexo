@@ -130,10 +130,11 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
                 match frame_type {
                     TYPE_REQUEST => {
-                        // Extract payload from the frozen frame_data
+                        // Extract opcode from header and payload
+                        let opcode = frame_ref.header.opcode;
                         let payload = frame_data.slice(RequestHeader::SIZE..);
-                        // Pass client_id to route so SUB can use it
-                        let response = route(payload, &engine_clone, &client_id_clone).await;
+                        // Route request
+                        let response = route(opcode, payload, &engine_clone, &client_id_clone).await;
                         
                         let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
                     }

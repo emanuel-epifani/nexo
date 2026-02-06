@@ -25,10 +25,8 @@ pub const OP_DEBUG_ECHO: u8 = 0x00;
 // ROUTING
 // ========================================
 
-pub async fn route(payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    if payload.is_empty() { return Response::Error("Empty payload".to_string()); }
-    let opcode = payload[PAYLOAD_OFFSET_OPCODE];
-    let mut cursor = PayloadCursor::new(payload.slice((PAYLOAD_OFFSET_OPCODE + 1)..));
+pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
+    let mut cursor = PayloadCursor::new(payload);
 
     match opcode {
         // DEBUG

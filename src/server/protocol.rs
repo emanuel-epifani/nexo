@@ -1,15 +1,22 @@
 //! Nexo Binary Protocol Specification
 //!
-//! Binary Frame Structure (Total Header: 9 bytes):
-//! [FrameType: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
+//! Binary Frame Structure (Total Header: 10 bytes):
+//! [FrameType: 1 byte] [Opcode: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
 //!
 //! Payload Structure:
-//! [Opcode/Status: 1 byte] [DataType: 1 byte (Mandatory for DATA frames)] [Actual Data...]
+//! [...args (JSON strings)] [Data (if applicable)]
 //!
-//! DataTypes (Mandatory first byte of user data):
-//! 0x00: RAW (Binary)
-//! 0x01: STRING (UTF-8)
-//! 0x02: JSON (UTF-8)
+//! Data Structure (auto-contained):
+//! [TypeFlags: 1 byte] [Bytes...]
+//!
+//! TypeFlags (1 byte):
+//! [DataType: 4 bits] [Compressed: 1 bit] [Encrypted: 1 bit] [Reserved: 2 bits]
+//!
+//! DataTypes (4 bits = 16 values):
+//! 0x0: RAW (Binary)
+//! 0x1: STRING (UTF-8)
+//! 0x2: JSON (UTF-8)
+//! 0x3-0xF: Reserved
 
 // ========================================
 // PRIMITIVE SIZES (Fundamental building blocks)
@@ -39,26 +46,27 @@ pub const SIZE_OPCODE: usize = SIZE_U8;
 // HEADER GEOMETRY (Sizes in bytes)
 // ========================================
 pub const HEADER_SIZE_FRAME_TYPE: usize     = SIZE_U8;
+pub const HEADER_SIZE_OPCODE: usize         = SIZE_U8;
 pub const HEADER_SIZE_CORRELATION_ID: usize = SIZE_U32;
 pub const HEADER_SIZE_PAYLOAD_LEN: usize    = SIZE_U32;
 
 /// Total size of the binary header (Sum of all header fields)
-pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
+pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_OPCODE + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
 
 // Offsets within the header
 pub const HEADER_OFFSET_FRAME_TYPE: usize     = 0;
-pub const HEADER_OFFSET_CORRELATION_ID: usize = HEADER_SIZE_FRAME_TYPE;
-pub const HEADER_OFFSET_PAYLOAD_LEN: usize    = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_CORRELATION_ID;
+pub const HEADER_OFFSET_OPCODE: usize         = HEADER_OFFSET_FRAME_TYPE + HEADER_SIZE_FRAME_TYPE;
+pub const HEADER_OFFSET_CORRELATION_ID: usize = HEADER_OFFSET_OPCODE + HEADER_SIZE_OPCODE;
+pub const HEADER_OFFSET_PAYLOAD_LEN: usize    = HEADER_OFFSET_CORRELATION_ID + HEADER_SIZE_CORRELATION_ID;
 
 // ========================================
 // PAYLOAD GEOMETRY
 // ========================================
-/// Every payload starts with an Opcode (Requests) or a Status (Responses)
-pub const PAYLOAD_OFFSET_OPCODE: usize = 0;
+/// Response payloads start with a Status byte
 pub const PAYLOAD_OFFSET_STATUS: usize = 0;
 
-/// For frames carrying data, the first byte of actual content is the DataType
-pub const PAYLOAD_OFFSET_DATA_TYPE: usize = 0;
+/// For data carrying TypeFlags, the first byte indicates type and flags
+pub const DATA_OFFSET_TYPE_FLAGS: usize = 0;
 
 // ========================================
 // FRAME TYPES (The "Envelope" Type)
@@ -79,11 +87,20 @@ pub const STATUS_NULL: u8 = 0x02;
 pub const STATUS_DATA: u8 = 0x03;
 
 // ========================================
-// DATA TYPES (First byte of actual data)
+// DATA TYPE FLAGS (First byte of data payload)
 // ========================================
+/// Base data types (4 bits)
 pub const DATA_TYPE_RAW: u8    = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;
 pub const DATA_TYPE_JSON: u8   = 0x02;
+
+/// Data flags (bits 4-5)
+pub const DATA_FLAG_COMPRESSED: u8 = 0x08;  // bit 4
+pub const DATA_FLAG_ENCRYPTED: u8  = 0x04;  // bit 5
+
+/// Masks for extracting type and flags
+pub const DATA_TYPE_MASK: u8  = 0xF0;  // Upper 4 bits
+pub const DATA_FLAGS_MASK: u8 = 0x0C;  // Bits 4-5
 
 // ========================================
 // OPCODES RANGES
@@ -112,15 +129,16 @@ pub const CHANNEL_CAPACITY_SOCKET_WRITE: usize = 1024;
 // DASHBOARD UTILS
 // ========================================
 
-/// Converts a protocol-compliant payload into a serde_json::Value for dashboard visualization.
-/// Assumes the payload follows: [DataType: 1 byte] [Data...]
+/// Converts a protocol-compliant data payload into a serde_json::Value for dashboard visualization.
+/// Assumes the payload follows: [TypeFlags: 1 byte] [Data...]
 pub fn payload_to_dashboard_value(payload: &[u8]) -> serde_json::Value {
     if payload.is_empty() {
         return serde_json::Value::Null;
     }
 
-    let data_type = payload[PAYLOAD_OFFSET_DATA_TYPE];
-    let content = &payload[SIZE_DATA_TYPE..]; // Skip DataType byte
+    let type_flags = payload[DATA_OFFSET_TYPE_FLAGS];
+    let data_type = (type_flags & DATA_TYPE_MASK) >> 4;
+    let content = &payload[SIZE_DATA_TYPE..]; // Skip TypeFlags byte
 
     match data_type {
         DATA_TYPE_JSON => {

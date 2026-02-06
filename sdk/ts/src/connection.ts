@@ -121,11 +121,11 @@ export class NexoConnection extends EventEmitter {
     }
 
     while (true) {
-      // Need at least header (9 bytes)
-      if (this.buffer.length < 9) break;
+      // Need at least header (10 bytes): [Type:1][Opcode:1][ID:4][Len:4]
+      if (this.buffer.length < 10) break;
 
-      const payloadLen = this.buffer.readUInt32BE(5);
-      const totalFrameLen = 9 + payloadLen;
+      const payloadLen = this.buffer.readUInt32BE(6);
+      const totalFrameLen = 10 + payloadLen;
 
       if (this.buffer.length < totalFrameLen) break;
 
@@ -140,6 +140,7 @@ export class NexoConnection extends EventEmitter {
   private handleFrame(frame: Buffer) {
     const cursor = new Cursor(frame);
     const type = cursor.readU8();
+    const opcode = cursor.readU8(); // Opcode (unused in responses)
     const id = cursor.readU32();
     cursor.readU32(); // Skip payloadLen
 
