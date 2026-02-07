@@ -10,6 +10,12 @@ pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
 pub const OP_Q_DELETE: u8 = 0x15;
 
+// DLQ Operations
+pub const OP_Q_PEEK_DLQ: u8 = 0x16;
+pub const OP_Q_MOVE_TO_QUEUE: u8 = 0x17;
+pub const OP_Q_DELETE_DLQ: u8 = 0x18;
+pub const OP_Q_PURGE_DLQ: u8 = 0x19;
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceOptions {
@@ -71,6 +77,27 @@ pub enum QueueCommand {
     Exists {
         q_name: String,
     },
+    
+    // DLQ Commands
+    /// PEEK_DLQ: [QNameLen:4][QName][Limit:4]
+    PeekDLQ {
+        q_name: String,
+        limit: usize,
+    },
+    /// MOVE_TO_QUEUE: [QNameLen:4][QName][MessageID:16]
+    MoveToQueue {
+        q_name: String,
+        message_id: Uuid,
+    },
+    /// DELETE_DLQ: [QNameLen:4][QName][MessageID:16]
+    DeleteDLQ {
+        q_name: String,
+        message_id: Uuid,
+    },
+    /// PURGE_DLQ: [QNameLen:4][QName]
+    PurgeDLQ {
+        q_name: String,
+    },
 }
 
 impl QueueCommand {
@@ -117,6 +144,27 @@ impl QueueCommand {
             OP_Q_DELETE => {
                 let q_name = cursor.read_string()?;
                 Ok(Self::Delete { q_name })
+            }
+            OP_Q_PEEK_DLQ => {
+                let q_name = cursor.read_string()?;
+                let limit = cursor.read_u32()? as usize;
+                Ok(Self::PeekDLQ { q_name, limit })
+            }
+            OP_Q_MOVE_TO_QUEUE => {
+                let q_name = cursor.read_string()?;
+                let id_bytes = cursor.read_uuid_bytes()?;
+                let message_id = Uuid::from_bytes(id_bytes);
+                Ok(Self::MoveToQueue { q_name, message_id })
+            }
+            OP_Q_DELETE_DLQ => {
+                let q_name = cursor.read_string()?;
+                let id_bytes = cursor.read_uuid_bytes()?;
+                let message_id = Uuid::from_bytes(id_bytes);
+                Ok(Self::DeleteDLQ { q_name, message_id })
+            }
+            OP_Q_PURGE_DLQ => {
+                let q_name = cursor.read_string()?;
+                Ok(Self::PurgeDLQ { q_name })
             }
             _ => Err(format!("Unknown Queue opcode: 0x{:02X}", opcode)),
         }

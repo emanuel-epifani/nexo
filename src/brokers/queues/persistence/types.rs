@@ -31,6 +31,24 @@ pub enum StorageOp {
         visible_at: u64,
         attempts: u32,
     },
+    
+    // DLQ Operations
+    /// Insert a message into DLQ
+    InsertDLQ(Message),
+    /// Delete a message from DLQ
+    DeleteDLQ(Uuid),
+    /// Move message from main queue to DLQ (atomic)
+    MoveToDLQ {
+        id: Uuid,
+        msg: Message,
+    },
+    /// Move message from DLQ to main queue (atomic)
+    MoveToMain {
+        id: Uuid,
+        msg: Message,
+    },
+    /// Purge all messages from DLQ
+    PurgeDLQ,
 }
 
 /// The command sent to the Writer Thread

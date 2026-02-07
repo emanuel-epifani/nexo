@@ -376,6 +376,47 @@ impl QueueState {
         !self.waiting_for_dispatch.is_empty()
     }
 
+    /// Peek messages without consuming them (for DLQ inspection)
+    pub fn peek_messages(&self, limit: usize) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let mut count = 0;
+        
+        for (_, queue) in self.waiting_for_dispatch.iter().rev() {
+            for id in queue.iter() {
+                if count >= limit {
+                    break;
+                }
+                if let Some(msg) = self.registry.get(id) {
+                    messages.push(msg.clone());
+                    count += 1;
+                }
+            }
+            if count >= limit {
+                break;
+            }
+        }
+        
+        messages
+    }
+
+    /// Get total message count
+    pub fn len(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// Remove a message by ID (for DLQ operations)
+    pub fn remove_by_id(&mut self, id: Uuid) -> Option<Message> {
+        self.delete_message_and_return(id)
+    }
+
+    /// Clear all messages (for purge)
+    pub fn clear(&mut self) {
+        self.registry.clear();
+        self.waiting_for_dispatch.clear();
+        self.waiting_for_time.clear();
+        self.waiting_for_ack.clear();
+    }
+
     // --- Internal helpers ---
 
     fn transition_to(&mut self, id: Uuid, new_state: MessageState) -> bool {
@@ -440,10 +481,11 @@ impl QueueState {
     }
 
     fn delete_message(&mut self, id: Uuid) -> bool {
-        let msg = match self.registry.remove(&id) {
-            Some(m) => m,
-            None => return false,
-        };
+        self.delete_message_and_return(id).is_some()
+    }
+
+    fn delete_message_and_return(&mut self, id: Uuid) -> Option<Message> {
+        let msg = self.registry.remove(&id)?;
 
         match msg.state {
             MessageState::Ready => {
@@ -472,7 +514,7 @@ impl QueueState {
             }
         }
 
-        true
+        Some(msg)
     }
 }
 

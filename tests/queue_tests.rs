@@ -42,6 +42,26 @@ mod queue_tests {
         }
 
         #[tokio::test]
+        async fn test_fifo_ordering() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("feature_fifo_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 0, None).await.unwrap();
+
+            let m1 = manager.pop(&q).await.unwrap();
+            assert_eq!(m1.payload, Bytes::from("msg1"));
+
+            let m2 = manager.pop(&q).await.unwrap();
+            assert_eq!(m2.payload, Bytes::from("msg2"));
+
+            let m3 = manager.pop(&q).await.unwrap();
+            assert_eq!(m3.payload, Bytes::from("msg3"));
+        }
+
+        #[tokio::test]
         async fn test_priority_ordering() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("feature_priority_{}", Uuid::new_v4());
@@ -61,7 +81,37 @@ mod queue_tests {
             assert_eq!(m3.payload, Bytes::from("low"));
         }
 
-        // todo: FIFO? than priority?
+        #[tokio::test]
+        async fn test_priority_than_fifo_ordering() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("feature_priority_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            //test PRIORITY
+            manager.push(q.clone(), Bytes::from("low"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("high"), 10, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("mid"), 7, None).await.unwrap();
+            //normal, test FIFO
+            manager.push(q.clone(), Bytes::from("msg1"), 4, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 4, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 4, None).await.unwrap();
+
+            let m1 = manager.pop(&q).await.unwrap();
+            assert_eq!(m1.payload, Bytes::from("high"));
+            let m2 = manager.pop(&q).await.unwrap();
+            assert_eq!(m2.payload, Bytes::from("mid"));
+
+            let m3 = manager.pop(&q).await.unwrap();
+            assert_eq!(m3.payload, Bytes::from("msg1"));
+            let m4 = manager.pop(&q).await.unwrap();
+            assert_eq!(m4.payload, Bytes::from("msg2"));
+            let m5 = manager.pop(&q).await.unwrap();
+            assert_eq!(m5.payload, Bytes::from("msg3"));
+
+            let m6 = manager.pop(&q).await.unwrap();
+            assert_eq!(m6.payload, Bytes::from("low"));
+        }
+
 
         #[tokio::test]
         async fn test_scheduled_delivery() {
@@ -125,18 +175,33 @@ mod queue_tests {
             // Attempt 3 (Last)
             let m3 = manager.pop(&q).await.unwrap();
             assert_eq!(m3.attempts, 3);
-            tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
+            let msg_id = m3.id;
+            
+            // Wait for visibility timeout + buffer for actor to wake up and process
+            tokio::time::sleep(Duration::from_millis(visibility_timeout + 150)).await;
 
-            // Attempt 4 -> Should be gone from Main Queue
+            // Attempt 4 -> Should be gone from Main Queue (moved to internal DLQ)
+            // The actor loop should have woken up automatically and moved to DLQ
             assert!(manager.pop(&q).await.is_none(), "Should be moved to DLQ");
 
-            // Check DLQ
-            let dlq_name = format!("{}_dlq", q);
-            // Small wait for async DLQ move
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Verify message is in DLQ using new DLQ methods
+            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            assert_eq!(dlq_msgs.len(), 1, "Should have 1 message in DLQ");
+            assert_eq!(dlq_msgs[0].payload, Bytes::from("fail_me"));
+            assert_eq!(dlq_msgs[0].id, msg_id);
 
-            let dead = manager.pop(&dlq_name).await.expect("Should be in DLQ");
-            assert_eq!(dead.payload, Bytes::from("fail_me"));
+            // Test move_to_queue (replay)
+            let moved = manager.move_to_queue(&q, msg_id).await.unwrap();
+            assert!(moved, "Should successfully move message back to main queue");
+
+            // Verify it's back in main queue
+            let replayed = manager.pop(&q).await.expect("Message should be back in main queue");
+            assert_eq!(replayed.payload, Bytes::from("fail_me"));
+            // After move_to_queue (attempts=0) + pop (attempts++), should be 1
+            assert_eq!(replayed.attempts, 1, "Attempts should be 1 after replay and pop");
+
+            // Ack it to clean up
+            manager.ack(&q, replayed.id).await;
         }
 
         #[tokio::test]
@@ -517,23 +582,68 @@ mod queue_tests {
         }
 
         #[tokio::test]
+        async fn test_dlq_delete_and_purge() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("dlq_ops_{}", Uuid::new_v4());
+
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(100),
+                max_retries: Some(0), // Immediate DLQ
+                persistence: Some(PersistenceOptions::FileSync),
+                ..Default::default()
+            };
+            manager.create_queue(q.clone(), config).await.unwrap();
+
+            // Push 3 messages that will fail
+            manager.push(q.clone(), Bytes::from("msg1"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 0, None).await.unwrap();
+
+            // Pop all 3 and let them timeout
+            let m1 = manager.pop(&q).await.unwrap();
+            let _m2 = manager.pop(&q).await.unwrap();
+            let _m3 = manager.pop(&q).await.unwrap();
+
+            // Wait for visibility timeout + buffer for actor to wake up and process
+            tokio::time::sleep(Duration::from_millis(250)).await;
+
+            // Verify all 3 in DLQ (actor should have moved them automatically)
+            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            assert_eq!(dlq_msgs.len(), 3, "Should have 3 messages in DLQ");
+
+            // Test delete_dlq (remove one specific message)
+            let deleted = manager.delete_dlq(&q, m1.id).await.unwrap();
+            assert!(deleted, "Should successfully delete message from DLQ");
+
+            // Verify only 2 left
+            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            assert_eq!(dlq_msgs.len(), 2, "Should have 2 messages left in DLQ");
+
+            // Test purge_dlq (remove all)
+            let purged_count = manager.purge_dlq(&q).await.unwrap();
+            assert_eq!(purged_count, 2, "Should purge 2 messages");
+
+            // Verify DLQ is empty
+            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            assert_eq!(dlq_msgs.len(), 0, "DLQ should be empty after purge");
+        }
+
+        #[tokio::test]
         async fn test_dlq_persistence_after_restart() {
-            // Test that ensures DLQ (implicitly created) survives a restart
+            // Test that ensures DLQ (now internal to queue actor) survives a restart
             let temp_dir = tempfile::tempdir().unwrap();
             let path = temp_dir.path().to_str().unwrap().to_string();
             let mut sys_config = nexo::config::Config::global().queue.clone();
             sys_config.persistence_path = path.clone();
 
             let q = format!("dlq_test_{}", Uuid::new_v4());
-            let dlq_name = format!("{}_dlq", q);
 
-            // Phase 1: Trigger DLQ creation
+            // Phase 1: Trigger DLQ move
             {
                 let manager = QueueManager::new(sys_config.clone());
                 // Create with max_retries = 0 (1st timeout -> DLQ immediately)
-                // Persistence FileSync to be sure
                 let config = QueueCreateOptions {
-                    visibility_timeout_ms: Some(100), // Increased visibility timeout
+                    visibility_timeout_ms: Some(100),
                     max_retries: Some(0),
                     persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
@@ -541,38 +651,21 @@ mod queue_tests {
                 manager.create_queue(q.clone(), config).await.unwrap();
 
                 // Push message destined to fail
-                manager.push(q.clone(), Bytes::from("bad_msg"), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from("stay_in_dlq"), 0, None).await.unwrap();
 
                 // Attempt 1 (and only attempt allowed)
                 let _ = manager.pop(&q).await.unwrap();
                 
-                // Wait for visibility timeout (100ms) + Pulse margin + Actor processing
+                // Wait for visibility timeout + buffer for actor to wake up and process
                 tokio::time::sleep(Duration::from_millis(250)).await;
 
-                // Verify it's in DLQ
-                assert!(manager.exists(&dlq_name).await, "DLQ should exist");
-                
-                // Retry loop to be safe against disk flush latencies
-                let mut dead = None;
-                for _ in 0..20 {
-                    if let Some(msg) = manager.pop(&dlq_name).await {
-                        dead = Some(msg);
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                let dead = dead.expect("Message should be in DLQ after timeout");
-                
-                manager.ack(&dlq_name, dead.id).await;
+                // Verify main queue is empty (message moved to internal DLQ by actor)
+                assert!(manager.pop(&q).await.is_none(), "Main queue should be empty");
 
-                // Push a new one that will stay in DLQ untouched
-                // We push to main queue, pop it, let it fail -> move to DLQ.
-                manager.push(q.clone(), Bytes::from("stay_in_dlq"), 0, None).await.unwrap();
-                let _ = manager.pop(&q).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(250)).await; // Wait for move to DLQ
-                
-                // Check if it's there (peek would be nice, but we check existence via side effect or just trust timing)
-                // We assume it's there because the first one went there.
+                // Verify message is in DLQ
+                let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+                assert_eq!(dlq_msgs.len(), 1, "Should have 1 message in DLQ");
+                assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
             }
 
             // Small delay for flush
@@ -583,12 +676,16 @@ mod queue_tests {
                 let manager2 = QueueManager::new(sys_config.clone());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
-                // DLQ should be auto-discovered
-                assert!(manager2.exists(&dlq_name).await, "DLQ should survive restart");
+                // Queue should be auto-restored with DLQ messages
+                assert!(manager2.exists(&q).await, "Queue should survive restart");
 
-                // Check message
-                let msg = manager2.pop(&dlq_name).await.expect("DLQ message should survive");
-                assert_eq!(msg.payload, Bytes::from("stay_in_dlq"));
+                // Main queue should still be empty (DLQ message persisted internally)
+                assert!(manager2.pop(&q).await.is_none(), "Main queue should still be empty after restart");
+                
+                // Verify DLQ message survived restart
+                let dlq_msgs = manager2.peek_dlq(&q, 10).await.unwrap();
+                assert_eq!(dlq_msgs.len(), 1, "DLQ message should survive restart");
+                assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
             }
         }
     }

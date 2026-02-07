@@ -8,7 +8,7 @@ use types::{PersistenceMode, StorageOp, StoreCommand};
 use writer::run_writer;
 
 use crate::brokers::queues::queue::Message;
-use sqlite::load_all_messages;
+use sqlite::{load_all_messages, load_dlq_messages};
 use rusqlite::Connection;
 
 use crate::brokers::queues::persistence::sqlite::init_db; // Import init_db
@@ -55,11 +55,18 @@ impl QueueStore {
     }
 
     /// Recover all messages from DB (Read-Only connection)
-    pub fn recover(&self) -> Result<Vec<Message>, String> {
+    /// Returns (main_messages, dlq_messages)
+    pub fn recover(&self) -> Result<(Vec<Message>, Vec<Message>), String> {
         let conn = Connection::open(&self.db_path)
             .map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
 
-        load_all_messages(&conn).map_err(|e| format!("Failed to load messages: {}", e))
+        let main_messages = load_all_messages(&conn)
+            .map_err(|e| format!("Failed to load main messages: {}", e))?;
+        
+        let dlq_messages = load_dlq_messages(&conn)
+            .map_err(|e| format!("Failed to load DLQ messages: {}", e))?;
+
+        Ok((main_messages, dlq_messages))
     }
 
     pub async fn execute(&self, op: StorageOp) -> Result<(), String> {

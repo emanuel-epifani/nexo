@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use tracing::{error, info};
 use uuid::Uuid;
 use std::path::PathBuf;
-
+use crate::brokers::queues::MessageState;
 use crate::brokers::queues::queue::{QueueState, QueueConfig, Message, current_time_ms};
 use crate::brokers::queues::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queues::queue_manager::ManagerCommand;
@@ -44,7 +44,23 @@ pub enum QueueActorCommand {
     Stop {
         reply: oneshot::Sender<()>,
     },
-    ProcessExpired,
+    
+    // DLQ Commands
+    PeekDLQ {
+        limit: usize,
+        reply: oneshot::Sender<Vec<Message>>,
+    },
+    MoveToQueue {
+        message_id: Uuid,
+        reply: oneshot::Sender<bool>,
+    },
+    DeleteDLQ {
+        message_id: Uuid,
+        reply: oneshot::Sender<bool>,
+    },
+    PurgeDLQ {
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 struct WaitingConsumer {
@@ -55,7 +71,8 @@ struct WaitingConsumer {
 
 pub struct QueueActor {
     name: String,
-    state: QueueState,
+    main_state: QueueState,
+    dlq_state: QueueState,
     config: QueueConfig,
     store: QueueStore,
     rx: mpsc::Receiver<QueueActorCommand>,
@@ -86,7 +103,8 @@ impl QueueActor {
 
         Self {
             name,
-            state: QueueState::new(),
+            main_state: QueueState::new(),
+            dlq_state: QueueState::new(),
             config,
             store,
             rx,
@@ -98,13 +116,21 @@ impl QueueActor {
     pub async fn run(mut self) {
         // RECOVERY PHASE
         match self.store.recover() {
-            Ok(messages) => {
-                let count = messages.len();
-                if count > 0 {
-                    for msg in messages {
-                        self.state.push(msg);
-                    }
-                    info!("Queue '{}': Recovered {} messages from storage", self.name, count);
+            Ok((main_messages, dlq_messages)) => {
+                let main_count = main_messages.len();
+                let dlq_count = dlq_messages.len();
+                
+                for msg in main_messages {
+                    self.main_state.push(msg);
+                }
+                
+                for msg in dlq_messages {
+                    self.dlq_state.push(msg);
+                }
+                
+                if main_count > 0 || dlq_count > 0 {
+                    info!("Queue '{}': Recovered {} main + {} DLQ messages from storage", 
+                          self.name, main_count, dlq_count);
                 }
             }
             Err(e) => {
@@ -140,7 +166,7 @@ impl QueueActor {
     fn next_wakeup_time(&self) -> Instant {
         let now_ms = current_time_ms();
         
-        let next_msg_ts = self.state.next_timeout();
+        let next_msg_ts = self.main_state.next_timeout();
         let next_waiter_ts = self.waiters.front().map(|w| w.expires_at);
 
         let next_event_ts = match (next_msg_ts, next_waiter_ts) {
@@ -165,14 +191,13 @@ impl QueueActor {
     async fn handle_command(&mut self, cmd: QueueActorCommand) -> bool {
         match cmd {
             QueueActorCommand::Push { payload, priority, delay_ms, reply } => {
-                // ... (existing logic)
                 let msg = Message::new(payload, priority, delay_ms);
                 if delay_ms.is_none() && !self.waiters.is_empty() {
-                    self.state.push(msg.clone());
+                    self.main_state.push(msg.clone());
                     let _ = self.store.execute(StorageOp::Insert(msg)).await;
                     self.process_waiters().await;
                 } else {
-                    self.state.push(msg.clone());
+                    self.main_state.push(msg.clone());
                     let _ = self.store.execute(StorageOp::Insert(msg)).await;
                 }
                 let _ = reply.send(());
@@ -180,7 +205,7 @@ impl QueueActor {
             }
             
             QueueActorCommand::Pop { reply } => {
-                let (msg_opt, _) = self.state.pop(self.config.visibility_timeout_ms);
+                let (msg_opt, _) = self.main_state.pop(self.config.visibility_timeout_ms);
                 if let Some(msg) = &msg_opt {
                     let _ = self.store.execute(StorageOp::UpdateState { 
                         id: msg.id, 
@@ -193,7 +218,7 @@ impl QueueActor {
             }
             
             QueueActorCommand::Ack { id, reply } => {
-                let result = self.state.ack(id);
+                let result = self.main_state.ack(id);
                 if result {
                     let _ = self.store.execute(StorageOp::Delete(id)).await;
                 }
@@ -202,7 +227,7 @@ impl QueueActor {
             }
             
             QueueActorCommand::ConsumeBatch { max, wait_ms, reply } => {
-                let (msgs, _) = self.state.take_batch(max, self.config.visibility_timeout_ms);
+                let (msgs, _) = self.main_state.take_batch(max, self.config.visibility_timeout_ms);
                 if !msgs.is_empty() {
                     for msg in &msgs {
                         let _ = self.store.execute(StorageOp::UpdateState { 
@@ -225,19 +250,75 @@ impl QueueActor {
             }
             
             QueueActorCommand::GetSnapshot { reply } => {
-                let snapshot = self.state.get_snapshot(&self.name);
+                let snapshot = self.main_state.get_snapshot(&self.name);
                 let _ = reply.send(snapshot);
-                true
-            }
-            
-            QueueActorCommand::ProcessExpired => {
-                self.process_time_events().await;
                 true
             }
 
             QueueActorCommand::Stop { reply } => {
                 let _ = reply.send(());
                 false // Signal to break the loop
+            }
+            
+            // DLQ Command Handlers
+            QueueActorCommand::PeekDLQ { limit, reply } => {
+                let messages = self.dlq_state.peek_messages(limit);
+                let _ = reply.send(messages);
+                true
+            }
+            
+            QueueActorCommand::MoveToQueue { message_id, reply } => {
+                // Remove from DLQ and add to main queue
+                if let Some(msg) = self.dlq_state.remove_by_id(message_id) {
+                    // Create new message for main queue (reset attempts)
+                    let mut new_msg = msg.clone();
+                    new_msg.attempts = 0;
+                    new_msg.visible_at = 0;
+                    new_msg.state = MessageState::Ready;
+                    
+                    // Add to main queue
+                    self.main_state.push(new_msg.clone());
+                    
+                    // Persist atomically
+                    let _ = self.store.execute(StorageOp::MoveToMain {
+                        id: message_id,
+                        msg: new_msg,
+                    }).await;
+                    
+                    // Check if waiters can be fulfilled
+                    self.process_waiters().await;
+                    
+                    let _ = reply.send(true);
+                } else {
+                    let _ = reply.send(false);
+                }
+                true
+            }
+            
+            QueueActorCommand::DeleteDLQ { message_id, reply } => {
+                // Remove from DLQ
+                if self.dlq_state.remove_by_id(message_id).is_some() {
+                    // Persist deletion
+                    let _ = self.store.execute(StorageOp::DeleteDLQ(message_id)).await;
+                    let _ = reply.send(true);
+                } else {
+                    let _ = reply.send(false);
+                }
+                true
+            }
+            
+            QueueActorCommand::PurgeDLQ { reply } => {
+                // Count messages before purging
+                let count = self.dlq_state.len();
+                
+                // Clear all DLQ state
+                self.dlq_state.clear();
+                
+                // Persist purge
+                let _ = self.store.execute(StorageOp::PurgeDLQ).await;
+                
+                let _ = reply.send(count);
+                true
             }
         }
     }
@@ -246,9 +327,9 @@ impl QueueActor {
         let now = current_time_ms();
 
         // 1. Process Message Expirations (Scheduled -> Ready, InFlight -> Retry/DLQ)
-        if let Some(next_msg_ts) = self.state.next_timeout() {
+        if let Some(next_msg_ts) = self.main_state.next_timeout() {
             if next_msg_ts <= now {
-                let (requeued, dlq_msgs) = self.state.process_expired(self.config.max_retries);
+                let (requeued, dlq_msgs) = self.main_state.process_expired(self.config.max_retries);
                 
                 for msg in requeued {
                     let _ = self.store.execute(StorageOp::UpdateState {
@@ -259,13 +340,16 @@ impl QueueActor {
                 }
 
                 for msg in dlq_msgs {
-                    let dlq_name = format!("{}_dlq", self.name);
-                    let _ = self.manager_tx.send(ManagerCommand::MoveToDLQ {
-                        queue_name: dlq_name,
-                        payload: msg.payload,
-                        priority: msg.priority,
+                    // Force message to Ready state for DLQ (so peek_messages can find it)
+                    let mut dlq_msg = msg.clone();
+                    dlq_msg.state = MessageState::Ready;
+                    dlq_msg.visible_at = 0;
+                    
+                    self.dlq_state.push(dlq_msg);
+                    let _ = self.store.execute(StorageOp::MoveToDLQ {
+                        id: msg.id,
+                        msg,
                     }).await;
-                    let _ = self.store.execute(StorageOp::Delete(msg.id)).await;
                 }
                 
                 // Since messages might have become Ready, check waiters
@@ -293,10 +377,10 @@ impl QueueActor {
 
     async fn process_waiters(&mut self) {
         // While we have ready messages AND waiters...
-        while !self.waiters.is_empty() && self.state.has_ready_messages() {
+        while !self.waiters.is_empty() && self.main_state.has_ready_messages() {
             if let Some(waiter) = self.waiters.pop_front() {
                 // Try to fulfill this waiter
-                let (msgs, _) = self.state.take_batch(waiter.max, self.config.visibility_timeout_ms);
+                let (msgs, _) = self.main_state.take_batch(waiter.max, self.config.visibility_timeout_ms);
                 
                 if !msgs.is_empty() {
                     for msg in &msgs {

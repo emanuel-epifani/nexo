@@ -282,6 +282,56 @@ impl QueueManager {
         self.get_actor(name).await.is_some()
     }
 
+    // --- DLQ Operations ---
+
+    /// Peek messages from DLQ without consuming them
+    pub async fn peek_dlq(&self, queue_name: &str, limit: usize) -> Result<Vec<Message>, String> {
+        let actor = self.get_actor(queue_name).await
+            .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
+        
+        let (tx, rx) = oneshot::channel();
+        actor.send(QueueActorCommand::PeekDLQ { limit, reply: tx })
+            .await
+            .map_err(|_| "Actor closed".to_string())?;
+        rx.await.map_err(|_| "No reply".to_string())
+    }
+
+    /// Move a message from DLQ back to main queue (replay/retry)
+    pub async fn move_to_queue(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
+        let actor = self.get_actor(queue_name).await
+            .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
+        
+        let (tx, rx) = oneshot::channel();
+        actor.send(QueueActorCommand::MoveToQueue { message_id, reply: tx })
+            .await
+            .map_err(|_| "Actor closed".to_string())?;
+        rx.await.map_err(|_| "No reply".to_string())
+    }
+
+    /// Delete a specific message from DLQ
+    pub async fn delete_dlq(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
+        let actor = self.get_actor(queue_name).await
+            .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
+        
+        let (tx, rx) = oneshot::channel();
+        actor.send(QueueActorCommand::DeleteDLQ { message_id, reply: tx })
+            .await
+            .map_err(|_| "Actor closed".to_string())?;
+        rx.await.map_err(|_| "No reply".to_string())
+    }
+
+    /// Purge all messages from DLQ
+    pub async fn purge_dlq(&self, queue_name: &str) -> Result<usize, String> {
+        let actor = self.get_actor(queue_name).await
+            .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
+        
+        let (tx, rx) = oneshot::channel();
+        actor.send(QueueActorCommand::PurgeDLQ { reply: tx })
+            .await
+            .map_err(|_| "Actor closed".to_string())?;
+        rx.await.map_err(|_| "No reply".to_string())
+    }
+
     async fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(ManagerCommand::GetQueueActor { 
