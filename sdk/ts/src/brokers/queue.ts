@@ -10,6 +10,10 @@ enum QueueOpcode {
   Q_ACK = 0x13,
   Q_EXISTS = 0x14,
   Q_DELETE = 0x15,
+  Q_PEEK_DLQ = 0x16,
+  Q_MOVE_TO_QUEUE = 0x17,
+  Q_DELETE_DLQ = 0x18,
+  Q_PURGE_DLQ = 0x19,
 }
 
 const QueueCommands = {
@@ -63,6 +67,55 @@ const QueueCommands = {
 
   ack: (conn: NexoConnection, name: string, id: string) =>
     conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
+
+  // DLQ Commands
+  peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number): Promise<{ id: string, data: T, attempts: number }[]> => {
+    const res = await conn.send(
+      QueueOpcode.Q_PEEK_DLQ,
+      FrameCodec.string(name),
+      FrameCodec.u32(limit)
+    );
+
+    const count = res.cursor.readU32();
+    if (count === 0) return [];
+
+    const messages: { id: string; data: T; attempts: number }[] = [];
+    for (let i = 0; i < count; i++) {
+      const idHex = res.cursor.readUUID();
+      const payloadLen = res.cursor.readU32();
+      const payloadBuf = res.cursor.readBuffer(payloadLen);
+      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      const attempts = res.cursor.readU32();
+      messages.push({ id: idHex, data, attempts });
+    }
+    return messages;
+  },
+
+  moveToQueue: async (conn: NexoConnection, name: string, messageId: string): Promise<boolean> => {
+    const res = await conn.send(
+      QueueOpcode.Q_MOVE_TO_QUEUE,
+      FrameCodec.string(name),
+      FrameCodec.uuid(messageId)
+    );
+    return res.cursor.readU8() === 1;
+  },
+
+  deleteDLQ: async (conn: NexoConnection, name: string, messageId: string): Promise<boolean> => {
+    const res = await conn.send(
+      QueueOpcode.Q_DELETE_DLQ,
+      FrameCodec.string(name),
+      FrameCodec.uuid(messageId)
+    );
+    return res.cursor.readU8() === 1;
+  },
+
+  purgeDLQ: async (conn: NexoConnection, name: string): Promise<number> => {
+    const res = await conn.send(
+      QueueOpcode.Q_PURGE_DLQ,
+      FrameCodec.string(name)
+    );
+    return res.cursor.readU32();
+  },
 };
 
 export type PersistenceStrategy = 'file_sync' | 'file_async';
@@ -97,14 +150,77 @@ async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) =
   await Promise.all(workers);
 }
 
+/**
+ * Dead Letter Queue (DLQ) management for a queue.
+ * Provides methods to inspect, replay, delete, and purge failed messages.
+ */
+export class NexoDLQ<T = any> {
+  constructor(
+    private conn: NexoConnection,
+    private queueName: string,
+    private logger: Logger
+  ) {}
+
+  /**
+   * Peek messages in the DLQ without consuming them.
+   * @param limit Maximum number of messages to return (default: 10)
+   * @returns Array of messages with id, data, and attempts
+   */
+  async peek(limit: number = 10): Promise<{ id: string; data: T; attempts: number }[]> {
+    this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages`);
+    return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit);
+  }
+
+  /**
+   * Move a message from DLQ back to the main queue (replay/retry).
+   * The message will be reset with attempts = 0 and become available for consumption.
+   * @param messageId ID of the message to move
+   * @returns true if the message was moved, false if not found
+   */
+  async moveToQueue(messageId: string): Promise<boolean> {
+    this.logger.debug(`[DLQ:${this.queueName}] Moving message ${messageId} to main queue`);
+    return QueueCommands.moveToQueue(this.conn, this.queueName, messageId);
+  }
+
+  /**
+   * Delete a specific message from the DLQ.
+   * @param messageId ID of the message to delete
+   * @returns true if the message was deleted, false if not found
+   */
+  async delete(messageId: string): Promise<boolean> {
+    this.logger.debug(`[DLQ:${this.queueName}] Deleting message ${messageId}`);
+    return QueueCommands.deleteDLQ(this.conn, this.queueName, messageId);
+  }
+
+  /**
+   * Purge all messages from the DLQ.
+   * @returns Number of messages purged
+   */
+  async purge(): Promise<number> {
+    this.logger.debug(`[DLQ:${this.queueName}] Purging all messages`);
+    return QueueCommands.purgeDLQ(this.conn, this.queueName);
+  }
+}
+
 export class NexoQueue<T = any> {
   private isSubscribed = false;
+  private _dlq: NexoDLQ<T>;
 
   constructor(
     private conn: NexoConnection,
     public readonly name: string,
     private logger: Logger
-  ) { }
+  ) {
+    this._dlq = new NexoDLQ<T>(conn, name, logger);
+  }
+
+  /**
+   * Access the Dead Letter Queue (DLQ) for this queue.
+   * Use this to inspect, replay, delete, or purge failed messages.
+   */
+  get dlq(): NexoDLQ<T> {
+    return this._dlq;
+  }
 
   async create(config: QueueConfig = {}): Promise<this> {
     await QueueCommands.create(this.conn, this.name, config);
@@ -186,7 +302,12 @@ export class NexoQueue<T = any> {
       this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 
-    return { stop: () => { active = false; } };
+    return { 
+      stop: () => { 
+        active = false;
+        this.isSubscribed = false;
+      } 
+    };
   }
 
   private async ack(id: string): Promise<void> {

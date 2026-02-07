@@ -55,7 +55,10 @@ export class FrameCodec {
   }
 
   static uuid(hex: string): Buffer {
-    return Buffer.from(hex, 'hex');
+    // Remove dashes from UUID format (e.g., "550e8400-e29b-41d4-a716-446655440000")
+    // This handles both formats: with dashes (from crypto.randomUUID()) and without (from server)
+    const cleanHex = hex.replace(/-/g, '');
+    return Buffer.from(cleanHex, 'hex');
   }
 
   static any(data: any): Buffer {

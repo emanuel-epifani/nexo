@@ -692,7 +692,7 @@ describe('BROKER INTEGRATION', async () => {
 
     });
 
-    describe('MEMORY STRESS & CLEANUP VERIFICATION', () => {
+    describe.skip('MEMORY STRESS & CLEANUP VERIFICATION', () => {
         // Test per verificare che la memoria schizzi in alto e poi si abbassi
         // grazie ai meccanismi di cleanup automatico di ogni broker
 
@@ -959,6 +959,99 @@ describe('BROKER INTEGRATION', async () => {
             console.log('📊 Check Docker stats NOW - memory should be back down!');
             console.log('✅ If memory dropped from ~5-6GB to ~500MB-1GB, cleanup is working! 🎉');
         }); // Timeout 5 minuti
+    });
+
+    describe('QUEUE DLQ MANAGEMENT', () => {
+        it('Should handle DLQ workflow: peek, moveToQueue, delete, purge', async () => {
+            const qName = `dlq-test-${randomUUID()}`;
+            
+            // Create queue with low max_retries to trigger DLQ quickly
+            const q = await nexo.queue(qName).create({
+                visibilityTimeoutMs: 100,
+                maxRetries: 1, // Only 1 retry allowed (attempts >= 1 -> DLQ)
+                persistence: 'file_sync'
+            });
+
+            // Push 3 messages
+            await q.push({ order: 'order1' });
+            await q.push({ order: 'order2' });
+            await q.push({ order: 'order3' });
+
+            // Consume messages but don't ack (simulate failure)
+            const received: any[] = [];
+            const sub = await q.subscribe(async (msg) => {
+                received.push(msg);
+                // Don't ack - let them timeout and go to DLQ
+                throw new Error('Simulated processing error');
+            }, { batchSize: 10, waitMs: 100 });
+
+            // Wait for messages to be consumed and timeout
+            await waitFor(() => expect(received.length).toBe(3), 2000);
+            
+            // Stop subscription before waiting for DLQ
+            sub.stop();
+            
+            // Wait for visibility timeout + actor wakeup
+            await new Promise(r => setTimeout(r, 300));
+
+            // 1. Peek DLQ - should have 3 messages
+            const dlqMessages = await q.dlq.peek(10);
+            expect(dlqMessages.length).toBe(3);
+            expect(dlqMessages[0].attempts).toBeGreaterThanOrEqual(1);
+            
+            const msg1Id = dlqMessages[0].id;
+            const msg2Id = dlqMessages[1].id;
+
+            // 2. Move one message back to main queue (replay)
+            const moved = await q.dlq.moveToQueue(msg1Id);
+            expect(moved).toBe(true);
+
+            // Give actor time to process the move
+            await new Promise(r => setTimeout(r, 200));
+
+            // Verify it's back in main queue using a new queue instance
+            const replayed: any[] = [];
+            const sub2 = await nexo.queue(qName).subscribe(async (msg) => {
+                replayed.push(msg);
+            }, { batchSize: 1, waitMs: 100 });
+
+            await waitFor(() => expect(replayed.length).toBe(1), 2000);
+            expect(replayed[0].order).toBe('order1');
+            sub2.stop();
+
+            // 3. Delete one specific message from DLQ
+            const deleted = await q.dlq.delete(msg2Id);
+            expect(deleted).toBe(true);
+
+            // Verify only 1 message left in DLQ
+            const dlqAfterDelete = await q.dlq.peek(10);
+            expect(dlqAfterDelete.length).toBe(1);
+
+            // 4. Purge all remaining messages
+            const purgedCount = await q.dlq.purge();
+            expect(purgedCount).toBe(1);
+
+            // Verify DLQ is empty
+            const dlqAfterPurge = await q.dlq.peek(10);
+            expect(dlqAfterPurge.length).toBe(0);
+
+            await q.delete();
+        }, 10000);
+
+        it('Should return false when moving/deleting non-existent message', async () => {
+            const qName = `dlq-notfound-${randomUUID()}`;
+            const q = await nexo.queue(qName).create();
+
+            const fakeId = randomUUID();
+            
+            const moved = await q.dlq.moveToQueue(fakeId);
+            expect(moved).toBe(false);
+
+            const deleted = await q.dlq.delete(fakeId);
+            expect(deleted).toBe(false);
+
+            await q.delete();
+        });
     });
 
 

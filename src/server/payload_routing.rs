@@ -157,6 +157,7 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                         buf.extend_from_slice(msg.id.as_bytes());
                         buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
                         buf.extend_from_slice(&msg.payload);
+                        buf.extend_from_slice(&msg.attempts.to_be_bytes());
                     }
                     Response::Data(Bytes::from(buf))
                 }
@@ -165,15 +166,21 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
         }
         QueueCommand::MoveToQueue { q_name, message_id } => {
             match queue_manager.move_to_queue(&q_name, message_id).await {
-                Ok(true) => Response::Ok,
-                Ok(false) => Response::Error("Message not found in DLQ".to_string()),
+                Ok(found) => {
+                    let mut buf = Vec::new();
+                    buf.push(if found { 1u8 } else { 0u8 });
+                    Response::Data(Bytes::from(buf))
+                }
                 Err(e) => Response::Error(e),
             }
         }
         QueueCommand::DeleteDLQ { q_name, message_id } => {
             match queue_manager.delete_dlq(&q_name, message_id).await {
-                Ok(true) => Response::Ok,
-                Ok(false) => Response::Error("Message not found in DLQ".to_string()),
+                Ok(found) => {
+                    let mut buf = Vec::new();
+                    buf.push(if found { 1u8 } else { 0u8 });
+                    Response::Data(Bytes::from(buf))
+                }
                 Err(e) => Response::Error(e),
             }
         }
