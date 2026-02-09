@@ -30,6 +30,12 @@ pub enum ManagerCommand {
         payload: Bytes,
         priority: u8,
     },
+    Nack {
+        queue_name: String,
+        id: Uuid,
+        reason: String,
+        reply: oneshot::Sender<bool>,
+    },
     DeleteQueue {
         name: String,
         reply: oneshot::Sender<Result<(), String>>,
@@ -146,6 +152,19 @@ impl QueueManager {
                     }).await;
                 }
 
+                ManagerCommand::Nack { queue_name, id, reason, reply } => {
+                    if let Some(actor_tx) = actors.get(&queue_name) {
+                        let (tx, rx) = oneshot::channel();
+                        if actor_tx.send(QueueActorCommand::Nack { id, reason, reply: tx }).await.is_ok() {
+                            let _ = reply.send(rx.await.unwrap_or(false));
+                        } else {
+                             let _ = reply.send(false);
+                        }
+                    } else {
+                        let _ = reply.send(false);
+                    }
+                }
+
                 ManagerCommand::DeleteQueue { name, reply } => {
                     if let Some(actor_tx) = actors.remove(&name) {
                         // 1. Stop Actor
@@ -253,6 +272,15 @@ impl QueueManager {
             }
         }
         false
+    }
+
+    pub async fn nack(&self, queue_name: &str, id: Uuid, reason: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(ManagerCommand::Nack { queue_name: queue_name.to_string(), id, reason, reply: tx }).await.is_ok() {
+             rx.await.unwrap_or(false)
+        } else {
+             false
+        }
     }
 
     pub async fn consume_batch(&self, queue_name: String, max: Option<usize>, wait_ms: Option<u64>) -> Result<Vec<Message>, String> {

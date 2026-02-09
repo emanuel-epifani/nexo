@@ -9,6 +9,7 @@ pub const OP_Q_CONSUME: u8 = 0x12;
 pub const OP_Q_ACK: u8 = 0x13;
 pub const OP_Q_EXISTS: u8 = 0x14;
 pub const OP_Q_DELETE: u8 = 0x15;
+pub const OP_Q_NACK: u8 = 0x1A;
 
 // DLQ Operations
 pub const OP_Q_PEEK_DLQ: u8 = 0x16;
@@ -73,6 +74,12 @@ pub enum QueueCommand {
         id: Uuid,
         q_name: String,
     },
+    /// NACK: [ID:16][QNameLen:4][QName][ReasonLen:4][Reason]
+    Nack {
+        id: Uuid,
+        q_name: String,
+        reason: String,
+    },
     /// EXISTS: [QNameLen:4][QName]
     Exists {
         q_name: String,
@@ -136,6 +143,13 @@ impl QueueCommand {
                 let id = Uuid::from_bytes(id_bytes);
                 let q_name = cursor.read_string()?;
                 Ok(Self::Ack { id, q_name })
+            }
+            OP_Q_NACK => {
+                let id_bytes = cursor.read_uuid_bytes()?;
+                let id = Uuid::from_bytes(id_bytes);
+                let q_name = cursor.read_string()?;
+                let reason = cursor.read_string()?;
+                Ok(Self::Nack { id, q_name, reason })
             }
             OP_Q_EXISTS => {
                 let q_name = cursor.read_string()?;

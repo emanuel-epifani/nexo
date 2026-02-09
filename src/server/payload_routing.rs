@@ -136,6 +136,12 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 false => Response::Error("ACK failed".to_string()),
             }
         }
+        QueueCommand::Nack { id, q_name, reason } => {
+            match queue_manager.nack(&q_name, id, reason).await {
+                true => Response::Ok,
+                false => Response::Error("NACK failed".to_string()),
+            }
+        }
         QueueCommand::Exists { q_name } => {
             match queue_manager.exists(&q_name).await {
                 true => Response::Ok,
@@ -158,6 +164,11 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                         buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
                         buf.extend_from_slice(&msg.payload);
                         buf.extend_from_slice(&msg.attempts.to_be_bytes());
+                        
+                        let reason = msg.failure_reason.as_deref().unwrap_or("");
+                        let reason_bytes = reason.as_bytes();
+                        buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(reason_bytes);
                     }
                     Response::Data(Bytes::from(buf))
                 }

@@ -37,6 +37,7 @@ pub struct Message {
     pub created_at: u64,
     pub visible_at: u64,
     pub delayed_until: Option<u64>,
+    pub failure_reason: Option<String>,
     pub state: MessageState,
 }
 
@@ -59,6 +60,7 @@ impl Message {
             created_at: now,
             visible_at,
             delayed_until: delay_ms.map(|d| now + d),
+            failure_reason: None,
             state,
         }
     }
@@ -237,6 +239,35 @@ impl QueueState {
         }
 
         (result, any_earliest)
+    }
+
+    /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
+    /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
+    pub fn nack(&mut self, id: Uuid, reason: String, max_retries: u32) -> (Option<Message>, Option<Message>) {
+        // 1. Check existence and update fields
+        let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
+            msg.failure_reason = Some(reason);
+            msg.attempts += 1;
+            (msg.attempts >= max_retries, msg.priority)
+        } else {
+            return (None, None);
+        };
+
+        // 2. Action
+        if should_dlq {
+            // Remove from here, return for DLQ
+            let msg = self.delete_message_and_return(id);
+            (None, msg)
+        } else {
+            // Requeue (Ready)
+            if self.transition_to(id, MessageState::Ready) {
+                if let Some(msg) = self.registry.get_mut(&id) {
+                    msg.visible_at = 0;
+                    return (Some(msg.clone()), None);
+                }
+            }
+            (None, None)
+        }
     }
 
     /// Process expired events (scheduled -> ready, timeout -> retry/DLQ).

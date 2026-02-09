@@ -14,6 +14,7 @@ enum QueueOpcode {
   Q_MOVE_TO_QUEUE = 0x17,
   Q_DELETE_DLQ = 0x18,
   Q_PURGE_DLQ = 0x19,
+  Q_NACK = 0x1A,
 }
 
 const QueueCommands = {
@@ -68,8 +69,16 @@ const QueueCommands = {
   ack: (conn: NexoConnection, name: string, id: string) =>
     conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
 
+  nack: (conn: NexoConnection, name: string, id: string, reason: string) =>
+    conn.send(
+      QueueOpcode.Q_NACK,
+      FrameCodec.uuid(id),
+      FrameCodec.string(name),
+      FrameCodec.string(reason)
+    ),
+
   // DLQ Commands
-  peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number): Promise<{ id: string, data: T, attempts: number }[]> => {
+  peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number): Promise<{ id: string, data: T, attempts: number, failureReason: string }[]> => {
     const res = await conn.send(
       QueueOpcode.Q_PEEK_DLQ,
       FrameCodec.string(name),
@@ -79,14 +88,15 @@ const QueueCommands = {
     const count = res.cursor.readU32();
     if (count === 0) return [];
 
-    const messages: { id: string; data: T; attempts: number }[] = [];
+    const messages: { id: string; data: T; attempts: number; failureReason: string }[] = [];
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
       const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
       const attempts = res.cursor.readU32();
-      messages.push({ id: idHex, data, attempts });
+      const failureReason = res.cursor.readString();
+      messages.push({ id: idHex, data, attempts, failureReason });
     }
     return messages;
   },
@@ -166,7 +176,7 @@ export class NexoDLQ<T = any> {
    * @param limit Maximum number of messages to return (default: 10)
    * @returns Array of messages with id, data, and attempts
    */
-  async peek(limit: number = 10): Promise<{ id: string; data: T; attempts: number }[]> {
+  async peek(limit: number = 10): Promise<{ id: string; data: T; attempts: number; failureReason: string }[]> {
     this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages`);
     return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit);
   }
@@ -278,9 +288,11 @@ export class NexoQueue<T = any> {
             try {
               await callback(msg.data);
               await this.ack(msg.id);
-            } catch (e) {
+            } catch (e: any) {
               if (!this.conn.isConnected) return;
-              this.logger.error(`Callback error in queue ${this.name}:`, e);
+              const reason = e instanceof Error ? e.message : String(e);
+              this.logger.error(`[Queue:${this.name}] Consumer error, sending NACK. Reason: ${reason}`);
+              await this.nack(msg.id, reason);
             }
           });
 
@@ -312,5 +324,9 @@ export class NexoQueue<T = any> {
 
   private async ack(id: string): Promise<void> {
     await QueueCommands.ack(this.conn, this.name, id);
+  }
+
+  private async nack(id: string, reason: string): Promise<void> {
+    await QueueCommands.nack(this.conn, this.name, id, reason);
   }
 }

@@ -33,6 +33,11 @@ pub enum QueueActorCommand {
         id: Uuid,
         reply: oneshot::Sender<bool>,
     },
+    Nack {
+        id: Uuid,
+        reason: String,
+        reply: oneshot::Sender<bool>,
+    },
     ConsumeBatch {
         max: usize,
         wait_ms: u64,
@@ -223,6 +228,40 @@ impl QueueActor {
                     let _ = self.store.execute(StorageOp::Delete(id)).await;
                 }
                 let _ = reply.send(result);
+                true
+            }
+
+            QueueActorCommand::Nack { id, reason, reply } => {
+                let (requeued, dlq_msg) = self.main_state.nack(id, reason, self.config.max_retries);
+                
+                if let Some(msg) = requeued {
+                    // Requeued (Ready)
+                    let _ = self.store.execute(StorageOp::UpdateState { 
+                        id: msg.id, 
+                        visible_at: msg.visible_at, 
+                        attempts: msg.attempts 
+                    }).await;
+                    // Check waiters since it became Ready
+                    self.process_waiters().await;
+                    let _ = reply.send(true);
+                } else if let Some(msg) = dlq_msg {
+                    // Moved to DLQ
+                    // Force message to Ready state for DLQ (so peek_messages can find it)
+                    let mut dlq_msg_ready = msg.clone();
+                    dlq_msg_ready.state = MessageState::Ready;
+                    dlq_msg_ready.visible_at = 0;
+                    
+                    self.dlq_state.push(dlq_msg_ready);
+                    
+                    let _ = self.store.execute(StorageOp::MoveToDLQ {
+                        id: msg.id,
+                        msg,
+                    }).await;
+                    let _ = reply.send(true);
+                } else {
+                    // Not found
+                    let _ = reply.send(false);
+                }
                 true
             }
             

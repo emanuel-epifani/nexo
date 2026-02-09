@@ -98,6 +98,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
             created_at,
             visible_at,
             delayed_until: None, // Lost persistence of original delay, but functional equivalent
+            failure_reason: None, // Not persisted in main queue yet
             state,
         })
     })?;
@@ -111,7 +112,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
 
 pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, payload, priority, attempts, created_at, failed_at FROM dlq_messages"
+        "SELECT id, payload, priority, attempts, created_at, failed_at, error FROM dlq_messages"
     )?;
 
     let message_iter = stmt.query_map([], |row| {
@@ -121,6 +122,7 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<Message>> {
         let attempts: u32 = row.get(3)?;
         let created_at = row.get::<_, i64>(4)? as u64;
         let failed_at = row.get::<_, i64>(5)? as u64;
+        let error: Option<String> = row.get(6)?;
 
         Ok(Message {
             id: Uuid::parse_str(&id_str).unwrap_or_default(),
@@ -130,6 +132,7 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<Message>> {
             created_at,
             visible_at: failed_at,
             delayed_until: None,
+            failure_reason: error,
             state: MessageState::Ready, // DLQ messages are always ready for inspection
         })
     })?;
@@ -181,7 +184,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.attempts,
                 msg.created_at as i64,
                 current_time_ms() as i64,
-                None::<String> // error field, can be added later
+                msg.failure_reason
             ])?;
         }
         StorageOp::DeleteDLQ(id) => {
@@ -204,7 +207,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.attempts,
                 msg.created_at as i64,
                 current_time_ms() as i64,
-                None::<String>
+                msg.failure_reason
             ])?;
         }
         StorageOp::MoveToMain { id, msg } => {
@@ -224,6 +227,8 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 0u32, // reset attempts
                 msg.created_at as i64
             ])?;
+            // failure_reason is lost when moving back to main because table doesn't support it yet
+            // and we are resetting the message anyway.
         }
         StorageOp::PurgeDLQ => {
             tx.execute("DELETE FROM dlq_messages", [])?;
