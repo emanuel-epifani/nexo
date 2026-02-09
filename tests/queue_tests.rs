@@ -185,7 +185,8 @@ mod queue_tests {
             assert!(manager.pop(&q).await.is_none(), "Should be moved to DLQ");
 
             // Verify message is in DLQ using new DLQ methods
-            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+            assert_eq!(total, 1, "Total should be 1");
             assert_eq!(dlq_msgs.len(), 1, "Should have 1 message in DLQ");
             assert_eq!(dlq_msgs[0].payload, Bytes::from("fail_me"));
             assert_eq!(dlq_msgs[0].id, msg_id);
@@ -608,7 +609,8 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(250)).await;
 
             // Verify all 3 in DLQ (actor should have moved them automatically)
-            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+            assert_eq!(total, 3, "Total should be 3");
             assert_eq!(dlq_msgs.len(), 3, "Should have 3 messages in DLQ");
 
             // Test delete_dlq (remove one specific message)
@@ -616,7 +618,8 @@ mod queue_tests {
             assert!(deleted, "Should successfully delete message from DLQ");
 
             // Verify only 2 left
-            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+            assert_eq!(total, 2, "Total should be 2");
             assert_eq!(dlq_msgs.len(), 2, "Should have 2 messages left in DLQ");
 
             // Test purge_dlq (remove all)
@@ -624,7 +627,8 @@ mod queue_tests {
             assert_eq!(purged_count, 2, "Should purge 2 messages");
 
             // Verify DLQ is empty
-            let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+            let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+            assert_eq!(total, 0, "Total should be 0");
             assert_eq!(dlq_msgs.len(), 0, "DLQ should be empty after purge");
         }
 
@@ -663,7 +667,8 @@ mod queue_tests {
                 assert!(manager.pop(&q).await.is_none(), "Main queue should be empty");
 
                 // Verify message is in DLQ
-                let dlq_msgs = manager.peek_dlq(&q, 10).await.unwrap();
+                let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+                assert_eq!(total, 1);
                 assert_eq!(dlq_msgs.len(), 1, "Should have 1 message in DLQ");
                 assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
             }
@@ -683,7 +688,8 @@ mod queue_tests {
                 assert!(manager2.pop(&q).await.is_none(), "Main queue should still be empty after restart");
                 
                 // Verify DLQ message survived restart
-                let dlq_msgs = manager2.peek_dlq(&q, 10).await.unwrap();
+                let (total, dlq_msgs) = manager2.peek_dlq(&q, 10, 0).await.unwrap();
+                assert_eq!(total, 1);
                 assert_eq!(dlq_msgs.len(), 1, "DLQ message should survive restart");
                 assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
             }

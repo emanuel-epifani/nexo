@@ -10,6 +10,7 @@ use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::dashboard::models::queues::QueueBrokerSnapshot;
 use crate::config::SystemQueueConfig;
+use crate::brokers::queues::dlq::{DlqMessage, DlqState};
 
 // ==========================================
 // MANAGER COMMANDS
@@ -313,12 +314,12 @@ impl QueueManager {
     // --- DLQ Operations ---
 
     /// Peek messages from DLQ without consuming them
-    pub async fn peek_dlq(&self, queue_name: &str, limit: usize) -> Result<Vec<Message>, String> {
+    pub async fn peek_dlq(&self, queue_name: &str, limit: usize, offset: usize) -> Result<(usize, Vec<DlqMessage>), String> {
         let actor = self.get_actor(queue_name).await
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::PeekDLQ { limit, reply: tx })
+        actor.send(QueueActorCommand::PeekDLQ { limit, offset, reply: tx })
             .await
             .map_err(|_| "Actor closed".to_string())?;
         rx.await.map_err(|_| "No reply".to_string())

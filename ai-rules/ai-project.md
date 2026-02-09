@@ -6,23 +6,20 @@ per ottimizzare fin da subito questa vision estrema ho puntato ovunque potessi a
 ulteriore priorità assoluta (forse ancora più delle performance) deve essere la developer experience di chi usa questo sdk. 1 broker che fa tutto "super comodo ma comunque abbastanza performante", con una sdk super super intuitivo e flessibile. questo è il motivo per cui nasce nexo.
 e infatti la mia idea è 1 broker qualunque funzionalità con 1 sola configutazione:
 
-- STORE → cache in memory stile redis con n strutture dati (x ora c’è solo hashmap x in futuro vedremo
-- QUEUE → FIFO message queues per work/job con consistenza
-- PUBSUB → Pub/Sub with hierarchical topics stile mqtt/nats realtime fanin fanout (Volatile, Fan-out, Realtime)
-- STREAM → Append-only event-logs stile kafka con consistenza (Persistente, Log, Replay)
-- DASHBOARD react che runna automaticamente su una porta quando avvii il container docker che fa una request ed ogni broker ritorna una snaphsto a quell'istante dello stato di tutti i broker (lo store, le queue, topics ecc) super comodo per debuggare in locale mentre sviluppi (non da usare in produzione come met) anche senza dover installare mille tool diversi stile datagrip, plugin vscode o altro ecc. scarichi il container, 1 sdk  e hai tutto, cache, queue, mqtt, topic, e una dashboard web per vedere stato dati esposto automaticamente.
+- STORE → cache in memory stile redis con n strutture dati (x ora c’è solo MAP x in futuro vedremo)
+- QUEUE → message queues per work/job con persistenza
+- PUBSUB → Pub/Sub realtime with hierarchical topics stile mqtt realtime fanin fanout (deafult Volatile, ma persistenza per retained value)
+- STREAM → Append-only event-logs stile kafka con persistenza (Persistente, Log, Replay)
+- DASHBOARD FE -> esposta automaticamente su una porta quando avvii il container docker che fa una request ed ogni broker ritorna una snaphsto a quell'istante dello stato di tutti i broker (lo store, le queue, topics ecc) super comodo per debuggare in locale mentre sviluppi (non da usare in produzione come metriche) anche senza dover installare mille tool diversi stile datagrip, plugin vscode o altro ecc. scarichi il container, 1 sdk  e hai tutto, cache, queue, mqtt, topic, e una dashboard web per vedere stato dati esposto automaticamente.
 
 
 SERVER RUST (Data consistency/Robustness > Throughput > Latency)
 - tutta la logica di connessioni/socket/parsing ecc dentro -> src/server
 - tutta la logica di business dentro -> src/brokers (ogni broker deve avere logica di business quanto più isolato all'interno di se stesso)
 - ogni modulo deve avere un mod.rs che fa solo da exporter. esporta solo il necessario dal modulo (se facade pattern ci sarà una struct finale con cui interagire e metodi/struct dell'implementazioen interna non esportati)
-- prediligi codice pulito (match anzichè molti if else if ecc, usa enum ordinati)
-- evita default value hardcode nel codice come fallback, ma usa costanti in file appositi manutenibili
-- evita "magic number" (es HEADER length per capire offset lettura socket) sparsi nel codice ma usa vriabili parlanti e centralizzate per render il tutto manutenibile e centralizzato
-- se non inevitabile, evita mille file diversi con mille livelli di indirezione per capire un flusso (un file con una intera macrologica spesso è meglio di n file, se rimane la stessa responsabilità)
-- quando scegli tra diverse soluzioni possibili non prendere la strada più breve solo per fare prima se è palesemente Code Smell
-- non lasciare refusi di codice/commenti/todo ecc di vecchie logiche/retrocompatibilità. se stiamo facendo un refactor il codice che rimane deve esser unicamente quello che rispecchia la logica attuale
+- ogni broker dovrebeb esser testato in tutte le sue features in un file dentro tests/*, (ogni broker 1 file, tipi diversi di feature raggrupapti in mod nidificati)
+- tutti i test dei broker dovrebbero interagrie solo con il corrispettivo manager, cosia da poter testare il flusso quanto più e2e possibile, e poter piegare il runtime del flow in base alle config passate al manager
+
 
 SDK TYPESCRIPT (devexperience over all)
 - max develoepr experience (senza leggere la docs deve essere super intuitivo capire come si usa e cosa può fare)
@@ -38,20 +35,16 @@ TEST VITEST (business logic first)
 
 APPROCCIO ALLO SVILUPPO
 - facciamo brainstorming su strutture dati/design pattern da poter seguire per esppletare tutte le features
-- scegliamo inizialmente la strada più facile da implemetnare/debuggare/manutenere
-- scriviamo i test vitest in tests/integration/src/brokers (usando l'sdk ts di nexo) coprendo quanti più edge case possibili
-- procediamo eventualmente a refactorizzare broker con stesse funzionalità ma sfruttando più ottimizzazioni possibili e vediamo se test continuano a passare
 
 GENERAL
 - non installare mai dipendenze sensa avermi prima consultati e aver valutato assieme (anzi, laddove possibiel toglierne valutiamo se fattibile. less is more)
 - non fare assunzioni, se qualche pezzo dell'implementazione ha più possibilità e non ho pensato a tutte, non supporre, fermami e chiedi esplicitamente come gestire quella situazione nel codice
-- se facciamo refactor di alcune logiche, non lasciare mai refusi  (ne codice ne commenti) sulla vecchia implementazione
-
-
-PRIORITA' PROGETTO
-nella versione 1 il progetto dovrebbe essere:
-1- cosi wow (in termini di comodità e devexperience) da far dire "lo voglio proprio provare"
-2- cosi stabile in termini di funzionamento senza mai crash, da non far abbandonare chi lo ha provato. quindi di nuovo: Robustness > Throughput > Latency
+- se facciamo refactor di alcune logiche, non lasciare mai refusi (ne codice ne commenti) sulla vecchia implementazione
+- mai usare magic number/value hardcoded nel codice, ma mettili sempre sotto variabili/costanti parlanti e modificabili
+- non lasciare refusi di codice/commenti/todo ecc di vecchie logiche/retrocompatibilità. se stiamo facendo un refactor il codice che rimane deve esser unicamente quello che rispecchia la logica attuale
+- qualunque test dovrebbe esser equanto più deterministico e non probabilistico (non sleep/timeout random a caso, se quelal funzione avviene ogni interval_function_x, aspettiamo esattametne interval_function_x + qualcosa per avere test dinamici)
+- i test devono esser pensati per essere indipendenti tra loro per esser atomici e runnabili in maniera indipendnete, e non dovrebbero creare problemi di refusi a fine test
+- i test devono coprire TUTTE le features implementate, nel modo quanto più diretto possibile (non sempre è possibile, ma è il goal)
 
 
 parla in italiano nella chat

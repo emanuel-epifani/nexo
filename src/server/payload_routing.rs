@@ -11,7 +11,7 @@ use crate::brokers::pub_sub::ClientId;
 // Import Command types from brokers
 use crate::brokers::store::commands::StoreCommand;
 use crate::brokers::store::map::commands::MapCommand;
-use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions, OP_Q_DELETE};
+use crate::brokers::queues::commands::{QueueCommand, QueueCreateOptions, OP_Q_DELETE, OP_Q_NACK};
 use crate::brokers::pub_sub::commands::{PubSubCommand, PubSubPublishConfig};
 use crate::brokers::stream::commands::StreamCommand;
 use crate::config::Config;
@@ -154,19 +154,22 @@ async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::PeekDLQ { q_name, limit } => {
-            match queue_manager.peek_dlq(&q_name, limit).await {
-                Ok(messages) => {
+        QueueCommand::PeekDLQ { q_name, limit, offset } => {
+            match queue_manager.peek_dlq(&q_name, limit, offset).await {
+                Ok((total, messages)) => {
                     let mut buf = Vec::new();
+                    
+                    // Metadata: Total Count & Item Count
+                    buf.extend_from_slice(&(total as u32).to_be_bytes());
                     buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
+                    
                     for msg in messages {
                         buf.extend_from_slice(msg.id.as_bytes());
                         buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
                         buf.extend_from_slice(&msg.payload);
                         buf.extend_from_slice(&msg.attempts.to_be_bytes());
                         
-                        let reason = msg.failure_reason.as_deref().unwrap_or("");
-                        let reason_bytes = reason.as_bytes();
+                        let reason_bytes = msg.failure_reason.as_bytes();
                         buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
                         buf.extend_from_slice(reason_bytes);
                     }

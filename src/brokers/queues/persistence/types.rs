@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use crate::brokers::queues::queue::Message;
+use crate::brokers::queues::dlq::DlqMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -34,13 +35,13 @@ pub enum StorageOp {
     
     // DLQ Operations
     /// Insert a message into DLQ
-    InsertDLQ(Message),
+    InsertDLQ(DlqMessage),
     /// Delete a message from DLQ
     DeleteDLQ(Uuid),
     /// Move message from main queue to DLQ (atomic)
     MoveToDLQ {
         id: Uuid,
-        msg: Message,
+        msg: DlqMessage,
     },
     /// Move message from DLQ to main queue (atomic)
     MoveToMain {

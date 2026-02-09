@@ -1,7 +1,8 @@
 use rusqlite::{params, Connection, Result};
 use super::types::{StorageOp, PersistenceMode};
 
-use crate::brokers::queues::queue::{Message, MessageState, current_time_ms}; // Add current_time_ms import
+use crate::brokers::queues::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queues::dlq::DlqMessage;
 use uuid::Uuid;
 
 pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
@@ -110,7 +111,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
-pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<Message>> {
+pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     let mut stmt = conn.prepare(
         "SELECT id, payload, priority, attempts, created_at, failed_at, error FROM dlq_messages"
     )?;
@@ -124,16 +125,14 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<Message>> {
         let failed_at = row.get::<_, i64>(5)? as u64;
         let error: Option<String> = row.get(6)?;
 
-        Ok(Message {
+        Ok(DlqMessage {
             id: Uuid::parse_str(&id_str).unwrap_or_default(),
             payload: bytes::Bytes::from(payload),
             priority,
             attempts,
             created_at,
-            visible_at: failed_at,
-            delayed_until: None,
-            failure_reason: error,
-            state: MessageState::Ready, // DLQ messages are always ready for inspection
+            failed_at,
+            failure_reason: error.unwrap_or_default(),
         })
     })?;
 
@@ -183,7 +182,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.priority,
                 msg.attempts,
                 msg.created_at as i64,
-                current_time_ms() as i64,
+                msg.failed_at as i64,
                 msg.failure_reason
             ])?;
         }
@@ -206,7 +205,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.priority,
                 msg.attempts,
                 msg.created_at as i64,
-                current_time_ms() as i64,
+                msg.failed_at as i64,
                 msg.failure_reason
             ])?;
         }

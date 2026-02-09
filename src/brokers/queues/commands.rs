@@ -86,10 +86,11 @@ pub enum QueueCommand {
     },
     
     // DLQ Commands
-    /// PEEK_DLQ: [QNameLen:4][QName][Limit:4]
+    /// PEEK_DLQ: [QNameLen:4][QName][Limit:4][Offset:4]
     PeekDLQ {
         q_name: String,
         limit: usize,
+        offset: usize,
     },
     /// MOVE_TO_QUEUE: [QNameLen:4][QName][MessageID:16]
     MoveToQueue {
@@ -162,7 +163,8 @@ impl QueueCommand {
             OP_Q_PEEK_DLQ => {
                 let q_name = cursor.read_string()?;
                 let limit = cursor.read_u32()? as usize;
-                Ok(Self::PeekDLQ { q_name, limit })
+                let offset = cursor.read_u32()? as usize;
+                Ok(Self::PeekDLQ { q_name, limit, offset })
             }
             OP_Q_MOVE_TO_QUEUE => {
                 let q_name = cursor.read_string()?;

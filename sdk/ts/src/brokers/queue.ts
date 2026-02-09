@@ -78,17 +78,18 @@ const QueueCommands = {
     ),
 
   // DLQ Commands
-  peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number): Promise<{ id: string, data: T, attempts: number, failureReason: string }[]> => {
+  peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number, offset: number): Promise<{ total: number, items: { id: string, data: T, attempts: number, failureReason: string }[] }> => {
     const res = await conn.send(
       QueueOpcode.Q_PEEK_DLQ,
       FrameCodec.string(name),
-      FrameCodec.u32(limit)
+      FrameCodec.u32(limit),
+      FrameCodec.u32(offset)
     );
 
+    const total = res.cursor.readU32();
     const count = res.cursor.readU32();
-    if (count === 0) return [];
-
-    const messages: { id: string; data: T; attempts: number; failureReason: string }[] = [];
+    
+    const items: { id: string; data: T; attempts: number; failureReason: string }[] = [];
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
@@ -96,9 +97,9 @@ const QueueCommands = {
       const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
       const attempts = res.cursor.readU32();
       const failureReason = res.cursor.readString();
-      messages.push({ id: idHex, data, attempts, failureReason });
+      items.push({ id: idHex, data, attempts, failureReason });
     }
-    return messages;
+    return { total, items };
   },
 
   moveToQueue: async (conn: NexoConnection, name: string, messageId: string): Promise<boolean> => {
@@ -174,11 +175,12 @@ export class NexoDLQ<T = any> {
   /**
    * Peek messages in the DLQ without consuming them.
    * @param limit Maximum number of messages to return (default: 10)
-   * @returns Array of messages with id, data, and attempts
+   * @param offset Pagination offset (default: 0)
+   * @returns Object containing total count and array of messages
    */
-  async peek(limit: number = 10): Promise<{ id: string; data: T; attempts: number; failureReason: string }[]> {
-    this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages`);
-    return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit);
+  async peek(limit: number = 10, offset: number = 0): Promise<{ total: number, items: { id: string; data: T; attempts: number; failureReason: string }[] }> {
+    this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages at offset ${offset}`);
+    return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit, offset);
   }
 
   /**
@@ -284,7 +286,13 @@ export class NexoQueue<T = any> {
           if (messages.length === 0) continue;
 
           await runConcurrent(messages, concurrency, async (msg) => {
-            if (!active) return;
+            if (!active) {
+              if (this.conn.isConnected) {
+                // If stopped while consuming, release message immediately so it's available for others
+                await this.nack(msg.id, "Consumer stopped").catch(() => {});
+              }
+              return;
+            }
             try {
               await callback(msg.data);
               await this.ack(msg.id);

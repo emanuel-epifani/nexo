@@ -10,6 +10,7 @@ use uuid::Uuid;
 use std::path::PathBuf;
 use crate::brokers::queues::MessageState;
 use crate::brokers::queues::queue::{QueueState, QueueConfig, Message, current_time_ms};
+use crate::brokers::queues::dlq::{DlqState, DlqMessage};
 use crate::brokers::queues::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queues::queue_manager::ManagerCommand;
 use crate::config::Config;
@@ -53,7 +54,8 @@ pub enum QueueActorCommand {
     // DLQ Commands
     PeekDLQ {
         limit: usize,
-        reply: oneshot::Sender<Vec<Message>>,
+        offset: usize,
+        reply: oneshot::Sender<(usize, Vec<DlqMessage>)>,
     },
     MoveToQueue {
         message_id: Uuid,
@@ -77,7 +79,7 @@ struct WaitingConsumer {
 pub struct QueueActor {
     name: String,
     main_state: QueueState,
-    dlq_state: QueueState,
+    dlq_state: DlqState,
     config: QueueConfig,
     store: QueueStore,
     rx: mpsc::Receiver<QueueActorCommand>,
@@ -109,7 +111,7 @@ impl QueueActor {
         Self {
             name,
             main_state: QueueState::new(),
-            dlq_state: QueueState::new(),
+            dlq_state: DlqState::new(),
             config,
             store,
             rx,
@@ -232,7 +234,7 @@ impl QueueActor {
             }
 
             QueueActorCommand::Nack { id, reason, reply } => {
-                let (requeued, dlq_msg) = self.main_state.nack(id, reason, self.config.max_retries);
+                let (requeued, dlq_msg) = self.main_state.nack(id, reason.clone(), self.config.max_retries);
                 
                 if let Some(msg) = requeued {
                     // Requeued (Ready)
@@ -244,18 +246,13 @@ impl QueueActor {
                     // Check waiters since it became Ready
                     self.process_waiters().await;
                     let _ = reply.send(true);
-                } else if let Some(msg) = dlq_msg {
-                    // Moved to DLQ
-                    // Force message to Ready state for DLQ (so peek_messages can find it)
-                    let mut dlq_msg_ready = msg.clone();
-                    dlq_msg_ready.state = MessageState::Ready;
-                    dlq_msg_ready.visible_at = 0;
-                    
-                    self.dlq_state.push(dlq_msg_ready);
+                } else if let Some(dlq_message) = dlq_msg {
+                    // Moved to DLQ - Already converted
+                    self.dlq_state.push(dlq_message.clone());
                     
                     let _ = self.store.execute(StorageOp::MoveToDLQ {
-                        id: msg.id,
-                        msg,
+                        id: dlq_message.id,
+                        msg: dlq_message,
                     }).await;
                     let _ = reply.send(true);
                 } else {
@@ -300,20 +297,17 @@ impl QueueActor {
             }
             
             // DLQ Command Handlers
-            QueueActorCommand::PeekDLQ { limit, reply } => {
-                let messages = self.dlq_state.peek_messages(limit);
-                let _ = reply.send(messages);
+            QueueActorCommand::PeekDLQ { limit, offset, reply } => {
+                let (total, messages) = self.dlq_state.peek(offset, limit);
+                let _ = reply.send((total, messages));
                 true
             }
             
             QueueActorCommand::MoveToQueue { message_id, reply } => {
                 // Remove from DLQ and add to main queue
-                if let Some(msg) = self.dlq_state.remove_by_id(message_id) {
+                if let Some(dlq_msg) = self.dlq_state.remove(&message_id) {
                     // Create new message for main queue (reset attempts)
-                    let mut new_msg = msg.clone();
-                    new_msg.attempts = 0;
-                    new_msg.visible_at = 0;
-                    new_msg.state = MessageState::Ready;
+                    let new_msg = dlq_msg.clone().to_message();
                     
                     // Add to main queue
                     self.main_state.push(new_msg.clone());
@@ -336,7 +330,7 @@ impl QueueActor {
             
             QueueActorCommand::DeleteDLQ { message_id, reply } => {
                 // Remove from DLQ
-                if self.dlq_state.remove_by_id(message_id).is_some() {
+                if self.dlq_state.remove(&message_id).is_some() {
                     // Persist deletion
                     let _ = self.store.execute(StorageOp::DeleteDLQ(message_id)).await;
                     let _ = reply.send(true);
@@ -378,16 +372,12 @@ impl QueueActor {
                     }).await;
                 }
 
-                for msg in dlq_msgs {
-                    // Force message to Ready state for DLQ (so peek_messages can find it)
-                    let mut dlq_msg = msg.clone();
-                    dlq_msg.state = MessageState::Ready;
-                    dlq_msg.visible_at = 0;
+                for dlq_msg in dlq_msgs {
+                    self.dlq_state.push(dlq_msg.clone());
                     
-                    self.dlq_state.push(dlq_msg);
                     let _ = self.store.execute(StorageOp::MoveToDLQ {
-                        id: msg.id,
-                        msg,
+                        id: dlq_msg.id,
+                        msg: dlq_msg,
                     }).await;
                 }
                 

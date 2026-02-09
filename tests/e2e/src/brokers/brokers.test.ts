@@ -174,7 +174,7 @@ describe('BROKER INTEGRATION', async () => {
             const qName = `queue-dlq-${randomUUID()}`;
             // Max 1 retry (2 attempts total)
             const q = await nexo.queue(qName).create({ maxRetries: 1, visibilityTimeoutMs: 100 });
-            const dlq = await nexo.queue(`${qName}_dlq`).create();
+            // NOTE: We don't create a separate DLQ queue anymore. It's internal.
 
             await q.push('fail_payload');
 
@@ -187,14 +187,10 @@ describe('BROKER INTEGRATION', async () => {
             await new Promise(r => setTimeout(r, 1000));
             sub.stop();
 
-            // Check DLQ
-            let dlqMsg = null;
-            const dlqSub = await dlq.subscribe(async (data) => {
-                dlqMsg = data;
-            });
-
-            await waitFor(() => expect(dlqMsg).toBe('fail_payload'));
-            dlqSub.stop();
+            // Check DLQ using peek
+            const dlqResult = await q.dlq.peek(10);
+            expect(dlqResult.total).toBe(1);
+            expect(dlqResult.items[0].data).toBe('fail_payload');
         });
 
         it('should respect priority (High before Low)', async () => {
@@ -221,8 +217,9 @@ describe('BROKER INTEGRATION', async () => {
             const qName = `dlq-test-${randomUUID()}`;
 
             // Create queue with low max_retries to trigger DLQ quickly
+            // INCREASED visibilityTimeoutMs to 5000ms to avoid premature timeout during test
             const q = await nexo.queue(qName).create({
-                visibilityTimeoutMs: 100,
+                visibilityTimeoutMs: 5000, 
                 maxRetries: 1, // Only 1 retry allowed (attempts >= 1 -> DLQ)
                 persistence: 'file_sync'
             });
@@ -236,51 +233,66 @@ describe('BROKER INTEGRATION', async () => {
             const received: any[] = [];
             const sub = await q.subscribe(async (msg) => {
                 received.push(msg);
-                // Don't ack - let them timeout and go to DLQ
+                // Don't ack - throw error so NACK sends them to DLQ
                 throw new Error('Simulated processing error');
             }, { batchSize: 10, waitMs: 100 });
-
-            // Wait for messages to be consumed and timeout
-            await waitFor(() => expect(received.length).toBe(3), 2000);
-
+            // Wait for messages to be consumed and NACKed
+            await waitFor(() => expect(received.length).toBe(3));
             // Stop subscription before waiting for DLQ
             sub.stop();
 
-            // Wait for visibility timeout + actor wakeup
-            await new Promise(r => setTimeout(r, 300));
-
             // 1. Peek DLQ - should have 3 messages
-            const dlqMessages = await q.dlq.peek(10);
-            expect(dlqMessages.length).toBe(3);
-            expect(dlqMessages[0].attempts).toBeGreaterThanOrEqual(1);
+            // Use waitFor to ensure eventual consistency (actor processing NACKs)
+            let dlqResult;
+            await waitFor(async () => {
+                dlqResult = await q.dlq.peek(10);
+                expect(dlqResult.total).toBe(3);
+                expect(dlqResult.items.length).toBe(3);
+            });
+            
+            expect(dlqResult.items[0].attempts).toBeGreaterThanOrEqual(1);
 
-            const msg1Id = dlqMessages[0].id;
-            const msg2Id = dlqMessages[1].id;
+            // The list is reversed (newest first), but parallel processing makes order non-deterministic.
+            // Instead of relying on index 0, we find the specific message we want to test.
+            const targetMsg = dlqResult.items.find((i: any) => i.data.order === 'order3');
+            const otherMsg = dlqResult.items.find((i: any) => i.data.order === 'order2');
+            
+            expect(targetMsg).toBeDefined();
+            expect(otherMsg).toBeDefined();
+
+            const msgToReplayId = targetMsg!.id;
+            const msgToDeleteId = otherMsg!.id;
 
             // 2. Move one message back to main queue (replay)
-            const moved = await q.dlq.moveToQueue(msg1Id);
+            console.log('Moving message back to queue:', msgToReplayId);
+            const moved = await q.dlq.moveToQueue(msgToReplayId);
             expect(moved).toBe(true);
 
-            // Give actor time to process the move
-            await new Promise(r => setTimeout(r, 200));
-
             // Verify it's back in main queue using a new queue instance
+            console.log('Subscribing to consume replayed message...');
             const replayed: any[] = [];
+            
+            // Use concurrency 1 to be safe
             const sub2 = await nexo.queue(qName).subscribe(async (msg) => {
+                console.log('Consumer received:', msg);
                 replayed.push(msg);
-            }, { batchSize: 1, waitMs: 100 });
+            }, { batchSize: 1, waitMs: 200, concurrency: 1 });
 
-            await waitFor(() => expect(replayed.length).toBe(1), 2000);
-            expect(replayed[0].order).toBe('order1');
+            // Wait with generous timeout
+            await waitFor(() => expect(replayed.length).toBe(1));
+            
+            // We moved 'order3', so we expect 'order3' back
+            expect(replayed[0].order).toBe('order3'); 
             sub2.stop();
 
             // 3. Delete one specific message from DLQ
-            const deleted = await q.dlq.delete(msg2Id);
+            const deleted = await q.dlq.delete(msgToDeleteId);
             expect(deleted).toBe(true);
 
-            // Verify only 1 message left in DLQ
+            // Verify only 1 message left in DLQ (started with 3, moved 1, deleted 1 -> 1 left)
             const dlqAfterDelete = await q.dlq.peek(10);
-            expect(dlqAfterDelete.length).toBe(1);
+            expect(dlqAfterDelete.total).toBe(1);
+            expect(dlqAfterDelete.items.length).toBe(1);
 
             // 4. Purge all remaining messages
             const purgedCount = await q.dlq.purge();
@@ -288,7 +300,8 @@ describe('BROKER INTEGRATION', async () => {
 
             // Verify DLQ is empty
             const dlqAfterPurge = await q.dlq.peek(10);
-            expect(dlqAfterPurge.length).toBe(0);
+            expect(dlqAfterPurge.total).toBe(0);
+            expect(dlqAfterPurge.items.length).toBe(0);
 
             await q.delete();
         });
@@ -315,9 +328,9 @@ describe('BROKER INTEGRATION', async () => {
             sub.stop();
 
             // Check DLQ
-            const dlqMessages = await q.dlq.peek(10);
-            expect(dlqMessages.length).toBe(1);
-            expect(dlqMessages[0].failureReason).toBe("Specific Failure Reason");
+            const dlqResult = await q.dlq.peek(10);
+            expect(dlqResult.total).toBe(1);
+            expect(dlqResult.items[0].failureReason).toBe("Specific Failure Reason");
         });
 
     });
