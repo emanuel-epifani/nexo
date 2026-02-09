@@ -78,11 +78,18 @@ src/brokers/{broker}/
 - **Benchmarks**: `tests/benchmark_*.rs`
 
 **TypeScript Tests** (`sdk/ts/tests/`):
-- **Location**: `sdk/ts/tests/brokers/{broker}.test.ts` (one file per broker)
+- **Organization**: One file per broker/feature
+  - `brokers/store.test.ts` - STORE (KV) tests
+  - `brokers/queue.test.ts` - QUEUE + DLQ tests
+  - `brokers/pubsub.test.ts` - PUBSUB + wildcards tests
+  - `brokers/stream.test.ts` - STREAM + consumer groups tests
+  - `brokers/cross-broker.test.ts` - Binary payload + protocol tests
+  - `brokers/reconnection.test.ts` - Socket reconnection tests
+  - `brokers/dashboard-prefill.test.ts` - Dashboard data visualization
 - **Structure**: Nested describes (BROKER → FEATURE → test cases)
-- **Priority**: Happy path → probable edge cases → race conditions → reconnection scenarios
-- **Performance**: Separate file `sdk/ts/tests/performance/{broker}.test.ts`
-- **Run**: `cd sdk/ts && npm test`
+- **Naming**: All resources use `randomUUID()` for uniqueness
+- **Setup**: Global setup builds server once, tests reuse singleton client (`nexo.ts`)
+- **Run**: `cd sdk/ts && npm test` (or `npm test store` for specific broker)
 
 ### Code Quality Gates
 - No magic numbers/strings (use named constants)
@@ -116,11 +123,18 @@ sdk/ts/
 │   ├── protocol/             # Protocol implementation
 │   └── types/                # Type definitions
 ├── tests/                    # Test suite (not published)
-│   ├── brokers/              # Broker E2E tests
+│   ├── brokers/              # Broker E2E tests (one file per broker)
+│   │   ├── store.test.ts
+│   │   ├── queue.test.ts
+│   │   ├── pubsub.test.ts
+│   │   ├── stream.test.ts
+│   │   ├── cross-broker.test.ts
+│   │   ├── reconnection.test.ts
+│   │   └── dashboard-prefill.test.ts
 │   ├── performance/          # Performance tests
-│   ├── utils/                # Test utilities
-│   ├── global-setup.ts       # Vitest global setup
-│   └── nexo.ts               # Test client singleton
+│   ├── utils/                # Test utilities (wait-for, server, etc.)
+│   ├── global-setup.ts       # Vitest global setup (build + start server)
+│   └── nexo.ts               # Test client singleton (pre-connected)
 ├── dist/                     # Build output (published)
 ├── package.json
 ├── vitest.config.ts
@@ -207,10 +221,12 @@ dashboard/src/
 - **Deterministic**: Calculate exact wait times (no random timeouts)
 - **Independent**: Each test runnable alone, no shared state pollution
 - **Complete Coverage**: ALL implemented features tested
+- **Unique Names**: Always use `randomUUID()` for resource names (queues, topics, keys)
 
 ### Setup/Teardown
-**Global**: Build binary (`--release`), start server, kill after all tests
-**Per-File**: Reuse singleton Nexo client (avoid unnecessary `connect()`/`disconnect()`)
+**Global** (`global-setup.ts`): Build binary (not in `--release` to be faster), start server once, kill after all tests
+**Per-File**: Reuse singleton Nexo client from `nexo.ts` (avoid unnecessary `connect()`/`disconnect()`)
+**Exception**: `stream.test.ts` creates 2 shared clients in `beforeAll` for consumer group tests
 
 ### Deterministic Test Timing
 **Bad**: `await sleep(2000)` (random guess)
