@@ -1,0 +1,11 @@
+# Exclude tests from published package
+tests/
+vitest.config.ts
+tsconfig.test.json
+
+# Exclude source files (only dist/ is published)
+src/
+
+# Exclude development files
+*.test.ts
+*.spec.ts

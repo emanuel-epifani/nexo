@@ -1,4 +1,4 @@
-import { NexoClient } from '@nexo/client';
+import { NexoClient } from '../src/client';
 
 /**
  * 🚀 TOP-LEVEL AWAIT SINGLETON

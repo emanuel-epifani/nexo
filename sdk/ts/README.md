@@ -19,6 +19,25 @@ This exposes:
 npm install @emanuelepifani/nexo-client
 ```
 
+## Development
+
+### Running Tests
+
+```bash
+# Install dependencies
+npm install
+
+# Run all tests
+npm test
+
+# Run tests in watch mode
+npm run test:watch
+```
+
+**Note**: Tests require a running Nexo server. The test suite automatically builds and starts the server via `global-setup.ts`.
+
+---
+
 ### Connection
 ```typescript
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });

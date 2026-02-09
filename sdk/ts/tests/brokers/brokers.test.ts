@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import { NexoClient } from '../../../../sdk/ts/src/client';
+import { NexoClient } from '../../src/client';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 import { BenchmarkProbe } from "../utils/benchmark-misure";

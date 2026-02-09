@@ -5,8 +5,8 @@ import { z } from 'zod';
 
 
 
-// 1. Load .env from the root monorepo
-loadEnvFile(resolve(__dirname, '../../.env'));
+// 1. Load .env from the root project
+loadEnvFile(resolve(__dirname, '../.env'));
 
 
 // 2. Define Env Schema
@@ -35,18 +35,13 @@ Object.entries(result.data).forEach(([key, value]) => {
 
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      '@nexo/client': resolve(__dirname, '../../sdk/ts/src/index.ts'),
-    },
-  },
   test: {
     globals: true,
     testTimeout: 10000000,
     hookTimeout: 10000000,
-    include: ['src/**/*.test.ts'],
-    setupFiles: ["./src/file-setup.ts"],
-    globalSetup: ['./src/global-setup.ts'],
+    include: ['tests/**/*.test.ts'],
+    setupFiles: ["./tests/file-setup.ts"],
+    globalSetup: ['./tests/global-setup.ts'],
     // 1. Disabilita parallelismo TRA file
     fileParallelism: false,
     // 2. Disabilita parallelismo tra test DENTRO lo stesso file

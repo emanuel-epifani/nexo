@@ -72,15 +72,17 @@ src/brokers/{broker}/
 
 ### Testing Strategy
 
-**Rust Tests**:
+**Rust Tests** (`tests/`):
 - **Unit tests**: Inline `#[cfg(test)]` modules for pure logic
 - **Integration tests**: `tests/integration/*.rs` for multi-module flows
+- **Benchmarks**: `tests/benchmark_*.rs`
 
-**E2E Tests** (TypeScript SDK):
-- **Location**: `tests/e2e/src/brokers/{broker}.test.ts` (one file per broker)
+**TypeScript Tests** (`sdk/ts/tests/`):
+- **Location**: `sdk/ts/tests/brokers/{broker}.test.ts` (one file per broker)
 - **Structure**: Nested describes (BROKER → FEATURE → test cases)
 - **Priority**: Happy path → probable edge cases → race conditions → reconnection scenarios
-- **Performance**: Separate file `tests/e2e/src/performance/{broker}.test.ts`
+- **Performance**: Separate file `sdk/ts/tests/performance/{broker}.test.ts`
+- **Run**: `cd sdk/ts && npm test`
 
 ### Code Quality Gates
 - No magic numbers/strings (use named constants)
@@ -103,15 +105,26 @@ src/brokers/{broker}/
 ### File Organization (SDK)
 
 ```
-sdk/ts/src/
-├── client.ts                 # Main entry point
-├── brokers/
-│   ├── queue.ts              # Queue broker facade
-│   ├── store.ts              # Store broker facade
-│   ├── pubsub.ts             # PubSub broker facade
-│   └── stream.ts             # Stream broker facade
-├── protocol/                 # Protocol implementation
-└── types/                    # Type definitions
+sdk/ts/
+├── src/                      # SDK source code
+│   ├── client.ts             # Main entry point
+│   ├── brokers/
+│   │   ├── queue.ts          # Queue broker facade
+│   │   ├── store.ts          # Store broker facade
+│   │   ├── pubsub.ts         # PubSub broker facade
+│   │   └── stream.ts         # Stream broker facade
+│   ├── protocol/             # Protocol implementation
+│   └── types/                # Type definitions
+├── tests/                    # Test suite (not published)
+│   ├── brokers/              # Broker E2E tests
+│   ├── performance/          # Performance tests
+│   ├── utils/                # Test utilities
+│   ├── global-setup.ts       # Vitest global setup
+│   └── nexo.ts               # Test client singleton
+├── dist/                     # Build output (published)
+├── package.json
+├── vitest.config.ts
+└── .npmignore                # Exclude tests/ from npm package
 ```
 
 ### File Organization (Dashboard)
@@ -163,9 +176,25 @@ dashboard/src/
 - Explicit return types for complex functions
 
 ### CSS & Styling (Dashboard)
-- **Tailwind first**: Use semantic tokens (`bg-accent`, `text-muted-foreground`), not hardcoded colors
-- **shadcn/ui**: Prefer pre-styled components
-- **Inline styles**: Only for dynamic runtime values (e.g., `style={{ backgroundColor: team.color }}`)
+
+**Follow shadcn/ui Style System**:
+- **Components**: ALWAYS use shadcn/ui components (Button, Card, Badge, etc.) - no custom alternatives
+- **Colors**: Use ONLY semantic tokens (`bg-background`, `bg-card`, `bg-accent`, `text-foreground`, `text-muted-foreground`, `border`) - NEVER hardcoded colors or arbitrary Tailwind shades
+- **Spacing**: Use Tailwind scale (`p-2/4/6/8`, `gap-2/4/6/8`, `space-y-2/4/6/8`) - NEVER custom values like `p-5`, `mt-[13px]`
+- **Typography**: Use scale (`text-sm/base/lg/xl/2xl`, `font-normal/medium/semibold/bold`) - NEVER custom sizes like `text-[17px]`
+- **Borders**: `rounded-lg` (cards), `rounded-md` (inputs/buttons) - consistent across all components
+- **Shadows**: `shadow-sm` (subtle), `shadow-md` (elevated), `shadow-lg` (modals) - no custom shadows
+- **Transitions**: ALWAYS add `transition-colors` or `transition-all` with `duration-200/300` for interactive elements
+- **Hover States**: ALWAYS present on interactive elements (`hover:bg-accent`, `hover:scale-105`)
+- **Inline styles**: ONLY for dynamic runtime values (e.g., `style={{ backgroundColor: team.color }}`)
+
+**Anti-Patterns**:
+- ❌ Custom hex colors (`#3b82f6` → use `text-primary`)
+- ❌ Arbitrary values (`mt-[13px]` → use `mt-4`)
+- ❌ Custom font sizes (`text-[17px]` → use `text-lg`)
+- ❌ Missing hover/focus states on buttons/links
+- ❌ Inconsistent border-radius (mixing `rounded-lg` and `rounded-xl`)
+- ❌ Custom component styles when shadcn equivalent exists
 
 ### State Management
 **Priority**: Local (`useState`) → Shared (Zustand) → Server (TanStack Query) → URL (React Router)
@@ -217,6 +246,9 @@ Enterprise patterns (repository/factory) for single use. Direct implementation u
 ### ❌ Test Interdependence
 Tests depending on execution order. Each test must be independent with unique resources.
 
+### ❌ UI Style Inconsistency
+Mixing custom styles with shadcn/ui, hardcoded colors, arbitrary spacing values. ALWAYS follow shadcn style system (semantic tokens, Tailwind scale, pre-built components).
+
 ---
 
 ## ✅ Pre-Commit Quality Checklist
@@ -227,6 +259,7 @@ Tests depending on execution order. Each test must be independent with unique re
 **Clean Code**: No leftovers? Semantic names? No commented code?
 **Architecture**: File <500 LOC? No premature abstractions? Clear separation?
 **TypeScript**: No `any`/`@ts-ignore`? Semantic tokens? 3-tier respected?
+**UI Style**: shadcn components only? Semantic color tokens? Tailwind spacing scale? Hover states present?
 
 ---
 

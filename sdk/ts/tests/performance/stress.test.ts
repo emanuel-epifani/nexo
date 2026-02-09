@@ -1,7 +1,7 @@
 import {expect, it} from "vitest";
 import {BenchmarkProbe} from "../utils/benchmark-misure";
 import {nexo} from "../nexo";
-import {Cursor, FrameCodec} from "../../../../sdk/ts/src/codec";
+import {Cursor, FrameCodec} from "../../src/codec";
 
 
 describe('Stress test', async () => {
