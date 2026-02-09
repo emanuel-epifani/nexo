@@ -101,20 +101,21 @@ await criticalQueue.subscribe(
 // 4. DEAD LETTER QUEUE (DLQ) - Failed Message Management
 // ---------------------------------------------------------
 
-// DLQ is automatically created for every main queue and always accessible
+// DLQ is automatically available for every main queue.
 // When messages exceed maxRetries, they're moved to DLQ automatically
 
 // Inspect failed messages
 const failedMessages = await criticalQueue.dlq.peek(10);
-console.log(`Found ${failedMessages.length} failed messages`);
+console.log(`Found ${failedMessages.total} failed messages`);
 
-for (const msg of failedMessages) {
-    console.log(`Message ${msg.id}: attempts=${msg.attempts}`);
+for (const msg of failedMessages.items) {
+    console.log(`Message ${msg.id}: attempts=${msg.attempts}, reason=${msg.failureReason}`);
     console.log(`Payload:`, msg.data);
 
     // Decision logic based on failure reason
     if (shouldRetry(msg.data)) {
         // Replay: Move back to main queue (resets attempts to 0)
+        // The message will be immediately available for consumption
         const moved = await criticalQueue.dlq.moveToQueue(msg.id);
         console.log(`Replayed message ${msg.id}: ${moved}`);
     } else {
@@ -129,7 +130,7 @@ const purgedCount = await criticalQueue.dlq.purge(); // Clear all DLQ messages
 console.log(`Purged ${purgedCount} messages from DLQ`);
 
 // DLQ API:
-// - peek(limit): Inspect messages without removing them
+// - peek(limit, offset): Inspect messages without removing them. Returns { total, items: [] }
 // - moveToQueue(messageId): Replay a specific message (returns false if not found)
 // - delete(messageId): Permanently remove a specific message (returns false if not found)
 // - purge(): Remove all messages (returns count)
