@@ -57,6 +57,13 @@ module.exports = {
         content: "hsl(var(--content-bg))",
         "item-hover": "hsl(var(--item-hover))",
         "item-selected": "hsl(var(--item-selected))",
+        // Status Colors
+        status: {
+          pending: "hsl(var(--status-pending))",
+          processing: "hsl(var(--status-processing))",
+          success: "hsl(var(--status-success))",
+          error: "hsl(var(--status-error))",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

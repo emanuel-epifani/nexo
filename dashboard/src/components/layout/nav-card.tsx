@@ -1,6 +1,16 @@
 import { RefreshCw } from 'lucide-react'
 
-export function NavCard({ label, desc, active, onClick, icon, onRefresh, isRefreshing }: any) {
+interface NavCardProps {
+  label: string
+  desc: string
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
+  onRefresh: () => void
+  isRefreshing: boolean
+}
+
+export function NavCard({ label, desc, active, onClick, icon, onRefresh, isRefreshing }: NavCardProps) {
     return (
         <div
             onClick={onClick}
@@ -25,7 +35,7 @@ export function NavCard({ label, desc, active, onClick, icon, onRefresh, isRefre
                     <span className={`text-base font-mono font-bold tracking-tight leading-tight ${active ? 'text-foreground' : 'text-muted-foreground'}`}>
                         {label}
                     </span>
-                    <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider truncate">
+                    <span className="text-xs font-mono text-muted-foreground uppercase tracking-wider truncate">
                         {desc}
                     </span>
                 </div>

@@ -43,6 +43,12 @@
     --ring: 222.2 84% 4.9%;
 
     --radius: 0.5rem;
+
+    /* --- STATUS COLORS (Semantic Tokens) --- */
+    --status-pending: 45 93% 47%;      /* Amber 500 - Pending messages */
+    --status-processing: 213 94% 68%;  /* Blue 400 - In-flight/processing */
+    --status-success: 142 76% 36%;     /* Green 600 - Success states */
+    --status-error: 0 84.2% 60.2%;     /* Red 500 - Errors (same as destructive) */
   }
 }
 

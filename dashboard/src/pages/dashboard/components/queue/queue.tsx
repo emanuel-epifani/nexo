@@ -140,14 +140,14 @@ export function QueueView({ data }: Props) {
               <div className="flex border-b-2 border-border">
                   <button 
                       onClick={() => setActiveTab('active')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'active' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                      className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors ${activeTab === 'active' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       Active ({activeQueues.length})
                   </button>
                   <div className="w-[1px] bg-border" />
                   <button 
                       onClick={() => setActiveTab('dlq')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 ${activeTab === 'dlq' ? 'bg-destructive/10 text-destructive' : 'text-muted-foreground hover:text-foreground'}`}
+                      className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 ${activeTab === 'dlq' ? 'bg-destructive/10 text-destructive' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       DLQ / Errors ({dlqQueues.length})
                       {dlqQueues.length > 0 && <AlertTriangle className="h-3 w-3 text-destructive" />}
@@ -199,7 +199,7 @@ export function QueueView({ data }: Props) {
 
                                   <div className="flex items-center gap-2">
                                       {q.pending.length > 0 && (
-                                          <Badge variant="outline" className={`h-4 px-1.5 text-[9px] rounded-sm border ${activeTab === 'dlq' ? 'border-destructive bg-destructive/10 text-destructive' : 'border-amber-500/50 bg-amber-500/10 text-amber-500'}`}>
+                                          <Badge variant="outline" className={`h-4 px-1.5 text-xs rounded-sm border ${activeTab === 'dlq' ? 'border-destructive bg-destructive/10 text-destructive' : 'border-status-pending bg-status-pending/10 text-status-pending'}`}>
                                               {q.pending.length}
                                           </Badge>
                                       )}
@@ -220,8 +220,8 @@ export function QueueView({ data }: Props) {
                          <div className="flex justify-between items-center mb-3">
                              <h2 className={`text-xs font-bold ${activeTab === 'dlq' ? 'text-destructive' : 'text-foreground'}`}>{selectedQueue.name}</h2>
                              <div className="flex gap-3">
-                                 <StatBadge label="PENDING" value={selectedQueue.pending.length} color="text-amber-500" />
-                                 <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight.length} color="text-blue-400" />
+                                 <StatBadge label="PENDING" value={selectedQueue.pending.length} color="text-status-pending" />
+                                 <StatBadge label="IN_FLIGHT" value={selectedQueue.inflight.length} color="text-status-processing" />
                                  <StatBadge label="SCHEDULED" value={selectedQueue.scheduled.length} color="text-muted-foreground" />
                              </div>
                          </div>
@@ -244,7 +244,7 @@ export function QueueView({ data }: Props) {
                         ) : (
                             <div className="p-0">
                                 {/* Table Header */}
-                                <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-[9px] font-bold uppercase text-muted-foreground z-10">
+                                <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10">
                                     <div>ID</div>
                                     <div className="text-center">Status</div>
                                     <button 
@@ -301,16 +301,16 @@ export function QueueView({ data }: Props) {
                                                             ${selectedMessageId === msg.id ? 'bg-secondary' : 'hover:bg-muted/50'}
                                                         `}
                                                     >
-                                                        <span className={`font-mono text-[11px] truncate ${selectedMessageId === msg.id ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
+                                                        <span className={`font-mono text-sm truncate ${selectedMessageId === msg.id ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
                                                             {msg.id}
                                                         </span>
                                                         <div className="flex justify-center">
                                                             <StatusBadgeCompact state={msg.state} />
                                                         </div>
-                                                        <div className={`text-center text-[9px] ${msg.priority > 0 ? 'text-amber-500 font-bold' : 'text-muted-foreground'}`}>
+                                                        <div className={`text-center text-xs ${msg.priority > 0 ? 'text-status-pending font-bold' : 'text-muted-foreground'}`}>
                                                             {msg.priority}
                                                         </div>
-                                                        <div className={`text-center text-[9px] ${msg.attempts > 0 ? 'text-destructive font-bold' : 'text-muted-foreground'}`}>
+                                                        <div className={`text-center text-xs ${msg.attempts > 0 ? 'text-destructive font-bold' : 'text-muted-foreground'}`}>
                                                             {msg.attempts}
                                                         </div>
                                                     </div>
@@ -337,40 +337,40 @@ export function QueueView({ data }: Props) {
                       {/* Header - Compact */}
                       <div className="p-3 border-b border-border bg-section-header flex-shrink-0">
                           <div className="flex items-center justify-between mb-2">
-                              <h3 className="text-[10px] font-bold uppercase text-muted-foreground">ID</h3>
+                              <h3 className="text-xs font-bold uppercase text-muted-foreground">ID</h3>
                               <button
                                   onClick={() => copyToClipboard(selectedMessage.id, selectedMessage.id)}
                                   className="p-1 hover:bg-muted rounded transition-colors"
                                   title="Copy Message ID"
                               >
                                   {copiedId === selectedMessage.id ? (
-                                      <Check className="h-3 w-3 text-green-500" />
+                                      <Check className="h-3 w-3 text-status-success" />
                                   ) : (
                                       <Copy className="h-3 w-3 text-muted-foreground" />
                                   )}
                               </button>
                           </div>
                           <div className="bg-muted/50 p-2 rounded border border-border break-all">
-                              <span className="font-mono text-[13px] text-foreground">{selectedMessage.id}</span>
+                              <span className="font-mono text-sm text-foreground">{selectedMessage.id}</span>
                           </div>
                       </div>
 
                       {/* Delivery Time - Only for Scheduled */}
                       {messageState === 'Scheduled' && selectedMessage && 'next_delivery_at' in selectedMessage && (
                           <div className="p-3 border-b border-border bg-section-header">
-                              <h3 className="text-[10px] font-bold uppercase text-muted-foreground mb-2">DELIVERY AT</h3>
+                              <h3 className="text-xs font-bold uppercase text-muted-foreground mb-2">DELIVERY AT</h3>
                               <div className="bg-panel p-2 rounded border border-border">
-                                  <span className="font-mono text-[11px] text-foreground">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
+                                  <span className="font-mono text-sm text-foreground">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
                               </div>
                           </div>
                       )}
 
                       {/* Payload - Full Space */}
                       <div className="flex-1 flex flex-col min-h-0 p-3">
-                          <h4 className="text-[13px] font-bold uppercase text-muted-foreground mb-2 flex-shrink-0">PAYLOAD</h4>
+                          <h4 className="text-sm font-bold uppercase text-muted-foreground mb-2 flex-shrink-0">PAYLOAD</h4>
                           <ScrollArea className="flex-1 border border-border rounded bg-muted/50">
                               <div className="p-3">
-                                  <pre className="font-mono text-[13px] text-foreground whitespace-pre-wrap break-words">
+                                  <pre className="font-mono text-sm text-foreground whitespace-pre-wrap break-words">
                                       {typeof selectedMessage.payload === 'string' 
                                           ? selectedMessage.payload 
                                           : JSON.stringify(selectedMessage.payload, null, 2)}
@@ -390,21 +390,34 @@ export function QueueView({ data }: Props) {
   )
 }
 
-function StatBadge({ label, value, color }: any) {
+interface StatBadgeProps {
+  label: string
+  value: number
+  color: string
+}
+
+function StatBadge({ label, value, color }: StatBadgeProps) {
     return (
-        <div className="flex items-center gap-2 text-[10px] font-mono">
+        <div className="flex items-center gap-2 text-xs font-mono">
             <span className="text-muted-foreground">{label}:</span>
             <span className={`font-bold ${value > 0 ? color : 'text-muted-foreground'}`}>{value}</span>
         </div>
     )
 }
 
-function FilterButton({ label, count, active, onClick }: any) {
+interface FilterButtonProps {
+  label: string
+  count: number
+  active: boolean
+  onClick: () => void
+}
+
+function FilterButton({ label, count, active, onClick }: FilterButtonProps) {
     return (
         <button 
             onClick={onClick}
             className={`
-                px-3 py-1 text-[10px] font-mono uppercase rounded-sm border transition-all flex items-center gap-2
+                px-3 py-1 text-xs font-mono uppercase rounded-sm border transition-all flex items-center gap-2
                 ${active 
                     ? 'bg-secondary border-border text-foreground' 
                     : 'bg-transparent border-transparent text-muted-foreground hover:bg-muted hover:text-foreground'
@@ -417,15 +430,19 @@ function FilterButton({ label, count, active, onClick }: any) {
     )
 }
 
-function StatusBadgeCompact({ state }: { state: string }) {
+interface StatusBadgeCompactProps {
+  state: string
+}
+
+function StatusBadgeCompact({ state }: StatusBadgeCompactProps) {
     let color = "bg-muted text-muted-foreground border-border"
     let icon = <Clock className="h-2 w-2" />
 
     if (state === 'InFlight') {
-        color = "bg-blue-500/10 text-blue-400 border-blue-500/30"
+        color = "bg-status-processing/10 text-status-processing border-status-processing/30"
         icon = <RefreshCw className="h-2 w-2 animate-spin duration-[3s]" />
     } else if (state === 'Pending') {
-        color = "bg-amber-500/10 text-amber-500 border-amber-500/30"
+        color = "bg-status-pending/10 text-status-pending border-status-pending/30"
         icon = <AlertCircle className="h-2 w-2" />
     } else if (state === 'Scheduled') {
         color = "bg-secondary text-foreground border-border"
@@ -433,7 +450,7 @@ function StatusBadgeCompact({ state }: { state: string }) {
     }
 
     return (
-        <div className={`flex items-center gap-1 px-1 py-0.5 rounded-sm border text-[8px] ${color}`}>
+        <div className={`flex items-center gap-1 px-1 py-0.5 rounded-sm border text-xs ${color}`}>
             {icon}
             <span className="uppercase font-bold">{state}</span>
         </div>

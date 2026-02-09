@@ -26,7 +26,7 @@ export function StoreView({ data }: Props) {
           
           {/* SIDEBAR: Navigation */}
           <div className="w-48 flex flex-col border-r-2 border-border bg-sidebar">
-              <div className="p-3 border-b-2 border-border text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
+              <div className="p-3 border-b-2 border-border text-xs font-bold text-muted-foreground uppercase tracking-widest">
                   DATA_TYPES
               </div>
               <div className="p-2 space-y-0.5">
@@ -65,7 +65,16 @@ export function StoreView({ data }: Props) {
   )
 }
 
-function NavButton({ label, icon, count, active, onClick, disabled }: any) {
+interface NavButtonProps {
+  label: string
+  icon: React.ReactNode
+  count: number
+  active: boolean
+  onClick: () => void
+  disabled?: boolean
+}
+
+function NavButton({ label, icon, count, active, onClick, disabled }: NavButtonProps) {
     return (
         <button
             onClick={onClick}
@@ -84,7 +93,7 @@ function NavButton({ label, icon, count, active, onClick, disabled }: any) {
                 <span>{label}</span>
             </div>
             {count > 0 && (
-                <span className={`text-[9px] px-1.5 py-0.5 rounded-sm ${active ? 'bg-primary/20 text-foreground' : 'bg-muted text-muted-foreground'}`}>
+                <span className={`text-xs px-1.5 py-0.5 rounded-sm ${active ? 'bg-primary/20 text-foreground' : 'bg-muted text-muted-foreground'}`}>
                     {count}
                 </span>
             )}
@@ -193,7 +202,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
         </div>
         
         {/* Footer Count */}
-        <div className="p-2 border-t border-border text-[10px] text-muted-foreground text-center uppercase">
+        <div className="p-2 border-t border-border text-xs text-muted-foreground text-center uppercase">
             {filter === "" 
               ? `${data.keys.length} KEYS`
               : filteredKeys.length >= FILTER_LIMIT 
@@ -211,7 +220,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                     <div className="flex items-center gap-2">
                         <h2 className="text-sm font-bold text-foreground">{selectedKey.key}</h2>
                     </div>
-                    <div className="flex items-center gap-4 text-[10px] text-muted-foreground uppercase tracking-wide">
+                    <div className="flex items-center gap-4 text-xs text-muted-foreground uppercase tracking-wide">
                         <span className="flex items-center gap-1.5">
                             <Clock className="h-3 w-3" /> 
                             expire at: {new Date(selectedKey.exp_at).toLocaleString()}
@@ -228,7 +237,7 @@ function StoreBrowser({ data, structure }: { data: StoreBrokerSnapshot, structur
                 </div>
                 
                  {/* Footer Metadata */}
-                <div className="px-4 py-2 border-t border-border bg-section-header text-[10px] text-muted-foreground flex justify-between font-mono uppercase">
+                <div className="px-4 py-2 border-t border-border bg-section-header text-xs text-muted-foreground flex justify-between font-mono uppercase">
                     <div className="flex items-center gap-2">
                         <Binary className="h-3 w-3" />
                         <span>SIZE: {new Blob([typeof selectedKey.value === 'string' ? selectedKey.value : JSON.stringify(selectedKey.value)]).size} BYTES</span>

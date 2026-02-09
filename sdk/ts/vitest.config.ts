@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 
 // 1. Load .env from the root project
-loadEnvFile(resolve(__dirname, '../.env'));
+loadEnvFile(resolve(__dirname, '../../.env'));
 
 
 // 2. Define Env Schema

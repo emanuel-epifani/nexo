@@ -22,7 +22,7 @@ interface Props {
 interface FlatTopic {
     path: string;
     subscribers: number;
-    retained_value: any | null;
+    retained_value: unknown | null;
     is_wildcard: boolean;
     client_id?: string;
 }
@@ -33,7 +33,7 @@ export function PubSubView({ data }: Props) {
   
   const { topics, wildcards } = useMemo(() => {
       // Use flat topics directly from backend - no traverse needed!
-      const flatTopics = data.topics.map((topic: any) => ({
+      const flatTopics: FlatTopic[] = data.topics.map((topic) => ({
           path: topic.full_path,
           subscribers: topic.subscribers,
           retained_value: topic.retained_value,
@@ -76,14 +76,14 @@ export function PubSubView({ data }: Props) {
               <div className="flex border-b-2 border-border">
                   <button 
                       onClick={() => setActiveTab('topics')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'topics' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                      className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors ${activeTab === 'topics' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       Active Topics ({topics.length})
                   </button>
                   <div className="w-[1px] bg-border" />
                   <button 
                       onClick={() => setActiveTab('wildcards')}
-                      className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'wildcards' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                      className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-colors ${activeTab === 'wildcards' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                       Wildcards ({data.wildcards.multi_level.length + data.wildcards.single_level.length})
                   </button>
@@ -104,20 +104,20 @@ export function PubSubView({ data }: Props) {
                      <div className="p-4 border-b border-border bg-section-header">
                          <div className="flex items-center gap-2 mb-2">
                              {selectedItem.is_wildcard ? (
-                                 <Hash className="h-4 w-4 text-amber-500" />
+                                 <Hash className="h-4 w-4 text-status-pending" />
                              ) : (
-                                 <Circle className="h-3 w-3 text-emerald-500" />
+                                 <Circle className="h-3 w-3 text-status-success" />
                              )}
                              <h2 className="text-sm font-bold text-foreground">{selectedItem.path}</h2>
                          </div>
-                         <div className="flex gap-4 text-[10px] text-muted-foreground uppercase tracking-wide">
+                         <div className="flex gap-4 text-xs text-muted-foreground uppercase tracking-wide">
                              <div className="flex items-center gap-1.5">
                                  <Users className="h-3 w-3" />
                                  {selectedItem.subscribers} SUBSCRIBERS
                              </div>
                              {selectedItem.client_id && (
                                  <div className="flex items-center gap-1.5 text-muted-foreground">
-                                     <Zap className="h-3 w-3 text-amber-500" />
+                                     <Zap className="h-3 w-3 text-status-pending" />
                                      CLIENT: {selectedItem.client_id}
                                  </div>
                              )}
@@ -141,7 +141,7 @@ export function PubSubView({ data }: Props) {
 
                      {/* Footer Metadata */}
                      {selectedItem.retained_value && (
-                        <div className="px-4 py-2 border-t border-border bg-section-header text-[10px] text-muted-foreground flex justify-between font-mono uppercase">
+                        <div className="px-4 py-2 border-t border-border bg-section-header text-xs text-muted-foreground flex justify-between font-mono uppercase">
                             <div className="flex items-center gap-2">
                                 <Binary className="h-3 w-3" />
                                 <span>SIZE: {new Blob([JSON.stringify(selectedItem.retained_value)]).size} BYTES</span>
@@ -166,13 +166,14 @@ export function PubSubView({ data }: Props) {
 }
 
 
-// TopicRow component con layout flessibile
-function TopicRow({ item, layout, selected, onSelect }: {
-  item: any;
-  layout: 'topics' | 'wildcards';
-  selected: boolean;
-  onSelect: (path: string) => void;
-}) {
+interface TopicRowProps {
+  item: FlatTopic
+  layout: 'topics' | 'wildcards'
+  selected: boolean
+  onSelect: (path: string) => void
+}
+
+function TopicRow({ item, layout, selected, onSelect }: TopicRowProps) {
   // Layout dinamico basato su type
   const containerClass = layout === 'topics' 
     ? 'group grid grid-cols-[1fr_4rem_4rem] gap-4 items-center px-3 py-2 border-b border-border/50 cursor-pointer transition-all min-h-9'
@@ -191,7 +192,7 @@ function TopicRow({ item, layout, selected, onSelect }: {
           </span>
         </div>
         {item.client_id && (
-          <div className="text-[10px] text-muted-foreground truncate">
+          <div className="text-xs text-muted-foreground truncate">
             Client: {item.client_id}
           </div>
         )}
@@ -203,22 +204,22 @@ function TopicRow({ item, layout, selected, onSelect }: {
           {/* Colonna Subscribers */}
           <div className="flex justify-center">
             {!item.is_wildcard && item.subscribers > 0 ? (
-              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-muted text-muted-foreground border-border rounded-sm">
+              <Badge variant="secondary" className="h-4 px-1.5 text-xs bg-muted text-muted-foreground border-border rounded-sm">
                 {item.subscribers}
               </Badge>
             ) : (
-              <span className="text-muted-foreground text-[9px]">—</span>
+              <span className="text-muted-foreground text-xs">—</span>
             )}
           </div>
 
           {/* Colonna Retained */}
           <div className="flex justify-center">
             {item.retained_value ? (
-              <Badge variant="outline" className="h-4 px-1 text-[9px] border-purple-500/30 bg-purple-500/10 text-purple-500 rounded-sm">
+              <Badge variant="outline" className="h-4 px-1 text-xs border-status-processing bg-status-processing/10 text-status-processing rounded-sm">
                 RET
               </Badge>
             ) : (
-              <span className="text-muted-foreground text-[9px]">—</span>
+              <span className="text-muted-foreground text-xs">—</span>
             )}
           </div>
         </>
@@ -227,7 +228,14 @@ function TopicRow({ item, layout, selected, onSelect }: {
   );
 }
 
-function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
+interface TopicBrowserProps {
+  list: FlatTopic[]
+  type: 'topics' | 'wildcards'
+  selectedPath: string | null
+  onSelect: (path: string) => void
+}
+
+function TopicBrowser({ list, type, selectedPath, onSelect }: TopicBrowserProps) {
     const [inputValue, setInputValue] = useState("")
     const [filter, setFilter] = useState("")
     const [wildcardFilter, setWildcardFilter] = useState< 'multi' | 'single'>('single')
@@ -244,7 +252,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
     // Filter for TOPICS
     const filteredTopics = useMemo(() => {
         const lowerFilter = filter.toLowerCase()
-        const result: any[] = []
+        const result: FlatTopic[] = []
         
         for (const t of list) {
             if (t.path.toLowerCase().includes(lowerFilter)) {
@@ -258,7 +266,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
     // Filter for WILDCARDS
     const filteredWildcards = useMemo(() => {
         const lowerFilter = filter.toLowerCase()
-        const result: any[] = []
+        const result: FlatTopic[] = []
         
         for (const t of list) {
             if (t.path.toLowerCase().includes(lowerFilter)) {
@@ -268,7 +276,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
         }
         
         // Apply wildcard type filter
-        return result.filter((t: any) => {
+        return result.filter((t: FlatTopic) => {
             if (wildcardFilter === 'multi') return t.path.includes('#');
             if (wildcardFilter === 'single') return t.path.includes('+');
             return true;
@@ -304,23 +312,23 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                     <div className="flex gap-1 mt-2">
                         <button
                             onClick={() => setWildcardFilter('multi')}
-                            className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
+                            className={`flex-1 px-2 py-1 text-xs font-mono rounded transition-colors ${
                                 wildcardFilter === 'multi'
-                                    ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30'
-                                    : 'bg-background text-muted-foreground border border-border hover:text-amber-500'
+                                    ? 'bg-status-pending/10 text-status-pending border border-status-pending/30'
+                                    : 'bg-background text-muted-foreground border border-border hover:text-status-pending'
                             }`}
                         >
-                            # MULTI level ({list.filter((t: any) => t.path.includes('#')).length})
+                            # MULTI level ({list.filter((t: FlatTopic) => t.path.includes('#')).length})
                         </button>
                         <button
                             onClick={() => setWildcardFilter('single')}
-                            className={`flex-1 px-2 py-1 text-[10px] font-mono rounded transition-colors ${
+                            className={`flex-1 px-2 py-1 text-xs font-mono rounded transition-colors ${
                                 wildcardFilter === 'single'
-                                    ? 'bg-blue-500/10 text-blue-500 border border-blue-500/30'
-                                    : 'bg-background text-muted-foreground border border-border hover:text-blue-500'
+                                    ? 'bg-status-processing/10 text-status-processing border border-status-processing/30'
+                                    : 'bg-background text-muted-foreground border border-border hover:text-status-processing'
                             }`}
                         >
-                            + SINGLE level ({list.filter((t: any) => t.path.includes('+')).length})
+                            + SINGLE level ({list.filter((t: FlatTopic) => t.path.includes('+')).length})
                         </button>
                     </div>
                 )}
@@ -329,7 +337,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             <div ref={parentRef} className="flex-1 overflow-y-auto w-full contain-strict">
                 {/* HEADER DIVERSO BASATO SU TYPE */}
                 {type === 'topics' ? (
-                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-[9px] font-bold uppercase text-muted-foreground z-10">
+                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_4rem_4rem] gap-4 text-xs font-bold uppercase text-muted-foreground z-10">
                         <div className="flex items-center gap-2">
                             <span>Topic Path</span>
                         </div>
@@ -337,7 +345,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                         <div className="w-16 text-center">Retained</div>
                     </div>
                 ) : (
-                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 text-[9px] font-bold uppercase text-muted-foreground z-10">
+                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 text-xs font-bold uppercase text-muted-foreground z-10">
                         <div className="flex items-center gap-2">
                             <span>Wildcard Patterns</span>
                         </div>
@@ -382,7 +390,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
                     </div>
                 ) : (
                     <div className="p-0">
-                        {filtered.map((item: any) => (
+                        {filtered.map((item: FlatTopic) => (
                             <TopicRow 
                                 key={item.path}
                                 item={item}
@@ -396,7 +404,7 @@ function TopicBrowser({ list, type, selectedPath, onSelect }: any) {
             </div>
 
             {/* Footer Count */}
-            <div className="p-2 border-t border-border text-[10px] text-muted-foreground text-center uppercase">
+            <div className="p-2 border-t border-border text-xs text-muted-foreground text-center uppercase">
                 {filter === ""
                     ? `${list.length} ${type === 'topics' ? 'TOPICS' : 'WILDCARDS'}`
                     : (type === 'topics' ? filteredTopics.length : filteredWildcards.length) >= FILTER_LIMIT

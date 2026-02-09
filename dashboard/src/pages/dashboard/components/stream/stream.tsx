@@ -96,9 +96,9 @@ export function StreamView({ data }: Props) {
                                       {t.name}
                                   </span>
                                 </div>
-                                <span className="text-[9px] text-muted-foreground font-mono">
-                                  {t.partitions.length}P
-                              </span>
+                                    <span className="text-xs text-muted-foreground font-mono">
+                                      {t.partitions.length}P
+                                  </span>
                             </div>
                         ))}
                     </div>
@@ -108,7 +108,7 @@ export function StreamView({ data }: Props) {
             {/* COL 2: PARTITIONS LIST */}
             <div className="w-[200px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
                 <div className="px-3 py-2 border-b-2 border-border bg-section-header">
-                    <span className="text-[9px] text-muted-foreground uppercase font-bold tracking-wider">Partitions</span>
+                    <span className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Partitions</span>
                 </div>
                 {hasTopics && selectedTopic ? (
                     <ScrollArea className="flex-1">
@@ -128,7 +128,7 @@ export function StreamView({ data }: Props) {
                                             {p.id}
                                         </span>
                                     </div>
-                                    <span className="text-[9px] text-muted-foreground font-mono">
+                                    <span className="text-xs text-muted-foreground font-mono">
                                         {p.messages.length} messages
                                     </span>
                                 </div>
@@ -148,13 +148,13 @@ export function StreamView({ data }: Props) {
                         <div className="flex-1 flex flex-col min-w-0 border-r-2 border-border">
                             {/* HEADER */}
                             <div className="px-5 py-3  border-b-2 border-border bg-section-header">
-                                <div className="text-[12px] text-muted-foreground font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
-                                <div className="text-[12px] text-muted-foreground font-mono font-medium">Consumer groups:</div>
+                                <div className="text-sm text-muted-foreground font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
+                                <div className="text-sm text-muted-foreground font-mono font-medium">Consumer groups:</div>
                                 {currentPartition.groups.length > 0 && (
                                     <div className="space-y-1">
                                         {currentPartition.groups.map((group: ConsumerGroupSummary) => {
                                             return (
-                                                <div key={group.id} className="grid grid-cols-3 gap-4 text-[11px] text-muted-foreground font-mono">
+                                                <div key={group.id} className="grid grid-cols-3 gap-4 text-sm text-muted-foreground font-mono">
                                                     <div className="truncate ml-6 ">- {group.id}</div>
                                                     <div className="text-right text-muted-foreground">Progress: {group.committed_offset}/{currentPartition.last_offset}</div>
                                                 </div>
@@ -166,7 +166,7 @@ export function StreamView({ data }: Props) {
 
                             {/* EVENTS LOG HEADER */}
                             <div className="px-5 py-2 border-b border-border bg-section-header shrink-0">
-                                <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Events Log</span>
+                                <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Events Log</span>
                             </div>
 
                             {/* CONTENT AREA */}
@@ -174,7 +174,7 @@ export function StreamView({ data }: Props) {
                                 {/* MESSAGES LOG */}
                                 <div className="flex-1 flex flex-col min-h-0">
                                     {/* HEADERS */}
-                                    <div className="flex items-center px-5 py-2 border-b border-border bg-section-header text-[10px] font-mono text-muted-foreground uppercase shrink-0 tracking-wider">
+                                    <div className="flex items-center px-5 py-2 border-b border-border bg-section-header text-xs font-mono text-muted-foreground uppercase shrink-0 tracking-wider">
                                         <div className="w-16 shrink-0">Offset</div>
                                         <div className="flex-1">Timestamp</div>
                                     </div>
@@ -211,10 +211,10 @@ export function StreamView({ data }: Props) {
                                                          ${isSelected ? 'bg-primary/10 border-primary/30' : ''}
                                                      `}
                                                     >
-                                                        <div className={`w-16 shrink-0 font-mono text-[10px] ${isSelected ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
+                                                        <div className={`w-16 shrink-0 font-mono text-xs ${isSelected ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
                                                             {msg.offset}
                                                         </div>
-                                                        <div className="flex-1 font-mono text-[10px] text-muted-foreground">
+                                                        <div className="flex-1 font-mono text-xs text-muted-foreground">
                                                             {timeStr}
                                                         </div>
                                                         {isSelected && <ArrowRight className="h-3 w-3 text-primary ml-2" />}
@@ -230,21 +230,21 @@ export function StreamView({ data }: Props) {
                         {/* RIGHT SECTION: PAYLOAD INSPECTOR */}
                         <div className="w-[420px] bg-content flex flex-col shadow-xl border-l border-border shrink-0">
                             <div className="px-5 py-3 border-b border-border bg-section-header flex items-center justify-between shrink-0">
-                                <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold">Payload</span>
+                                <span className="text-xs text-muted-foreground uppercase tracking-wider font-bold">Payload</span>
                                 {selectedMessage && (
-                                    <span className="text-[10px] font-mono text-muted-foreground">Offset {selectedMessage.offset}</span>
+                                    <span className="text-xs font-mono text-muted-foreground">Offset {selectedMessage.offset}</span>
                                 )}
                             </div>
 
                             <ScrollArea className="flex-1">
                                 <div className="p-5">
                                     {selectedMessage ? (
-                                        <div className="font-mono text-[11px] leading-relaxed text-foreground whitespace-pre-wrap break-all">
+                                        <div className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
                                             {JSON.stringify(selectedMessage.payload, null, 2)}
                                         </div>
                                     ) : (
                                         <div className="flex flex-col items-center justify-center h-40 text-muted-foreground mt-10">
-                                            <p className="text-[10px] text-center opacity-60">
+                                            <p className="text-xs text-center opacity-60">
                                                 Select a message
                                             </p>
                                         </div>
@@ -256,7 +256,7 @@ export function StreamView({ data }: Props) {
                 ) : (
                     <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                         <Database className="h-10 w-10 mb-3 opacity-20" />
-                        <p className="text-[10px] font-mono uppercase tracking-widest opacity-60">SELECT A PARTITION</p>
+                        <p className="text-xs font-mono uppercase tracking-widest opacity-60">SELECT A PARTITION</p>
                     </div>
                 )}
             </div>
