@@ -1,6 +1,6 @@
 use serde::Serialize;
 use super::store::StoreBrokerSnapshot;
-use super::queues::QueueBrokerSnapshot;
+use super::queues::QueueSummary;
 use super::pubsub::PubSubBrokerSnapshot;
 use super::stream::StreamBrokerSnapshot;
 
@@ -12,7 +12,7 @@ pub struct SystemSnapshot {
 #[derive(Serialize)]
 pub struct BrokersSnapshot {
     pub store: StoreBrokerSnapshot,
-    pub queue: QueueBrokerSnapshot,
+    pub queue: Vec<QueueSummary>,
     pub pubsub: PubSubBrokerSnapshot,
     pub stream: StreamBrokerSnapshot,
 }

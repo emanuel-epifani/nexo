@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::brokers::queues::queue::{QueueConfig, Message};
 use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
-use crate::dashboard::models::queues::QueueBrokerSnapshot;
+use crate::dashboard::models::queues::QueueSummary;
 use crate::config::SystemQueueConfig;
 use crate::brokers::queues::dlq::{DlqMessage, DlqState};
 
@@ -42,7 +42,7 @@ pub enum ManagerCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     GetSnapshot {
-        reply: oneshot::Sender<QueueBrokerSnapshot>,
+        reply: oneshot::Sender<Vec<QueueSummary>>,
     },
 }
 
@@ -191,22 +191,17 @@ impl QueueManager {
                 }
                 
                 ManagerCommand::GetSnapshot { reply } => {
-                    let mut active_queues = Vec::new();
-                    let mut dlq_queues = Vec::new();
+                    let mut queues = Vec::new();
                     
                     for (_, actor_tx) in &actors {
                         let (tx, rx) = oneshot::channel();
                         if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
                             if let Ok(summary) = rx.await {
-                                if summary.name.ends_with("_dlq") {
-                                    dlq_queues.push(summary);
-                                } else {
-                                    active_queues.push(summary);
-                                }
+                                queues.push(summary);
                             }
                         }
                     }
-                    let _ = reply.send(QueueBrokerSnapshot { active_queues, dlq_queues });
+                    let _ = reply.send(queues);
                 }
             }
         }
@@ -298,12 +293,12 @@ impl QueueManager {
         rx.await.map_err(|_| "No reply".to_string())
     }
 
-    pub async fn get_snapshot(&self) -> QueueBrokerSnapshot {
+    pub async fn get_snapshot(&self) -> Vec<QueueSummary> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(ManagerCommand::GetSnapshot { reply: tx }).await.is_ok() {
-            rx.await.unwrap_or(QueueBrokerSnapshot { active_queues: vec![], dlq_queues: vec![] })
+            rx.await.unwrap_or(vec![])
         } else {
-            QueueBrokerSnapshot { active_queues: vec![], dlq_queues: vec![] }
+            vec![]
         }
     }
 

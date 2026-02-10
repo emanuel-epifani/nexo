@@ -80,6 +80,11 @@ impl DlqState {
         self.messages.len()
     }
 
+    /// Peek all messages (for snapshotting).
+    /// Returns iterator over all DLQ messages.
+    pub fn peek_all(&self) -> Vec<&DlqMessage> {
+        self.messages.values().collect()
+    }
     /// Peek messages with pagination.
     /// Returns (total_count, paginated_items)
     /// Items are ordered from MOST RECENT failure to OLDEST (Reverse insertion order).

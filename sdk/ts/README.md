@@ -19,24 +19,6 @@ This exposes:
 npm install @emanuelepifani/nexo-client
 ```
 
-## Development
-
-### Running Tests
-
-```bash
-# Install dependencies
-npm install
-
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-```
-
-**Note**: Tests require a running Nexo server. The test suite automatically builds and starts the server via `global-setup.ts`.
-
----
 
 ### Connection
 ```typescript
@@ -68,7 +50,7 @@ await mailQ.delete();
 ```
 
 <details>
-<summary><strong>Advanced Features (Persistence, Retry, Delay, Priority)</strong></summary>
+<summary><strong>Advanced Features (Persistence, Retry, Delay, Priority, DLQ)</strong></summary>
 
 ```typescript
 // -------------------------------------------------------------
@@ -262,7 +244,7 @@ await orders.subscribe('audit-log', (order) => saveAudit(order));
 ### Binary Payloads (Zero-Overhead)
 
 All Nexo brokers (**Store, Queue, Stream, PubSub**) natively support raw binary data (`Buffer`).    
-Bypassing JSON serialization drastically reduces Latency, increases Throughput, and saves Bandwidth (~30% smaller payloads) .
+Bypassing JSON serialization drastically reduces Latency, increases Throughput, and saves Bandwidth.
 
 **Perfect for:** Video chunks, Images, Protobuf/MsgPack, Encrypted blobs.
 
@@ -272,13 +254,10 @@ const heavyPayload = Buffer.alloc(1024 * 1024);
 
 // 1. STREAM: Replayable Data (e.g. CCTV Recording, Event Sourcing)
 await client.stream('cctv-archive').publish(heavyPayload);
-
 // 2. PUBSUB: Ephemeral Live Data (e.g. VoIP, Real-time Sensor)
 await client.pubsub('live-audio-call').publish(heavyPayload);
-
 // 3. STORE (Cache Images)
 await client.store.map.set('user:avatar:1', heavyPayload);
-
 // 4. QUEUE (Process Files)
 await client.queue('pdf-processing').push(heavyPayload);
 ```

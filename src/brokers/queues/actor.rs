@@ -14,7 +14,8 @@ use crate::brokers::queues::dlq::{DlqState, DlqMessage};
 use crate::brokers::queues::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queues::queue_manager::ManagerCommand;
 use crate::config::Config;
-use crate::dashboard::models::queues::QueueSummary;
+use crate::dashboard::models::queues::{QueueSummary, DlqMessageSummary};
+use crate::server::protocol::payload_to_dashboard_value;
 
 // ==========================================
 // ACTOR COMMANDS
@@ -286,7 +287,17 @@ impl QueueActor {
             }
             
             QueueActorCommand::GetSnapshot { reply } => {
-                let snapshot = self.main_state.get_snapshot(&self.name);
+                let mut snapshot = self.main_state.get_snapshot(&self.name);
+                
+                // Populate DLQ messages
+                snapshot.dlq = self.dlq_state.peek_all().iter().map(|msg| DlqMessageSummary {
+                    id: msg.id,
+                    payload: payload_to_dashboard_value(&msg.payload),
+                    attempts: msg.attempts,
+                    failure_reason: Some(msg.failure_reason.clone()),
+                    created_at: msg.created_at,
+                }).collect();
+
                 let _ = reply.send(snapshot);
                 true
             }

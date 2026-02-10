@@ -12,7 +12,7 @@ use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
 use crate::server::protocol::payload_to_dashboard_value;
 
-use crate::dashboard::models::queues::{QueueSummary, MessageSummary};
+use crate::dashboard::models::queues::{QueueSummary, MessageSummary, DlqMessageSummary};
 use crate::brokers::queues::persistence::types::PersistenceMode;
 use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::config::SystemQueueConfig;
@@ -417,6 +417,7 @@ impl Message {
                 pending,
                 inflight,
                 scheduled,
+                dlq: Vec::new(),
             }
         }
 

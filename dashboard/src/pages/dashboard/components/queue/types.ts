@@ -1,13 +1,11 @@
-export interface QueueBrokerSnapshot {
-  active_queues: QueueSummary[];
-  dlq_queues: QueueSummary[];
-}
+export type QueueBrokerSnapshot = QueueSummary[];
 
 export interface QueueSummary {
   name: string;
   pending: MessageSummary[];
   inflight: MessageSummary[];
   scheduled: ScheduledMessageSummary[];
+  dlq: DlqMessageSummary[];
 }
 
 export interface MessageSummary {
@@ -20,4 +18,9 @@ export interface MessageSummary {
 
 export interface ScheduledMessageSummary extends MessageSummary {
   next_delivery_at: string;
+}
+
+export interface DlqMessageSummary extends MessageSummary {
+  failure_reason: string;
+  created_at: number;
 }

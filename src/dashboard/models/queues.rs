@@ -3,17 +3,21 @@ use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Serialize)]
-pub struct QueueBrokerSnapshot {
-    pub active_queues: Vec<QueueSummary>,
-    pub dlq_queues: Vec<QueueSummary>,
-}
-
-#[derive(Serialize)]
 pub struct QueueSummary {
     pub name: String,
     pub pending: Vec<MessageSummary>,
     pub inflight: Vec<MessageSummary>,
     pub scheduled: Vec<MessageSummary>,
+    pub dlq: Vec<DlqMessageSummary>,
+}
+
+#[derive(Serialize)]
+pub struct DlqMessageSummary {
+    pub id: Uuid,
+    pub payload: Value,
+    pub attempts: u32,
+    pub failure_reason: Option<String>,
+    pub created_at: u64,
 }
 
 #[derive(Serialize)]
