@@ -106,16 +106,17 @@ describe('QUEUE', () => {
         const msgToReplayId = targetMsg!.id;
         const msgToDeleteId = otherMsg!.id;
 
-        // 2. Move one message back to main queue (replay)
-        const moved = await q.dlq.moveToQueue(msgToReplayId);
-        expect(moved).toBe(true);
-
-        // Verify it's back in main queue
+        // 2. Create subscriber BEFORE moving message (to avoid race condition)
         const replayed: any[] = [];
         const sub2 = await nexo.queue(qName).subscribe(async (msg) => {
             replayed.push(msg);
-        }, { batchSize: 1, waitMs: 200, concurrency: 1 });
+        }, { batchSize: 1, waitMs: 100, concurrency: 1 });
 
+        // 3. Move message back to main queue (subscriber is ready)
+        const moved = await q.dlq.moveToQueue(msgToReplayId);
+        expect(moved).toBe(true);
+
+        // 4. Verify it's received
         await waitFor(() => expect(replayed.length).toBe(1));
         expect(replayed[0].order).toBe('order3'); 
         sub2.stop();
