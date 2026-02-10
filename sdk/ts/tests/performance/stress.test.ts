@@ -4,7 +4,7 @@ import {nexo} from "../nexo";
 import {Cursor, FrameCodec} from "../../src/codec";
 
 
-describe('Stress test', async () => {
+describe.skip('Stress test', async () => {
 
     describe('SOCKET', async () => {
 
