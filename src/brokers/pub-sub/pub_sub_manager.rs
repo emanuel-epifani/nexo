@@ -6,6 +6,12 @@
 //! - Parallelism between different root topics
 //! - Global "#" subscribers handled separately
 //!
+//! Sender Ownership:
+//! - PubSubManager.clients (Arc<DashMap>) is the SINGLE SOURCE OF TRUTH for Senders
+//! - Radix tree nodes store only ClientId (HashSet<ClientId>)
+//! - Actors resolve ClientId → Sender via shared DashMap read at publish time
+//! - disconnect() removes from DashMap → all actors see None on next lookup
+//!
 //! Supports:
 //! - Exact matching: "home/kitchen/temp"
 //! - Single-level wildcard: "home/+/temp"
@@ -65,9 +71,8 @@ impl PubSubMessage {
 
 enum RootCommand {
     Subscribe {
-        pattern: Vec<String>,  // Path segments after root (e.g., ["kitchen", "temp"])
+        pattern: Vec<String>,
         client: ClientId,
-        sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,
         reply: oneshot::Sender<Vec<(String, Bytes)>>,  // Retained messages to send
     },
     Unsubscribe {
@@ -75,16 +80,16 @@ enum RootCommand {
         client: ClientId,
     },
     Publish {
-        parts: Vec<String>,  // Path segments after root
-        full_topic: String,  // Full topic for push payload
+        parts: Vec<String>,
+        full_topic: String,
         data: Bytes,
         retain: bool,
         ttl_seconds: Option<u64>,
-        reply: oneshot::Sender<usize>,  // Matched clients
+        reply: oneshot::Sender<usize>,
     },
     Disconnect {
         client: ClientId,
-        reply: oneshot::Sender<()>,  // Acknowledge completion
+        reply: oneshot::Sender<()>,
     },
     GetFlatSnapshot {
         reply: oneshot::Sender<Vec<crate::dashboard::models::pubsub::TopicSnapshot>>,
@@ -104,7 +109,6 @@ struct RetainedMessage {
     data: Bytes,
     #[serde(skip)]
     expires_at: Option<Instant>,
-    // For serialization: store as unix timestamp
     expires_at_unix: Option<u64>,
 }
 
@@ -131,7 +135,7 @@ impl RetainedMessage {
                 let remaining = unix_ts - now_unix;
                 Some(Instant::now() + std::time::Duration::from_secs(remaining))
             } else {
-                None  // Already expired
+                None
             }
         });
         Self { data, expires_at, expires_at_unix }
@@ -153,9 +157,8 @@ struct Node {
     // Wildcard '#' child: matches everything remaining
     // Note: Used for routing messages TO subscribers who used '#'
     hash_child: Option<Box<Node>>,
-    
-    // Clients subscribed exactly to the path ending at this node
-    subscribers: HashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
+    /// Only stores ClientIds. Sender resolution happens via shared DashMap at publish time.
+    subscribers: HashSet<ClientId>,
     retained: Option<RetainedMessage>,
 }
 
@@ -165,7 +168,7 @@ impl Node {
             children: HashMap::new(),
             plus_child: None,
             hash_child: None,
-            subscribers: HashMap::new(),
+            subscribers: HashSet::new(),
             retained: None,
         }
     }
@@ -183,29 +186,39 @@ impl Node {
 // ROOT ACTOR
 // ==========================================
 
+type ClientRegistry = Arc<DashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>>;
+
 struct RootActor {
     name: String,
     tree: Node,
-    client_patterns: HashMap<ClientId, HashSet<String>>,  // Reverse index for cleanup
+    client_patterns: HashMap<ClientId, HashSet<String>>,
+    /// Shared read-only reference to the global client registry (single source of truth for Senders)
+    clients: ClientRegistry,
     rx: mpsc::Receiver<RootCommand>,
     retained_file_path: PathBuf,
     default_ttl_seconds: u64,
 }
 
 impl RootActor {
-    fn new(name: String, rx: mpsc::Receiver<RootCommand>, persistence_path: &str, default_ttl_seconds: u64) -> Self {
+    fn new(
+        name: String,
+        rx: mpsc::Receiver<RootCommand>,
+        persistence_path: &str,
+        default_ttl_seconds: u64,
+        clients: ClientRegistry,
+    ) -> Self {
         let retained_file_path = PathBuf::from(format!("{}/pubsub/retained/{}.json", persistence_path, name));
         
         let mut actor = Self {
             name,
             tree: Node::new(),
             client_patterns: HashMap::new(),
+            clients,
             rx,
             retained_file_path,
             default_ttl_seconds,
         };
         
-        // Load retained messages from disk
         actor.load_retained();
         actor
     }
@@ -213,8 +226,8 @@ impl RootActor {
     async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                RootCommand::Subscribe { pattern, client, sender, reply } => {
-                    let retained = self.subscribe(&pattern, &client, sender);
+                RootCommand::Subscribe { pattern, client, reply } => {
+                    let retained = self.subscribe(&pattern, &client);
                     let _ = reply.send(retained);
                 }
                 RootCommand::Unsubscribe { pattern, client } => {
@@ -246,31 +259,26 @@ impl RootActor {
     }
 
     // --- SUBSCRIBE ---
-    fn subscribe(&mut self, pattern: &[String], client: &ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) -> Vec<(String, Bytes)> {
-        // Track pattern for cleanup
+    fn subscribe(&mut self, pattern: &[String], client: &ClientId) -> Vec<(String, Bytes)> {
         let pattern_str = pattern.join("/");
         self.client_patterns
             .entry(client.clone())
             .or_default()
             .insert(pattern_str);
 
-        // Navigate/create path for subscription
         let mut current = &mut self.tree;
         for (i, part) in pattern.iter().enumerate() {
             if part == "#" {
                 if current.hash_child.is_none() {
                     current.hash_child = Some(Box::new(Node::new()));
                 }
-                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone(), sender.clone());
+                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone());
                 
-                // Collect retained from current node down (not from root!)
-                // Navigate to the correct position first for collection
                 let mut collect_node = &self.tree;
                 for j in 0..i {
                     if let Some(child) = collect_node.children.get(&pattern[j]) {
                         collect_node = child;
                     } else {
-                        // Path doesn't exist in tree, no retained to collect
                         return Vec::new();
                     }
                 }
@@ -293,9 +301,8 @@ impl RootActor {
             }
         }
 
-        current.subscribers.insert(client.clone(), sender);
+        current.subscribers.insert(client.clone());
 
-        // Collect retained matching this exact pattern
         let mut retained = Vec::new();
         Self::collect_retained_for_pattern(&self.tree, pattern, &self.name, &mut retained);
         retained
@@ -312,58 +319,50 @@ impl RootActor {
 
     // --- PUBLISH ---
     fn publish(&mut self, parts: &[String], full_topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
-        // Update retained if needed
         if retain {
             let mut current = &mut self.tree;
             for part in parts {
                 current = current.children.entry(part.clone()).or_insert_with(Node::new);
             }
             
-            // MQTT standard: empty payload clears retained
             if data.is_empty() {
                 current.retained = None;
             } else {
-                // Use client TTL if provided, otherwise use default
                 let effective_ttl = ttl_seconds.unwrap_or(self.default_ttl_seconds);
                 current.retained = Some(RetainedMessage::new(data.clone(), Some(effective_ttl)));
             }
             
-            // Save to disk asynchronously (also when clearing)
             self.save_retained_async();
         }
 
-        // Match subscribers and collect senders
-        let mut senders = Vec::new();
-        Self::match_recursive(&self.tree, parts, &mut senders);
+        // Match subscriber IDs from radix tree
+        let mut matched = Vec::new();
+        Self::match_recursive(&self.tree, parts, &mut matched);
         
-        // Deduplicate by ClientId (MQTT standard: same client receives message only once)
+        // Deduplicate (MQTT standard: same client receives message only once)
         let mut seen = HashSet::new();
-        let mut unique_senders = Vec::new();
-        for (client_id, sender) in senders {
-            if seen.insert(client_id.clone()) {
-                unique_senders.push((client_id, sender));
-            }
-        }
+        matched.retain(|id| seen.insert(id.clone()));
         
-        // Send messages
+        // Resolve ClientId → Sender from shared registry and send
         let msg = Arc::new(PubSubMessage::new(full_topic.to_string(), data));
         let mut sent_count = 0;
-        
-        // Identify zombies
         let mut zombies = Vec::new();
 
-        for (client_id, sender) in unique_senders {
-            if sender.send(msg.clone()).is_ok() {
-                sent_count += 1;
-            } else {
-                // Channel closed -> Zombie
-                zombies.push(client_id);
+        for client_id in matched {
+            match self.clients.get(&client_id) {
+                Some(sender) => {
+                    if sender.send(msg.clone()).is_ok() {
+                        sent_count += 1;
+                    } else {
+                        zombies.push(client_id);
+                    }
+                }
+                None => zombies.push(client_id),
             }
         }
         
-        // Cleanup zombies if any
         for client_id in zombies {
-             self.disconnect(&client_id);
+            self.disconnect(&client_id);
         }
 
         sent_count
@@ -417,17 +416,17 @@ impl RootActor {
 
     // --- HELPERS ---
 
-    fn match_recursive(node: &Node, parts: &[String], results: &mut Vec<(ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>)>) {
+    fn match_recursive(node: &Node, parts: &[String], results: &mut Vec<ClientId>) {
         // "#" matches everything from here
         if let Some(hash_node) = &node.hash_child {
-            for (client, sender) in &hash_node.subscribers {
-                results.push((client.clone(), sender.clone()));
+            for client in &hash_node.subscribers {
+                results.push(client.clone());
             }
         }
 
         if parts.is_empty() {
-             for (client, sender) in &node.subscribers {
-                results.push((client.clone(), sender.clone()));
+            for client in &node.subscribers {
+                results.push(client.clone());
             }
             return;
         }
@@ -435,12 +434,10 @@ impl RootActor {
         let head = &parts[0];
         let tail = &parts[1..];
 
-        // Exact match
         if let Some(child) = node.children.get(head) {
             Self::match_recursive(child, tail, results);
         }
 
-        // "+" matches any single level
         if let Some(plus_node) = &node.plus_child {
             Self::match_recursive(plus_node, tail, results);
         }
@@ -500,24 +497,24 @@ impl RootActor {
         let mut should_remove = false;
 
         if head == "#" {
-             if let Some(ref mut hash_node) = node.hash_child {
+            if let Some(ref mut hash_node) = node.hash_child {
                 hash_node.subscribers.remove(client);
                 if hash_node.is_empty() {
                     should_remove = true;
-                 }
-             }
+                }
+            }
             if should_remove {
-                 node.hash_child = None;
-             }
+                node.hash_child = None;
+            }
         } else if head == "+" {
-             if let Some(ref mut plus_node) = node.plus_child {
-                 if Self::remove_recursive(plus_node, tail, client) {
+            if let Some(ref mut plus_node) = node.plus_child {
+                if Self::remove_recursive(plus_node, tail, client) {
                     should_remove = true;
-                 }
-             }
+                }
+            }
             if should_remove {
-                 node.plus_child = None;
-             }
+                node.plus_child = None;
+            }
         } else {
             if let Some(child) = node.children.get_mut(head) {
                 if Self::remove_recursive(child, tail, client) {
@@ -525,8 +522,8 @@ impl RootActor {
                 }
             }
             if should_remove {
-                 node.children.remove(head);
-             }
+                node.children.remove(head);
+            }
         }
         
         node.is_empty()
@@ -544,17 +541,14 @@ impl RootActor {
                 match serde_json::from_str::<HashMap<String, RetainedMessage>>(&json_str) {
                     Ok(retained_map) => {
                         for (path, mut retained_msg) in retained_map {
-                            // Reconstruct Instant from unix timestamp
                             if let Some(unix_ts) = retained_msg.expires_at_unix {
                                 retained_msg = RetainedMessage::from_persisted(retained_msg.data, Some(unix_ts));
                             }
                             
-                            // Skip if already expired
                             if retained_msg.is_expired() {
                                 continue;
                             }
                             
-                            // Set retained in tree
                             let parts: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
                             let mut current = &mut self.tree;
                             for part in parts {
@@ -579,7 +573,6 @@ impl RootActor {
         let retained_map = self.collect_retained_for_persistence();
         
         tokio::spawn(async move {
-            // Create directory if not exists
             if let Some(parent) = path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
@@ -624,14 +617,12 @@ impl RootActor {
         let mut cleaned = false;
         Self::cleanup_expired_recursive(&mut self.tree, &mut cleaned);
         
-        // Save to disk if any retained was removed
         if cleaned {
             self.save_retained_async();
         }
     }
     
     fn cleanup_expired_recursive(node: &mut Node, cleaned: &mut bool) {
-        // Remove expired retained at this node
         if let Some(retained) = &node.retained {
             if retained.is_expired() {
                 node.retained = None;
@@ -639,7 +630,6 @@ impl RootActor {
             }
         }
         
-        // Recursively cleanup children
         for child in node.children.values_mut() {
             Self::cleanup_expired_recursive(child, cleaned);
         }
@@ -660,9 +650,11 @@ impl RootActor {
 
 pub struct PubSubManager {
     actors: DashMap<String, mpsc::Sender<RootCommand>>,
-    clients: DashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>,
-    client_subscriptions: DashMap<ClientId, HashSet<String>>,  // For global tracking
-    global_hash_subscribers: RwLock<HashMap<ClientId, mpsc::UnboundedSender<Arc<PubSubMessage>>>>,  // Subscribers to "#"
+    /// Single source of truth for client Senders. Actors resolve ClientId → Sender via this.
+    clients: ClientRegistry,
+    client_subscriptions: DashMap<ClientId, HashSet<String>>,
+    /// Global "#" subscribers — only stores ClientIds, resolved from `clients` at publish time.
+    global_hash_subscribers: RwLock<HashSet<ClientId>>,
     config: crate::config::PubSubConfig,
 }
 
@@ -670,13 +662,12 @@ impl PubSubManager {
     pub fn new(config: crate::config::PubSubConfig) -> Self {
         let manager = Self {
             actors: DashMap::new(),
-            clients: DashMap::new(),
+            clients: Arc::new(DashMap::new()),
             client_subscriptions: DashMap::new(),
-            global_hash_subscribers: RwLock::new(HashMap::new()),
+            global_hash_subscribers: RwLock::new(HashSet::new()),
             config: config.clone(),
         };
         
-        // Spawn background cleanup task
         let actors = manager.actors.clone();
         let cleanup_interval = std::time::Duration::from_secs(config.cleanup_interval_seconds);
         
@@ -700,7 +691,6 @@ impl PubSubManager {
 
     /// Subscribe to a topic pattern
     pub async fn subscribe(&self, topic: &str, client: ClientId) {
-        // Track subscription globally
         self.client_subscriptions
             .entry(client.clone())
             .or_default()
@@ -710,22 +700,20 @@ impl PubSubManager {
 
         // Handle global "#" subscription
         if parts.len() == 1 && parts[0] == "#" {
-             if let Some(sender) = self.clients.get(&client) {
-                self.global_hash_subscribers.write().await.insert(client, sender.clone());
-             }
+            self.global_hash_subscribers.write().await.insert(client);
             return;
         }
 
         let root = parts[0].to_string();
         let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
-        if let Some(sender) = self.clients.get(&client) {
-            let actor = self.get_or_create_actor(&root);
-            let (tx, rx) = oneshot::channel();
-            
-            if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), sender: sender.clone(), reply: tx }).await.is_ok() {
-                // Send retained messages
-                if let Ok(retained) = rx.await {
+        let actor = self.get_or_create_actor(&root);
+        let (tx, rx) = oneshot::channel();
+        
+        if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), reply: tx }).await.is_ok() {
+            // Send retained messages to the client
+            if let Ok(retained) = rx.await {
+                if let Some(sender) = self.clients.get(&client) {
                     for (topic_str, payload) in retained {
                         let msg = Arc::new(PubSubMessage::new(topic_str, payload));
                         let _ = sender.send(msg);
@@ -737,14 +725,12 @@ impl PubSubManager {
 
     /// Unsubscribe from a topic pattern
     pub async fn unsubscribe(&self, topic: &str, client: &ClientId) {
-        // Remove from global tracking
         if let Some(mut subs) = self.client_subscriptions.get_mut(client) {
             subs.remove(topic);
         }
 
         let parts: Vec<&str> = topic.split('/').collect();
 
-        // Handle global "#"
         if parts.len() == 1 && parts[0] == "#" {
             self.global_hash_subscribers.write().await.remove(client);
             return;
@@ -784,7 +770,6 @@ impl PubSubManager {
                 sent += rx.await.unwrap_or_default();
             }
         } else if retain {
-             // Create actor for retained message even if no subscribers yet
             let actor = self.get_or_create_actor(root);
             let (tx, rx) = oneshot::channel();
             if actor.send(RootCommand::Publish {
@@ -795,17 +780,19 @@ impl PubSubManager {
                 ttl_seconds,
                 reply: tx,
             }).await.is_ok() {
-                 sent += rx.await.unwrap_or_default();
+                sent += rx.await.unwrap_or_default();
             }
         }
 
-        // 2. Add global "#" subscribers
+        // 2. Send to global "#" subscribers (resolve from clients DashMap)
         let global_subs = self.global_hash_subscribers.read().await;
         if !global_subs.is_empty() {
             let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
-            for sender in global_subs.values() {
-                if sender.send(msg.clone()).is_ok() {
-                    sent += 1;
+            for client_id in global_subs.iter() {
+                if let Some(sender) = self.clients.get(client_id) {
+                    if sender.send(msg.clone()).is_ok() {
+                        sent += 1;
+                    }
                 }
             }
         }
@@ -815,6 +802,7 @@ impl PubSubManager {
 
     /// Disconnect a client and cleanup subscriptions
     pub async fn disconnect(&self, client_id: &ClientId) {
+        // Remove sender from single source of truth — all actors will see None on next lookup
         self.clients.remove(client_id);
         self.global_hash_subscribers.write().await.remove(client_id);
 
@@ -827,7 +815,6 @@ impl PubSubManager {
                 }
             }
 
-            // Send disconnect and wait for confirmation from all actors
             let mut waits = Vec::new();
             for root in roots {
                 if let Some(actor) = self.actors.get(&root) {
@@ -841,7 +828,6 @@ impl PubSubManager {
                 }
             }
             
-            // Wait for all actors to confirm disconnect
             for rx in waits {
                 let _ = rx.await;
             }
@@ -878,7 +864,6 @@ impl PubSubManager {
             }
         }
 
-        // Build flat topics list by querying each actor
         let mut all_topics = Vec::new();
         for entry in self.actors.iter() {
             let (tx, rx) = oneshot::channel();
@@ -908,7 +893,8 @@ impl PubSubManager {
                 root.to_string(), 
                 rx, 
                 &self.config.persistence_path,
-                self.config.default_retained_ttl_seconds
+                self.config.default_retained_ttl_seconds,
+                Arc::clone(&self.clients),
             );
             tokio::spawn(actor.run());
             tx
@@ -920,7 +906,6 @@ impl PubSubManager {
         let start = std::time::Instant::now();
         let mut tasks = Vec::new();
         
-        // Spawn parallel cleanup task for each actor
         for entry in actors.iter() {
             let root = entry.key().clone();
             let actor = entry.value().clone();
@@ -945,7 +930,6 @@ impl PubSubManager {
             tasks.push(task);
         }
         
-        // Wait for all cleanup tasks to complete
         let mut removed = Vec::new();
         for task in tasks {
             if let Ok(Some(root)) = task.await {
