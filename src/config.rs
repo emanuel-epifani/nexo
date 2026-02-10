@@ -123,7 +123,7 @@ impl PubSubConfig {
     fn load() -> Self {
         Self {
             actor_channel_capacity: get_env("PUBSUB_ACTOR_CHAN_CAP", "10000"),
-            persistence_path: get_env("PUBSUB_PERSISTENCE_PATH", "data"),
+            persistence_path: get_env("PUBSUB_ROOT_PERSISTENCE_PATH", "data"),
             default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", "3600"),
             cleanup_interval_seconds: get_env("PUBSUB_CLEANUP_INTERVAL_SECS", "60"),
         }

@@ -222,7 +222,7 @@ docker run -d \
   -v $(pwd)/nexo_pubsub:/storage/pubsub \            # Volume 3 for PubSub retained messages
   -e QUEUE_ROOT_PERSISTENCE_PATH=/storage/queue \    # Map Queue persistency to Volume 1
   -e STREAM_ROOT_PERSISTENCE_PATH=/storage/stream \  # Map Stream persistency to Volume 2
-  -e PUBSUB_PERSISTENCE_PATH=/storage/pubsub \       # Map PubSub retained messages to Volume 3
+  -e PUBSUB_ROOT_PERSISTENCE_PATH=/storage/pubsub \  # Map PubSub retained messages to Volume 3
   -e NEXO_ENV=prod \                                 # Set Production Mode (Dashboard OFF)
   nexobroker/nexo:latest
 ```
