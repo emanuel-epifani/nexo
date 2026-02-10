@@ -4,7 +4,7 @@ import path from 'node:path';
 
 let serverProcess: ChildProcess | null = null;
 
-const ROOT_DIR = path.resolve(__dirname, '../../../');
+const ROOT_DIR = path.resolve(__dirname, '../../../../');
 const BINARY_PATH = path.join(ROOT_DIR, 'target/debug/nexo');
 
 /**
