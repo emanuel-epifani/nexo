@@ -78,14 +78,21 @@ describe('QUEUE', () => {
         await q.push({ order: 'order3' });
 
         // Consume messages but don't ack (simulate failure)
+        const OLD_CONSUME_WAIT_MS = 100;
+
         const received: any[] = [];
         const sub = await q.subscribe(async (msg) => {
             received.push(msg);
             throw new Error('Simulated processing error');
-        }, { batchSize: 10, waitMs: 100 });
+        }, { batchSize: 10, waitMs: OLD_CONSUME_WAIT_MS });
 
         await waitFor(() => expect(received.length).toBe(3));
         sub.stop();
+
+        // Wait for old consume(waitMs=100) to expire on server before proceeding.
+        // Calculated delay: waitMs + margin. Not arbitrary — prevents old waiter from
+        // stealing the replayed message and NACKing it back to DLQ.
+        await new Promise(r => setTimeout(r, OLD_CONSUME_WAIT_MS + 100));
 
         // 1. Peek DLQ - should have 3 messages
         let dlqResult;
@@ -106,15 +113,15 @@ describe('QUEUE', () => {
         const msgToReplayId = targetMsg!.id;
         const msgToDeleteId = otherMsg!.id;
 
-        // 2. Create subscriber BEFORE moving message (to avoid race condition)
+        // 2. Move message back to main queue FIRST
+        const moved = await q.dlq.moveToQueue(msgToReplayId);
+        expect(moved).toBe(true);
+
+        // 3. Subscribe AFTER move (message is already Ready in queue)
         const replayed: any[] = [];
         const sub2 = await nexo.queue(qName).subscribe(async (msg) => {
             replayed.push(msg);
         }, { batchSize: 1, waitMs: 100, concurrency: 1 });
-
-        // 3. Move message back to main queue (subscriber is ready)
-        const moved = await q.dlq.moveToQueue(msgToReplayId);
-        expect(moved).toBe(true);
 
         // 4. Verify it's received
         await waitFor(() => expect(replayed.length).toBe(1));
