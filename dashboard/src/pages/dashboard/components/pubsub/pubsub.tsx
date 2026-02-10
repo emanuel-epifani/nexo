@@ -22,7 +22,7 @@ interface Props {
 interface FlatTopic {
     path: string;
     subscribers: number;
-    retained_value: unknown | null;
+    retained_value: string | object | null;
     is_wildcard: boolean;
     client_id?: string;
 }
