@@ -155,8 +155,8 @@ async fn bench_03_stream_publish_fasync() {
 #[tokio::test]
 async fn bench_04_pubsub_fanout() {
     // 10k messaggi * 1k subs = 10M delivery totali
-    let msg_count = 10_000;
-    let sub_count = 1000;
+    let msg_count = 100_000;
+    let sub_count = 100;
     let total_delivery = msg_count * sub_count;
 
     let config = Config::global().pubsub.clone();
@@ -204,7 +204,7 @@ async fn bench_04_pubsub_fanout() {
     // Publish Loop
     let publish_start = Instant::now();
     for _ in 0..msg_count {
-        manager.publish(topic, payload.clone(), false).await;
+        manager.publish(topic, payload.clone(), false, None).await;
     }
     let publish_time = publish_start.elapsed();
     let publish_ops_sec = msg_count as f64 / publish_time.as_secs_f64();
