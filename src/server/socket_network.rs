@@ -49,7 +49,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     
     // Bridge Task: Forward Pushes to Main Write Loop
     let tx_bridge = tx.clone();
-    tokio::spawn(async move {
+    let bridge_handle = tokio::spawn(async move {
         while let Some(msg_arc) = push_rx.recv().await {
             // Forward push message to the main write loop
             // Use network_cache to get pre-serialized bytes efficiently
@@ -85,6 +85,9 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // Use a larger buffer to allow for more data in a single read syscall
     let mut buffer = BytesMut::with_capacity(NETWORK_BUFFER_READ_SIZE);
     let engine = Arc::new(engine);
+    
+    // Collect request handler tasks for cleanup on disconnect
+    let mut request_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     loop {
         let n = match reader.read_buf(&mut buffer).await {
@@ -126,7 +129,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             let client_id_clone = client_id.clone();
 
             // Parallel execution: One task per request
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 match frame_type {
                     TYPE_REQUEST => {
                         let payload = frame_data.slice(RequestHeader::SIZE..);
@@ -142,11 +145,18 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                     }
                 }
             });
+            request_handles.push(handle);
         }
     }
 
-    // Cleanup: Explicitly disconnect from managers
-    // This ensures cleanup happens before the connection handler returns
+    // Cleanup: Cancel all in-flight request handlers first.
+    // This drops oneshot receivers, making stale waiters (e.g. queue long-poll)
+    // detectable by actors via is_closed() / send() failure.
+    for handle in &request_handles {
+        handle.abort();
+    }
+    bridge_handle.abort();
+    
     tracing::debug!("Client {:?} disconnected", client_id);
     
     // Disconnect from PubSub (cleanup subscriptions, actors)

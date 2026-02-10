@@ -158,9 +158,6 @@ class StreamSubscription<T> {
         continue;
       }
 
-      // Jitter to avoid thundering herd
-      await this.backoff(Math.random() * 500);
-
       try {
         if (!this.conn.isConnected) continue;
 

@@ -405,10 +405,13 @@ impl QueueActor {
     }
 
     async fn process_waiters(&mut self) {
-        // While we have ready messages AND waiters...
         while !self.waiters.is_empty() && self.main_state.has_ready_messages() {
             if let Some(waiter) = self.waiters.pop_front() {
-                // Try to fulfill this waiter
+                // Skip stale waiters from disconnected clients
+                if waiter.reply.is_closed() {
+                    continue;
+                }
+
                 let (msgs, _) = self.main_state.take_batch(waiter.max, self.config.visibility_timeout_ms);
                 
                 if !msgs.is_empty() {
@@ -419,13 +422,20 @@ impl QueueActor {
                             attempts: msg.attempts 
                         }).await;
                     }
-                    if waiter.reply.send(msgs).is_err() {
-                        // Waiter disconnected? Messages are already InFlight in memory + DB.
-                        // We rely on VisibilityTimeout to recover them. Correct.
+                    // Safety net: if send fails despite is_closed check (race between
+                    // check and send), re-queue messages immediately as Ready.
+                    if let Err(returned_msgs) = waiter.reply.send(msgs) {
+                        for msg in &returned_msgs {
+                            let reverted_attempts = msg.attempts.saturating_sub(1);
+                            self.main_state.requeue_inflight(msg.id);
+                            let _ = self.store.execute(StorageOp::UpdateState {
+                                id: msg.id,
+                                visible_at: 0,
+                                attempts: reverted_attempts,
+                            }).await;
+                        }
                     }
                 } else {
-                    // Should not happen if has_ready_messages is true, unless race/logic error.
-                    // Put waiter back?
                     self.waiters.push_front(waiter);
                     break;
                 }

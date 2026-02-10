@@ -424,6 +424,27 @@ impl Message {
             !self.waiting_for_dispatch.is_empty()
         }
 
+        /// Re-queue an InFlight message back to Ready state immediately.
+        /// Used when a waiter (consumer connection) dies before receiving the response.
+        /// Undoes the attempt increment from take_batch since the message was never delivered.
+        pub fn requeue_inflight(&mut self, id: Uuid) -> bool {
+            let is_inflight = self.registry.get(&id)
+                .map(|m| matches!(m.state, MessageState::InFlight(_)))
+                .unwrap_or(false);
+
+            if !is_inflight { return false; }
+
+            if self.transition_to(id, MessageState::Ready) {
+                if let Some(msg) = self.registry.get_mut(&id) {
+                    msg.visible_at = 0;
+                    msg.attempts = msg.attempts.saturating_sub(1);
+                }
+                true
+            } else {
+                false
+            }
+        }
+
         /// Peek messages without consuming them (for DLQ inspection)
         pub fn peek_messages(&self, limit: usize) -> Vec<Message> {
             let mut messages = Vec::new();

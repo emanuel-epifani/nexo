@@ -274,9 +274,6 @@ export class NexoQueue<T = any> {
           continue;
         }
 
-        // Add small jitter to avoid thundering herd on reconnect
-        await new Promise(r => setTimeout(r, Math.random() * 500));
-
         try {
           // Double check before sending
           if (!this.conn.isConnected) continue;
