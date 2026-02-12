@@ -53,14 +53,5 @@ impl NexoEngine {
         }
     }
 
-    pub async fn get_global_snapshot(&self) -> SystemSnapshot {
-        SystemSnapshot {
-            brokers: BrokersSnapshot {
-                store: self.store.get_snapshot(),
-                queue: self.queue.get_snapshot().await,
-                pubsub: self.pubsub.get_snapshot().await,
-                stream: self.stream.get_snapshot().await,
-            },
-        }
-    }
+
 }

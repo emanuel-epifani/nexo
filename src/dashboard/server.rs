@@ -17,7 +17,7 @@ struct Assets;
 
 pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     let app = Router::new()
-        .route("/api/store", get(get_store))
+        .route("/api/store", get(crate::dashboard::models::store::get_store_handler))
         .route("/api/queue", get(get_queue))
         .route("/api/stream", get(get_stream))
         .route("/api/pubsub", get(get_pubsub))
@@ -31,11 +31,6 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind dashboard port");
     
     axum::serve(listener, app).await.expect("Failed to start dashboard server");
-}
-
-async fn get_store(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.store.get_snapshot();
-    axum::Json(snapshot)
 }
 
 async fn get_queue(State(engine): State<NexoEngine>) -> impl IntoResponse {

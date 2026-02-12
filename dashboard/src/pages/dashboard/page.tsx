@@ -17,18 +17,8 @@ import {
 export function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'store' | 'queue' | 'stream' | 'pubsub'>('store')
 
-  const [storeQuery, queueQuery, streamQuery, pubsubQuery] = useQueries({
+  const [queueQuery, streamQuery, pubsubQuery] = useQueries({
     queries: [
-      {
-        queryKey: ['store-snapshot'],
-        queryFn: async () => {
-          const response = await fetch('/api/store')
-          if (!response.ok) throw new Error('Failed to fetch store')
-          return response.json()
-        },
-        enabled: activeTab === 'store',
-        gcTime: 0
-      },
       {
         queryKey: ['queue-snapshot'],
         queryFn: async () => {
@@ -64,14 +54,12 @@ export function DashboardPage() {
 
   // Loading state: Only consider the ACTIVE tab's loading state
   const isLoading = 
-      (activeTab === 'store' && storeQuery.isLoading) ||
       (activeTab === 'queue' && queueQuery.isLoading) ||
       (activeTab === 'stream' && streamQuery.isLoading) ||
       (activeTab === 'pubsub' && pubsubQuery.isLoading);
 
   // Error state: Only consider the ACTIVE tab's error state
   const hasError = 
-      (activeTab === 'store' && storeQuery.error) ||
       (activeTab === 'queue' && queueQuery.error) ||
       (activeTab === 'stream' && streamQuery.error) ||
       (activeTab === 'pubsub' && pubsubQuery.error);
@@ -109,8 +97,8 @@ export function DashboardPage() {
                 active={activeTab === 'store'}
                 onClick={() => setActiveTab('store')}
                 icon={<Database className="h-5 w-5" />}
-                onRefresh={() => storeQuery.refetch()}
-                isRefreshing={storeQuery.isFetching}
+                onRefresh={() => {}}
+                isRefreshing={false}
             />
             <NavCard 
                 label="QUEUE" 
@@ -143,9 +131,9 @@ export function DashboardPage() {
 
         {/* CONTENT AREA */}
         <main className="h-[calc(100vh-11rem)] border-t border-border pt-6 overflow-hidden">
-            {activeTab === 'store' && storeQuery.data && (
+            {activeTab === 'store' && (
                 <div className="h-full">
-                    <StoreView data={storeQuery.data} />
+                    <StoreView />
                 </div>
             )}
             {activeTab === 'queue' && queueQuery.data && (

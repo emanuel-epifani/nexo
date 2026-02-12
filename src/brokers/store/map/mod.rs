@@ -91,4 +91,8 @@ impl MapStore {
     pub fn iter(&self) -> dashmap::iter::Iter<'_, String, Entry> {
         self.inner.iter()
     }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
 }
