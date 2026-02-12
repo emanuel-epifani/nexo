@@ -9,16 +9,13 @@
 //! Payload: [Data...] (no status byte, status is in header)
 //!
 //! Data Structure (auto-contained):
-//! [TypeFlags: 1 byte] [Bytes...]
+//! [DataType: 1 byte] [Data...]
 //!
-//! TypeFlags (1 byte):
-//! [DataType: 4 bits] [Compressed: 1 bit] [Encrypted: 1 bit] [Reserved: 2 bits]
-//!
-//! DataTypes (4 bits = 16 values):
+//! DataTypes (1 byte):
 //! 0x0: RAW (Binary)
 //! 0x1: STRING (UTF-8)
 //! 0x2: JSON (UTF-8)
-//! 0x3-0xF: Reserved
+//! 0x3-0xFF: Reserved
 
 // ========================================
 // PRIMITIVE SIZES (Fundamental building blocks)
@@ -36,7 +33,7 @@ pub const SIZE_UUID: usize = 16;
 pub const SIZE_STRING_PREFIX: usize = SIZE_U32;
 
 /// DataType indicator (u8)
-pub const SIZE_DATA_TYPE: usize = SIZE_U8;
+pub const DATA_TYPE_SIZE: usize = SIZE_U8;
 
 /// Status code in response payloads (u8)
 pub const SIZE_STATUS: usize = SIZE_U8;
@@ -65,8 +62,8 @@ pub const HEADER_OFFSET_PAYLOAD_LEN: usize    = HEADER_OFFSET_CORRELATION_ID + H
 // ========================================
 // PAYLOAD GEOMETRY
 // ========================================
-/// For data carrying TypeFlags, the first byte indicates type and flags
-pub const DATA_OFFSET_TYPE_FLAGS: usize = 0;
+/// For data carrying DataType, the first byte indicates type
+pub const DATA_OFFSET_DATA_TYPE: usize = 0;
 
 // ========================================
 // FRAME TYPES (The "Envelope" Type)
@@ -89,18 +86,10 @@ pub const STATUS_DATA: u8 = 0x03;
 // ========================================
 // DATA TYPE FLAGS (First byte of data payload)
 // ========================================
-/// Base data types (4 bits)
+/// Data types (1 byte)
 pub const DATA_TYPE_RAW: u8    = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;
 pub const DATA_TYPE_JSON: u8   = 0x02;
-
-/// Data flags (bits 4-5)
-pub const DATA_FLAG_COMPRESSED: u8 = 0x08;  // bit 4
-pub const DATA_FLAG_ENCRYPTED: u8  = 0x04;  // bit 5
-
-/// Masks for extracting type and flags
-pub const DATA_TYPE_MASK: u8  = 0xF0;  // Upper 4 bits
-pub const DATA_FLAGS_MASK: u8 = 0x0C;  // Bits 4-5
 
 // ========================================
 // OPCODES RANGES
@@ -130,15 +119,21 @@ pub const CHANNEL_CAPACITY_SOCKET_WRITE: usize = 1024;
 // ========================================
 
 /// Converts a protocol-compliant data payload into a serde_json::Value for dashboard visualization.
-/// Assumes the payload follows: [TypeFlags: 1 byte] [Data...]
+/// Format: [DataType: 1 byte][Data...]
 pub fn payload_to_dashboard_value(payload: &[u8]) -> serde_json::Value {
     if payload.is_empty() {
         return serde_json::Value::Null;
     }
 
-    let type_flags = payload[DATA_OFFSET_TYPE_FLAGS];
-    let data_type = (type_flags & DATA_TYPE_MASK) >> 4;
-    let content = &payload[SIZE_DATA_TYPE..]; // Skip TypeFlags byte
+    // Se il primo byte è un DataType valido (0-2), usalo. Altrimenti tratta tutto come JSON.
+    let (data_type, content) = if payload.len() >= 1 && payload[0] <= DATA_TYPE_JSON {
+        let data_type = payload[0];
+        let content = &payload[DATA_TYPE_SIZE..];
+        (data_type, content)
+    } else {
+        // Legacy: tratta tutto come JSON
+        (DATA_TYPE_JSON, payload)
+    };
 
     match data_type {
         DATA_TYPE_JSON => {
@@ -149,8 +144,10 @@ pub fn payload_to_dashboard_value(payload: &[u8]) -> serde_json::Value {
         DATA_TYPE_RAW => {
             serde_json::Value::String(format!("0x{}", hex::encode(content)))
         }
+        DATA_TYPE_STRING => {
+            serde_json::Value::String(String::from_utf8_lossy(content).to_string())
+        }
         _ => {
-            // String or fallback
             serde_json::Value::String(String::from_utf8_lossy(content).to_string())
         }
     }
