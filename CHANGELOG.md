@@ -2,8 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - 2026-02-10
+## [0.3.0] - Planned
+- **Architecture**: Unifying Server, SDK, Dashboard, and Docs under a "Lock-Step" versioning strategy.
+- **Deployment**: Unified deployment process for all components.
 
+## [0.2.0] - 2026-02-10 (SDK History)
 ### ⚠️ Breaking Changes
 - **Protocol Upgrade**: Updated binary protocol structure. Requires Nexo Server v0.2.0+.
 
@@ -21,4 +24,3 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 - Fixed race conditions in `reconnection.test.ts`.
 - Improved error handling during network instability.
-
