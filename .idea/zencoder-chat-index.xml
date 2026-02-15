@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ai.zencoder.plugin.chat.index">
+    <option name="chatMetadata" value="{&quot;6f78d6f7-92c8-42f3-8897-8af7b1ec7bf3&quot;:{&quot;id&quot;:&quot;6f78d6f7-92c8-42f3-8897-8af7b1ec7bf3&quot;,&quot;title&quot;:&quot;Guida al contenuto del repo&quot;,&quot;createdAt&quot;:1766775358248,&quot;updatedAt&quot;:1766775379888,&quot;isNameGenerated&quot;:true,&quot;messageCount&quot;:7,&quot;lastMessagePreview&quot;:&quot;**Reviewing Project Structure**\n\nI'm currently focused on the file structure of this project. `rust_...&quot;}}" />
+  </component>
+</project>

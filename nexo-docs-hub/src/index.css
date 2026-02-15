@@ -1,0 +1,176 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap');
+
+@layer base {
+  :root {
+    --background: 0 0% 99%;
+    --foreground: 220 20% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 20% 10%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 10% 46%;
+
+    --accent: 25 95% 95%;
+    --accent-foreground: 25 95% 40%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 25 95% 53%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 220 10% 40%;
+    --sidebar-primary: 25 95% 53%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 25 95% 97%;
+    --sidebar-accent-foreground: 25 95% 40%;
+    --sidebar-border: 220 13% 93%;
+    --sidebar-ring: 25 95% 53%;
+
+    --code-bg: 220 20% 97%;
+    --code-border: 220 13% 91%;
+    --code-text: 220 20% 20%;
+
+    --hero-gradient-from: 25 95% 53%;
+    --hero-gradient-to: 15 90% 45%;
+  }
+
+  .dark {
+    --background: 220 20% 7%;
+    --foreground: 220 10% 93%;
+
+    --card: 220 20% 10%;
+    --card-foreground: 220 10% 93%;
+
+    --popover: 220 20% 10%;
+    --popover-foreground: 220 10% 93%;
+
+    --primary: 25 95% 53%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 14%;
+    --secondary-foreground: 220 10% 93%;
+
+    --muted: 220 14% 14%;
+    --muted-foreground: 220 10% 55%;
+
+    --accent: 25 95% 12%;
+    --accent-foreground: 25 95% 65%;
+
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 14% 16%;
+    --input: 220 14% 16%;
+    --ring: 25 95% 53%;
+
+    --sidebar-background: 220 20% 8%;
+    --sidebar-foreground: 220 10% 65%;
+    --sidebar-primary: 25 95% 53%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 12%;
+    --sidebar-accent-foreground: 220 10% 93%;
+    --sidebar-border: 220 14% 14%;
+    --sidebar-ring: 25 95% 53%;
+
+    --code-bg: 220 20% 10%;
+    --code-border: 220 14% 16%;
+    --code-text: 220 10% 85%;
+
+    --hero-gradient-from: 25 95% 53%;
+    --hero-gradient-to: 15 90% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  code, pre {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  .code-block {
+    @apply rounded-lg border text-sm overflow-x-auto;
+    background: hsl(var(--code-bg));
+    border-color: hsl(var(--code-border));
+    color: hsl(var(--code-text));
+  }
+
+  .code-block pre {
+    @apply p-4 leading-relaxed;
+  }
+
+  .docs-prose h1 {
+    @apply text-3xl font-bold tracking-tight mb-4;
+  }
+
+  .docs-prose h2 {
+    @apply text-xl font-semibold tracking-tight mt-10 mb-4 pb-2 border-b;
+    scroll-margin-top: 4.5rem;
+  }
+
+  .docs-prose h3 {
+    @apply text-lg font-semibold mt-8 mb-3;
+    scroll-margin-top: 4.5rem;
+  }
+
+  .docs-prose p {
+    @apply text-muted-foreground leading-7 mb-4;
+  }
+
+  .docs-prose ul {
+    @apply list-disc pl-6 mb-4 space-y-1 text-muted-foreground;
+  }
+
+  .docs-prose li {
+    @apply leading-7;
+  }
+
+  .docs-prose strong {
+    @apply text-foreground font-semibold;
+  }
+
+  .docs-prose code:not(pre code) {
+    @apply text-sm px-1.5 py-0.5 rounded font-medium;
+    background: hsl(var(--code-bg));
+    color: hsl(var(--accent-foreground));
+  }
+
+  .nexo-gradient {
+    background: linear-gradient(135deg, hsl(var(--hero-gradient-from)), hsl(var(--hero-gradient-to)));
+  }
+
+  .nexo-gradient-text {
+    background: linear-gradient(135deg, hsl(var(--hero-gradient-from)), hsl(var(--hero-gradient-to)));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+}
