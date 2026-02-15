@@ -14,8 +14,8 @@ use crate::server::header_protocol::{
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
+use crate::config::Config;
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
-use crate::server::protocol::{NETWORK_BUFFER_READ_SIZE, NETWORK_BUFFER_WRITE_SIZE, CHANNEL_CAPACITY_SOCKET_WRITE};
 
 /// Internal message type for the write loop
 enum WriteMessage {
@@ -25,6 +25,7 @@ enum WriteMessage {
 
 /// Handle a single client connection.
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
+    let config = Config::global();
     let (mut reader, writer) = tokio::io::split(socket);
     
     // Generate a unique Client ID
@@ -32,10 +33,10 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let client_id = ClientId(client_uuid.to_string());
     
     // BATCHING: Wrap writer in a BufWriter for automatic OS-level batching
-    let mut buffered_writer = BufWriter::with_capacity(NETWORK_BUFFER_WRITE_SIZE, writer);
+    let mut buffered_writer = BufWriter::with_capacity(config.server.network_buffer_write_size, writer);
     
     // Main channel for writing to the socket
-    let (tx, mut rx) = mpsc::channel::<WriteMessage>(CHANNEL_CAPACITY_SOCKET_WRITE);
+    let (tx, mut rx) = mpsc::channel::<WriteMessage>(config.server.channel_capacity_socket_write);
     
     // Channel for PubSubManager to send push notifications to this client
     // We use Unbounded channel for high throughput, but we should monitor for memory usage
@@ -83,7 +84,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     
     // --- READ LOOP ---
     // Use a larger buffer to allow for more data in a single read syscall
-    let mut buffer = BytesMut::with_capacity(NETWORK_BUFFER_READ_SIZE);
+    let mut buffer = BytesMut::with_capacity(config.server.network_buffer_read_size);
     let engine = Arc::new(engine);
     
     // Collect request handler tasks for cleanup on disconnect

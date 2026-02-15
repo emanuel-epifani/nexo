@@ -107,10 +107,4 @@ pub const OPCODE_MAX_PUBSUB: u8  = 0x2F;
 pub const OPCODE_MIN_STREAM: u8  = 0x30;
 pub const OPCODE_MAX_STREAM: u8  = 0x3F;
 
-// ========================================
-// NETWORK TUNING
-// ========================================
-pub const NETWORK_BUFFER_READ_SIZE: usize  = 64 * 1024; // 64KB
-pub const NETWORK_BUFFER_WRITE_SIZE: usize = 16 * 1024; // 16KB
-pub const CHANNEL_CAPACITY_SOCKET_WRITE: usize = 1024;
 
