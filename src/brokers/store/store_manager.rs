@@ -5,7 +5,7 @@ use crate::brokers::store::types::{Entry, Value};
 use crate::brokers::store::map::MapValue;
 use std::time::Instant;
 use crate::config::StoreConfig;
-use crate::server::protocol::payload_to_dashboard_value;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 pub struct StoreManager {
     pub map: MapStore,

@@ -7,8 +7,8 @@ use axum::{
 use crate::NexoEngine;
 use crate::brokers::store::types::Value as StoreValue;
 use crate::brokers::store::map::MapValue;
-use crate::server::protocol::payload_to_dashboard_value;
 use std::time::Instant;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 #[derive(Serialize)]
 pub struct StoreBrokerSnapshot {

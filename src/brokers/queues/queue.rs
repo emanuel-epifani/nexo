@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
-use crate::server::protocol::payload_to_dashboard_value;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 use crate::dashboard::models::queues::{QueueSummary, MessageSummary, DlqMessageSummary};
 use crate::brokers::queues::persistence::types::PersistenceMode;

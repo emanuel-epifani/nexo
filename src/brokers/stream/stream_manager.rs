@@ -18,7 +18,7 @@ use crate::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
 use crate::brokers::stream::persistence::writer::Segment;
-use crate::server::protocol::payload_to_dashboard_value;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 // ==========================================
 // COMMANDS (The Internal Protocol)

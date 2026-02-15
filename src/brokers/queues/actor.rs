@@ -15,7 +15,7 @@ use crate::brokers::queues::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queues::queue_manager::ManagerCommand;
 use crate::config::Config;
 use crate::dashboard::models::queues::{QueueSummary, DlqMessageSummary};
-use crate::server::protocol::payload_to_dashboard_value;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 // ==========================================
 // ACTOR COMMANDS

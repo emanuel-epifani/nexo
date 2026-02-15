@@ -28,7 +28,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use crate::dashboard::models::pubsub::TopicSnapshot;
-use crate::server::protocol::payload_to_dashboard_value;
+use crate::dashboard::utils::payload_to_dashboard_value;
 
 // ==========================================
 // PUBLIC TYPES
