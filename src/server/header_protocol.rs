@@ -3,7 +3,7 @@
 
 pub use crate::server::protocol::*;
 use bytes::{BufMut, BytesMut, Bytes};
-use std::convert::TryInto;
+use bytemuck::{Pod, Zeroable};
 
 // ========================================
 // TYPES
@@ -16,42 +16,39 @@ pub enum ParseError {
 }
 
 /// Fixed-size Header: [FrameType: 1] [Opcode: 1] [CorrelationID: 4] [PayloadLen: 4]
-#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct RequestHeader {
     pub frame_type: u8,
     pub opcode: u8,
-    pub id: u32,
-    pub payload_len: u32,
+    pub id: [u8; 4],          // [u8; 4] prevents padding and allows bytemuck safety
+    pub payload_len: [u8; 4],
 }
 
 impl RequestHeader {
     /// Total size of the header from protocol specification
-    pub const SIZE: usize = HEADER_SIZE;
+    pub const SIZE: usize = std::mem::size_of::<Self>();
 
     /// Parse header from bytes without consuming the buffer
-    pub fn parse(buf: &[u8]) -> Result<Option<Self>, ParseError> {
+    /// Returns a reference to the struct inside the buffer (Zero Copy)
+    pub fn parse(buf: &[u8]) -> Result<Option<&Self>, ParseError> {
         if buf.len() < Self::SIZE {
             return Ok(None);
         }
 
-        // Field extraction based on protocol geometry
-        let frame_type = buf[HEADER_OFFSET_FRAME_TYPE];
-        let opcode = buf[HEADER_OFFSET_OPCODE];
-        
-        let id_start = HEADER_OFFSET_CORRELATION_ID;
-        let id_end = id_start + HEADER_SIZE_CORRELATION_ID;
-        let id = u32::from_be_bytes(buf[id_start..id_end].try_into().map_err(|_| ParseError::Incomplete)?);
-        
-        let len_start = HEADER_OFFSET_PAYLOAD_LEN;
-        let len_end = len_start + HEADER_SIZE_PAYLOAD_LEN;
-        let payload_len = u32::from_be_bytes(buf[len_start..len_end].try_into().map_err(|_| ParseError::Incomplete)?);
+        // Zero-copy safe cast verified by bytemuck
+        match bytemuck::try_from_bytes(&buf[..Self::SIZE]) {
+            Ok(header) => Ok(Some(header)),
+            Err(_) => Err(ParseError::Invalid("Header alignment or size mismatch".to_string())),
+        }
+    }
 
-        Ok(Some(Self {
-            frame_type,
-            opcode,
-            id,
-            payload_len,
-        }))
+    pub fn id(&self) -> u32 {
+        u32::from_be_bytes(self.id)
+    }
+
+    pub fn payload_len(&self) -> u32 {
+        u32::from_be_bytes(self.payload_len)
     }
 }
 
@@ -77,18 +74,25 @@ pub enum Response {
 
 /// Attempts to parse a full frame from the buffer
 pub fn parse_frame(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, ParseError> {
-    let header = match RequestHeader::parse(buf)? {
+    // 1. Zero-copy parse header
+    let header_ref = match RequestHeader::parse(buf)? {
         Some(h) => h,
         None => return Ok(None),
     };
     
-    let total_len = RequestHeader::SIZE + header.payload_len as usize;
+    // 2. Check total length
+    let payload_len = header_ref.payload_len() as usize;
+    let total_len = RequestHeader::SIZE + payload_len;
+    
     if buf.len() < total_len { 
         return Ok(None); 
     }
     
+    // 3. Extract payload
     let payload = &buf[RequestHeader::SIZE..total_len];
-    Ok(Some((Frame { header, payload }, total_len)))
+    
+    // Copy header (10 bytes) to Frame struct, keep payload as ref
+    Ok(Some((Frame { header: *header_ref, payload }, total_len)))
 }
 
 // ========================================

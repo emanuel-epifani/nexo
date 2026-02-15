@@ -52,13 +52,6 @@ pub const HEADER_SIZE_PAYLOAD_LEN: usize    = SIZE_U32;
 /// Total size of the binary header (Sum of all header fields)
 pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_OPCODE_OR_STATUS + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
 
-// Offsets within the header
-pub const HEADER_OFFSET_FRAME_TYPE: usize     = 0;
-pub const HEADER_OFFSET_OPCODE: usize         = HEADER_OFFSET_FRAME_TYPE + HEADER_SIZE_FRAME_TYPE;
-pub const HEADER_OFFSET_STATUS: usize         = HEADER_OFFSET_FRAME_TYPE + HEADER_SIZE_FRAME_TYPE;  // Same position as opcode
-pub const HEADER_OFFSET_CORRELATION_ID: usize = HEADER_OFFSET_OPCODE + HEADER_SIZE_OPCODE_OR_STATUS;
-pub const HEADER_OFFSET_PAYLOAD_LEN: usize    = HEADER_OFFSET_CORRELATION_ID + HEADER_SIZE_CORRELATION_ID;
-
 // ========================================
 // PAYLOAD GEOMETRY
 // ========================================

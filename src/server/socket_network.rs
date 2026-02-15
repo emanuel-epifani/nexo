@@ -118,7 +118,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                 None
             },
         } {
-            let id = frame_ref.header.id;
+            let id = frame_ref.header.id();
             let frame_type = frame_ref.header.frame_type;
             let opcode = frame_ref.header.opcode;
 
