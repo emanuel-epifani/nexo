@@ -77,8 +77,20 @@ function getRecentCommits() {
     }
 }
 
+function checkCleanWorkspace() {
+    const status = run('git status --porcelain');
+    if (status) {
+        console.error("❌ Git workspace is dirty. Please commit or stash your changes before releasing.");
+        console.error("Uncommitted changes:");
+        console.error(status);
+        process.exit(1);
+    }
+}
+
 console.log("🚀 NEXO RELEASE WIZARD");
 console.log("======================");
+
+checkCleanWorkspace();
 
 const currentVer = getCurrentVersion();
 console.log(`Current Version: ${currentVer}`);
