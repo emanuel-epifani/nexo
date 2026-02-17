@@ -202,7 +202,7 @@ pub struct StreamWriter {
     retention_check_interval_ms: u64,
     batch_size: usize,
     
-    ack_tx: mpsc::Sender<super::super::stream_manager::TopicCommand>,
+    ack_tx: mpsc::Sender<super::super::actor::TopicCommand>,
 }
 
 impl StreamWriter {
@@ -217,7 +217,7 @@ impl StreamWriter {
         retention: RetentionOptions,
         retention_check_interval_ms: u64,
         batch_size: usize,
-        ack_tx: mpsc::Sender<super::super::stream_manager::TopicCommand>,
+        ack_tx: mpsc::Sender<super::super::actor::TopicCommand>,
     ) -> Self {
         let base_path = base_path.join(&topic_name);
         
@@ -414,7 +414,7 @@ impl StreamWriter {
             self.writers.insert(i, (BufWriter::new(file), size));
             
             // Notifica TopicActor del segmento iniziale
-            let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::SegmentRotated {
+            let _ = self.ack_tx.try_send(super::super::actor::TopicCommand::SegmentRotated {
                 partition: i,
                 segment: active_segment,
             });
@@ -492,7 +492,7 @@ impl StreamWriter {
         // 3. Send ACK to TopicActor (non-blocking)
         if !failed {
             for (partition, last_offset) in last_offsets {
-                let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::PersistenceAck {
+                let _ = self.ack_tx.try_send(super::super::actor::TopicCommand::PersistenceAck {
                     partition,
                     last_persisted_offset: last_offset,
                 });
@@ -537,7 +537,7 @@ impl StreamWriter {
                             path: new_path.clone(),
                             start_offset: *offset,
                         };
-                        let _ = self.ack_tx.try_send(super::super::stream_manager::TopicCommand::SegmentRotated {
+                        let _ = self.ack_tx.try_send(super::super::actor::TopicCommand::SegmentRotated {
                             partition: *partition,
                             segment,
                         });

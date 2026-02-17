@@ -1,18 +1,12 @@
-pub mod types;
-mod sqlite;
-mod writer;
-
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
-use types::{PersistenceMode, StorageOp, StoreCommand};
-use writer::run_writer;
-
-use crate::brokers::queues::queue::Message;
-use crate::brokers::queues::dlq::DlqMessage;
-use sqlite::{load_all_messages, load_dlq_messages};
 use rusqlite::Connection;
 
-use crate::brokers::queues::persistence::sqlite::init_db; // Import init_db
+use crate::brokers::queue::queue::Message;
+use crate::brokers::queue::dlq::DlqMessage;
+use crate::brokers::queue::persistence::types::{PersistenceMode, StorageOp, StoreCommand};
+use crate::brokers::queue::persistence::sqlite::{init_db, load_all_messages, load_dlq_messages};
+use crate::brokers::queue::persistence::writer::run_writer;
 
 #[derive(Clone)]
 pub struct QueueStore {

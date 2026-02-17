@@ -9,7 +9,7 @@ use hashlink::LinkedHashMap;
 use uuid::Uuid;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use crate::brokers::queues::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queue::queue::{Message, MessageState, current_time_ms};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlqMessage {

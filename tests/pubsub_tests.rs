@@ -1,9 +1,8 @@
 use nexo::brokers::pub_sub::{PubSubManager, ClientId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use bytes::{Bytes, Buf};
+use bytes::Bytes;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 mod helpers;
 use helpers::{setup_pubsub_manager, Benchmark};

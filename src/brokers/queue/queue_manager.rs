@@ -5,12 +5,12 @@ use bytes::Bytes;
 use uuid::Uuid;
 use std::collections::HashMap;
 
-use crate::brokers::queues::queue::{QueueConfig, Message};
-use crate::brokers::queues::actor::{QueueActor, QueueActorCommand};
-use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
+use crate::brokers::queue::queue::{QueueConfig, Message};
+use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
+use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::dashboard::models::queues::QueueSummary;
 use crate::config::SystemQueueConfig;
-use crate::brokers::queues::dlq::{DlqMessage, DlqState};
+use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 
 // ==========================================
 // MANAGER COMMANDS

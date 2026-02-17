@@ -1,5 +1,4 @@
-use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions, RetentionOptions};
-use nexo::brokers::stream::StreamManager;
+use nexo::brokers::stream::commands::{StreamCreateOptions, StreamPublishOptions, PersistenceOptions};
 use nexo::config::{Config, SystemStreamConfig};
 use bytes::Bytes;
 use std::collections::HashSet;
@@ -244,7 +243,6 @@ mod stream_tests {
 
     mod persistence {
         use super::*;
-        use std::fs;
         use std::io::Write;
         use nexo::brokers::stream::StreamManager;
 

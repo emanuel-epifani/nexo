@@ -13,10 +13,10 @@ use chrono::{DateTime, Utc};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
 use crate::dashboard::models::queues::{QueueSummary, MessageSummary, DlqMessageSummary};
-use crate::brokers::queues::persistence::types::PersistenceMode;
-use crate::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
+use crate::brokers::queue::persistence::types::PersistenceMode;
+use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::config::SystemQueueConfig;
-use crate::brokers::queues::dlq::DlqMessage;
+use crate::brokers::queue::dlq::DlqMessage;
 
 // ==========================================
 // MESSAGE & CONFIG

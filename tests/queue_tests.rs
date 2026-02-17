@@ -1,5 +1,5 @@
-use nexo::brokers::queues::{QueueManager};
-use nexo::brokers::queues::commands::{QueueCreateOptions, PersistenceOptions};
+use nexo::brokers::queue::{QueueManager};
+use nexo::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -335,7 +335,7 @@ mod queue_tests {
             manager.push(q.clone(), Bytes::from("s1"), 0, Some(10000)).await.unwrap();
 
             let snapshot = manager.get_snapshot().await;
-            let queue_snap = snapshot.active_queues.iter().find(|qs| qs.name == q).expect("Queue not found in snapshot");
+            let queue_snap = snapshot.iter().find(|qs| qs.name == q).expect("Queue not found in snapshot");
 
             // Verify counts based on vectors length in summary
             // 2 Pending (p2, p3) - p1 was popped
@@ -576,7 +576,7 @@ mod queue_tests {
 
                 // Verify snapshot includes restored queues
                 let snapshot = manager2.get_snapshot().await;
-                let queue_names: Vec<String> = snapshot.active_queues.iter().map(|q| q.name.clone()).collect();
+                let queue_names: Vec<String> = snapshot.iter().map(|q| q.name.clone()).collect();
                 assert!(queue_names.contains(&q1), "Snapshot should include q1");
                 assert!(queue_names.contains(&q2), "Snapshot should include q2");
             }

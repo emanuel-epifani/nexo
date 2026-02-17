@@ -1,15 +1,21 @@
 use std::sync::Arc;
-use nexo::brokers::queues::QueueManager;
+use nexo::brokers::queue::QueueManager;
+use nexo::brokers::stream::StreamManager;
 use nexo::brokers::store::StoreManager;
+use nexo::brokers::pub_sub::PubSubManager;
+use nexo::config::Config;
 use tempfile::TempDir;
 use std::time::{Duration, Instant};
-use nexo::brokers::pub_sub::PubSubManager;
+
+// ==========================================
+// SETUP HELPERS
+// ==========================================
 
 pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
-    let mut config = nexo::config::Config::global().queue.clone();
+    let mut config = Config::global().queue.clone();
     config.persistence_path = path;
     
     let manager = QueueManager::new(config);
@@ -20,19 +26,34 @@ pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
-    let mut config = nexo::config::Config::global().pubsub.clone();
+    let mut config = Config::global().pubsub.clone();
     config.persistence_path = path;
     
     let manager = Arc::new(PubSubManager::new(config));
     (manager, temp_dir)
 }
 
+pub async fn setup_stream_manager() -> (StreamManager, TempDir) {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+
+    let mut config = Config::global().stream.clone();
+    config.persistence_path = path;
+
+    let manager = StreamManager::new(config);
+    (manager, temp_dir)
+}
+
 pub async fn setup_store_manager() -> (StoreManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let config = nexo::config::Config::global().store.clone();
+    let config = Config::global().store.clone();
     let manager = StoreManager::new(config);
     (manager, temp_dir)
 }
+
+// ==========================================
+// BENCHMARK UTILITY
+// ==========================================
 
 pub struct Benchmark {
     pub name: String,
@@ -67,12 +88,13 @@ impl Benchmark {
         let p95 = self.samples.get(len * 95 / 100).unwrap_or(&Duration::ZERO).as_micros();
         let p99 = self.samples.get(len * 99 / 100).unwrap_or(&Duration::ZERO).as_micros();
         let max = self.samples.last().unwrap_or(&Duration::ZERO).as_micros();
+        let avg = if len > 0 { self.samples.iter().sum::<Duration>().as_micros() as u64 / len as u64 } else { 0 };
 
-        println!("\n{}", self.name);
-        println!(" 🚀 Throughput:  {:.0} ops/sec", ops_sec);
-        println!(" ⏱️  Total Time:  {:.2?}", total_duration);
-        println!(" 📊 Latency (µs): p50: {} | p95: {} | p99: {} | MAX: {}", 
-            p50, p95, p99, max);
-        println!(" 📦 Count:       {}\n", self.count);
+        println!("\n📊 {}", self.name);
+        println!("   Throughput:  {:.0} ops/sec", ops_sec);
+        println!("   Total Time:  {:.2?}", total_duration);
+        println!("   Latency:     Avg: {}µs | p50: {}µs | p95: {}µs | p99: {}µs | Max: {}µs", 
+            avg, p50, p95, p99, max);
+        println!("   Count:       {}\n", self.count);
     }
 }

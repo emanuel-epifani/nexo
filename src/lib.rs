@@ -9,7 +9,7 @@ pub mod config;
 use std::sync::Arc;
 use std::time::Instant;
 use crate::brokers::store::StoreManager;
-use crate::brokers::queues::QueueManager;
+use crate::brokers::queue::QueueManager;
 use crate::brokers::pub_sub::PubSubManager;
 use crate::brokers::stream::StreamManager;
 use crate::dashboard::models::system::SystemSnapshot;

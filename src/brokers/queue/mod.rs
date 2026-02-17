@@ -1,5 +1,5 @@
-mod queue_manager;
-mod queue;
+pub mod queue_manager;
+pub mod queue;
 pub mod actor;
 pub mod persistence;
 pub mod commands;

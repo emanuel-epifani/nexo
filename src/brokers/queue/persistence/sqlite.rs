@@ -1,8 +1,8 @@
 use rusqlite::{params, Connection, Result};
 use super::types::{StorageOp, PersistenceMode};
 
-use crate::brokers::queues::queue::{Message, MessageState, current_time_ms};
-use crate::brokers::queues::dlq::DlqMessage;
+use crate::brokers::queue::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queue::dlq::DlqMessage;
 use uuid::Uuid;
 
 pub fn init_db(conn: &Connection, mode: &PersistenceMode) -> Result<()> {
