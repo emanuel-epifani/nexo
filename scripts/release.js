@@ -139,7 +139,12 @@ rl.question('Enter new version (e.g., 0.3.1): ', (newVersion) => {
         run(`git commit -m "chore: release v${newVersion}"`);
 
         console.log(`🏷️  Tagging v${newVersion}...`);
-        run(`git tag v${newVersion}`);
+        try {
+            run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
+        } catch (e) {
+            console.error("❌ Failed to tag. Do you have a gpg key configured? If not, try git tag without -s or just -a.");
+            throw e;
+        }
 
         console.log("\n🎉 Release ready!");
         console.log(`Run 'git push && git push --tags' to publish.`);
