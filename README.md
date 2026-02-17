@@ -35,10 +35,6 @@ Modern backend architecture suffers from **Infrastructure Fatigue**. A typical s
 Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**.
 
 Here's the reality: most scale-ups will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 99%—companies that need **high throughput without operational complexity**.
-*   **Unified:** One TCP connection for Caching, Pub/Sub, Queues, and Streams.
-*   **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
-*   **Fast:** Built in Rust on top of Tokio for extreme throughput and incredible low latency.
-*   **Dev Dashboard:** Built-in Web UI for local development. Inspect all brokers in real-time. (Auto-disabled in production)
 
 ## Architecture
 
@@ -47,7 +43,7 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in 
 *   **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
 *   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
 *   **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
-*   **Embedded Observability:** The server hosts its own Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
+*   **Dev Dashboard:** The server expose built-in Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
 
 
                                      ┌──────────────────────────────────────┐
@@ -107,7 +103,6 @@ Everything is available instantly via a unified Client.
 └──────────────┘                        └──────────────────┘
 ```
 
-*   **Granular TTL:** Set expiration per-key or globally. Ideal for temporary API caches and rate-limiting counters.
 
 
 ### 2. PUB/SUB (Real-Time Broadcast)
@@ -196,14 +191,12 @@ Everything is available instantly via a unified Client.
 Nexo comes with a built-in, zero-config dashboard exposed to local development.
 Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
 
-![Nexo Dashboard Screenshot](docs/assets/dashboard-preview.png)
+![Nexo Dashboard Screenshot](nexo-docs/public/dashboard-preview.png)
 
 ## Getting Started
 
 ### 1. Run the Server
 
-**Option A: Quick Start (Ephemeral)**
-Run in-memory for quick testing. Data persists across restarts but is lost if the container is removed.
 ```bash
 docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo
 ```
@@ -211,21 +204,6 @@ This exposes:
 - Port 7654 (TCP): Main server socket for SDK clients.
 - Port 8080 (HTTP): Web Dashboard with status of all brokers.
 
-**Option B: Production Mode (Persistent)**
-Mount volumes to persist data. You can split Queues, Streams, and PubSub retained messages onto different disks.
-```bash
-docker run -d \
-  --name nexo \
-  -p 7654:7654 \                                     # Expose only TCP socket (Dashboard is OFF in prod)
-  -v $(pwd)/nexo_queue:/storage/queue \              # Volume 1 (e.g. fast SSD)
-  -v $(pwd)/nexo_stream:/storage/stream \            # Volume 2 (e.g. large HDD)
-  -v $(pwd)/nexo_pubsub:/storage/pubsub \            # Volume 3 for PubSub retained messages
-  -e QUEUE_ROOT_PERSISTENCE_PATH=/storage/queue \    # Map Queue persistency to Volume 1
-  -e STREAM_ROOT_PERSISTENCE_PATH=/storage/stream \  # Map Stream persistency to Volume 2
-  -e PUBSUB_ROOT_PERSISTENCE_PATH=/storage/pubsub \  # Map PubSub retained messages to Volume 3
-  -e NEXO_ENV=prod \                                 # Set Production Mode (Dashboard OFF)
-  nexobroker/nexo:latest
-```
 
 ### 2. Install the SDK
 
@@ -274,7 +252,7 @@ client.stream<Buffer>('video-archive').publish(chunk);
 client.queue<Buffer>('video-processing').push(chunk);
 ```
 
-> **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Node.js SDK Guide**](https://www.npmjs.com/package/@emanuelepifani/nexo-client).
+> **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Nexo Docs**](https://nexo-docs-hub.vercel.app/).
 
 ---
 

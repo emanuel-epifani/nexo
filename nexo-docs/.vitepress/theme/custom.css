@@ -1,0 +1,521 @@
+/* ─── Fonts ─── */
+:root {
+  --vp-font-family-base: 'Inter', system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', monospace;
+}
+
+/* ─── Brand Colors (Orange — hsl(25, 95%, 53%)) ─── */
+:root {
+  --vp-c-brand-1: hsl(25, 95%, 53%);
+  --vp-c-brand-2: hsl(25, 95%, 46%);
+  --vp-c-brand-3: hsl(25, 95%, 40%);
+  --vp-c-brand-soft: hsla(25, 95%, 53%, 0.14);
+  --nexo-orange: hsl(25, 95%, 53%);
+  --nexo-orange-dark: hsl(15, 90%, 45%);
+  --nexo-bg-dark: hsl(220, 20%, 7%);
+  --nexo-card-bg: hsl(220, 20%, 10%);
+  --nexo-border: hsl(220, 14%, 16%);
+  --nexo-text: hsl(220, 10%, 93%);
+  --nexo-text-muted: hsl(220, 10%, 55%);
+}
+
+.dark {
+  --vp-c-brand-1: hsl(25, 95%, 53%);
+  --vp-c-brand-2: hsl(25, 95%, 58%);
+  --vp-c-brand-3: hsl(25, 95%, 65%);
+  --vp-c-brand-soft: hsla(25, 95%, 53%, 0.16);
+}
+
+/* ─── Hide VitePress nav/footer on landing page ─── */
+.nexo-landing {
+  margin-top: calc(var(--vp-nav-height) * -1 - 1px);
+  padding-top: 0;
+}
+
+/* ═══════════════════════════════════════════════════
+   LANDING PAGE — Custom Styles
+   ═══════════════════════════════════════════════════ */
+
+.nexo-landing {
+  background: var(--nexo-bg-dark);
+  color: var(--nexo-text);
+  font-family: var(--vp-font-family-base);
+}
+
+/* ─── Hero ─── */
+.hero-section {
+  position: relative;
+  overflow: hidden;
+  padding: 10rem 1.5rem 5rem;
+  text-align: center;
+}
+
+.hero-glow {
+  position: absolute;
+  top: -40%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 800px;
+  background: radial-gradient(circle, hsla(25, 95%, 53%, 0.15) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 1rem;
+  border-radius: 9999px;
+  border: 1px solid var(--nexo-border);
+  background: var(--nexo-card-bg);
+  font-size: 0.875rem;
+  color: var(--nexo-text-muted);
+  margin-bottom: 2rem;
+}
+
+.hero-title {
+  margin: 0 0 1rem;
+  line-height: 1;
+}
+
+.hero-title-nexo {
+  font-size: 3rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--nexo-orange), var(--nexo-orange-dark));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin: 0 0 2rem;
+}
+
+.hero-subtitle-white {
+  color: var(--nexo-text);
+}
+
+.hero-subtitle-gradient {
+  background: linear-gradient(135deg, var(--nexo-orange), var(--nexo-orange-dark));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-desc {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--nexo-text-muted);
+  max-width: 640px;
+  margin: 0 auto 1.25rem;
+}
+
+.hero-desc strong {
+  color: var(--nexo-text);
+  font-weight: 600;
+}
+
+.hero-desc code {
+  color: var(--nexo-orange);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.875rem;
+}
+
+.hero-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 2rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  font-size: 1rem;
+  color: #fff;
+  background: linear-gradient(135deg, var(--nexo-orange), var(--nexo-orange-dark));
+  text-decoration: none;
+  transition: filter 0.2s, transform 0.2s;
+  margin-top: 1rem;
+}
+
+.hero-cta:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+/* ─── Sections ─── */
+.landing-section {
+  border-top: 1px solid var(--nexo-border);
+}
+
+.section-inner {
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+}
+
+.section-title {
+  font-size: 2.25rem;
+  font-weight: 700;
+  text-align: center;
+  margin: 0 0 0.75rem;
+  letter-spacing: -0.02em;
+  color: var(--nexo-text);
+}
+
+.section-desc {
+  text-align: center;
+  color: var(--nexo-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.7;
+  max-width: 640px;
+  margin: 0 auto 2.5rem;
+}
+
+.section-desc code {
+  color: var(--nexo-orange);
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.8125rem;
+}
+
+/* ─── Engine Cards ─── */
+.engines-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 640px) {
+  .engines-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.engine-card {
+  display: block;
+  padding: 1.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--nexo-border);
+  background: var(--nexo-card-bg);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.engine-card:hover {
+  border-color: hsla(25, 95%, 53%, 0.3);
+  box-shadow: 0 0 0 1px hsla(25, 95%, 53%, 0.1);
+}
+
+.engine-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.engine-card-icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.5rem;
+  background: hsla(25, 95%, 53%, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  color: var(--nexo-orange);
+}
+
+.engine-card-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.engine-card-perf {
+  font-size: 0.75rem;
+  font-family: var(--vp-font-family-mono);
+  color: var(--nexo-orange);
+  font-weight: 500;
+}
+
+.engine-card-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0 0 0.375rem;
+  color: var(--nexo-text);
+  transition: color 0.2s;
+}
+
+.engine-card:hover .engine-card-title {
+  color: var(--nexo-orange);
+}
+
+.engine-card-desc {
+  font-size: 0.875rem;
+  color: var(--nexo-text-muted);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ─── Code Tabs ─── */
+.code-tabs-container {
+  border-radius: 0.75rem;
+  border: 1px solid var(--nexo-border);
+  overflow: hidden;
+  background: hsl(220, 20%, 6%);
+}
+
+.code-tabs-bar {
+  display: flex;
+  border-bottom: 1px solid var(--nexo-border);
+  background: hsl(220, 20%, 8%);
+}
+
+.code-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.625rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nexo-text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+  font-family: var(--vp-font-family-base);
+}
+
+.code-tab:hover {
+  color: var(--nexo-text);
+}
+
+.code-tab.active {
+  color: var(--nexo-orange);
+  border-bottom-color: var(--nexo-orange);
+}
+
+.code-tab-icon {
+  font-size: 0.875rem;
+}
+
+.code-tabs-body {
+  position: relative;
+  min-height: 260px;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  background: hsl(220, 14%, 18%);
+  border: none;
+  color: var(--nexo-text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+  z-index: 2;
+}
+
+.code-tabs-body:hover .code-copy-btn {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  background: hsl(220, 14%, 24%);
+}
+
+.code-tabs-highlighted {
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+}
+
+.code-tabs-highlighted pre {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  font-size: 0.875rem;
+  line-height: 1.7;
+  font-family: var(--vp-font-family-mono);
+}
+
+.code-tabs-highlighted code {
+  font-family: var(--vp-font-family-mono);
+}
+
+/* ─── Dashboard Image ─── */
+.dashboard-img-container {
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid var(--nexo-border);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+
+.dashboard-img-container img {
+  width: 100%;
+  display: block;
+}
+
+/* ─── Performance Table ─── */
+.perf-card {
+  border-radius: 0.75rem;
+  border: 1px solid var(--nexo-border);
+  overflow: hidden;
+  background: var(--nexo-card-bg);
+}
+
+.perf-table-full {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.perf-table-full th {
+  text-align: left;
+  padding: 0.75rem 1.5rem;
+  font-weight: 600;
+  color: var(--nexo-text);
+  border-bottom: 1px solid var(--nexo-border);
+}
+
+.perf-table-full td {
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid hsla(220, 14%, 16%, 0.5);
+}
+
+.perf-table-full tr:last-child td {
+  border-bottom: none;
+}
+
+.perf-engine {
+  font-weight: 500;
+  color: var(--nexo-text);
+}
+
+.perf-throughput {
+  font-family: var(--vp-font-family-mono);
+  color: var(--nexo-orange);
+}
+
+.perf-latency {
+  font-family: var(--vp-font-family-mono);
+  color: var(--nexo-text-muted);
+}
+
+.perf-footnote {
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid hsla(220, 14%, 16%, 0.5);
+  font-size: 0.75rem;
+  color: var(--nexo-text-muted);
+}
+
+/* ─── Footer ─── */
+.landing-footer {
+  border-top: 1px solid var(--nexo-border);
+  padding: 2rem 1.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: var(--nexo-text-muted);
+}
+
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.footer-inner a {
+  color: var(--nexo-text);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.footer-inner a:hover {
+  color: var(--nexo-orange);
+}
+
+.footer-dot {
+  color: var(--nexo-text-muted);
+}
+
+/* ─── Landing page: full-width, no padding ─── */
+.VPContent:has(.nexo-landing) {
+  padding: 0 !important;
+}
+
+.VPContent:has(.nexo-landing) .VPDoc .container {
+  max-width: 100% !important;
+}
+
+.VPContent:has(.nexo-landing) .VPDoc .content {
+  padding: 0 !important;
+  max-width: 100% !important;
+}
+
+.VPContent:has(.nexo-landing) .VPDoc .content-container {
+  max-width: 100% !important;
+  padding: 0 !important;
+}
+
+.VPContent:has(.nexo-landing) .VPDoc .aside {
+  display: none;
+}
+
+/* ─── Hide VitePress default footer on landing page ─── */
+.VPContent:has(.nexo-landing) .VPDocFooter,
+.VPContent:has(.nexo-landing) + .VPFooter {
+  display: none !important;
+}
+
+/* Also hide the global VitePress footer */
+.has-nexo-landing .VPFooter {
+  display: none !important;
+}
+
+/* ─── Dark navbar on landing page ─── */
+.VPContent:has(.nexo-landing) ~ .VPNav,
+body:has(.nexo-landing) .VPNav {
+  --vp-nav-bg-color: var(--nexo-bg-dark) !important;
+  background: var(--nexo-bg-dark) !important;
+}
+
+body:has(.nexo-landing) .VPNavBar {
+  background: var(--nexo-bg-dark) !important;
+  border-bottom-color: var(--nexo-border) !important;
+}
+
+body:has(.nexo-landing) .VPNavBar .content {
+  background: var(--nexo-bg-dark) !important;
+}
+
+body:has(.nexo-landing) .VPNavBar .curtain {
+  background: var(--nexo-bg-dark) !important;
+}
+
+body:has(.nexo-landing) .VPNavBar .title {
+  color: var(--nexo-text) !important;
+}
+
+body:has(.nexo-landing) .VPNavBarTitle .title {
+  color: var(--nexo-text) !important;
+}
+
+body:has(.nexo-landing) .VPNavBarSearch .DocSearch-Button {
+  background: var(--nexo-card-bg) !important;
+}
+
+/* ─── Hide VitePress footer globally on landing ─── */
+body:has(.nexo-landing) .VPFooter {
+  display: none !important;
+}

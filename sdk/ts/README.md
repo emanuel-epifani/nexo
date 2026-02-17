@@ -1,8 +1,8 @@
 # Nexo Client SDK
 
-High-performance TypeScript client for [Nexo](https://github.com/emanuel-epifani/nexo).
+High-performance TypeScript client for [Nexo](https://nexo-docs-hub.vercel.app/).
 
-> 📚 **Full Documentation:** Configuration, deployment guides, architecture deep-dives, and advanced patterns → [Nexo -Docs](https://nexo-docs-hub.vercel.app/)
+
 
 ## Quick Start
 
@@ -51,94 +51,6 @@ await mailQ.subscribe((msg) => console.log(msg));
 await mailQ.delete();
 ```
 
-<details>
-<summary><strong>Advanced Features (Persistence, Retry, Delay, Priority, DLQ)</strong></summary>
-
-```typescript
-// -------------------------------------------------------------
-// 1. CREATION (Default behavior for all messages in this queue)
-// -------------------------------------------------------------
-interface CriticalTask { type: string; payload: any; }
-
-const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create({
-    // RELIABILITY:
-    visibilityTimeoutMs: 10000, // Retry delivery if not ACKed within 10s   (default=30s)
-    maxRetries: 5,              // Move to DLQ after 5 failures             (default=5)
-    ttlMs: 60000,               // Message expires if not consumed in 60s   (default=7days)
-
-    // PERSISTENCE:
-    // - 'file_sync':  Save every message (Safest, Slowest)
-    // - 'file_async': Flush periodically (Fast & Durable) - 
-    // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs
-    persistence: 'file_sync',
-});
-
-
-// ---------------------------------------------------------
-// 2. PRODUCING (Override specific behaviors per message)
-// ---------------------------------------------------------
-
-// PRIORITY: Higher value (255) delivered before lower values (0)
-// This message jumps ahead of all priority < 255 messages sent previously and still not consumed.
-await criticalQueue.push({ type: 'urgent' }, { priority: 255 });
-
-// SCHEDULING: Delay visibility
-// This message is hidden for 1 hour (default delayMs: 0, instant)
-await criticalQueue.push({ type: 'scheduled' }, { delayMs: 3600000 });
-
-
-
-// ---------------------------------------------------------
-// 3. CONSUMING (Worker Tuning to optimize throughput and latency)
-// ---------------------------------------------------------
-await criticalQueue.subscribe(
-    async (task) => { await processTask(task); },
-    {
-        batchSize: 100,   // Network: Fetch 100 messages in one request
-        concurrency: 10,  // Local: Process 10 messages concurrently (useful for I/O tasks)
-        waitMs: 5000      // Polling: If empty, wait 5s for new messages before retrying
-    }
-);
-
-// ---------------------------------------------------------
-// 4. DEAD LETTER QUEUE (DLQ) - Failed Message Management
-// ---------------------------------------------------------
-
-// DLQ is automatically available for every main queue.
-// When messages exceed maxRetries, they're moved to DLQ automatically
-
-// Inspect failed messages
-const failedMessages = await criticalQueue.dlq.peek(10);
-console.log(`Found ${failedMessages.total} failed messages`);
-
-for (const msg of failedMessages.items) {
-    console.log(`Message ${msg.id}: attempts=${msg.attempts}, reason=${msg.failureReason}`);
-    console.log(`Payload:`, msg.data);
-
-    // Decision logic based on failure reason
-    if (shouldRetry(msg.data)) {
-        // Replay: Move back to main queue (resets attempts to 0)
-        // The message will be immediately available for consumption
-        const moved = await criticalQueue.dlq.moveToQueue(msg.id);
-        console.log(`Replayed message ${msg.id}: ${moved}`);
-    } else {
-        // Discard: Permanently delete from DLQ
-        const deleted = await criticalQueue.dlq.delete(msg.id);
-        console.log(`Deleted message ${msg.id}: ${deleted}`);
-    }
-}
-
-// Bulk operations
-const purgedCount = await criticalQueue.dlq.purge(); // Clear all DLQ messages
-console.log(`Purged ${purgedCount} messages from DLQ`);
-
-// DLQ API:
-// - peek(limit, offset): Inspect messages without removing them. Returns { total, items: [] }
-// - moveToQueue(messageId): Replay a specific message (returns false if not found)
-// - delete(messageId): Permanently remove a specific message (returns false if not found)
-// - purge(): Remove all messages (returns count)
-```
-</details>
 
 ### 3. PUB/SUB
 
@@ -151,35 +63,6 @@ await alerts.subscribe((msg) => console.log(msg));
 await alerts.publish({ level: "high" });
 ```
 
-<details>
-<summary><strong>Wildcards & Retained Messages</strong></summary>
-
-```typescript
-// WILDCARD SUBSCRIPTIONS
-// ----------------------
-
-// 1. Single-Level Wildcard (+)
-// Matches: 'home/kitchen/light', 'home/garage/light'
-const roomLights = client.pubsub<LightStatus>('home/+/light');
-await roomLights.subscribe((status) => console.log('Light is:', status.state));
-
-// 2. Multi-Level Wildcard (#)
-// Matches all topics under 'sensors/'
-const allSensors = client.pubsub<SensorData>('sensors/#');
-await allSensors.subscribe((data) => console.log('Sensor value:', data.value));
-
-// PUBLISHING (No wildcards allowed!)
-// ---------------------------------
-// You must publish to concrete topics with matching types
-await client.pubsub<LightStatus>('home/kitchen/light').publish({ state: 'ON' });
-await client.pubsub<SensorData>('sensors/kitchen/temp').publish({ value: 22.5, unit: 'C' });
-
-// RETAINED MESSAGES
-// -----------------
-// Last value is stored and immediately sent to new subscribers
-await client.pubsub<string>('config/theme').publish('dark', { retain: true });
-```
-</details>
 
 ### 4. STREAM
 
@@ -194,56 +77,11 @@ await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} pe
 await stream.delete();
 ```
 
-<details>
-<summary><strong>Advanced Features (Consumer Groups, Persistence, Retention)</strong></summary>
-
-```typescript
-// ---------------------------------------------------------
-// 1. STREAM CREATION & POLICY
-// ---------------------------------------------------------
-const orders = await client.stream<Order>('orders').create({
-    // SCALING
-    partitions: 4,              // Max concurrent consumers per group on same topic (default=8)
-
-    // PERSISTENCE:
-    // - 'file_sync':  Save every message (Safest, Slowest)
-    // - 'file_async': Flush periodically (Fast & Durable) - 
-    // DEFAULT: 'file_async': Flush every 50ms or 5000 msgs
-    persistence: 'file_sync',
-
-    // RETENTION (Cleanup Policy)
-    // --------------------------
-    // Delete old data when EITHER limit is reached:
-    retention: {
-        maxAgeMs: 86400000,     // 1 Day (Default: 7 Days)
-        maxBytes: 536870912     // 512 MB (Default: 1 GB)
-    },
-});
-
-// ---------------------------------------------------------
-// 2. CONSUMING (Scaling & Broadcast patterns)
-// ---------------------------------------------------------
-
-// SCALING (Microservices Replicas / K8s Pods)
-// Same Group ('workers') -> Automatic Load Balancing & Rebalancing
-// Partitions are distributed among workers.
-await orders.subscribe('workers', (order) => process(order));
-await orders.subscribe('workers', (order) => process(order));
-
-
-// BROADCAST (Independent Domains)
-// Different Groups -> Each group gets a full copy of the stream.
-// Useful for independent services reacting to the same event.
-await orders.subscribe('analytics', (order) => trackMetrics(order));
-await orders.subscribe('audit-log', (order) => saveAudit(order));
-```
-</details>
-
 
 
 ---
 
-### Binary Payloads (Zero-Overhead)
+### Binary Payloads
 
 All Nexo brokers (**Store, Queue, Stream, PubSub**) natively support raw binary data (`Buffer`).    
 Bypassing JSON serialization drastically reduces Latency, increases Throughput, and saves Bandwidth.
@@ -254,13 +92,13 @@ Bypassing JSON serialization drastically reduces Latency, increases Throughput, 
 // Send 1MB raw buffer (30% smaller than JSON/Base64)
 const heavyPayload = Buffer.alloc(1024 * 1024);
 
-// 1. STREAM: Replayable Data (e.g. CCTV Recording, Event Sourcing)
+// 1. STREAM
 await client.stream('cctv-archive').publish(heavyPayload);
-// 2. PUBSUB: Ephemeral Live Data (e.g. VoIP, Real-time Sensor)
+// 2. PUBSUB 
 await client.pubsub('live-audio-call').publish(heavyPayload);
-// 3. STORE (Cache Images)
+// 3. STORE
 await client.store.map.set('user:avatar:1', heavyPayload);
-// 4. QUEUE (Process Files)
+// 4. QUEUE
 await client.queue('pdf-processing').push(heavyPayload);
 ```
 
@@ -273,10 +111,8 @@ MIT
 
 ## Links
 
-- **Nexo Broker (Server):** [GitHub Repository](https://github.com/emanuel-epifani/nexo)
-- **Server Docs:** [Nexo Internals & Architecture](https://github.com/emanuel-epifani/nexo/tree/main/docs)
-- **SDK Source:** [sdk/ts](https://github.com/emanuel-epifani/nexo/tree/main/sdk/ts)
-- **Docker Image:** [emanuelepifani/nexo](https://hub.docker.com/r/emanuelepifani/nexo)
+- **📚 Full Documentation:** [Nexo Docs](https://nexo-docs-hub.vercel.app/)
+- **🐳 Docker Image:** [emanuelepifani/nexo](https://hub.docker.com/r/emanuelepifani/nexo)
 
 ## Author
 
