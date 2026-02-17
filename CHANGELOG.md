@@ -2,7 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.0] - Planned
+## [0.3.1] - 2026-02-17
+
+### 🚀 Features
+- **Scripts**: Added `release.js` for automated versioning and tagging.
+- **Scripts**: Added `deploy.sh` to automate the build and push workflow.
+
+### 🐛 Bug Fixes
+- **Release**: Enforced clean workspace check before releasing.
+- **Release**: Switched to Git Annotated Tags for better release metadata.
+
+## [0.3.0] - 2026-02-15
+### 🚀 Features
 - **Architecture**: Unifying Server, SDK, Dashboard, and Docs under a "Lock-Step" versioning strategy.
 - **Deployment**: Unified deployment process for all components.
 

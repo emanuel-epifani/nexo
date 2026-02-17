@@ -9,7 +9,7 @@ const FILES = [
     { 
         path: 'Cargo.toml', 
         type: 'toml',
-        regex: /^version = "(.*)"/m 
+        regex: /^version = "(.*?)"/m 
     },
     { 
         path: 'sdk/ts/package.json', 
@@ -30,6 +30,10 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
+function ask(question) {
+    return new Promise((resolve) => rl.question(question, resolve));
+}
+
 function run(command) {
     try {
         return execSync(command, { cwd: ROOT_DIR, encoding: 'utf8' }).trim();
@@ -42,8 +46,18 @@ function run(command) {
 function getCurrentVersion() {
     const cargoPath = path.join(ROOT_DIR, 'Cargo.toml');
     const content = fs.readFileSync(cargoPath, 'utf8');
-    const match = content.match(/^version = "(.*)"/m);
+    const match = content.match(/^version = "(.*?)"/m);
     return match ? match[1] : 'unknown';
+}
+
+function bumpVersion(current, type) {
+    const [major, minor, patch] = current.split('.').map(Number);
+    switch (type) {
+        case 'major': return `${major + 1}.0.0`;
+        case 'minor': return `${major}.${minor + 1}.0`;
+        case 'patch': return `${major}.${minor}.${patch + 1}`;
+        default: throw new Error(`Unknown bump type: ${type}`);
+    }
 }
 
 function updateVersion(newVersion) {
@@ -51,6 +65,12 @@ function updateVersion(newVersion) {
     
     for (const file of FILES) {
         const filePath = path.join(ROOT_DIR, file.path);
+        
+        if (!fs.existsSync(filePath)) {
+            console.log(`⚠️  Skipped ${file.path} (file not found)`);
+            continue;
+        }
+
         let content = fs.readFileSync(filePath, 'utf8');
         
         if (file.type === 'json') {
@@ -71,9 +91,9 @@ function getRecentCommits() {
         const lastTag = run('git describe --tags --abbrev=0 2>/dev/null || echo ""');
         const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
         const logs = run(`git log ${range} --pretty=format:"- %s"`);
-        return logs;
+        return logs || 'No new commits since last tag.';
     } catch (e) {
-        return "No commits found or error retrieving logs.";
+        return 'No commits found or error retrieving logs.';
     }
 }
 
@@ -87,68 +107,116 @@ function checkCleanWorkspace() {
     }
 }
 
-console.log("🚀 NEXO RELEASE WIZARD");
-console.log("======================");
+async function main() {
+    console.log("🚀 NEXO RELEASE WIZARD");
+    console.log("======================\n");
 
-checkCleanWorkspace();
+    checkCleanWorkspace();
 
-const currentVer = getCurrentVersion();
-console.log(`Current Version: ${currentVer}`);
+    const currentVer = getCurrentVersion();
+    console.log(`Current Version: ${currentVer}\n`);
 
-rl.question('Enter new version (e.g., 0.3.1): ', (newVersion) => {
-    if (!newVersion) {
-        console.log("Operation cancelled.");
-        rl.close();
-        return;
-    }
-
-    // 1. Validations
-    if (!/^\d+\.\d+\.\d+$/.test(newVersion)) {
-        console.error("❌ Invalid version format. Use X.Y.Z");
-        rl.close();
-        return;
-    }
-
-    // 2. Show Changelog Candidates
-    console.log("\n📝 Commits since last tag:");
+    // Show recent commits for context
+    console.log("📝 Commits since last tag:");
     console.log(getRecentCommits());
-    console.log("\n(Copy these to CHANGELOG.md if needed)");
+    console.log("\n(Update CHANGELOG.md before proceeding if needed)\n");
 
-    rl.question('\nProceed with update? (y/N): ', (answer) => {
-        if (answer.toLowerCase() !== 'y') {
+    // Auto-bump selection
+    const patchVer = bumpVersion(currentVer, 'patch');
+    const minorVer = bumpVersion(currentVer, 'minor');
+    const majorVer = bumpVersion(currentVer, 'major');
+
+    console.log("What kind of release?");
+    console.log(`  [1] patch  → ${patchVer}  (bugfix, internal improvements)`);
+    console.log(`  [2] minor  → ${minorVer}  (new features, backward compatible)`);
+    console.log(`  [3] major  → ${majorVer}  (breaking changes)`);
+    console.log(`  [4] custom → enter manually\n`);
+
+    const choice = await ask('Choice (1/2/3/4): ');
+
+    let newVersion;
+    switch (choice.trim()) {
+        case '1': newVersion = patchVer; break;
+        case '2': newVersion = minorVer; break;
+        case '3': newVersion = majorVer; break;
+        case '4':
+            newVersion = await ask('Enter version (e.g., 0.3.1): ');
+            if (!newVersion || !/^\d+\.\d+\.\d+$/.test(newVersion.trim())) {
+                console.error("❌ Invalid version format. Use X.Y.Z");
+                rl.close();
+                return;
+            }
+            newVersion = newVersion.trim();
+            break;
+        default:
             console.log("Aborted.");
             rl.close();
             return;
-        }
+    }
 
-        // 3. Update Files
-        updateVersion(newVersion);
+    // Confirmation
+    console.log(`\n📋 Release Summary:`);
+    console.log(`   ${currentVer} → ${newVersion}`);
+    console.log(`   Files to update:`);
+    for (const file of FILES) {
+        console.log(`     • ${file.path}`);
+    }
 
-        // 4. Git Operations
-        console.log("\n📦 Staging files...");
-        run('git add Cargo.toml sdk/ts/package.json dashboard/package.json nexo-docs-hub/package.json');
-        
-        // Check if CHANGELOG.md is modified
-        const status = run('git status --porcelain');
-        if (status.includes('CHANGELOG.md')) {
-            run('git add CHANGELOG.md');
-            console.log("✅ Included CHANGELOG.md");
-        }
-
-        console.log("💾 Committing...");
-        run(`git commit -m "chore: release v${newVersion}"`);
-
-        console.log(`🏷️  Tagging v${newVersion}...`);
-        try {
-            run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
-        } catch (e) {
-            console.error("❌ Failed to tag. Do you have a gpg key configured? If not, try git tag without -s or just -a.");
-            throw e;
-        }
-
-        console.log("\n🎉 Release ready!");
-        console.log(`Run 'git push && git push --tags' to publish.`);
-        
+    const confirm = await ask('\nProceed? (y/N): ');
+    if (confirm.toLowerCase() !== 'y') {
+        console.log("Aborted.");
         rl.close();
-    });
+        return;
+    }
+
+    // 1. Update version in all files
+    updateVersion(newVersion);
+
+    // 2. Stage files
+    console.log("\n📦 Staging files...");
+    const filesToStage = FILES.map(f => f.path).filter(p => 
+        fs.existsSync(path.join(ROOT_DIR, p))
+    );
+    run(`git add ${filesToStage.join(' ')}`);
+
+    // Include CHANGELOG.md if it was modified
+    const status = run('git status --porcelain');
+    if (status.includes('CHANGELOG.md')) {
+        run('git add CHANGELOG.md');
+        console.log("✅ Included CHANGELOG.md");
+    }
+
+    // 3. Commit
+    console.log("💾 Committing...");
+    run(`git commit -m "chore: release v${newVersion}"`);
+
+    // 4. Tag
+    console.log(`🏷️  Tagging v${newVersion}...`);
+    run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
+
+    // 5. Push
+    const pushNow = await ask('\n🚀 Push now? (this will trigger the deploy pipeline) (y/N): ');
+    if (pushNow.toLowerCase() === 'y') {
+        console.log("Pushing to remote...");
+        run('git push');
+        run('git push --tags');
+        console.log("\n🎉 Release v" + newVersion + " pushed!");
+        console.log("   The GitHub Actions pipeline will now deploy automatically:");
+        console.log("   • 🐳 Docker image → Docker Hub");
+        console.log("   • 📦 SDK → NPM");
+        console.log("   • 📄 Docs → Vercel/Netlify");
+        console.log("\n   Monitor progress: https://github.com/<your-org>/nexo/actions");
+    } else {
+        console.log("\n🎉 Release v" + newVersion + " ready!");
+        console.log("   Run this when you're ready to deploy:");
+        console.log("   git push && git push --tags");
+    }
+
+    rl.close();
+}
+
+main().catch((err) => {
+    console.error("Fatal error:", err);
+    rl.close();
+    process.exit(1);
 });

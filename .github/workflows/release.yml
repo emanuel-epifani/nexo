@@ -1,0 +1,145 @@
+# ==========================================
+# NEXO — Automated Release Pipeline
+# ==========================================
+# Triggered when you push a version tag (v*)
+# Flow: You run `npm run release` locally → push → this runs automatically
+#
+# NPM Publishing: Uses OIDC Trusted Publishing (no token needed)
+#   → Configure on npmjs.com → Package Settings → Trusted Publishers
+#
+# Required GitHub Secrets:
+#   - DOCKERHUB_USERNAME  → your Docker Hub username
+#   - DOCKERHUB_TOKEN     → hub.docker.com → Account Settings → Security → New Access Token
+#   - VERCEL_TOKEN        → (if using Vercel) vercel.com → Settings → Tokens
+#   - VERCEL_ORG_ID       → from .vercel/project.json after `vercel link`
+#   - VERCEL_PROJECT_ID   → from .vercel/project.json after `vercel link`
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Extract version from the tag name (v0.5.3 → 0.5.3)
+env:
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  # ─────────────────────────────────────
+  # 1. SERVER — Build & Push Docker Image
+  # ─────────────────────────────────────
+  release-server:
+    name: 🐳 Docker — Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            nexobroker/nexo:${{ env.VERSION }}
+            nexobroker/nexo:latest
+
+
+
+  # ─────────────────────────────────────
+  # 2. SDK — Publish to NPM (OIDC Trusted Publishing)
+  # ─────────────────────────────────────
+  release-sdk:
+    name: 📦 NPM — TypeScript SDK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write    # Required for OIDC Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        working-directory: sdk/ts
+        run: npm ci
+
+      - name: Build SDK
+        working-directory: sdk/ts
+        run: npm run build --if-present
+
+      - name: Publish to NPM
+        working-directory: sdk/ts
+        run: npm publish --access public --provenance
+
+  # ─────────────────────────────────────
+  # 3. DOCS — Deploy Documentation Website
+  # ─────────────────────────────────────
+  # Option A: Vercel (uncomment if using Vercel)
+  # Option B: Netlify (uncomment if using Netlify)
+  # Option C: If your hosting auto-deploys on push, you can remove this job entirely
+  release-docs:
+    name: 📄 Docs — Website
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: nexo-docs-hub
+        run: npm ci
+
+      - name: Build docs
+        working-directory: nexo-docs-hub
+        run: npm run build
+
+      # ── Option A: Deploy to Vercel ──
+      - name: Deploy to Vercel
+        working-directory: nexo-docs-hub
+        run: |
+          npx -y vercel --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      # ── Option B: Deploy to Netlify (uncomment and replace Option A) ──
+      # - name: Deploy to Netlify
+      #   uses: nwtgck/actions-netlify@v3
+      #   with:
+      #     publish-dir: nexo-docs-hub/dist   # or build/ depending on framework
+      #     production-deploy: true
+      #   env:
+      #     NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      #     NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+  # ─────────────────────────────────────
+  # 4. GITHUB RELEASE (optional but nice)
+  # ─────────────────────────────────────
+  create-github-release:
+    name: 🎉 GitHub Release
+    runs-on: ubuntu-latest
+    needs: [release-server, release-sdk, release-docs]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Nexo ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
