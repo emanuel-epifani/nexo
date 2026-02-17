@@ -4,15 +4,10 @@
 # Triggered when you push a version tag (v*)
 # Flow: You run `npm run release` locally → push → this runs automatically
 #
-# NPM Publishing: Uses OIDC Trusted Publishing (no token needed)
-#   → Configure on npmjs.com → Package Settings → Trusted Publishers
-#
-# Required GitHub Secrets:
-#   - DOCKERHUB_USERNAME  → your Docker Hub username
-#   - DOCKERHUB_TOKEN     → hub.docker.com → Account Settings → Security → New Access Token
-#   - VERCEL_TOKEN        → (if using Vercel) vercel.com → Settings → Tokens
-#   - VERCEL_ORG_ID       → from .vercel/project.json after `vercel link`
-#   - VERCEL_PROJECT_ID   → from .vercel/project.json after `vercel link`
+# Auth:
+#   NPM  → OIDC Trusted Publishing (no token needed, configure on npmjs.com)
+#   Docker → DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets
+#   Vercel → VERCEL_TOKEN + VERCEL_ORG_ID + VERCEL_PROJECT_ID secrets
 
 name: Release
 
@@ -20,14 +15,13 @@ on:
   push:
     tags: ['v*']
 
-# Extract version from the tag name (v0.5.3 → 0.5.3)
 env:
   VERSION: ${{ github.ref_name }}
 
 jobs:
-  # ─────────────────────────────────────
-  # 1. SERVER — Build & Push Docker Image
-  # ─────────────────────────────────────
+  # ─────────────────────────────────
+  # 1. SERVER — Docker Image
+  # ─────────────────────────────────
   release-server:
     name: 🐳 Docker — Server
     runs-on: ubuntu-latest
@@ -46,20 +40,18 @@ jobs:
           context: .
           push: true
           tags: |
-            nexobroker/nexo:${{ env.VERSION }}
-            nexobroker/nexo:latest
+            emanuelepifani/nexo:${{ env.VERSION }}
+            emanuelepifani/nexo:latest
 
-
-
-  # ─────────────────────────────────────
-  # 2. SDK — Publish to NPM (OIDC Trusted Publishing)
-  # ─────────────────────────────────────
+  # ─────────────────────────────────
+  # 2. SDK — NPM (OIDC Trusted Publishing)
+  # ─────────────────────────────────
   release-sdk:
     name: 📦 NPM — TypeScript SDK
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write    # Required for OIDC Trusted Publishing
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -80,12 +72,9 @@ jobs:
         working-directory: sdk/ts
         run: npm publish --access public --provenance
 
-  # ─────────────────────────────────────
-  # 3. DOCS — Deploy Documentation Website
-  # ─────────────────────────────────────
-  # Option A: Vercel (uncomment if using Vercel)
-  # Option B: Netlify (uncomment if using Netlify)
-  # Option C: If your hosting auto-deploys on push, you can remove this job entirely
+  # ─────────────────────────────────
+  # 3. DOCS — Vercel
+  # ─────────────────────────────────
   release-docs:
     name: 📄 Docs — Website
     runs-on: ubuntu-latest
@@ -96,36 +85,16 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
-        working-directory: nexo-docs-hub
-        run: npm ci
-
-      - name: Build docs
-        working-directory: nexo-docs-hub
-        run: npm run build
-
-      # ── Option A: Deploy to Vercel ──
       - name: Deploy to Vercel
         working-directory: nexo-docs-hub
-        run: |
-          npx -y vercel --prod --token=${{ secrets.VERCEL_TOKEN }}
+        run: npx -y vercel --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      # ── Option B: Deploy to Netlify (uncomment and replace Option A) ──
-      # - name: Deploy to Netlify
-      #   uses: nwtgck/actions-netlify@v3
-      #   with:
-      #     publish-dir: nexo-docs-hub/dist   # or build/ depending on framework
-      #     production-deploy: true
-      #   env:
-      #     NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-      #     NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-
-  # ─────────────────────────────────────
-  # 4. GITHUB RELEASE (optional but nice)
-  # ─────────────────────────────────────
+  # ─────────────────────────────────
+  # 4. GITHUB RELEASE
+  # ─────────────────────────────────
   create-github-release:
     name: 🎉 GitHub Release
     runs-on: ubuntu-latest
