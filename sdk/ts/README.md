@@ -2,6 +2,8 @@
 
 High-performance TypeScript client for [Nexo](https://github.com/emanuel-epifani/nexo).
 
+> 📚 **Full Documentation:** Configuration, deployment guides, architecture deep-dives, and advanced patterns → [Nexo -Docs](https://nexo-docs-hub.vercel.app/)
+
 ## Quick Start
 
 
