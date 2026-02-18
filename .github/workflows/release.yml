@@ -120,4 +120,3 @@ jobs:
             ## Installation
             🐳 `docker pull emanuelepifani/nexo:${{ github.ref_name }}`
             📦 `npm install @emanuelepifani/nexo-client@${{ env.VERSION }}`
-            📄 [Documentation](https://nexo-docs-hub.vercel.app/)
