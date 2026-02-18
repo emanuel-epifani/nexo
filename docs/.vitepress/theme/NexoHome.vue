@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { createHighlighter } from 'shiki'
+import { version } from '../../package.json'
 
 const activeTab = ref('store')
 const copied = ref(false)
@@ -267,7 +268,7 @@ function handleCopy() {
         <span class="footer-dot">·</span>
         <a href="/reference/sdks">Client SDKs</a>
         <span class="footer-dot">·</span>
-        <span>MIT License</span>
+        <span>MIT License — v{{ version }}</span>
       </div>
     </footer>
   </div>
