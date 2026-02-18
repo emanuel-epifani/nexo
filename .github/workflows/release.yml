@@ -61,6 +61,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@emanuelepifani'
 
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         working-directory: sdk/ts
         run: npm ci
