@@ -119,7 +119,7 @@ async function main() {
     // Show recent commits for context
     console.log("📝 Commits since last tag:");
     console.log(getRecentCommits());
-    console.log("\n(Update CHANGELOG.md before proceeding if needed)\n");
+    console.log("");
 
     // Auto-bump selection
     const patchVer = bumpVersion(currentVer, 'patch');
@@ -179,13 +179,6 @@ async function main() {
     );
     run(`git add ${filesToStage.join(' ')}`);
 
-    // Include CHANGELOG.md if it was modified
-    const status = run('git status --porcelain');
-    if (status.includes('CHANGELOG.md')) {
-        run('git add CHANGELOG.md');
-        console.log("✅ Included CHANGELOG.md");
-    }
-
     // 3. Commit
     console.log("💾 Committing...");
     run(`git commit -m "chore: release v${newVersion}"`);
@@ -205,7 +198,7 @@ async function main() {
         console.log("   • 🐳 Docker image → Docker Hub");
         console.log("   • 📦 SDK → NPM");
         console.log("   • 📄 Docs → Vercel/Netlify");
-        console.log("\n   Monitor progress: https://github.com/<your-org>/nexo/actions");
+        console.log("\n   Monitor progress: https://github.com/emanuel-epifani/nexo/actions");
     } else {
         console.log("\n🎉 Release v" + newVersion + " ready!");
         console.log("   Run this when you're ready to deploy:");
