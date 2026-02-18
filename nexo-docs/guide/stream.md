@@ -102,29 +102,30 @@ const orders = await client.stream<Order>('orders').create({
 });
 ```
 
-## Consumer Patterns
+## Consumer Groups
 
-### Scaling (Load Balancing)
+Every consumer subscribes to a stream through a **group name**. The group name determines how messages are distributed:
 
-Same group name → automatic load balancing across consumers.
+- **Same group** = work is split across consumers (each message processed once)
+- **Different groups** = each group reads all messages independently
+
+### Scaling: Same Group
+
+You have an order processing service and a single instance can't keep up. You deploy 3 replicas — all subscribe with the **same group name**. The server splits the partitions between them, so each order is processed exactly once.
 
 ```typescript
-// K8s pods / microservice replicas
+// Pod-1, Pod-2, Pod-3 — same group, work is split
+await orders.subscribe('workers', (order) => process(order));
 await orders.subscribe('workers', (order) => process(order));
 await orders.subscribe('workers', (order) => process(order));
 ```
 
-### Broadcast (Independent Domains)
+### Broadcast: Different Groups
 
-Different groups → each gets a full copy of the stream.
+You need analytics **and** an audit log for the same orders. These are two independent services that both need to see **every** order. Each subscribes with a **different group name**, so each gets a full copy of the stream.
 
 ```typescript
+// Two independent services, each reads ALL orders
 await orders.subscribe('analytics', (order) => trackMetrics(order));
 await orders.subscribe('audit-log', (order) => saveAudit(order));
 ```
-
-## Features
-
-- **Immutable History:** Events are strictly appended and never modified.
-- **Consumer Groups:** Maintains separate read cursors for different consumers.
-- **Replayability:** Consumers can rewind their offset to re-process from any point.

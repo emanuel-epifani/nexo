@@ -42,6 +42,7 @@ export default defineConfig({
           text: 'Advanced',
           items: [
             { text: 'Binary Payloads', link: '/guide/binary' },
+            { text: 'Deployment', link: '/guide/deployment' },
           ],
         },
       ],
