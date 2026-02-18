@@ -15,8 +15,9 @@ export default defineConfig({
     siteTitle: 'Nexo',
 
     nav: [
-      { text: 'Guide', link: '/guide/introduction' },
-      { text: 'Reference', link: '/reference/sdks' },
+      { text: 'Docs', link: '/guide/introduction' },
+      { text: 'Client SDKs', link: '/reference/sdks' },
+      { text: 'Docker Hub', link: 'https://hub.docker.com/r/emanuelepifani/nexo' },
     ],
 
     sidebar: {
