@@ -86,7 +86,7 @@ jobs:
           node-version: '20'
 
       - name: Deploy to Vercel
-        working-directory: nexo-docs
+        working-directory: .
         run: npx -y vercel --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
