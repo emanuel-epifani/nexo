@@ -52,6 +52,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    environment: npm-release
     steps:
       - uses: actions/checkout@v4
 
