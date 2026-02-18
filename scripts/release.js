@@ -20,7 +20,7 @@ const FILES = [
         type: 'json' 
     },
     { 
-        path: 'nexo-docs/package.json', 
+        path: 'docs/package.json',
         type: 'json' 
     }
 ];

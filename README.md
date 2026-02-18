@@ -192,7 +192,7 @@ Everything is available instantly via a unified Client.
 Nexo comes with a built-in, zero-config dashboard exposed to local development.
 Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
 
-![Nexo Dashboard Screenshot](nexo-docs/public/dashboard-preview.png)
+![Nexo Dashboard Screenshot](docs/public/dashboard-preview.png)
 
 ## Getting Started
 
