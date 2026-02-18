@@ -75,7 +75,7 @@ impl RootActor {
         default_ttl_seconds: u64,
         clients: ClientRegistry,
     ) -> Self {
-        let retained_file_path = PathBuf::from(format!("{}/pubsub/retained/{}.json", persistence_path, name));
+        let retained_file_path = PathBuf::from(format!("{}/{}.json", persistence_path, name));
         
         let mut actor = Self {
             name,

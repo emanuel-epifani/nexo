@@ -50,14 +50,12 @@ impl ServerConfig {
     fn load() -> Self {
         let env_mode = get_env::<String>("NEXO_ENV", "dev");
 
-        let def_dashboard_enabled = if env_mode == "prod" { "false" } else { "true" };
-
         Self {
             host:           get_env("SERVER_HOST", "0.0.0.0"),
             port:           get_env("SERVER_PORT", "7654"),
             dashboard_port: get_env("DASHBOARD_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "error"),
-            dashboard_enabled: get_env("NEXO_DASHBOARD_ENABLED", def_dashboard_enabled),
+            dashboard_enabled: env_mode != "prod",
             network_buffer_read_size: get_env("NETWORK_BUFFER_READ_SIZE", "65536"), // 64KB
             network_buffer_write_size: get_env("NETWORK_BUFFER_WRITE_SIZE", "16384"), // 16KB
             channel_capacity_socket_write: get_env("CHANNEL_CAPACITY_SOCKET_WRITE", "1024"),
@@ -129,7 +127,7 @@ impl PubSubConfig {
     fn load() -> Self {
         Self {
             actor_channel_capacity: get_env("PUBSUB_ACTOR_CHAN_CAP", "10000"),
-            persistence_path: get_env("PUBSUB_ROOT_PERSISTENCE_PATH", "data"),
+            persistence_path: get_env("PUBSUB_ROOT_PERSISTENCE_PATH", "./data/pubsub"),
             default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", "3600"),
             cleanup_interval_seconds: get_env("PUBSUB_CLEANUP_INTERVAL_SECS", "60"),
         }

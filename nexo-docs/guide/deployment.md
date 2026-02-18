@@ -6,10 +6,9 @@ Nexo stores all data under `./data/` by default:
 
 ```
 data/
-├── queues/        ← Queue messages (SQLite WAL)
-├── streams/       ← Stream segments (append-only files)
-└── pubsub/
-    └── retained/  ← Retained messages (JSON files)
+├── queues/     ← Queue messages (SQLite WAL)
+├── streams/    ← Stream segments (append-only files)
+└── pubsub/     ← Pub/Sub retained messages (JSON files)
 ```
 
 In Docker, this directory lives **inside the container** — meaning data is **lost when the container is removed**. To persist data across restarts, mount a Docker volume:
@@ -48,20 +47,14 @@ For most deployments, a single volume is sufficient.
 
 ## Dashboard
 
-Nexo includes a built-in debug dashboard accessible on port `8080`. In production, it is **disabled by default** when `NEXO_ENV=prod`.
+Nexo includes a built-in debug dashboard accessible on port `8080`. It is **automatically disabled** when `NEXO_ENV=prod`.
 
 ```bash
 # Development (dashboard enabled by default)
 docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo
 
-# Production (dashboard disabled automatically)
+# Production (dashboard disabled)
 docker run -p 7654:7654 -e NEXO_ENV=prod emanuelepifani/nexo
-
-# Production with dashboard explicitly enabled
-docker run -p 7654:7654 -p 8080:8080 \
-  -e NEXO_ENV=prod \
-  -e NEXO_DASHBOARD_ENABLED=true \
-  emanuelepifani/nexo
 ```
 
 ::: warning
@@ -77,7 +70,6 @@ The dashboard exposes internal state (messages, queues, topics) and is intended 
 | `SERVER_PORT` | `7654` | Client connection port |
 | `DASHBOARD_PORT` | `8080` | Dashboard HTTP port |
 | `NEXO_LOG` | `error` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
-| `NEXO_DASHBOARD_ENABLED` | auto | Override dashboard on/off |
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Queue data directory |
 | `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Stream data directory |
-| `PUBSUB_ROOT_PERSISTENCE_PATH` | `data` | Pub/Sub retained data directory |
+| `PUBSUB_ROOT_PERSISTENCE_PATH` | `./data/pubsub` | Pub/Sub data directory |
