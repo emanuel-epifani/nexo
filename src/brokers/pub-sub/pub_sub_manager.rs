@@ -277,6 +277,7 @@ impl PubSubManager {
                 rx, 
                 &self.config.persistence_path,
                 self.config.default_retained_ttl_seconds,
+                self.config.retained_flush_ms,
                 Arc::clone(&self.clients),
             );
             tokio::spawn(actor.run());

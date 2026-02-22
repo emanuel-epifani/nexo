@@ -121,6 +121,7 @@ pub struct PubSubConfig {
     pub persistence_path: String,
     pub default_retained_ttl_seconds: u64,
     pub cleanup_interval_seconds: u64,
+    pub retained_flush_ms: u64,
 }
 
 impl PubSubConfig {
@@ -130,6 +131,7 @@ impl PubSubConfig {
             persistence_path: get_env("PUBSUB_ROOT_PERSISTENCE_PATH", "./data/pubsub"),
             default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", "3600"),
             cleanup_interval_seconds: get_env("PUBSUB_CLEANUP_INTERVAL_SECS", "60"),
+            retained_flush_ms: get_env("PUBSUB_RETAINED_FLUSH_MS", "500"),
         }
     }
 }

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -65,6 +66,8 @@ pub(crate) struct RootActor {
     rx: mpsc::Receiver<RootCommand>,
     retained_file_path: PathBuf,
     default_ttl_seconds: u64,
+    retained_flush_ms: u64,
+    retained_needs_flush: bool,
 }
 
 impl RootActor {
@@ -73,6 +76,7 @@ impl RootActor {
         rx: mpsc::Receiver<RootCommand>,
         persistence_path: &str,
         default_ttl_seconds: u64,
+        retained_flush_ms: u64,
         clients: ClientRegistry,
     ) -> Self {
         let retained_file_path = PathBuf::from(format!("{}/{}.json", persistence_path, name));
@@ -85,6 +89,8 @@ impl RootActor {
             rx,
             retained_file_path,
             default_ttl_seconds,
+            retained_flush_ms,
+            retained_needs_flush: false,
         };
         
         actor.load_retained();
@@ -92,37 +98,60 @@ impl RootActor {
     }
 
     pub(crate) async fn run(mut self) {
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                RootCommand::Subscribe { pattern, client, reply } => {
-                    let retained = self.subscribe(&pattern, &client);
-                    let _ = reply.send(retained);
+        let mut flush_timer = tokio::time::interval(Duration::from_millis(self.retained_flush_ms));
+        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                maybe_cmd = self.rx.recv() => {
+                    match maybe_cmd {
+                        None => break,
+                        Some(cmd) => match cmd {
+                            RootCommand::Subscribe { pattern, client, reply } => {
+                                let retained = self.subscribe(&pattern, &client);
+                                let _ = reply.send(retained);
+                            }
+                            RootCommand::Unsubscribe { pattern, client } => {
+                                self.unsubscribe(&pattern, &client);
+                            }
+                            RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply } => {
+                                let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
+                                let _ = reply.send(count);
+                            }
+                            RootCommand::Disconnect { client, reply } => {
+                                self.disconnect(&client);
+                                let _ = reply.send(());
+                            }
+                            RootCommand::GetFlatSnapshot { reply } => {
+                                let flat_snapshot = self.build_flat_snapshot();
+                                let _ = reply.send(flat_snapshot);
+                            }
+                            RootCommand::IsEmpty { reply } => {
+                                let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
+                                tracing::debug!("RootActor '{}' IsEmpty check: {}", self.name, is_empty);
+                                let _ = reply.send(is_empty);
+                            }
+                            RootCommand::CleanupExpired => {
+                                self.cleanup_expired_retained();
+                            }
+                        }
+                    }
                 }
-                RootCommand::Unsubscribe { pattern, client } => {
-                    self.unsubscribe(&pattern, &client);
-                }
-                RootCommand::Publish { parts, full_topic, data, retain, ttl_seconds, reply } => {
-                    let count = self.publish(&parts, &full_topic, data, retain, ttl_seconds);
-                    let _ = reply.send(count);
-                }
-                RootCommand::Disconnect { client, reply } => {
-                    self.disconnect(&client);
-                    let _ = reply.send(());
-                }
-                RootCommand::GetFlatSnapshot { reply } => {
-                    let flat_snapshot = self.build_flat_snapshot();
-                    let _ = reply.send(flat_snapshot);
-                }
-                RootCommand::IsEmpty { reply } => {
-                    let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
-                    tracing::debug!("RootActor '{}' IsEmpty check: {}", self.name, is_empty);
-                    let _ = reply.send(is_empty);
-                }
-                RootCommand::CleanupExpired => {
-                    self.cleanup_expired_retained();
+
+                _ = flush_timer.tick() => {
+                    if self.retained_needs_flush {
+                        self.flush_retained().await;
+                        self.retained_needs_flush = false;
+                    }
                 }
             }
         }
+
+        // Final flush on shutdown to avoid losing pending retained state
+        if self.retained_needs_flush {
+            self.flush_retained().await;
+        }
+
         tracing::debug!("RootActor '{}' channel closed, exiting", self.name);
     }
 
@@ -200,7 +229,7 @@ impl RootActor {
                 current.retained = Some(RetainedMessage::new(data.clone(), Some(effective_ttl)));
             }
             
-            self.save_retained_async();
+            self.retained_needs_flush = true;
         }
 
         // Match subscriber IDs from radix tree
@@ -436,26 +465,23 @@ impl RootActor {
         }
     }
     
-    fn save_retained_async(&self) {
-        let path = self.retained_file_path.clone();
+    async fn flush_retained(&self) {
         let retained_map = self.collect_retained_for_persistence();
-        
-        tokio::spawn(async move {
-            if let Some(parent) = path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            
-            match serde_json::to_string_pretty(&retained_map) {
-                Ok(json_str) => {
-                    if let Err(e) = tokio::fs::write(&path, json_str).await {
-                        eprintln!("Failed to write retained file: {}", e);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Failed to serialize retained: {}", e);
+
+        if let Some(parent) = self.retained_file_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+
+        match serde_json::to_string_pretty(&retained_map) {
+            Ok(json_str) => {
+                if let Err(e) = tokio::fs::write(&self.retained_file_path, json_str).await {
+                    tracing::error!("Failed to write retained file for '{}': {}", self.name, e);
                 }
             }
-        });
+            Err(e) => {
+                tracing::error!("Failed to serialize retained for '{}': {}", self.name, e);
+            }
+        }
     }
     
     fn collect_retained_for_persistence(&self) -> HashMap<String, RetainedMessage> {
@@ -486,7 +512,7 @@ impl RootActor {
         Self::cleanup_expired_recursive(&mut self.tree, &mut cleaned);
         
         if cleaned {
-            self.save_retained_async();
+            self.retained_needs_flush = true;
         }
     }
     
