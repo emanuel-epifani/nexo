@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { StreamBrokerSnapshot, TopicSummary, ConsumerGroupSummary, StreamMessages } from "./types"
 import { Input } from "@/components/ui/input"
@@ -45,17 +45,9 @@ export function StreamView({ data }: Props) {
         setFromOffset(null)
     }, [selectedPartitionId])
 
-    const filteredTopics = useMemo(() =>
-        data.topics.filter((t: TopicSummary) => t.name.toLowerCase().includes(filter.toLowerCase())),
-        [data.topics, filter])
-
-    const selectedTopic = useMemo(() =>
-        data.topics.find((t: TopicSummary) => t.name === selectedTopicName),
-        [data.topics, selectedTopicName])
-
-    const currentPartition = useMemo(() =>
-        selectedTopic?.partitions.find(p => p.id === selectedPartitionId),
-        [selectedTopic, selectedPartitionId])
+    const filteredTopics = data.topics.filter((t: TopicSummary) => t.name.toLowerCase().includes(filter.toLowerCase()))
+    const selectedTopic = data.topics.find((t: TopicSummary) => t.name === selectedTopicName)
+    const currentPartition = selectedTopic?.partitions.find(p => p.id === selectedPartitionId)
 
     // Fetch messages on-demand when topic+partition selected
     const { data: streamData, isLoading } = useQuery({
@@ -76,9 +68,7 @@ export function StreamView({ data }: Props) {
     const hasOlder = currentFrom > 0
     const hasNewer = streamData ? currentFrom + PAGE_SIZE < lastOffset : false
 
-    const selectedMessage = useMemo(() =>
-        messages.find(m => m.offset === selectedMessageOffset),
-        [messages, selectedMessageOffset])
+    const selectedMessage = messages.find(m => m.offset === selectedMessageOffset)
 
     const hasTopics = data.topics.length > 0
 

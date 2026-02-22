@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary, DlqMessageSummary, PaginatedMessages, PaginatedDlqMessages } from "./types"
 import { Input } from "@/components/ui/input"
@@ -46,13 +46,8 @@ export function QueueView({ data }: Props) {
       setSelectedMessageId(null)
   }, [selectedQueueName, viewMode, messageState])
 
-  const filteredQueues = useMemo(() => {
-      return (data || []).filter(q => q.name.toLowerCase().includes(filter.toLowerCase()))
-  }, [data, filter])
-
-  const selectedQueue = useMemo(() => {
-      return (data || []).find((q: QueueSummary) => q.name === selectedQueueName)
-  }, [data, selectedQueueName])
+  const filteredQueues = (data || []).filter(q => q.name.toLowerCase().includes(filter.toLowerCase()))
+  const selectedQueue = (data || []).find((q: QueueSummary) => q.name === selectedQueueName)
 
   // Fetch paginated messages
   const { data: paginatedData, isLoading } = useQuery({
@@ -74,11 +69,9 @@ export function QueueView({ data }: Props) {
     enabled: !!selectedQueueName,
   })
 
-  // Get selected message details
-  const selectedMessage = useMemo(() => {
-      if (!paginatedData || !selectedMessageId) return undefined
-      return paginatedData.messages.find(m => m.id === selectedMessageId)
-  }, [paginatedData, selectedMessageId])
+  const selectedMessage = paginatedData && selectedMessageId
+      ? paginatedData.messages.find(m => m.id === selectedMessageId)
+      : undefined
 
   // Copy to clipboard helper
   const copyToClipboard = (text: string, id: string) => {
