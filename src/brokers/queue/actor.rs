@@ -14,7 +14,8 @@ use crate::brokers::queue::dlq::{DlqState, DlqMessage};
 use crate::brokers::queue::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queue::queue_manager::ManagerCommand;
 use crate::config::Config;
-use crate::dashboard::models::queues::{QueueSummary, DlqMessageSummary};
+use crate::dashboard::dashboard_queue;
+use crate::dashboard::dashboard_queue::{QueueSummary, DlqMessageSummary};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
 // ==========================================
@@ -47,6 +48,13 @@ pub enum QueueActorCommand {
     },
     GetSnapshot {
         reply: oneshot::Sender<QueueSummary>,
+    },
+    GetMessages {
+        state_filter: String,
+        offset: usize,
+        limit: usize,
+        search: Option<String>,
+        reply: oneshot::Sender<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)>,
     },
     Stop {
         reply: oneshot::Sender<()>,
@@ -288,17 +296,14 @@ impl QueueActor {
             
             QueueActorCommand::GetSnapshot { reply } => {
                 let mut snapshot = self.main_state.get_snapshot(&self.name);
-                
-                // Populate DLQ messages
-                snapshot.dlq = self.dlq_state.peek_all().iter().map(|msg| DlqMessageSummary {
-                    id: msg.id,
-                    payload: payload_to_dashboard_value(&msg.payload),
-                    attempts: msg.attempts,
-                    failure_reason: Some(msg.failure_reason.clone()),
-                    created_at: msg.created_at,
-                }).collect();
-
+                snapshot.dlq = self.dlq_state.len();
                 let _ = reply.send(snapshot);
+                true
+            }
+
+            QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply } => {
+                let (total, msgs) = self.main_state.get_messages(state_filter, offset, limit, search);
+                let _ = reply.send((total, msgs));
                 true
             }
 

@@ -53,7 +53,7 @@ impl ServerConfig {
         Self {
             host:           get_env("SERVER_HOST", "0.0.0.0"),
             port:           get_env("SERVER_PORT", "7654"),
-            dashboard_port: get_env("DASHBOARD_PORT", "8080"),
+            dashboard_port: get_env("SERVER_DASHBOARD_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "error"),
             dashboard_enabled: env_mode != "prod",
             network_buffer_read_size: get_env("NETWORK_BUFFER_READ_SIZE", "65536"), // 64KB

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::brokers::queue::queue::{QueueConfig, Message};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
-use crate::dashboard::models::queues::QueueSummary;
+use crate::dashboard::dashboard_queue::QueueSummary;
 use crate::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 
@@ -43,6 +43,14 @@ pub enum ManagerCommand {
     },
     GetSnapshot {
         reply: oneshot::Sender<Vec<QueueSummary>>,
+    },
+    GetMessages {
+        queue_name: String,
+        state_filter: String,
+        offset: usize,
+        limit: usize,
+        search: Option<String>,
+        reply: oneshot::Sender<Option<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)>>,
     },
 }
 
@@ -203,6 +211,19 @@ impl QueueManager {
                     }
                     let _ = reply.send(queues);
                 }
+                
+                ManagerCommand::GetMessages { queue_name, state_filter, offset, limit, search, reply } => {
+                    if let Some(actor_tx) = actors.get(&queue_name) {
+                        let (tx, rx) = oneshot::channel();
+                        if actor_tx.send(QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply: tx }).await.is_ok() {
+                            let _ = reply.send(rx.await.ok());
+                        } else {
+                            let _ = reply.send(None);
+                        }
+                    } else {
+                        let _ = reply.send(None);
+                    }
+                }
             }
         }
     }
@@ -299,6 +320,15 @@ impl QueueManager {
             rx.await.unwrap_or(vec![])
         } else {
             vec![]
+        }
+    }
+
+    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)> {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(ManagerCommand::GetMessages { queue_name, state_filter, offset, limit, search, reply: tx }).await.is_ok() {
+            rx.await.unwrap_or(None)
+        } else {
+            None
         }
     }
 

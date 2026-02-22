@@ -2,23 +2,34 @@ use axum::{
     routing::get,
     Router,
     response::{IntoResponse},
-    extract::State,
+    extract::{State, Path, Query},
     http::{header, Uri, StatusCode},
     body::Body,
 };
+use serde::Deserialize;
 use tower_http::compression::CompressionLayer;
 use rust_embed::RustEmbed;
 use crate::NexoEngine;
+use crate::dashboard::dashboard_queue::{PaginatedMessages, PaginatedDlqMessages, get_queue, get_queue_messages};
 
 // Embed the frontend build directory
 #[derive(RustEmbed)]
 #[folder = "dashboard/dist/"]
 struct Assets;
 
+#[derive(Deserialize)]
+pub struct QueueMessagesQuery {
+    pub state: String,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    pub search: Option<String>,
+}
+
 pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     let app = Router::new()
-        .route("/api/store", get(crate::dashboard::models::store::get_store_handler))
+        .route("/api/store", get(crate::dashboard::dashboard_store::get_store_handler))
         .route("/api/queue", get(get_queue))
+        .route("/api/queue/{name}/messages", get(get_queue_messages))
         .route("/api/stream", get(get_stream))
         .route("/api/pubsub", get(get_pubsub))
         .layer(CompressionLayer::new())
@@ -33,10 +44,7 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     axum::serve(listener, app).await.expect("Failed to start dashboard server");
 }
 
-async fn get_queue(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.queue.get_snapshot().await;
-    axum::Json(snapshot)
-}
+
 
 async fn get_stream(State(engine): State<NexoEngine>) -> impl IntoResponse {
     let snapshot = engine.stream.get_snapshot().await;

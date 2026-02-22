@@ -14,7 +14,7 @@ use crate::brokers::stream::message::Message;
 use crate::brokers::stream::commands::StreamCreateOptions;
 use crate::brokers::stream::actor::{TopicCommand, TopicActor};
 use crate::config::SystemStreamConfig;
-use crate::dashboard::models::stream::StreamBrokerSnapshot;
+use crate::dashboard::dashboard_stream::StreamBrokerSnapshot;
 
 // ==========================================
 // MANAGER COMMANDS

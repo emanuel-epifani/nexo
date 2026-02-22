@@ -53,7 +53,7 @@ pub enum TopicCommand {
         reply: oneshot::Sender<()>,
     },
     GetSnapshot {
-        reply: oneshot::Sender<crate::dashboard::models::stream::TopicSummary>,
+        reply: oneshot::Sender<crate::dashboard::dashboard_stream::TopicSummary>,
     },
     PersistenceAck {
         partition: u32,
@@ -341,19 +341,19 @@ impl TopicActor {
                                 let committed = group.get_committed_offset(p_id);
                                 
                                 // We include the group if it exists on this topic
-                                groups_info.push(crate::dashboard::models::stream::ConsumerGroupSummary {
+                                groups_info.push(crate::dashboard::dashboard_stream::ConsumerGroupSummary {
                                     id: group.id.clone(),
                                     committed_offset: committed,
                                 });
                             }
                             
                             // 2. Messages (Full Content)
-                            let messages_preview: Vec<crate::dashboard::models::stream::MessagePreview> = partition
+                            let messages_preview: Vec<crate::dashboard::dashboard_stream::MessagePreview> = partition
                                 .log
                                 .iter()
                                 .rev()
                                 .map(|msg| {
-                                    crate::dashboard::models::stream::MessagePreview {
+                                    crate::dashboard::dashboard_stream::MessagePreview {
                                         offset: msg.offset,
                                         timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
                                             .unwrap_or_default()
@@ -363,7 +363,7 @@ impl TopicActor {
                                 })
                                 .collect();
                             
-                            partitions_info.push(crate::dashboard::models::stream::PartitionInfo {
+                            partitions_info.push(crate::dashboard::dashboard_stream::PartitionInfo {
                                 id: p_id,
                                 messages: messages_preview,
                                 groups: groups_info,
@@ -371,7 +371,7 @@ impl TopicActor {
                             });
                         }
                         
-                        let summary = crate::dashboard::models::stream::TopicSummary {
+                        let summary = crate::dashboard::dashboard_stream::TopicSummary {
                              name: self.state.name.clone(),
                              partitions: partitions_info,
                         };

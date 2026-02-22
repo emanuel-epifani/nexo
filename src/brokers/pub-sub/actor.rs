@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use dashmap::DashMap;
-use crate::dashboard::models::pubsub::TopicSnapshot;
+use crate::dashboard::dashboard_pubsub::TopicSnapshot;
 use crate::dashboard::utils::payload_to_dashboard_value;
 use crate::brokers::pub_sub::types::{ClientId, PubSubMessage};
 use crate::brokers::pub_sub::radix_tree::Node;
@@ -42,7 +42,7 @@ pub(crate) enum RootCommand {
         reply: oneshot::Sender<()>,
     },
     GetFlatSnapshot {
-        reply: oneshot::Sender<Vec<crate::dashboard::models::pubsub::TopicSnapshot>>,
+        reply: oneshot::Sender<Vec<crate::dashboard::dashboard_pubsub::TopicSnapshot>>,
     },
     IsEmpty {
         reply: oneshot::Sender<bool>,

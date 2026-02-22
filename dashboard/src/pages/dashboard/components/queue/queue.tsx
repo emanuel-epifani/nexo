@@ -1,6 +1,6 @@
-import { useState, useMemo, useRef, useEffect } from "react"
-import { useVirtualizer } from "@tanstack/react-virtual"
-import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary, DlqMessageSummary } from "./types"
+import { useState, useMemo, useEffect } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary, DlqMessageSummary, PaginatedMessages, PaginatedDlqMessages } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -14,12 +14,16 @@ import {
     AlertTriangle,
     Copy,
     Check,
+    ChevronLeft,
+    ChevronRight,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 
 interface Props {
   data: QueueBrokerSnapshot
 }
+
+const PAGE_SIZE = 50
 
 export function QueueView({ data }: Props) {
   const [filter, setFilter] = useState("")
@@ -34,20 +38,14 @@ export function QueueView({ data }: Props) {
   // Message State Filter (for Traffic view)
   const [messageState, setMessageState] = useState<'Pending' | 'InFlight' | 'Scheduled'>('Pending')
   
-  // Sort State
-  const [sortColumn, setSortColumn] = useState<'priority' | 'attempts' | null>(null)
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+  // Pagination State
+  const [offset, setOffset] = useState(0)
   
-  // Virtualization ref
-  const parentRef = useRef<HTMLDivElement>(null)
-
-  // Reset selection when switching queues
+  // Reset pagination when changing context
   useEffect(() => {
+      setOffset(0)
       setSelectedMessageId(null)
-      // Default to traffic view when switching queues, unless the queue only has DLQ items? 
-      // Better to stick to 'traffic' default or keep current viewMode if user wants to check DLQ of multiple queues.
-      // Let's keep viewMode persistent for now, but reset if queue has no DLQ? No, let user see empty DLQ.
-  }, [selectedQueueName])
+  }, [selectedQueueName, viewMode, messageState])
 
   const filteredQueues = useMemo(() => {
       return (data || []).filter(q => q.name.toLowerCase().includes(filter.toLowerCase()))
@@ -57,69 +55,31 @@ export function QueueView({ data }: Props) {
       return (data || []).find((q: QueueSummary) => q.name === selectedQueueName)
   }, [data, selectedQueueName])
 
-  // Get messages for current state and apply sorting
-  const filteredMessages = useMemo(() => {
-      if (!selectedQueue) return []
-      
-      let messages: MessageSummary[] = []
-
-      if (viewMode === 'traffic') {
-          if (messageState === 'Pending') messages = selectedQueue.pending || []
-          else if (messageState === 'InFlight') messages = selectedQueue.inflight || []
-          else messages = selectedQueue.scheduled || []
-      } else {
-          // DLQ Mode
-          messages = selectedQueue.dlq || []
-      }
-      
-      // Apply sorting
-      if (sortColumn) {
-          messages = [...messages].sort((a, b) => {
-              let aVal = sortColumn === 'priority' ? a.priority : a.attempts
-              let bVal = sortColumn === 'priority' ? b.priority : b.attempts
-              
-              if (sortDirection === 'asc') {
-                  return aVal - bVal
-              } else {
-                  return bVal - aVal
-              }
-          })
-      } else if (viewMode === 'dlq') {
-          // Default sort for DLQ: Most recent first
-          messages = [...messages].sort((a, b) => {
-              const aTime = (a as DlqMessageSummary).created_at || 0
-              const bTime = (b as DlqMessageSummary).created_at || 0
-              return bTime - aTime
-          })
-      }
-      
-      return messages
-  }, [selectedQueue, viewMode, messageState, sortColumn, sortDirection])
-
-  // Handle sort column click
-  const handleSortClick = (column: 'priority' | 'attempts') => {
-      if (sortColumn === column) {
-          setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')
-      } else {
-          setSortColumn(column)
-          setSortDirection('desc')
-      }
-  }
+  // Fetch paginated messages
+  const { data: paginatedData, isLoading } = useQuery({
+    queryKey: ['queue-messages', selectedQueueName, viewMode, messageState, offset],
+    queryFn: async () => {
+        if (!selectedQueueName) return null
+        
+        const stateParam = viewMode === 'dlq' ? 'dlq' : messageState.toLowerCase()
+        const res = await fetch(`/api/queue/${selectedQueueName}/messages?state=${stateParam}&offset=${offset}&limit=${PAGE_SIZE}`)
+        
+        if (!res.ok) throw new Error('Failed to fetch messages')
+        
+        if (viewMode === 'dlq') {
+            return await res.json() as PaginatedDlqMessages
+        } else {
+            return await res.json() as PaginatedMessages
+        }
+    },
+    enabled: !!selectedQueueName,
+  })
 
   // Get selected message details
   const selectedMessage = useMemo(() => {
-      if (!selectedQueue || !selectedMessageId) return undefined
-      
-      // Search in all lists to be safe (or just the active view's list)
-      const allLists = [
-          ...(selectedQueue.pending || []),
-          ...(selectedQueue.inflight || []),
-          ...(selectedQueue.scheduled || []),
-          ...(selectedQueue.dlq || [])
-      ]
-      
-      return allLists.find(m => m.id === selectedMessageId)
-  }, [selectedQueue, selectedMessageId])
+      if (!paginatedData || !selectedMessageId) return undefined
+      return paginatedData.messages.find(m => m.id === selectedMessageId)
+  }, [paginatedData, selectedMessageId])
 
   // Copy to clipboard helper
   const copyToClipboard = (text: string, id: string) => {
@@ -128,13 +88,9 @@ export function QueueView({ data }: Props) {
       setTimeout(() => setCopiedId(null), 2000)
   }
 
-  // Virtualization setup
-  const virtualizer = useVirtualizer({
-      count: filteredMessages.length,
-      getScrollElement: () => parentRef.current,
-      estimateSize: () => 36, // h-9 = 36px
-      overscan: 10,
-  })
+  const messages = paginatedData?.messages || []
+  const total = paginatedData?.total || 0
+  const hasMore = offset + PAGE_SIZE < total
 
   return (
       <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
@@ -164,8 +120,8 @@ export function QueueView({ data }: Props) {
                           </div>
                       ) : (
                           filteredQueues.map((q) => {
-                              const hasDlq = (q.dlq || []).length > 0
-                              const totalPending = (q.pending || []).length
+                              const hasDlq = q.dlq > 0
+                              const totalPending = q.pending
                               
                               return (
                                   <div
@@ -196,7 +152,7 @@ export function QueueView({ data }: Props) {
                                           {hasDlq && (
                                               <div className="flex items-center gap-1 text-xs text-destructive font-bold bg-destructive/10 px-1.5 py-0.5 rounded">
                                                   <AlertTriangle className="h-3 w-3" />
-                                                  {(q.dlq || []).length}
+                                                  {q.dlq}
                                               </div>
                                           )}
                                           {totalPending > 0 && (
@@ -228,7 +184,7 @@ export function QueueView({ data }: Props) {
                                         TRAFFIC
                                     </TabsTrigger>
                                     <TabsTrigger value="dlq" className="h-6 text-[10px] px-3 data-[state=active]:bg-destructive data-[state=active]:text-destructive-foreground">
-                                        DLQ {(selectedQueue.dlq || []).length > 0 && `(${(selectedQueue.dlq || []).length})`}
+                                        DLQ {selectedQueue.dlq > 0 && `(${selectedQueue.dlq})`}
                                     </TabsTrigger>
                                 </TabsList>
                              </Tabs>
@@ -236,9 +192,9 @@ export function QueueView({ data }: Props) {
 
                          {viewMode === 'traffic' ? (
                              <div className="flex gap-1">
-                                 <FilterButton label="Pending" count={(selectedQueue.pending || []).length} active={messageState === 'Pending'} onClick={() => setMessageState('Pending')} />
-                                 <FilterButton label="InFlight" count={(selectedQueue.inflight || []).length} active={messageState === 'InFlight'} onClick={() => setMessageState('InFlight')} />
-                                 <FilterButton label="Scheduled" count={(selectedQueue.scheduled || []).length} active={messageState === 'Scheduled'} onClick={() => setMessageState('Scheduled')} />
+                                 <FilterButton label="Pending" count={selectedQueue.pending} active={messageState === 'Pending'} onClick={() => setMessageState('Pending')} />
+                                 <FilterButton label="InFlight" count={selectedQueue.inflight} active={messageState === 'InFlight'} onClick={() => setMessageState('InFlight')} />
+                                 <FilterButton label="Scheduled" count={selectedQueue.scheduled} active={messageState === 'Scheduled'} onClick={() => setMessageState('Scheduled')} />
                              </div>
                          ) : (
                              <div className="h-7 flex items-center text-xs text-destructive font-bold bg-destructive/5 px-2 rounded border border-destructive/20">
@@ -248,24 +204,29 @@ export function QueueView({ data }: Props) {
                          )}
                      </div>
 
-                     {/* Messages Table - Virtualized */}
-                     <div ref={parentRef} className="flex-1 overflow-y-auto bg-background">
-                        {filteredMessages.length === 0 ? (
-                            <div className="h-full flex flex-col items-center justify-center text-muted-foreground">
+                     {/* Messages Table - Simple Map */}
+                     <div className="flex-1 overflow-y-auto bg-background flex flex-col">
+                        {isLoading ? (
+                            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
+                                <RefreshCw className="h-6 w-6 animate-spin mb-4 opacity-50" />
+                                <p className="text-xs font-mono uppercase tracking-widest opacity-50">LOADING...</p>
+                            </div>
+                        ) : messages.length === 0 ? (
+                            <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                                 <Box className="h-12 w-12 opacity-20 mb-4" />
                                 <p className="text-xs font-mono uppercase tracking-widest opacity-50">
                                     {viewMode === 'traffic' ? 'NO_MESSAGES' : 'NO_ERRORS_FOUND'}
                                 </p>
                             </div>
                         ) : (
-                            <div className="p-0">
+                            <div className="flex-1 flex flex-col">
                                 {/* Table Header */}
                                 {viewMode === 'traffic' ? (
                                     <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
                                         <div>ID</div>
                                         <div className="text-center">Status</div>
-                                        <div className="text-center cursor-pointer hover:text-foreground" onClick={() => handleSortClick('priority')}>Priority</div>
-                                        <div className="text-center cursor-pointer hover:text-foreground" onClick={() => handleSortClick('attempts')}>Attempts</div>
+                                        <div className="text-center">Priority</div>
+                                        <div className="text-center">Attempts</div>
                                     </div>
                                 ) : (
                                     <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[120px_1fr_60px_60px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
@@ -276,82 +237,95 @@ export function QueueView({ data }: Props) {
                                     </div>
                                 )}
 
-                                {/* Virtual List */}
-                                <div style={{
-                                    height: `${virtualizer.getTotalSize()}px`,
-                                    width: '100%',
-                                    position: 'relative',
-                                }}>
-                                    {virtualizer.getVirtualItems().map((virtualItem) => (
-                                        <div
-                                            key={filteredMessages[virtualItem.index].id}
-                                            data-index={virtualItem.index}
-                                            style={{
-                                                position: 'absolute',
-                                                top: 0,
-                                                left: 0,
-                                                width: '100%',
-                                                transform: `translateY(${virtualItem.start}px)`,
-                                            }}
-                                        >
-                                            {(() => {
-                                                const msg = filteredMessages[virtualItem.index]
-                                                const isSelected = selectedMessageId === msg.id
-                                                
-                                                if (viewMode === 'dlq') {
-                                                    const dlqMsg = msg as DlqMessageSummary
-                                                    return (
-                                                        <div
-                                                            onClick={() => setSelectedMessageId(msg.id)}
-                                                            className={`
-                                                                grid grid-cols-[120px_1fr_60px_60px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
-                                                                ${isSelected ? 'bg-destructive/10 border-destructive/20' : 'hover:bg-destructive/5'}
-                                                            `}
-                                                        >
-                                                            <span className="font-mono text-xs text-muted-foreground truncate">
-                                                                {new Date(dlqMsg.created_at).toLocaleTimeString()}
-                                                            </span>
-                                                            <span className="font-mono text-xs text-destructive truncate font-medium" title={dlqMsg.failure_reason}>
-                                                                {dlqMsg.failure_reason}
-                                                            </span>
-                                                            <span className="font-mono text-xs text-center text-muted-foreground">
-                                                                {dlqMsg.attempts}
-                                                            </span>
-                                                            <span className="font-mono text-xs text-right opacity-40 truncate">
-                                                                ...{dlqMsg.id.slice(-4)}
-                                                            </span>
-                                                        </div>
-                                                    )
-                                                }
+                                {/* Simple List */}
+                                <div className="flex-1">
+                                    {messages.map((msg: any) => {
+                                        const isSelected = selectedMessageId === msg.id
+                                        
+                                        if (viewMode === 'dlq') {
+                                            const dlqMsg = msg as DlqMessageSummary
+                                            return (
+                                                <div
+                                                    key={msg.id}
+                                                    onClick={() => setSelectedMessageId(msg.id)}
+                                                    className={`
+                                                        grid grid-cols-[120px_1fr_60px_60px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
+                                                        ${isSelected ? 'bg-destructive/10 border-destructive/20' : 'hover:bg-destructive/5'}
+                                                    `}
+                                                >
+                                                    <span className="font-mono text-xs text-muted-foreground truncate">
+                                                        {new Date(dlqMsg.created_at).toLocaleTimeString()}
+                                                    </span>
+                                                    <span className="font-mono text-xs text-destructive truncate font-medium" title={dlqMsg.failure_reason}>
+                                                        {dlqMsg.failure_reason}
+                                                    </span>
+                                                    <span className="font-mono text-xs text-center text-muted-foreground">
+                                                        {dlqMsg.attempts}
+                                                    </span>
+                                                    <span className="font-mono text-xs text-right opacity-40 truncate">
+                                                        ...{dlqMsg.id.slice(-4)}
+                                                    </span>
+                                                </div>
+                                            )
+                                        }
 
-                                                return (
-                                                    <div
-                                                        onClick={() => setSelectedMessageId(msg.id)}
-                                                        className={`
-                                                            grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
-                                                            ${isSelected ? 'bg-secondary' : 'hover:bg-muted/50'}
-                                                        `}
-                                                    >
-                                                        <span className={`font-mono text-sm truncate ${isSelected ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
-                                                            {msg.id}
-                                                        </span>
-                                                        <div className="flex justify-center">
-                                                            <StatusBadgeCompact state={msg.state} />
-                                                        </div>
-                                                        <div className={`text-center text-xs ${msg.priority > 0 ? 'text-status-pending font-bold' : 'text-muted-foreground'}`}>
-                                                            {msg.priority}
-                                                        </div>
-                                                        <div className={`text-center text-xs ${msg.attempts > 0 ? 'text-destructive font-bold' : 'text-muted-foreground'}`}>
-                                                            {msg.attempts}
-                                                        </div>
-                                                    </div>
-                                                )
-                                            })()}
-                                        </div>
-                                    ))}
+                                        const trafficMsg = msg as MessageSummary
+                                        return (
+                                            <div
+                                                key={msg.id}
+                                                onClick={() => setSelectedMessageId(msg.id)}
+                                                className={`
+                                                    grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
+                                                    ${isSelected ? 'bg-secondary' : 'hover:bg-muted/50'}
+                                                `}
+                                            >
+                                                <span className={`font-mono text-sm truncate ${isSelected ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
+                                                    {msg.id}
+                                                </span>
+                                                <div className="flex justify-center">
+                                                    <StatusBadgeCompact state={trafficMsg.state} />
+                                                </div>
+                                                <div className={`text-center text-xs ${trafficMsg.priority > 0 ? 'text-status-pending font-bold' : 'text-muted-foreground'}`}>
+                                                    {trafficMsg.priority}
+                                                </div>
+                                                <div className={`text-center text-xs ${trafficMsg.attempts > 0 ? 'text-destructive font-bold' : 'text-muted-foreground'}`}>
+                                                    {trafficMsg.attempts}
+                                                </div>
+                                            </div>
+                                        )
+                                    })}
                                 </div>
                             </div>
                         )}
+                     </div>
+
+                     {/* Pagination Controls */}
+                     <div className="p-2 border-t-2 border-border bg-section-header flex items-center justify-between flex-shrink-0">
+                         <div className="text-xs text-muted-foreground font-mono">
+                             {total > 0 ? (
+                                 <span>{offset + 1}-{Math.min(offset + PAGE_SIZE, total)} of {total}</span>
+                             ) : (
+                                 <span>0 items</span>
+                             )}
+                         </div>
+                         <div className="flex gap-1">
+                             <button
+                                 disabled={offset === 0 || isLoading}
+                                 onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))}
+                                 className="h-7 px-2 flex items-center gap-1 text-xs font-mono uppercase bg-background border border-border rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                             >
+                                 <ChevronLeft className="h-3 w-3" />
+                                 Prev
+                             </button>
+                             <button
+                                 disabled={!hasMore || isLoading}
+                                 onClick={() => setOffset(o => o + PAGE_SIZE)}
+                                 className="h-7 px-2 flex items-center gap-1 text-xs font-mono uppercase bg-background border border-border rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                             >
+                                 Next
+                                 <ChevronRight className="h-3 w-3" />
+                             </button>
+                         </div>
                      </div>
                  </div>
              ) : (
@@ -438,8 +412,6 @@ export function QueueView({ data }: Props) {
       </div>
   )
 }
-
-
 
 interface FilterButtonProps {
   label: string

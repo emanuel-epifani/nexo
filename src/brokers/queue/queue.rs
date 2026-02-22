@@ -7,12 +7,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
-use crate::dashboard::models::queues::{QueueSummary, MessageSummary, DlqMessageSummary};
+use crate::dashboard::dashboard_queue::{QueueSummary, MessageSummary, DlqMessageSummary};
 use crate::brokers::queue::persistence::types::PersistenceMode;
 use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::config::SystemQueueConfig;
@@ -356,60 +357,20 @@ impl Message {
         }
 
         pub fn get_snapshot(&self, name: &str) -> QueueSummary {
-            let mut pending = Vec::new();
-            let mut inflight = Vec::new();
-            let mut scheduled = Vec::new();
+            let mut pending = 0;
+            let mut inflight = 0;
+            let mut scheduled = 0;
 
-            let parse_payload = |msg: &Message| {
-                payload_to_dashboard_value(&msg.payload)
-            };
-
-            // Pending
-            for (priority, queue) in &self.waiting_for_dispatch {
-                for id in queue {
-                    if let Some(msg) = self.registry.get(id) {
-                        pending.push(MessageSummary {
-                            id: msg.id,
-                            payload: parse_payload(msg),
-                            state: "Pending".to_string(),
-                            priority: *priority,
-                            attempts: msg.attempts,
-                            next_delivery_at: None,
-                        });
-                    }
-                }
+            for (_, queue) in &self.waiting_for_dispatch {
+                pending += queue.len();
             }
 
-            // InFlight
-            for (expiry, list) in &self.waiting_for_ack {
-                for id in list {
-                    if let Some(msg) = self.registry.get(id) {
-                        inflight.push(MessageSummary {
-                            id: msg.id,
-                            payload: parse_payload(msg),
-                            state: "InFlight".to_string(),
-                            priority: msg.priority,
-                            attempts: msg.attempts,
-                            next_delivery_at: None,
-                        });
-                    }
-                }
+            for (_, list) in &self.waiting_for_ack {
+                inflight += list.len();
             }
 
-            // Scheduled
-            for (time, list) in &self.waiting_for_time {
-                for id in list {
-                    if let Some(msg) = self.registry.get(id) {
-                        scheduled.push(MessageSummary {
-                            id: msg.id,
-                            payload: parse_payload(msg),
-                            state: "Scheduled".to_string(),
-                            priority: msg.priority,
-                            attempts: msg.attempts,
-                            next_delivery_at: Some(format_time(*time)),
-                        });
-                    }
-                }
+            for (_, list) in &self.waiting_for_time {
+                scheduled += list.len();
             }
 
             QueueSummary {
@@ -417,8 +378,65 @@ impl Message {
                 pending,
                 inflight,
                 scheduled,
-                dlq: Vec::new(),
+                dlq: 0, // Sarà popolato dall'Actor
             }
+        }
+
+        pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<MessageSummary>) {
+            let parse_payload = |msg: &Message| {
+                payload_to_dashboard_value(&msg.payload)
+            };
+
+            let iter: Box<dyn Iterator<Item = &Uuid>> = match state_filter.to_lowercase().as_str() {
+                "pending" => Box::new(self.waiting_for_dispatch.values().flat_map(|q| q.iter())),
+                "inflight" => Box::new(self.waiting_for_ack.values().flat_map(|q| q.iter())),
+                "scheduled" => Box::new(self.waiting_for_time.values().flat_map(|q| q.iter())),
+                _ => return (0, vec![]),
+            };
+
+            let mut all_filtered: Vec<&Message> = Vec::new();
+
+            for id in iter {
+                if let Some(msg) = self.registry.get(id) {
+                    let matches_search = match &search {
+                        Some(s) => {
+                            if let Value::String(str_val) = payload_to_dashboard_value(&msg.payload) {
+                                str_val.contains(s)
+                            } else {
+                                format!("{:?}", payload_to_dashboard_value(&msg.payload)).contains(s)
+                            }
+                        },
+                        None => true,
+                    };
+
+                    if matches_search {
+                        all_filtered.push(msg);
+                    }
+                }
+            }
+
+            let total = all_filtered.len();
+            let paged: Vec<MessageSummary> = all_filtered
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|msg| {
+                    let next_delivery_at = match msg.state {
+                        MessageState::Scheduled(ts) => Some(format_time(ts)),
+                        _ => None,
+                    };
+                    MessageSummary {
+                        id: msg.id,
+                        payload: parse_payload(msg),
+                        state: state_filter.clone(),
+                        priority: msg.priority,
+                        attempts: msg.attempts,
+                        next_delivery_at,
+                    }
+                })
+                .collect();
+
+            (total, paged)
         }
 
         pub fn has_ready_messages(&self) -> bool {
