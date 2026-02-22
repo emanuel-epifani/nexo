@@ -1,12 +1,16 @@
-use axum::extract::State;
+use axum::extract::{State, Query};
 use axum::response::IntoResponse;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::NexoEngine;
+
+const PUBSUB_PAGE_SIZE: usize = 50;
+const PUBSUB_MAX_PAGE_SIZE: usize = 500;
 
 #[derive(Serialize)]
 pub struct PubSubBrokerSnapshot {
     pub active_clients: usize,
+    pub total_topics: usize,
     pub topics: Vec<TopicSnapshot>,
     pub wildcards: WildcardSubscriptions,
 }
@@ -30,8 +34,19 @@ pub struct TopicSnapshot {
     pub retained_value: Option<Value>,
 }
 
+#[derive(Deserialize)]
+pub struct PubSubQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub search: Option<String>,
+}
 
-pub async fn get_pubsub(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.pubsub.get_snapshot().await;
+pub async fn get_pubsub(
+    State(engine): State<NexoEngine>,
+    Query(query): Query<PubSubQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(PUBSUB_PAGE_SIZE).min(PUBSUB_MAX_PAGE_SIZE);
+    let offset = query.offset.unwrap_or(0);
+    let snapshot = engine.pubsub.scan_topics(limit, offset, query.search).await;
     axum::Json(snapshot)
 }

@@ -17,7 +17,7 @@ import {
 export function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'store' | 'queue' | 'stream' | 'pubsub'>('store')
 
-  const [queueQuery, streamQuery, pubsubQuery] = useQueries({
+  const [queueQuery, streamQuery] = useQueries({
     queries: [
       {
         queryKey: ['queue-snapshot'],
@@ -39,30 +39,18 @@ export function DashboardPage() {
         enabled: activeTab === 'stream',
         gcTime: 0
       },
-      {
-        queryKey: ['pubsub-snapshot'],
-        queryFn: async () => {
-          const response = await fetch('/api/pubsub')
-          if (!response.ok) throw new Error('Failed to fetch pubsub')
-          return response.json()
-        },
-        enabled: activeTab === 'pubsub',
-        gcTime: 0
-      },
     ],
   })
 
   // Loading state: Only consider the ACTIVE tab's loading state
   const isLoading = 
       (activeTab === 'queue' && queueQuery.isLoading) ||
-      (activeTab === 'stream' && streamQuery.isLoading) ||
-      (activeTab === 'pubsub' && pubsubQuery.isLoading);
+      (activeTab === 'stream' && streamQuery.isLoading);
 
   // Error state: Only consider the ACTIVE tab's error state
   const hasError = 
       (activeTab === 'queue' && queueQuery.error) ||
-      (activeTab === 'stream' && streamQuery.error) ||
-      (activeTab === 'pubsub' && pubsubQuery.error);
+      (activeTab === 'stream' && streamQuery.error);
 
     if (isLoading) {
     return (
@@ -124,8 +112,8 @@ export function DashboardPage() {
                 active={activeTab === 'pubsub'}
                 onClick={() => setActiveTab('pubsub')}
                 icon={<Radio className="h-5 w-5" />}
-                onRefresh={() => pubsubQuery.refetch()}
-                isRefreshing={pubsubQuery.isFetching}
+                onRefresh={() => {}}
+                isRefreshing={false}
             />
         </div>
 
@@ -146,9 +134,9 @@ export function DashboardPage() {
                     <StreamView data={streamQuery.data} />
                 </div>
             )}
-            {activeTab === 'pubsub' && pubsubQuery.data && (
+            {activeTab === 'pubsub' && (
                 <div className="h-full space-y-4 overflow-auto">
-                    <PubSubView data={pubsubQuery.data} />
+                    <PubSubView />
                 </div>
             )}
         </main>

@@ -1,5 +1,6 @@
 export interface PubSubBrokerSnapshot {
   active_clients: number;
+  total_topics: number;
   topics: TopicSnapshot[];
   wildcards: WildcardSubscriptions;
 }

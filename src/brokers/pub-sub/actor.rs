@@ -42,7 +42,8 @@ pub(crate) enum RootCommand {
         client: ClientId,
         reply: oneshot::Sender<()>,
     },
-    GetFlatSnapshot {
+    ScanTopics {
+        search: Option<String>,
         reply: oneshot::Sender<Vec<crate::dashboard::pubsub::TopicSnapshot>>,
     },
     IsEmpty {
@@ -122,9 +123,9 @@ impl RootActor {
                                 self.disconnect(&client);
                                 let _ = reply.send(());
                             }
-                            RootCommand::GetFlatSnapshot { reply } => {
-                                let flat_snapshot = self.build_flat_snapshot();
-                                let _ = reply.send(flat_snapshot);
+                            RootCommand::ScanTopics { search, reply } => {
+                                let topics = self.scan_topics(search.as_deref());
+                                let _ = reply.send(topics);
                             }
                             RootCommand::IsEmpty { reply } => {
                                 let is_empty = self.tree.is_empty() && self.client_patterns.is_empty();
@@ -276,38 +277,38 @@ impl RootActor {
         }
     }
 
-    // --- FLAT SNAPSHOT ---
-    fn build_flat_snapshot(&self) -> Vec<TopicSnapshot> {
+    // --- TOPIC SCAN ---
+    fn scan_topics(&self, search: Option<&str>) -> Vec<TopicSnapshot> {
         let mut topics = Vec::new();
-        self.collect_flat_topics(&self.tree, &self.name, &mut topics);
+        self.collect_filtered_topics(&self.tree, &self.name, search, &mut topics);
         topics
     }
 
-    fn collect_flat_topics(&self, node: &Node, base_path: &str, topics: &mut Vec<TopicSnapshot>) {
-        topics.push(TopicSnapshot {
-            full_path: base_path.to_string(),
-            subscribers: node.subscribers.len(),
-            retained_value: node.retained.as_ref()
-                .filter(|r| !r.is_expired())
-                .map(|retained| payload_to_dashboard_value(&retained.data)),
-        });
+    fn collect_filtered_topics(&self, node: &Node, base_path: &str, search: Option<&str>, topics: &mut Vec<TopicSnapshot>) {
+        let matches = search.map_or(true, |s| base_path.contains(s));
+        if matches {
+            topics.push(TopicSnapshot {
+                full_path: base_path.to_string(),
+                subscribers: node.subscribers.len(),
+                retained_value: node.retained.as_ref()
+                    .filter(|r| !r.is_expired())
+                    .map(|retained| payload_to_dashboard_value(&retained.data)),
+            });
+        }
 
-        // Process exact match children
         for (child_name, child_node) in &node.children {
             let full_path = format!("{}/{}", base_path, child_name);
-            self.collect_flat_topics(child_node, &full_path, topics);
+            self.collect_filtered_topics(child_node, &full_path, search, topics);
         }
-        
-        // Process wildcard '+' child
+
         if let Some(plus_node) = &node.plus_child {
             let full_path = format!("{}/+", base_path);
-            self.collect_flat_topics(plus_node, &full_path, topics);
+            self.collect_filtered_topics(plus_node, &full_path, search, topics);
         }
-        
-        // Process wildcard '#' child
+
         if let Some(hash_node) = &node.hash_child {
             let full_path = format!("{}/#", base_path);
-            self.collect_flat_topics(hash_node, &full_path, topics);
+            self.collect_filtered_topics(hash_node, &full_path, search, topics);
         }
     }
 

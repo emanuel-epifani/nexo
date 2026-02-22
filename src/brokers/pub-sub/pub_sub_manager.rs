@@ -224,8 +224,8 @@ impl PubSubManager {
         }
     }
 
-    /// Get snapshot for dashboard
-    pub async fn get_snapshot(&self) -> crate::dashboard::pubsub::PubSubBrokerSnapshot {
+    /// Get paginated snapshot for dashboard
+    pub async fn scan_topics(&self, limit: usize, offset: usize, search: Option<String>) -> crate::dashboard::pubsub::PubSubBrokerSnapshot {
         use crate::dashboard::pubsub::{PubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
 
         let mut multi_level = Vec::new();
@@ -247,19 +247,26 @@ impl PubSubManager {
             }
         }
 
+        // Collect filtered topics from all root actors
         let mut all_topics = Vec::new();
         for entry in self.actors.iter() {
             let (tx, rx) = oneshot::channel();
-            if entry.value().send(RootCommand::GetFlatSnapshot { reply: tx }).await.is_ok() {
+            if entry.value().send(RootCommand::ScanTopics { search: search.clone(), reply: tx }).await.is_ok() {
                 if let Ok(topics) = rx.await {
                     all_topics.extend(topics);
                 }
             }
         }
 
+        // Sort for deterministic pagination, then slice
+        all_topics.sort_unstable_by(|a, b| a.full_path.cmp(&b.full_path));
+        let total = all_topics.len();
+        let topics = all_topics.into_iter().skip(offset).take(limit).collect();
+
         PubSubBrokerSnapshot {
             active_clients: self.clients.len(),
-            topics: all_topics,
+            total_topics: total,
+            topics,
             wildcards: WildcardSubscriptions {
                 multi_level,
                 single_level,
