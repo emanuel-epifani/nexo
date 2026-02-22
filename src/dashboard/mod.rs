@@ -1,6 +1,6 @@
 pub mod server;
 pub mod utils;
-pub mod dashboard_store;
-pub mod dashboard_pubsub;
-pub mod dashboard_stream;
-pub mod dashboard_queue;
+pub mod store;
+pub mod pubsub;
+pub mod stream;
+pub mod queue;

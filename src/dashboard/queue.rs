@@ -1,12 +1,18 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use crate::dashboard::server::QueueMessagesQuery;
 use crate::NexoEngine;
 
+#[derive(Deserialize)]
+pub struct QueueMessagesQuery {
+    pub state: String,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    pub search: Option<String>,
+}
 #[derive(Serialize)]
 pub struct QueueSummary {
     pub name: String,
@@ -67,7 +73,7 @@ pub async fn get_queue_messages(
     if state_filter == "dlq" {
         match engine.queue.peek_dlq(&name, limit, offset).await {
             Ok((total, dlq_msgs)) => {
-                let messages = dlq_msgs.into_iter().map(|msg| crate::dashboard::dashboard_queue::DlqMessageSummary {
+                let messages = dlq_msgs.into_iter().map(|msg| crate::dashboard::queue::DlqMessageSummary {
                     id: msg.id,
                     payload: crate::dashboard::utils::payload_to_dashboard_value(&msg.payload),
                     attempts: msg.attempts,
@@ -75,20 +81,14 @@ pub async fn get_queue_messages(
                     created_at: msg.created_at,
                 }).collect();
 
-                axum::Json(serde_json::to_value(PaginatedDlqMessages {
-                    messages,
-                    total,
-                }).unwrap()).into_response()
+                axum::Json(PaginatedDlqMessages { messages, total }).into_response()
             },
             Err(e) => (StatusCode::NOT_FOUND, e).into_response()
         }
     } else {
         match engine.queue.get_messages(name, state_filter, offset, limit, search).await {
             Some((total, messages)) => {
-                axum::Json(serde_json::to_value(PaginatedMessages {
-                    messages,
-                    total,
-                }).unwrap()).into_response()
+                axum::Json(PaginatedMessages { messages, total }).into_response()
             },
             None => (StatusCode::NOT_FOUND, "Queue not found").into_response()
         }

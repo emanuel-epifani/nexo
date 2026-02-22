@@ -8,7 +8,6 @@ import {
     Search, 
     MessageSquare,
     RefreshCw,
-    Clock,
     AlertCircle,
     Box,
     AlertTriangle,
@@ -222,9 +221,8 @@ export function QueueView({ data }: Props) {
                             <div className="flex-1 flex flex-col">
                                 {/* Table Header */}
                                 {viewMode === 'traffic' ? (
-                                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px_80px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
+                                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
                                         <div>ID</div>
-                                        <div className="text-center">Status</div>
                                         <div className="text-center">Priority</div>
                                         <div className="text-center">Attempts</div>
                                     </div>
@@ -275,16 +273,13 @@ export function QueueView({ data }: Props) {
                                                 key={msg.id}
                                                 onClick={() => setSelectedMessageId(msg.id)}
                                                 className={`
-                                                    grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
+                                                    grid grid-cols-[1fr_80px_80px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
                                                     ${isSelected ? 'bg-secondary' : 'hover:bg-muted/50'}
                                                 `}
                                             >
                                                 <span className={`font-mono text-sm truncate ${isSelected ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
                                                     {msg.id}
                                                 </span>
-                                                <div className="flex justify-center">
-                                                    <StatusBadgeCompact state={trafficMsg.state} />
-                                                </div>
                                                 <div className={`text-center text-xs ${trafficMsg.priority > 0 ? 'text-status-pending font-bold' : 'text-muted-foreground'}`}>
                                                     {trafficMsg.priority}
                                                 </div>
@@ -438,29 +433,3 @@ function FilterButton({ label, count, active, onClick }: FilterButtonProps) {
     )
 }
 
-interface StatusBadgeCompactProps {
-  state: string
-}
-
-function StatusBadgeCompact({ state }: StatusBadgeCompactProps) {
-    let color = "bg-muted text-muted-foreground border-border"
-    let icon = <Clock className="h-2 w-2" />
-
-    if (state === 'InFlight') {
-        color = "bg-status-processing/10 text-status-processing border-status-processing/30"
-        icon = <RefreshCw className="h-2 w-2 animate-spin duration-[3s]" />
-    } else if (state === 'Pending') {
-        color = "bg-status-pending/10 text-status-pending border-status-pending/30"
-        icon = <AlertCircle className="h-2 w-2" />
-    } else if (state === 'Scheduled') {
-        color = "bg-secondary text-foreground border-border"
-        icon = <Clock className="h-2 w-2" />
-    }
-
-    return (
-        <div className={`flex items-center gap-1 px-1 py-0.5 rounded-sm border text-xs ${color}`}>
-            {icon}
-            <span className="uppercase font-bold">{state}</span>
-        </div>
-    )
-}

@@ -1,5 +1,8 @@
+use axum::extract::State;
+use axum::response::IntoResponse;
 use serde::Serialize;
 use serde_json::Value;
+use crate::NexoEngine;
 
 #[derive(Serialize)]
 pub struct StreamBrokerSnapshot {
@@ -33,4 +36,10 @@ pub struct MessagePreview {
     pub offset: u64,
     pub timestamp: String,
     pub payload: Value,
+}
+
+
+pub async fn get_stream(State(engine): State<NexoEngine>) -> impl IntoResponse {
+    let snapshot = engine.stream.get_snapshot().await;
+    axum::Json(snapshot)
 }

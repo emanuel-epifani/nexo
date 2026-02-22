@@ -13,7 +13,7 @@ use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
-use crate::dashboard::dashboard_queue::{QueueSummary, MessageSummary, DlqMessageSummary};
+use crate::dashboard::queue::{QueueSummary, MessageSummary, DlqMessageSummary};
 use crate::brokers::queue::persistence::types::PersistenceMode;
 use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
 use crate::config::SystemQueueConfig;

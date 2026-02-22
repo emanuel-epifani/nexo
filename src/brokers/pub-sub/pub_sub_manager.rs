@@ -225,8 +225,8 @@ impl PubSubManager {
     }
 
     /// Get snapshot for dashboard
-    pub async fn get_snapshot(&self) -> crate::dashboard::dashboard_pubsub::PubSubBrokerSnapshot {
-        use crate::dashboard::dashboard_pubsub::{PubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
+    pub async fn get_snapshot(&self) -> crate::dashboard::pubsub::PubSubBrokerSnapshot {
+        use crate::dashboard::pubsub::{PubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
 
         let mut multi_level = Vec::new();
         let mut single_level = Vec::new();

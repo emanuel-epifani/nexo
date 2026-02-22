@@ -14,8 +14,8 @@ use crate::brokers::queue::dlq::{DlqState, DlqMessage};
 use crate::brokers::queue::persistence::{QueueStore, types::StorageOp};
 use crate::brokers::queue::queue_manager::ManagerCommand;
 use crate::config::Config;
-use crate::dashboard::dashboard_queue;
-use crate::dashboard::dashboard_queue::{QueueSummary, DlqMessageSummary};
+use crate::dashboard::queue;
+use crate::dashboard::queue::{QueueSummary, DlqMessageSummary};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
 // ==========================================
@@ -54,7 +54,7 @@ pub enum QueueActorCommand {
         offset: usize,
         limit: usize,
         search: Option<String>,
-        reply: oneshot::Sender<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)>,
+        reply: oneshot::Sender<(usize, Vec<crate::dashboard::queue::MessageSummary>)>,
     },
     Stop {
         reply: oneshot::Sender<()>,

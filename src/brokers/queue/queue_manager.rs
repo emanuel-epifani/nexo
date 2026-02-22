@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::brokers::queue::queue::{QueueConfig, Message};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
-use crate::dashboard::dashboard_queue::QueueSummary;
+use crate::dashboard::queue::QueueSummary;
 use crate::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 
@@ -50,7 +50,7 @@ pub enum ManagerCommand {
         offset: usize,
         limit: usize,
         search: Option<String>,
-        reply: oneshot::Sender<Option<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)>>,
+        reply: oneshot::Sender<Option<(usize, Vec<crate::dashboard::queue::MessageSummary>)>>,
     },
 }
 
@@ -323,7 +323,7 @@ impl QueueManager {
         }
     }
 
-    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<crate::dashboard::dashboard_queue::MessageSummary>)> {
+    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<crate::dashboard::queue::MessageSummary>)> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(ManagerCommand::GetMessages { queue_name, state_filter, offset, limit, search, reply: tx }).await.is_ok() {
             rx.await.unwrap_or(None)

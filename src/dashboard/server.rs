@@ -9,25 +9,21 @@ use axum::{
 use serde::Deserialize;
 use tower_http::compression::CompressionLayer;
 use rust_embed::RustEmbed;
+use crate::dashboard::pubsub::get_pubsub;
 use crate::NexoEngine;
-use crate::dashboard::dashboard_queue::{PaginatedMessages, PaginatedDlqMessages, get_queue, get_queue_messages};
+use crate::dashboard::queue::{PaginatedMessages, PaginatedDlqMessages, get_queue, get_queue_messages};
+use crate::dashboard::stream::get_stream;
 
 // Embed the frontend build directory
 #[derive(RustEmbed)]
 #[folder = "dashboard/dist/"]
 struct Assets;
 
-#[derive(Deserialize)]
-pub struct QueueMessagesQuery {
-    pub state: String,
-    pub offset: Option<usize>,
-    pub limit: Option<usize>,
-    pub search: Option<String>,
-}
+
 
 pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
     let app = Router::new()
-        .route("/api/store", get(crate::dashboard::dashboard_store::get_store_handler))
+        .route("/api/store", get(crate::dashboard::store::get_store_handler))
         .route("/api/queue", get(get_queue))
         .route("/api/queue/{name}/messages", get(get_queue_messages))
         .route("/api/stream", get(get_stream))
@@ -46,15 +42,6 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
 
 
 
-async fn get_stream(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.stream.get_snapshot().await;
-    axum::Json(snapshot)
-}
-
-async fn get_pubsub(State(engine): State<NexoEngine>) -> impl IntoResponse {
-    let snapshot = engine.pubsub.get_snapshot().await;
-    axum::Json(snapshot)
-}
 
 // Handler for serving embedded static files (SPA support)
 async fn static_handler(uri: Uri) -> impl IntoResponse {
