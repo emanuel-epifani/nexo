@@ -165,12 +165,8 @@ export class NexoConnection extends EventEmitter {
         }
         break;
       }
-      case FrameType.ERROR:
-        this.logger.error('Received Protocol Error');
-        break;
-      case FrameType.PING:
-        // Optional: Send PONG
-        break;
+      default:
+        this.logger.warn(`Unknown frame type: 0x${type.toString(16).padStart(2, '0')}`);
     }
   }
 

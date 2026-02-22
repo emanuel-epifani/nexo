@@ -3,9 +3,6 @@ export enum FrameType {
   REQUEST = 0x01,
   RESPONSE = 0x02,
   PUSH = 0x03,
-  ERROR = 0x04,
-  PING = 0x05,
-  PONG = 0x06,
 }
 
 /** @internal */

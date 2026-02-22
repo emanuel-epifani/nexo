@@ -64,9 +64,6 @@ pub const DATA_OFFSET_DATA_TYPE: usize = 0;
 pub const TYPE_REQUEST: u8  = 0x01;
 pub const TYPE_RESPONSE: u8 = 0x02;
 pub const TYPE_PUSH: u8     = 0x03;
-pub const TYPE_ERROR: u8    = 0x04;
-pub const TYPE_PING: u8     = 0x05;
-pub const TYPE_PONG: u8     = 0x06;
 
 // ========================================
 // RESPONSE STATUS (In Response Header, byte 1)

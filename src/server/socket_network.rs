@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::server::header_protocol::{
     encode_response, encode_push, parse_frame, ParseError, Response,
-    TYPE_REQUEST, TYPE_PING, RequestHeader
+    TYPE_REQUEST, RequestHeader
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
@@ -137,9 +137,6 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                         let response = route(opcode, payload, &engine_clone, &client_id_clone).await;
                         
                         let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
-                    }
-                    TYPE_PING => {
-                        let _ = tx_clone.send(WriteMessage::Response(id, Response::Ok)).await;
                     }
                     _ => {
                         let _ = tx_clone.send(WriteMessage::Response(id, Response::Error("Unsupported".into()))).await;
