@@ -1,18 +1,16 @@
 use axum::{
     routing::get,
     Router,
-    response::{IntoResponse},
-    extract::{State, Path, Query},
+    response::IntoResponse,
     http::{header, Uri, StatusCode},
     body::Body,
 };
-use serde::Deserialize;
 use tower_http::compression::CompressionLayer;
 use rust_embed::RustEmbed;
-use crate::dashboard::pubsub::get_pubsub;
 use crate::NexoEngine;
-use crate::dashboard::queue::{PaginatedMessages, PaginatedDlqMessages, get_queue, get_queue_messages};
-use crate::dashboard::stream::get_stream;
+use crate::dashboard::pubsub::get_pubsub;
+use crate::dashboard::queue::{get_queue, get_queue_messages};
+use crate::dashboard::stream::{get_stream, get_stream_messages};
 
 // Embed the frontend build directory
 #[derive(RustEmbed)]
@@ -27,6 +25,7 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
         .route("/api/queue", get(get_queue))
         .route("/api/queue/{name}/messages", get(get_queue_messages))
         .route("/api/stream", get(get_stream))
+        .route("/api/stream/{topic}/{partition}/messages", get(get_stream_messages))
         .route("/api/pubsub", get(get_pubsub))
         .layer(CompressionLayer::new())
         .fallback(static_handler)

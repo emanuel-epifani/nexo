@@ -668,7 +668,7 @@ mod stream_tests {
                 let topic_names: Vec<String> = snapshot.topics.iter().map(|t| t.name.clone()).collect();
                 assert!(topic_names.contains(&topic1.to_string()), "Snapshot should include topic1");
                 assert!(topic_names.contains(&topic2.to_string()), "Snapshot should include topic2");
-                assert_eq!(snapshot.total_topics, 2, "Should have 2 topics restored");
+                assert_eq!(snapshot.topics.len(), 2, "Should have 2 topics restored");
             }
         }
 

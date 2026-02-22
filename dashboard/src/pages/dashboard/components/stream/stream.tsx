@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect, useRef } from "react"
-import { useVirtualizer } from '@tanstack/react-virtual'
-import { StreamBrokerSnapshot, TopicSummary, ConsumerGroupSummary } from "./types"
+import { useState, useMemo, useEffect } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { StreamBrokerSnapshot, TopicSummary, ConsumerGroupSummary, StreamMessages } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -8,64 +8,84 @@ import {
     Database,
     Box,
     Layers,
-    ArrowRight
+    RefreshCw,
+    ChevronLeft,
+    ChevronRight,
 } from "lucide-react"
 
 interface Props {
     data: StreamBrokerSnapshot
 }
 
+const PAGE_SIZE = 50
+
 export function StreamView({ data }: Props) {
     const [filter, setFilter] = useState("")
     const [selectedTopicName, setSelectedTopicName] = useState<string | null>(null)
     const [selectedPartitionId, setSelectedPartitionId] = useState<number>(0)
     const [selectedMessageOffset, setSelectedMessageOffset] = useState<number | null>(null)
+    const [fromOffset, setFromOffset] = useState<number | null>(null)
 
-    // Default selection
+    // Default: select first topic
     useEffect(() => {
         if (!selectedTopicName && data.topics.length > 0) {
             setSelectedTopicName(data.topics[0].name)
         }
     }, [data.topics, selectedTopicName])
 
-    // Reset partition when topic changes
+    // Reset when topic or partition changes
     useEffect(() => {
         setSelectedPartitionId(0)
         setSelectedMessageOffset(null)
+        setFromOffset(null)
     }, [selectedTopicName])
 
-    const filteredTopics = useMemo(() => {
-        return data.topics.filter((t: TopicSummary) => t.name.toLowerCase().includes(filter.toLowerCase()))
-    }, [data.topics, filter])
+    useEffect(() => {
+        setSelectedMessageOffset(null)
+        setFromOffset(null)
+    }, [selectedPartitionId])
+
+    const filteredTopics = useMemo(() =>
+        data.topics.filter((t: TopicSummary) => t.name.toLowerCase().includes(filter.toLowerCase())),
+        [data.topics, filter])
 
     const selectedTopic = useMemo(() =>
-            data.topics.find((t: TopicSummary) => t.name === selectedTopicName),
+        data.topics.find((t: TopicSummary) => t.name === selectedTopicName),
         [data.topics, selectedTopicName])
 
     const currentPartition = useMemo(() =>
-            selectedTopic?.partitions.find(p => p.id === selectedPartitionId),
+        selectedTopic?.partitions.find(p => p.id === selectedPartitionId),
         [selectedTopic, selectedPartitionId])
 
-    const selectedMessage = useMemo(() =>
-            currentPartition?.messages.find(m => m.offset === selectedMessageOffset),
-        [currentPartition, selectedMessageOffset])
-
-    // Virtualizer for messages table
-    const parentRef = useRef<HTMLDivElement>(null)
-
-    const rowVirtualizer = useVirtualizer({
-        count: currentPartition?.messages.length ?? 0,
-        getScrollElement: () => parentRef.current,
-        estimateSize: () => 32,
-        overscan: 5,
+    // Fetch messages on-demand when topic+partition selected
+    const { data: streamData, isLoading } = useQuery({
+        queryKey: ["stream-messages", selectedTopicName, selectedPartitionId, fromOffset],
+        queryFn: async (): Promise<StreamMessages> => {
+            const params = new URLSearchParams({ limit: String(PAGE_SIZE) })
+            if (fromOffset !== null) params.set("from", String(fromOffset))
+            const res = await fetch(`/api/stream/${selectedTopicName}/${selectedPartitionId}/messages?${params}`)
+            if (!res.ok) throw new Error("Failed to fetch messages")
+            return res.json()
+        },
+        enabled: !!selectedTopicName,
     })
+
+    const messages = streamData?.messages ?? []
+    const lastOffset = streamData?.last_offset ?? currentPartition?.last_offset ?? 0
+    const currentFrom = streamData?.from_offset ?? 0
+    const hasOlder = currentFrom > 0
+    const hasNewer = streamData ? currentFrom + PAGE_SIZE < lastOffset : false
+
+    const selectedMessage = useMemo(() =>
+        messages.find(m => m.offset === selectedMessageOffset),
+        [messages, selectedMessageOffset])
 
     const hasTopics = data.topics.length > 0
 
     return (
         <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
 
-            {/* COL 1: SIDEBAR Topics List */}
+            {/* COL 1: Topics */}
             <div className="w-[220px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
                 <div className="p-3 border-b-2 border-border">
                     <div className="relative">
@@ -78,7 +98,6 @@ export function StreamView({ data }: Props) {
                         />
                     </div>
                 </div>
-
                 <ScrollArea className="flex-1">
                     <div className="p-0">
                         {filteredTopics.map((t: TopicSummary) => (
@@ -86,26 +105,26 @@ export function StreamView({ data }: Props) {
                                 key={t.name}
                                 onClick={() => setSelectedTopicName(t.name)}
                                 className={`
-                                  group flex items-center justify-between px-3 py-2.5 border-b border-border/30 cursor-pointer transition-all
-                                  ${selectedTopicName === t.name ? 'bg-secondary border-l-2 border-l-primary' : 'hover:bg-muted/50 border-l-2 border-l-transparent'}
-                              `}
+                                    group flex items-center justify-between px-3 py-2.5 border-b border-border/30 cursor-pointer transition-all
+                                    ${selectedTopicName === t.name ? 'bg-secondary border-l-2 border-l-primary' : 'hover:bg-muted/50 border-l-2 border-l-transparent'}
+                                `}
                             >
                                 <div className="flex items-center gap-2 overflow-hidden">
-                                    <Box className={`h-3.5 w-3.5 ${selectedTopicName === t.name ? 'text-primary' : 'text-muted-foreground'}`} />
+                                    <Box className={`h-3.5 w-3.5 shrink-0 ${selectedTopicName === t.name ? 'text-primary' : 'text-muted-foreground'}`} />
                                     <span className={`font-mono text-xs truncate ${selectedTopicName === t.name ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
-                                      {t.name}
-                                  </span>
+                                        {t.name}
+                                    </span>
                                 </div>
-                                    <span className="text-xs text-muted-foreground font-mono">
-                                      {t.partitions.length}P
-                                  </span>
+                                <span className="text-xs text-muted-foreground font-mono">
+                                    {t.partitions.length}P
+                                </span>
                             </div>
                         ))}
                     </div>
                 </ScrollArea>
             </div>
 
-            {/* COL 2: PARTITIONS LIST */}
+            {/* COL 2: Partitions */}
             <div className="w-[200px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
                 <div className="px-3 py-2 border-b-2 border-border bg-section-header">
                     <span className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Partitions</span>
@@ -129,7 +148,7 @@ export function StreamView({ data }: Props) {
                                         </span>
                                     </div>
                                     <span className="text-xs text-muted-foreground font-mono">
-                                        {p.messages.length} messages
+                                        {p.last_offset} msgs
                                     </span>
                                 </div>
                             ))}
@@ -140,94 +159,110 @@ export function StreamView({ data }: Props) {
                 )}
             </div>
 
-            {/* COL 3: DETAILS (Consumer Groups + Messages with Tab Toggle) + PAYLOAD INSPECTOR */}
+            {/* COL 3: Messages + Payload */}
             <div className="flex-1 flex min-w-0 bg-content">
                 {hasTopics && selectedTopic && currentPartition ? (
                     <>
-                        {/* LEFT SECTION: Messages + Consumer Groups */}
+                        {/* Messages Log */}
                         <div className="flex-1 flex flex-col min-w-0 border-r-2 border-border">
-                            {/* HEADER */}
-                            <div className="px-5 py-3  border-b-2 border-border bg-section-header">
-                                <div className="text-sm text-muted-foreground font-mono font-medium pb-4">Total messages: {currentPartition.last_offset}</div>
+                            {/* Header: stats + groups */}
+                            <div className="px-5 py-3 border-b-2 border-border bg-section-header">
+                                <div className="text-sm text-muted-foreground font-mono font-medium pb-4">
+                                    Total messages: {currentPartition.last_offset}
+                                </div>
                                 <div className="text-sm text-muted-foreground font-mono font-medium">Consumer groups:</div>
                                 {currentPartition.groups.length > 0 && (
                                     <div className="space-y-1">
-                                        {currentPartition.groups.map((group: ConsumerGroupSummary) => {
-                                            return (
-                                                <div key={group.id} className="grid grid-cols-3 gap-4 text-sm text-muted-foreground font-mono">
-                                                    <div className="truncate ml-6 ">- {group.id}</div>
-                                                    <div className="text-right text-muted-foreground">Progress: {group.committed_offset}/{currentPartition.last_offset}</div>
+                                        {currentPartition.groups.map((group: ConsumerGroupSummary) => (
+                                            <div key={group.id} className="grid grid-cols-3 gap-4 text-sm text-muted-foreground font-mono">
+                                                <div className="truncate ml-6">- {group.id}</div>
+                                                <div className="text-right text-muted-foreground">
+                                                    Progress: {group.committed_offset}/{currentPartition.last_offset}
                                                 </div>
-                                            )
-                                        })}
+                                            </div>
+                                        ))}
                                     </div>
                                 )}
                             </div>
 
-                            {/* EVENTS LOG HEADER */}
+                            {/* Events Log Header */}
                             <div className="px-5 py-2 border-b border-border bg-section-header shrink-0">
                                 <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Events Log</span>
                             </div>
 
-                            {/* CONTENT AREA */}
-                            <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                                {/* MESSAGES LOG */}
-                                <div className="flex-1 flex flex-col min-h-0">
-                                    {/* HEADERS */}
-                                    <div className="flex items-center px-5 py-2 border-b border-border bg-section-header text-xs font-mono text-muted-foreground uppercase shrink-0 tracking-wider">
-                                        <div className="w-16 shrink-0">Offset</div>
-                                        <div className="flex-1">Timestamp</div>
+                            {/* Table Header */}
+                            <div className="flex items-center px-5 py-2 border-b border-border bg-section-header text-xs font-mono text-muted-foreground uppercase shrink-0 tracking-wider">
+                                <div className="w-16 shrink-0">Offset</div>
+                                <div className="flex-1">Timestamp</div>
+                            </div>
+
+                            {/* Messages List */}
+                            <div className="flex-1 overflow-y-auto">
+                                {isLoading ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+                                        <RefreshCw className="h-6 w-6 animate-spin mb-4 opacity-50" />
+                                        <p className="text-xs font-mono uppercase tracking-widest opacity-50">LOADING...</p>
                                     </div>
+                                ) : (
+                                    messages.map((msg) => {
+                                        const isSelected = selectedMessageOffset === msg.offset
+                                        const timeStr = new Date(msg.timestamp).toLocaleTimeString('it-IT', {
+                                            hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+                                        })
+                                        return (
+                                            <div
+                                                key={msg.offset}
+                                                onClick={() => setSelectedMessageOffset(msg.offset)}
+                                                className={`
+                                                    flex items-center px-5 h-8 border-b border-border/50 cursor-pointer transition-colors
+                                                    ${isSelected ? 'bg-primary/10 border-primary/30' : 'hover:bg-muted/40'}
+                                                `}
+                                            >
+                                                <div className={`w-16 shrink-0 font-mono text-xs ${isSelected ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
+                                                    {msg.offset}
+                                                </div>
+                                                <div className="flex-1 font-mono text-xs text-muted-foreground">
+                                                    {timeStr}
+                                                </div>
+                                            </div>
+                                        )
+                                    })
+                                )}
+                            </div>
 
-                                    {/* LIST */}
-                                    <div className="flex-1 w-full overflow-y-auto" ref={parentRef}>
-                                        <div
-                                            style={{
-                                                height: `${rowVirtualizer.getTotalSize()}px`,
-                                                width: '100%',
-                                                position: 'relative',
-                                            }}
-                                        >
-                                            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                                                const msg = currentPartition.messages[virtualRow.index]
-                                                const isSelected = selectedMessageOffset === msg.offset
-
-                                                const timeStr = new Date(msg.timestamp).toLocaleTimeString('it-IT', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-
-                                                return (
-                                                    <div
-                                                        key={virtualRow.index}
-                                                        onClick={() => setSelectedMessageOffset(msg.offset)}
-                                                        style={{
-                                                            position: 'absolute',
-                                                            top: 0,
-                                                            left: 0,
-                                                            width: '100%',
-                                                            height: `${virtualRow.size}px`,
-                                                            transform: `translateY(${virtualRow.start}px)`,
-                                                        }}
-                                                        className={`
-                                                         flex items-center px-5 border-b border-border/50 cursor-pointer hover:bg-muted/40 transition-colors
-                                                         ${isSelected ? 'bg-primary/10 border-primary/30' : ''}
-                                                     `}
-                                                    >
-                                                        <div className={`w-16 shrink-0 font-mono text-xs ${isSelected ? 'text-primary font-bold' : 'text-muted-foreground'}`}>
-                                                            {msg.offset}
-                                                        </div>
-                                                        <div className="flex-1 font-mono text-xs text-muted-foreground">
-                                                            {timeStr}
-                                                        </div>
-                                                        {isSelected && <ArrowRight className="h-3 w-3 text-primary ml-2" />}
-                                                    </div>
-                                                )
-                                            })}
-                                        </div>
-                                    </div>
+                            {/* Pagination */}
+                            <div className="p-2 border-t-2 border-border bg-section-header flex items-center justify-between flex-shrink-0">
+                                <div className="text-xs text-muted-foreground font-mono">
+                                    {lastOffset > 0 ? (
+                                        <span>
+                                            {currentFrom}-{Math.min(currentFrom + PAGE_SIZE - 1, lastOffset - 1)} of {lastOffset}
+                                        </span>
+                                    ) : (
+                                        <span>0 messages</span>
+                                    )}
+                                </div>
+                                <div className="flex gap-1">
+                                    <button
+                                        disabled={!hasOlder || isLoading}
+                                        onClick={() => setFromOffset(Math.max(0, currentFrom - PAGE_SIZE))}
+                                        className="h-7 px-2 flex items-center gap-1 text-xs font-mono uppercase bg-background border border-border rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        <ChevronLeft className="h-3 w-3" />
+                                        Older
+                                    </button>
+                                    <button
+                                        disabled={!hasNewer || isLoading}
+                                        onClick={() => setFromOffset(currentFrom + PAGE_SIZE)}
+                                        className="h-7 px-2 flex items-center gap-1 text-xs font-mono uppercase bg-background border border-border rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        Newer
+                                        <ChevronRight className="h-3 w-3" />
+                                    </button>
                                 </div>
                             </div>
                         </div>
 
-                        {/* RIGHT SECTION: PAYLOAD INSPECTOR */}
+                        {/* Payload Inspector */}
                         <div className="w-[420px] bg-content flex flex-col shadow-xl border-l border-border shrink-0">
                             <div className="px-5 py-3 border-b border-border bg-section-header flex items-center justify-between shrink-0">
                                 <span className="text-xs text-muted-foreground uppercase tracking-wider font-bold">Payload</span>
@@ -235,18 +270,15 @@ export function StreamView({ data }: Props) {
                                     <span className="text-xs font-mono text-muted-foreground">Offset {selectedMessage.offset}</span>
                                 )}
                             </div>
-
                             <ScrollArea className="flex-1">
                                 <div className="p-5">
                                     {selectedMessage ? (
-                                        <div className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
+                                        <pre className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
                                             {JSON.stringify(selectedMessage.payload, null, 2)}
-                                        </div>
+                                        </pre>
                                     ) : (
                                         <div className="flex flex-col items-center justify-center h-40 text-muted-foreground mt-10">
-                                            <p className="text-xs text-center opacity-60">
-                                                Select a message
-                                            </p>
+                                            <p className="text-xs text-center opacity-60">Select a message</p>
                                         </div>
                                     )}
                                 </div>

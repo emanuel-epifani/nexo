@@ -1,6 +1,4 @@
 export interface StreamBrokerSnapshot {
-  total_topics: number;
-  total_active_groups: number;
   topics: TopicSummary[];
 }
 
@@ -10,10 +8,9 @@ export interface TopicSummary {
 }
 
 export interface PartitionInfo {
-  id: number; // u32
-  messages: MessagePreview[];
+  id: number;
   groups: ConsumerGroupSummary[];
-  last_offset: number; // u64 (High Watermark)
+  last_offset: number;
 }
 
 export interface ConsumerGroupSummary {
@@ -22,7 +19,14 @@ export interface ConsumerGroupSummary {
 }
 
 export interface MessagePreview {
-  offset: number; // u64
+  offset: number;
   timestamp: string;
-  payload: any;
+  payload: unknown;
+}
+
+export interface StreamMessages {
+  messages: MessagePreview[];
+  from_offset: number;
+  limit: number;
+  last_offset: number;
 }

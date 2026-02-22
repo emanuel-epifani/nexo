@@ -165,8 +165,6 @@ impl StreamManager {
                              }
                          }
                          let _ = reply.send(StreamBrokerSnapshot {
-                             total_topics: actors.len(),
-                             total_active_groups: 0, 
                              topics: summaries,
                          });
                     }
@@ -212,13 +210,17 @@ impl StreamManager {
     }
 
     pub async fn read(&self, topic: &str, offset: u64, limit: usize) -> Vec<Message> {
+        self.read_partition(topic, 0, offset, limit).await
+    }
+
+    pub async fn read_partition(&self, topic: &str, partition: u32, offset: u64, limit: usize) -> Vec<Message> {
         if let Some(actor) = self.get_actor(topic).await {
             let (tx, rx) = oneshot::channel();
-            let _ = actor.send(TopicCommand::Fetch { 
+            let _ = actor.send(TopicCommand::Fetch {
                 group_id: None, client_id: None, generation_id: None,
-                partition: 0, offset, limit, reply: tx 
+                partition, offset, limit, reply: tx
             }).await;
-            
+
             match rx.await {
                 Ok(Ok(msgs)) => msgs,
                 _ => Vec::new(),
@@ -277,9 +279,7 @@ impl StreamManager {
     pub async fn get_snapshot(&self) -> StreamBrokerSnapshot {
          let (tx, rx) = oneshot::channel();
          let _ = self.tx.send(ManagerCommand::GetSnapshot { reply: tx }).await;
-         rx.await.unwrap_or(StreamBrokerSnapshot {
-             total_topics: 0, total_active_groups: 0, topics: vec![]
-         })
+         rx.await.unwrap_or(StreamBrokerSnapshot { topics: vec![] })
     }
 
     pub async fn exists(&self, name: &str) -> bool {

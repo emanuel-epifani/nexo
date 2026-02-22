@@ -14,8 +14,6 @@ use crate::brokers::stream::commands::StreamPublishOptions;
 use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
 use crate::brokers::stream::persistence::types::PersistenceMode;
 use crate::brokers::stream::persistence::writer::Segment;
-use crate::dashboard::utils::payload_to_dashboard_value;
-
 // ==========================================
 // COMMANDS (The Internal Protocol)
 // ==========================================
@@ -347,25 +345,8 @@ impl TopicActor {
                                 });
                             }
                             
-                            // 2. Messages (Full Content)
-                            let messages_preview: Vec<crate::dashboard::stream::MessagePreview> = partition
-                                .log
-                                .iter()
-                                .rev()
-                                .map(|msg| {
-                                    crate::dashboard::stream::MessagePreview {
-                                        offset: msg.offset,
-                                        timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
-                                            .unwrap_or_default()
-                                            .to_rfc3339(),
-                                        payload: payload_to_dashboard_value(&msg.payload),
-                                    }
-                                })
-                                .collect();
-                            
                             partitions_info.push(crate::dashboard::stream::PartitionInfo {
                                 id: p_id,
-                                messages: messages_preview,
                                 groups: groups_info,
                                 last_offset: partition.next_offset,
                             });
