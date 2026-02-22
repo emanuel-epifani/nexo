@@ -2,6 +2,7 @@ import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary, DlqMessageSummary, PaginatedMessages, PaginatedDlqMessages } from "./types"
 import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { 
@@ -18,13 +19,19 @@ import {
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 
-interface Props {
-  data: QueueBrokerSnapshot
-}
-
 const PAGE_SIZE = 50
 
-export function QueueView({ data }: Props) {
+export function QueueView() {
+  const { data: snapshot, isLoading: snapshotLoading, error: snapshotError, refetch } = useQuery({
+    queryKey: ['queue-snapshot'],
+    queryFn: async (): Promise<QueueBrokerSnapshot> => {
+      const res = await fetch('/api/queue')
+      if (!res.ok) throw new Error('Failed to fetch queue')
+      return res.json()
+    },
+  })
+
+  const data = snapshot ?? []
   const [filter, setFilter] = useState("")
   const [selectedQueueName, setSelectedQueueName] = useState<string | null>(null)
   
@@ -83,6 +90,28 @@ export function QueueView({ data }: Props) {
   const messages = paginatedData?.messages || []
   const total = paginatedData?.total || 0
   const hasMore = offset + PAGE_SIZE < total
+
+  if (snapshotError) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 text-destructive p-8 border-2 border-destructive/20 rounded-lg bg-destructive/5 m-4">
+        <AlertCircle className="h-12 w-12" />
+        <div className="text-center">
+          <h3 className="font-bold">ERROR_LOADING_QUEUE</h3>
+          <p className="text-xs opacity-70 mt-1">{(snapshotError as Error).message}</p>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => refetch()}>TRY_AGAIN</Button>
+      </div>
+    )
+  }
+
+  if (snapshotLoading) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
+        <RefreshCw className="h-8 w-8 animate-spin opacity-50" />
+        <p className="text-xs font-mono uppercase tracking-widest">LOADING...</p>
+      </div>
+    )
+  }
 
   return (
       <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
