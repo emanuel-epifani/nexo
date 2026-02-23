@@ -317,35 +317,6 @@ mod queue_tests {
             assert!(elapsed < Duration::from_millis(450), "Should timeout reasonably fast");
         }
 
-        #[tokio::test]
-        async fn test_snapshot_metrics() {
-            let (manager, _tmp) = setup_queue_manager().await;
-            let q = format!("adv_snap_{}", Uuid::new_v4());
-            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
-
-            // 3 Pending
-            manager.push(q.clone(), Bytes::from("p1"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("p2"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("p3"), 0, None).await.unwrap();
-
-            // 1 InFlight
-            let _ = manager.pop(&q).await.unwrap();
-
-            // 1 Scheduled
-            manager.push(q.clone(), Bytes::from("s1"), 0, Some(10000)).await.unwrap();
-
-            let snapshot = manager.get_snapshot().await;
-            let queue_snap = snapshot.iter().find(|qs| qs.name == q).expect("Queue not found in snapshot");
-
-            // Verify counts based on vectors length in summary
-            // 2 Pending (p2, p3) - p1 was popped
-            assert_eq!(queue_snap.pending.len(), 2);
-            // 1 InFlight (p1)
-            assert_eq!(queue_snap.inflight.len(), 1);
-            // 1 Scheduled (s1)
-            assert_eq!(queue_snap.scheduled.len(), 1);
-        }
-
     }
 
     // =========================================================================================

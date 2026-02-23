@@ -14,10 +14,11 @@ export class NexoConnection extends EventEmitter {
   private pending = new Map<number, {
     resolve: (res: { status: number, data: Buffer }) => void,
     reject: (err: Error) => void,
-    timer: NodeJS.Timeout
+    deadline: number
   }>();
   private readonly requestTimeoutMs: number;
   private readonly logger: Logger;
+  private sweepInterval: NodeJS.Timeout | null = null;
 
   public onPush?: (topic: string, data: any) => void;
 
@@ -41,7 +42,29 @@ export class NexoConnection extends EventEmitter {
 
   async connect(): Promise<void> {
     this.shouldReconnect = true;
+    this.startSweep();
     return this.createSocketAndConnect();
+  }
+
+  private startSweep() {
+    if (this.sweepInterval) return;
+    this.sweepInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [id, req] of this.pending) {
+        if (now > req.deadline) {
+          this.pending.delete(id);
+          req.reject(new RequestTimeoutError(this.requestTimeoutMs));
+        }
+      }
+    }, 1000);
+    this.sweepInterval.unref();
+  }
+
+  private stopSweep() {
+    if (this.sweepInterval) {
+      clearInterval(this.sweepInterval);
+      this.sweepInterval = null;
+    }
   }
 
   private createSocketAndConnect(): Promise<void> {
@@ -76,7 +99,6 @@ export class NexoConnection extends EventEmitter {
       }
 
       this.pending.forEach(p => {
-        clearTimeout(p.timer);
         p.reject(new ConnectionClosedError());
       });
       this.pending.clear();
@@ -171,8 +193,8 @@ export class NexoConnection extends EventEmitter {
   }
 
   send(opcode: number, ...args: Buffer[]): Promise<{ status: ResponseStatus, cursor: Cursor }> {
-    const id = this.nextId++;
-    if (this.nextId === 0) this.nextId = 1;
+    const id = this.nextId;
+    this.nextId = (this.nextId + 1) & 0xFFFFFFFF || 1;
 
     const packet = FrameCodec.packRequest(id, opcode, ...args);
 
@@ -181,14 +203,8 @@ export class NexoConnection extends EventEmitter {
         return reject(new NotConnectedError());
       }
 
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new RequestTimeoutError(this.requestTimeoutMs));
-      }, this.requestTimeoutMs);
-
       this.pending.set(id, {
         resolve: (res) => {
-          clearTimeout(timer);
           if (res.status === ResponseStatus.ERR) {
             const errCursor = new Cursor(res.data);
             const errMsg = errCursor.readString();
@@ -201,11 +217,8 @@ export class NexoConnection extends EventEmitter {
             resolve({ status: res.status, cursor: new Cursor(res.data) });
           }
         },
-        reject: (err) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-        timer
+        reject,
+        deadline: Date.now() + this.requestTimeoutMs
       });
 
       this.socket.write(packet);
@@ -215,9 +228,7 @@ export class NexoConnection extends EventEmitter {
   disconnect() {
     this.shouldReconnect = false;
     this.isReconnecting = false;
-    for (const req of this.pending.values()) {
-      clearTimeout(req.timer);
-    }
+    this.stopSweep();
     this.pending.clear();
     this.socket.destroy();
     this.isConnected = false;
