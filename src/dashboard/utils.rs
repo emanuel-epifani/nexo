@@ -2,7 +2,7 @@
 // DASHBOARD UTILS
 // ========================================
 
-use crate::server::header_protocol::{DATA_TYPE_JSON, DATA_TYPE_RAW, DATA_TYPE_STRING};
+use crate::server::protocol::{DATA_TYPE_JSON, DATA_TYPE_RAW, DATA_TYPE_STRING};
 
 /// Converts a protocol-compliant data payload into a serde_json::Value for dashboard visualization.
 /// Format: [DataType: 1 byte][Data...]

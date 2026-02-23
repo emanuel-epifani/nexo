@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::ParseError;
 use serde::Deserialize;
 
 pub const OP_S_CREATE: u8 = 0x30;
@@ -83,13 +84,13 @@ pub enum StreamCommand {
 }
 
 impl StreamCommand {
-    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
                 let json_str = cursor.read_string()?;
                 let options: StreamCreateOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON config: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON config: {}", e)))?;
                 tracing::debug!("Parsed S_CREATE: topic={}", topic);
                 Ok(Self::Create { topic, options })
             }
@@ -98,7 +99,7 @@ impl StreamCommand {
                 let json_str = cursor.read_string()?;
                 
                 let options: StreamPublishOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
 
                 let payload = cursor.read_remaining();
                 tracing::debug!("Parsed S_PUB: topic={}, len={}", topic, payload.len());
@@ -137,7 +138,7 @@ impl StreamCommand {
                 let topic = cursor.read_string()?;
                 Ok(Self::Delete { topic })
             }
-            _ => Err(format!("Unknown Stream opcode: 0x{:02X}", opcode)),
+            _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
         }
     }
 }

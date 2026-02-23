@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::ParseError;
 use serde::Deserialize;
 
 pub const OP_MAP_SET: u8 = 0x02;
@@ -31,14 +32,14 @@ pub enum MapCommand {
 }
 
 impl MapCommand {
-    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_MAP_SET => {
                 let key = cursor.read_string()?;
                 let json_str = cursor.read_string()?;
                 
                 let options: MapSetOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
 
                 let value = cursor.read_remaining();
                 Ok(Self::Set { key, options, value })
@@ -51,7 +52,7 @@ impl MapCommand {
                 let key = cursor.read_string()?;
                 Ok(Self::Del { key })
             }
-            _ => Err(format!("Unknown Map opcode: 0x{:02X}", opcode)),
+            _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
         }
     }
 }

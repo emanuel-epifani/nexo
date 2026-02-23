@@ -2,7 +2,6 @@
 //! Uses specific Command enums for each broker to ensure type safety and clean parsing.
 
 use crate::server::protocol::*;
-use crate::server::header_protocol::*;
 use crate::server::payload_cursor::PayloadCursor;
 use crate::NexoEngine;
 use bytes::Bytes;
@@ -36,7 +35,7 @@ pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &
         OPCODE_MIN_STORE..=OPCODE_MAX_STORE => {
             match StoreCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_store(cmd, engine),
-                Err(e) => Response::Error(e),
+                Err(e) => Response::Error(e.to_string()),
             }
         }
 
@@ -44,7 +43,7 @@ pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &
         OPCODE_MIN_QUEUE..=OPCODE_MAX_QUEUE => {
             match QueueCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_queue(cmd, engine).await,
-                Err(e) => Response::Error(e),
+                Err(e) => Response::Error(e.to_string()),
             }
         }
 
@@ -52,7 +51,7 @@ pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &
         OPCODE_MIN_PUBSUB..=OPCODE_MAX_PUBSUB => {
             match PubSubCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_pubsub(cmd, engine, client_id).await,
-                Err(e) => Response::Error(e),
+                Err(e) => Response::Error(e.to_string()),
             }
         }
 
@@ -60,7 +59,7 @@ pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &
         OPCODE_MIN_STREAM..=OPCODE_MAX_STREAM => {
             match StreamCommand::parse(opcode, &mut cursor) {
                 Ok(cmd) => handle_stream(cmd, engine, client_id).await,
-                Err(e) => Response::Error(e),
+                Err(e) => Response::Error(e.to_string()),
             }
         }
 

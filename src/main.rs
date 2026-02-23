@@ -60,7 +60,7 @@ async fn main() {
         tracing::info!(client = %client_addr, "New connection accepted");
 
         tokio::spawn(async move {
-            if let Err(e) = server::socket_network::handle_connection(socket, engine_clone).await {
+            if let Err(e) = server::connection_session::handle_connection(socket, engine_clone).await {
                 tracing::error!(client = %client_addr, error = %e, "Connection error");
             }
             tracing::debug!(client = %client_addr, "Connection closed");

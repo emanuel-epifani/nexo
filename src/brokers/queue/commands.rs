@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use uuid::Uuid;
 use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::ParseError;
 use serde::Deserialize;
 
 pub const OP_Q_CREATE: u8 = 0x10;
@@ -109,14 +110,14 @@ pub enum QueueCommand {
 }
 
 impl QueueCommand {
-    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, String> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_Q_CREATE => {
                 let q_name = cursor.read_string()?;
                 let json_str = cursor.read_string()?;
 
                 let options: QueueCreateOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON config: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON config: {}", e)))?;
                 
                 Ok(Self::Create { q_name, options })
             }
@@ -125,7 +126,7 @@ impl QueueCommand {
                 let json_str = cursor.read_string()?;
                 
                 let options: QueuePushOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
 
                 let payload = cursor.read_remaining();
                 Ok(Self::Push { q_name, options, payload })
@@ -135,7 +136,7 @@ impl QueueCommand {
                 let json_str = cursor.read_string()?;
 
                 let options: QueueConsumeOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| format!("Invalid JSON options: {}", e))?;
+                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
 
                 Ok(Self::Consume { q_name, options })
             }
@@ -182,7 +183,7 @@ impl QueueCommand {
                 let q_name = cursor.read_string()?;
                 Ok(Self::PurgeDLQ { q_name })
             }
-            _ => Err(format!("Unknown Queue opcode: 0x{:02X}", opcode)),
+            _ => Err(ParseError::Invalid(format!("Unknown Queue opcode: 0x{:02X}", opcode))),
         }
     }
 }

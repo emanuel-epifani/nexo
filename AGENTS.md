@@ -77,20 +77,6 @@ src/brokers/{broker}/
 - **Integration tests**: `tests/integration/*.rs` for multi-module flows
 - **Benchmarks**: `tests/benchmark_*.rs`
 
-**TypeScript Tests** (`sdk/ts/tests/`):
-- **Organization**: One file per broker/feature
-  - `brokers/store.test.ts` - STORE (KV) tests
-  - `brokers/queue.test.ts` - QUEUE + DLQ tests
-  - `brokers/pubsub.test.ts` - PUBSUB + wildcards tests
-  - `brokers/stream.test.ts` - STREAM + consumer groups tests
-  - `brokers/cross-broker.test.ts` - Binary payload + protocol tests
-  - `brokers/reconnection.test.ts` - Socket reconnection tests
-  - `brokers/dashboard-prefill.test.ts` - Dashboard data visualization
-- **Structure**: Nested describes (BROKER → FEATURE → test cases)
-- **Naming**: All resources use `randomUUID()` for uniqueness
-- **Setup**: Global setup builds server once, tests reuse singleton client (`nexo.ts`)
-- **Run**: `cd sdk/ts && npm test` (or `npm test store` for specific broker)
-
 ### Code Quality Gates
 - No magic numbers/strings (use named constants)
 - Symmetry maintained with similar brokers
@@ -202,14 +188,6 @@ dashboard/src/
 - **Hover States**: ALWAYS present on interactive elements (`hover:bg-accent`, `hover:scale-105`)
 - **Inline styles**: ONLY for dynamic runtime values (e.g., `style={{ backgroundColor: team.color }}`)
 
-**Anti-Patterns**:
-- ❌ Custom hex colors (`#3b82f6` → use `text-primary`)
-- ❌ Arbitrary values (`mt-[13px]` → use `mt-4`)
-- ❌ Custom font sizes (`text-[17px]` → use `text-lg`)
-- ❌ Missing hover/focus states on buttons/links
-- ❌ Inconsistent border-radius (mixing `rounded-lg` and `rounded-xl`)
-- ❌ Custom component styles when shadcn equivalent exists
-
 ### State Management
 **Priority**: Local (`useState`) → Shared (Zustand) → Server (TanStack Query) → URL (React Router)
 
@@ -242,56 +220,43 @@ No leftover state. Delete created resources in `afterEach` if not auto-cleaned.
 
 ---
 
-## 🚫 Anti-Patterns (CRITICAL - Never Do This)
+## 🛡️ Guardrails: Idiomatic Code & Stack Awareness
 
-### ❌ Asymmetry Between Brokers
-Inconsistent naming across similar components (e.g., `QueueManager` vs `StoreHandler` vs `PubSubService`). Use symmetric naming.
+### Proactive Deviation Alerts
+When the user proposes or asks for an approach that goes against established
+patterns in the relevant language/framework, the AI MUST:
+1. **Flag it explicitly** before implementing: "⚠️ This goes against [pattern/convention] in [language]. The idiomatic approach is [X]. Want to proceed anyway?"
+2. **Explain the tradeoff** in 1-2 sentences (not a lecture)
+3. **Suggest the idiomatic alternative** with a concrete code example
 
-### ❌ Magic Values
-Hardcoded numbers/strings without named constants. Always use `MAX_RETRIES`, `TIMEOUT_MS`, etc.
+This applies to: error handling patterns, concurrency models, memory management,
+type system usage, project structure, dependency choices, testing patterns.
 
-### ❌ Non-Deterministic Tests
-Random `sleep()` timeouts. Calculate exact wait times or use polling with `waitFor()`.
+### De Facto Standards
+When multiple valid approaches exist for a problem, prefer the **de facto standard**
+in that ecosystem over creative alternatives:
+- If a well-known crate/library solves the problem, mention it before hand-rolling
+- If the language has a conventional pattern (e.g., Rust's Error trait, Go's error wrapping,
+  React's composition model), use it by default
+- If the framework has an official recommendation, follow it unless there's a
+  measured performance reason not to
 
-### ❌ Refactoring Leftovers
-Historical comments ("old implementation", "TODO", "changed from"). Only document current state.
+### Anti-Footgun Rule
+Never silently introduce patterns that are known footguns in the target language:
+- Rust: unbounded collections in long-lived tasks, .unwrap() in non-test code,
+  String where enums fit, missing Error/Display impls
+- TypeScript: `any` types, unhandled promise rejections, mutable shared state
+- React: prop drilling >3 levels, useEffect for derived state,
+  inline object/function props causing re-renders
 
-### ❌ Premature Abstraction
-Enterprise patterns (repository/factory) for single use. Direct implementation until proven need.
+When the user explicitly asks for a footgun pattern, implement it but add a
+one-line comment noting the risk.
 
-### ❌ Test Interdependence
-Tests depending on execution order. Each test must be independent with unique resources.
-
-### ❌ UI Style Inconsistency
-Mixing custom styles with shadcn/ui, hardcoded colors, arbitrary spacing values. ALWAYS follow shadcn style system (semantic tokens, Tailwind scale, pre-built components).
-
----
-
-## ✅ Pre-Commit Quality Checklist
-
-**Consistency**: Symmetric naming? File structure matches pattern? Manager is entry point?
-**No Magic**: Numbers/strings under constants? Config externalized?
-**Tests**: Deterministic timing? Independent? Complete coverage?
-**Clean Code**: No leftovers? Semantic names? No commented code?
-**Architecture**: File <500 LOC? No premature abstractions? Clear separation?
-**TypeScript**: No `any`/`@ts-ignore`? Semantic tokens? 3-tier respected?
-**UI Style**: shadcn components only? Semantic color tokens? Tailwind spacing scale? Hover states present?
-
----
-
-## 🎯 Development Workflow
-
-### Before Implementation
-Brainstorm data structures/patterns. No assumptions - ask if multiple approaches exist. Consult before adding dependencies.
-
-### During Implementation
-Self-documenting code, comments only for complex logic, files <500 LOC, follow symmetry.
-
-### After Implementation
-Run checklist, verify coverage, remove leftovers, no magic values.
-
-### Refactoring
-No backward compatibility. Remove ALL old code/comments/TODO. Update tests. Maintain symmetry across brokers.
+### Brainstorming Mode
+During architecture/design discussions, ALWAYS:
+1. State the conventional/boring solution first
+2. Only then suggest creative alternatives if they have concrete benefits
+3. For each option, note: ecosystem maturity, community adoption, maintenance burden
 
 ---
 
