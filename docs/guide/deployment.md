@@ -61,6 +61,16 @@ docker run -p 7654:7654 -e NEXO_ENV=prod emanuelepifani/nexo
 The dashboard exposes internal state (messages, queues, topics) and is intended for debugging only. Do not expose port `8080` publicly in production.
 :::
 
+## Max Payload Size
+
+Nexo enforces a maximum payload size per frame to prevent memory exhaustion from oversized or malicious requests. Any frame exceeding this limit is rejected at the protocol level before allocating memory.
+
+The default limit is **10 MB**. To increase it (e.g. for large stream messages or queue payloads):
+
+```bash
+docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -70,6 +80,7 @@ The dashboard exposes internal state (messages, queues, topics) and is intended 
 | `SERVER_PORT` | `7654` | Client connection port |
 | `DASHBOARD_PORT` | `8080` | Dashboard HTTP port |
 | `NEXO_LOG` | `error` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
+| `MAX_PAYLOAD_SIZE` | `10485760` | Max frame payload in bytes (10 MB) |
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Queue data directory |
 | `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Stream data directory |
 | `PUBSUB_ROOT_PERSISTENCE_PATH` | `./data/pubsub` | Pub/Sub data directory |

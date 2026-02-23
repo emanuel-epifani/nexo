@@ -1,6 +1,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::config::Config;
 use super::errors::ParseError;
 use super::frame::{
     FrameHeader, InboundFrame, OutboundFrame, Response, STATUS_DATA, STATUS_ERR, STATUS_NULL,
@@ -35,6 +36,13 @@ impl Decoder for NexoCodec {
         };
 
         let payload_len = header_ref.payload_len() as usize;
+        let max_payload_size = Config::global().server.max_payload_size;
+        if payload_len > max_payload_size {
+            return Err(ParseError::Invalid(format!(
+                "Payload too large: {} bytes (max: {})", payload_len, max_payload_size
+            )));
+        }
+
         let total_len = FrameHeader::SIZE + payload_len;
 
         if src.len() < total_len {
