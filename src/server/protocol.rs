@@ -8,6 +8,10 @@
 //! [FrameType: 1 byte] [Status: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
 //! Payload: [Data...] (no status byte, status is in header)
 //!
+//! Push Frame (Total Header: 10 bytes):
+//! [FrameType: 1 byte] [PushType: 1 byte] [CorrelationID: 4 bytes (BigEndian)] [PayloadLen: 4 bytes (BigEndian)]
+//! Payload: [Data...] 
+//!
 //! Data Structure (auto-contained):
 //! [DataType: 1 byte] [Data...]
 //!
@@ -18,52 +22,16 @@
 //! 0x3-0xFF: Reserved
 
 // ========================================
-// PRIMITIVE SIZES (Fundamental building blocks)
-// ========================================
-pub const SIZE_U8: usize   = 1;
-pub const SIZE_U16: usize  = 2;
-pub const SIZE_U32: usize  = 4;
-pub const SIZE_U64: usize  = 8;
-pub const SIZE_UUID: usize = 16;
-
-// ========================================
-// FIELD ENCODING SIZES (Protocol-level constructs)
-// ========================================
-/// String length prefix (u32 BigEndian)
-pub const SIZE_STRING_PREFIX: usize = SIZE_U32;
-
-/// DataType indicator (u8)
-pub const DATA_TYPE_SIZE: usize = SIZE_U8;
-
-/// Status code in response payloads (u8)
-pub const SIZE_STATUS: usize = SIZE_U8;
-
-/// Opcode in request payloads (u8)
-pub const SIZE_OPCODE: usize = SIZE_U8;
-
-// ========================================
-// HEADER GEOMETRY (Sizes in bytes)
-// ========================================
-pub const HEADER_SIZE_FRAME_TYPE: usize     = SIZE_U8;
-pub const HEADER_SIZE_OPCODE_OR_STATUS: usize = SIZE_U8;  // Opcode for requests, Status for responses
-pub const HEADER_SIZE_CORRELATION_ID: usize = SIZE_U32;
-pub const HEADER_SIZE_PAYLOAD_LEN: usize    = SIZE_U32;
-
-/// Total size of the binary header (Sum of all header fields)
-pub const HEADER_SIZE: usize = HEADER_SIZE_FRAME_TYPE + HEADER_SIZE_OPCODE_OR_STATUS + HEADER_SIZE_CORRELATION_ID + HEADER_SIZE_PAYLOAD_LEN;
-
-// ========================================
-// PAYLOAD GEOMETRY
-// ========================================
-/// For data carrying DataType, the first byte indicates type
-pub const DATA_OFFSET_DATA_TYPE: usize = 0;
-
-// ========================================
 // FRAME TYPES (The "Envelope" Type)
 // ========================================
 pub const TYPE_REQUEST: u8  = 0x01;
 pub const TYPE_RESPONSE: u8 = 0x02;
 pub const TYPE_PUSH: u8     = 0x03;
+
+// ========================================
+// PUSH TYPES (In Push Header, byte 1)
+// ========================================
+pub const PUSH_TYPE_PUBSUB: u8 = 0x01;
 
 // ========================================
 // RESPONSE STATUS (In Response Header, byte 1)

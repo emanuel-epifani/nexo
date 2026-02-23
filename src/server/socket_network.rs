@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::server::header_protocol::{
     encode_response, encode_push, parse_frame, ParseError, Response,
-    TYPE_REQUEST, RequestHeader
+    TYPE_REQUEST, FrameHeader
 };
 use crate::server::payload_routing::route;
 use crate::NexoEngine;
@@ -67,7 +67,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         while let Some(msg) = rx.recv().await {
             let bytes = match msg {
                 WriteMessage::Response(id, ref resp) => encode_response(id, resp),
-                WriteMessage::Push(ref payload) => encode_push(0, payload), // ID 0 for server pushes
+                WriteMessage::Push(ref payload) => encode_push(0, crate::server::protocol::PUSH_TYPE_PUBSUB, payload), // ID 0 for server pushes
             };
 
             if let Err(e) = buffered_writer.write_all(&bytes).await {
@@ -120,7 +120,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
         } {
             let id = frame_ref.header.id();
             let frame_type = frame_ref.header.frame_type;
-            let opcode = frame_ref.header.opcode;
+            let meta = frame_ref.header.meta;
 
             // ZERO-COPY: Split the buffer to get a 'static Bytes object for this frame
             let frame_data = buffer.split_to(consumed).freeze();
@@ -133,8 +133,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             let handle = tokio::spawn(async move {
                 match frame_type {
                     TYPE_REQUEST => {
-                        let payload = frame_data.slice(RequestHeader::SIZE..);
-                        let response = route(opcode, payload, &engine_clone, &client_id_clone).await;
+                        let payload = frame_data.slice(FrameHeader::SIZE..);
+                        let response = route(meta, payload, &engine_clone, &client_id_clone).await;
                         
                         let _ = tx_clone.send(WriteMessage::Response(id, response)).await;
                     }

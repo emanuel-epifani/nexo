@@ -17,29 +17,29 @@ impl PayloadCursor {
     }
 
     pub fn read_u8(&mut self) -> Result<u8, String> {
-        if !self.has_remaining(SIZE_U8) {
+        if !self.has_remaining(1) {
             return Err("Payload too short for u8".to_string());
         }
         let val = self.data[self.offset];
-        self.offset += SIZE_U8;
+        self.offset += 1;
         Ok(val)
     }
 
     pub fn read_u32(&mut self) -> Result<u32, String> {
-        if !self.has_remaining(SIZE_U32) {
+        if !self.has_remaining(4) {
             return Err("Payload too short for u32".to_string());
         }
-        let val = u32::from_be_bytes(self.data[self.offset..self.offset + SIZE_U32].try_into().unwrap());
-        self.offset += SIZE_U32;
+        let val = u32::from_be_bytes(self.data[self.offset..self.offset + 4].try_into().unwrap());
+        self.offset += 4;
         Ok(val)
     }
 
     pub fn read_u64(&mut self) -> Result<u64, String> {
-        if !self.has_remaining(SIZE_U64) {
+        if !self.has_remaining(8) {
             return Err("Payload too short for u64".to_string());
         }
-        let val = u64::from_be_bytes(self.data[self.offset..self.offset + SIZE_U64].try_into().unwrap());
-        self.offset += SIZE_U64;
+        let val = u64::from_be_bytes(self.data[self.offset..self.offset + 8].try_into().unwrap());
+        self.offset += 8;
         Ok(val)
     }
 
@@ -61,11 +61,11 @@ impl PayloadCursor {
     }
 
     pub fn read_uuid_bytes(&mut self) -> Result<[u8; 16], String> {
-        if !self.has_remaining(SIZE_UUID) {
+        if !self.has_remaining(16) {
             return Err("Payload too short for UUID".to_string());
         }
-        let val = self.data[self.offset..self.offset + SIZE_UUID].try_into().unwrap();
-        self.offset += SIZE_UUID;
+        let val = self.data[self.offset..self.offset + 16].try_into().unwrap();
+        self.offset += 16;
         Ok(val)
     }
 

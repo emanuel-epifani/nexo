@@ -6,6 +6,11 @@ export enum FrameType {
 }
 
 /** @internal */
+export enum PushType {
+  PUBSUB = 0x01,
+}
+
+/** @internal */
 export enum ResponseStatus {
   OK = 0x00,
   ERR = 0x01,

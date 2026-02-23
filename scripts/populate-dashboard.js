@@ -34,7 +34,7 @@ async function main() {
         console.error('❌ Error populating brokers:', error);
         process.exit(1);
     } finally {
-        await nexo.disconnect();
+        // await nexo.disconnect();
     }
 }
 
