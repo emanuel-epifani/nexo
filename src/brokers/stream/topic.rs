@@ -2,7 +2,7 @@
 //! Single append-only log per topic (no partitions).
 
 use crate::brokers::stream::message::Message;
-use crate::brokers::stream::commands::{StreamCreateOptions, RetentionOptions, PersistenceOptions};
+use crate::brokers::stream::commands::{StreamCreateOptions, RetentionOptions};
 use crate::config::SystemStreamConfig;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +10,6 @@ use bytes::Bytes;
 
 #[derive(Debug, Clone)]
 pub struct TopicConfig {
-    pub persistence_mode: PersistenceMode,
     pub persistence_path: String,
     pub max_segment_size: u64,
     pub retention: RetentionOptions,
@@ -24,22 +23,10 @@ pub struct TopicConfig {
     pub actor_channel_capacity: usize,
 }
 
-#[derive(Debug, Clone)]
-pub enum PersistenceMode {
-    Sync,
-    Async { flush_ms: u64 },
-}
+
 
 impl TopicConfig {
     pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
-        let persistence_mode = match opts.persistence {
-            Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
-            Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
-                flush_ms: sys.default_flush_ms,
-            },
-            None => PersistenceMode::Async { flush_ms: sys.default_flush_ms },
-        };
-
         let retention = match opts.retention {
             Some(r) => RetentionOptions {
                 max_age_ms: r.max_age_ms.map_or(
@@ -58,7 +45,6 @@ impl TopicConfig {
         };
 
         Self {
-            persistence_mode,
             persistence_path: sys.persistence_path.clone(),
             max_segment_size: sys.max_segment_size,
             retention,

@@ -46,7 +46,7 @@ async function run() {
     console.log("\n📜 Testing STREAM...");
     const stream = await client
       .stream("smoke-stream")
-      .create({ partitions: 1 });
+      .create();
     await stream.publish({ event: "log" });
 
     let streamReceived = false;

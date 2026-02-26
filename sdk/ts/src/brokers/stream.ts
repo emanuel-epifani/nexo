@@ -15,15 +15,12 @@ enum StreamOpcode {
   S_SEEK = 0x38,
 }
 
-export type PersistenceStrategy = 'file_sync' | 'file_async';
-
 export interface RetentionOptions {
   maxAgeMs: number;
   maxBytes: number;
 }
 
 export interface StreamCreateOptions {
-  persistence?: PersistenceStrategy;
   retention?: RetentionOptions;
 }
 

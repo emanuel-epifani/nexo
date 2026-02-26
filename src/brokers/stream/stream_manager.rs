@@ -73,7 +73,7 @@ impl StreamManager {
                                     topic_name.to_string(),
                                     t_rx,
                                     topic_config,
-                                );
+                                ).await;
                                 tokio::spawn(actor.run(config_clone));
                                 actors.insert(topic_name.to_string(), t_tx);
                                 tracing::info!("[StreamManager] Warm start: Restored topic '{}'", topic_name);
@@ -97,7 +97,7 @@ impl StreamManager {
                                 name.clone(),
                                 t_rx,
                                 topic_config,
-                            );
+                            ).await;
                             tokio::spawn(actor.run(config_clone));
                             actors.insert(name, t_tx);
                         }

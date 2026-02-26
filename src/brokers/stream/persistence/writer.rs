@@ -3,9 +3,9 @@
 //! Contains functions for reading/writing segment files and recovering topic state from disk.
 //! The StreamWriter actor has been removed — write logic is embedded in the TopicActor.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Write, Read, BufReader, BufWriter};
 use std::path::PathBuf;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncWriteExt, BufWriter, AsyncReadExt, BufReader};
 use std::collections::{HashMap, VecDeque};
 use tracing::{error, info, warn};
 use bytes::Bytes;
@@ -34,9 +34,9 @@ pub struct Segment {
 // --- PUBLIC API ---
 
 /// Read messages from a log segment file starting at a given seq.
-pub fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
+pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
     let mut msgs = Vec::new();
-    let file = match File::open(path) {
+    let file = match File::open(path).await {
         Ok(f) => f,
         Err(e) => {
             error!("Cold Read: Failed to open {:?}: {}", path, e);
@@ -49,17 +49,17 @@ pub fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Mes
     loop {
         // [Len: u32]
         let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).is_err() { break; }
+        if reader.read_exact(&mut len_buf).await.is_err() { break; }
         let len = u32::from_be_bytes(len_buf);
 
         // [CRC32: u32]
         let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).is_err() { break; }
+        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
         let stored_crc = u32::from_be_bytes(crc_buf);
 
         // Content
         let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).is_err() { break; }
+        if reader.read_exact(&mut content_buf).await.is_err() { break; }
 
         // CRC check
         let mut hasher = Hasher::new();
@@ -87,7 +87,7 @@ pub fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Mes
 }
 
 /// Recover topic state from filesystem.
-pub fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
+pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
     let base_path = base_path.join(topic_name);
     let mut state = RecoveredState::default();
 
@@ -96,10 +96,10 @@ pub fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
     }
 
     // 1. Load Log Segments
-    if let Ok(segments) = find_segments(&base_path) {
+    if let Ok(segments) = find_segments(&base_path).await {
         // Lazy load: only the last segment into RAM
         if let Some(last_segment) = segments.last() {
-            state.messages = load_segment_file(&last_segment.path);
+            state.messages = load_segment_file(&last_segment.path).await;
             info!("Topic '{}' Segment {}: LOADED {} messages", topic_name, last_segment.start_seq, state.messages.len());
         }
         state.segments = segments;
@@ -108,7 +108,7 @@ pub fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
     // 2. Load Groups (groups.log)
     let groups_path = base_path.join("groups.log");
     if groups_path.exists() {
-        match load_groups_file(&groups_path) {
+        match load_groups_file(&groups_path).await {
             Ok(groups) => {
                 info!("Topic '{}': recovered {} consumer groups", topic_name, groups.len());
                 state.groups_data = groups;
@@ -123,15 +123,15 @@ pub fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
 }
 
 /// Find all segment files for a topic, sorted by start_seq.
-pub fn find_segments(base_path: &PathBuf) -> std::io::Result<Vec<Segment>> {
+pub async fn find_segments(base_path: &PathBuf) -> std::io::Result<Vec<Segment>> {
     let mut segments = Vec::new();
 
     if !base_path.exists() {
         return Ok(segments);
     }
 
-    for entry in std::fs::read_dir(base_path)? {
-        let entry = entry?;
+    let mut entries = tokio::fs::read_dir(base_path).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if !path.is_file() { continue; }
         
@@ -170,34 +170,34 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, payload: &
 }
 
 /// Write the groups.log file (ack_floor for each group). Atomic write via temp file + rename.
-pub fn save_groups_file(base_path: &PathBuf, groups: &HashMap<String, u64>) -> std::io::Result<()> {
+pub async fn save_groups_file(base_path: &PathBuf, groups: &HashMap<String, u64>) -> std::io::Result<()> {
     let tmp_path = base_path.join("groups.log.tmp");
     let final_path = base_path.join("groups.log");
 
     {
-        let file = File::create(&tmp_path)?;
+        let file = File::create(&tmp_path).await?;
         let mut writer = BufWriter::new(file);
 
         for (group_id, ack_floor) in groups {
-            write_group_entry(&mut writer, group_id, *ack_floor)?;
+            write_group_entry(&mut writer, group_id, *ack_floor).await?;
         }
-        writer.flush()?;
+        writer.flush().await?;
     }
 
-    fs::rename(&tmp_path, &final_path)?;
+    tokio::fs::rename(&tmp_path, &final_path).await?;
     Ok(())
 }
 
 /// Append a single group entry to an existing groups.log file.
-pub fn append_group_entry(writer: &mut BufWriter<File>, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
-    write_group_entry(writer, group_id, ack_floor)?;
-    writer.flush()?;
+pub async fn append_group_entry(writer: &mut BufWriter<File>, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
+    write_group_entry(writer, group_id, ack_floor).await?;
+    writer.flush().await?;
     Ok(())
 }
 
 // --- INTERNAL HELPERS ---
 
-fn write_group_entry<W: Write>(writer: &mut W, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
+async fn write_group_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer: &mut W, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
     // [Len: u32][CRC32: u32][AckFloor: u64][GroupLen: u16][GroupBytes]
     let group_bytes = group_id.as_bytes();
     let group_len = group_bytes.len() as u16;
@@ -210,18 +210,18 @@ fn write_group_entry<W: Write>(writer: &mut W, group_id: &str, ack_floor: u64) -
     hasher.update(group_bytes);
     let crc = hasher.finalize();
 
-    writer.write_all(&len.to_be_bytes())?;
-    writer.write_all(&crc.to_be_bytes())?;
-    writer.write_all(&ack_floor.to_be_bytes())?;
-    writer.write_all(&group_len.to_be_bytes())?;
-    writer.write_all(group_bytes)?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(&crc.to_be_bytes()).await?;
+    writer.write_all(&ack_floor.to_be_bytes()).await?;
+    writer.write_all(&group_len.to_be_bytes()).await?;
+    writer.write_all(group_bytes).await?;
 
     Ok(())
 }
 
-fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
+async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
     let mut msgs = VecDeque::new();
-    let file = match File::open(path) {
+    let file = match File::open(path).await {
         Ok(f) => f,
         Err(e) => {
             error!("Failed to open {:?}: {}", path, e);
@@ -234,12 +234,12 @@ fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
     loop {
         // [Len: u32]
         let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).is_err() { break; }
+        if reader.read_exact(&mut len_buf).await.is_err() { break; }
         let len = u32::from_be_bytes(len_buf);
 
         // [CRC32: u32]
         let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).is_err() {
+        if reader.read_exact(&mut crc_buf).await.is_err() {
             warn!("Unexpected EOF reading CRC at {:?}", path);
             break;
         }
@@ -247,7 +247,7 @@ fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
 
         // Content
         let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).is_err() {
+        if reader.read_exact(&mut content_buf).await.is_err() {
             warn!("Unexpected EOF reading Content at {:?}", path);
             break;
         }
@@ -276,25 +276,25 @@ fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
     msgs
 }
 
-fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::io::Error> {
+async fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::io::Error> {
     let mut groups: HashMap<String, u64> = HashMap::new();
-    let file = File::open(path)?;
+    let file = File::open(path).await?;
     let mut reader = BufReader::new(file);
 
     loop {
         // [Len: u32]
         let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).is_err() { break; }
+        if reader.read_exact(&mut len_buf).await.is_err() { break; }
         let len = u32::from_be_bytes(len_buf);
 
         // [CRC32: u32]
         let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).is_err() { break; }
+        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
         let stored_crc = u32::from_be_bytes(crc_buf);
 
         // Content
         let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).is_err() { break; }
+        if reader.read_exact(&mut content_buf).await.is_err() { break; }
 
         // CRC check
         let mut hasher = Hasher::new();
@@ -306,18 +306,19 @@ fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::io::Err
 
         // Parse: [AckFloor: u64][GroupLen: u16][GroupBytes]
         let mut cursor = std::io::Cursor::new(content_buf);
+        use std::io::Read; // for the in-memory cursor
         
         let mut buf8 = [0u8; 8];
         let mut buf2 = [0u8; 2];
 
-        if cursor.read_exact(&mut buf8).is_err() { continue; }
+        if Read::read_exact(&mut cursor, &mut buf8).is_err() { continue; }
         let ack_floor = u64::from_be_bytes(buf8);
 
-        if cursor.read_exact(&mut buf2).is_err() { continue; }
+        if Read::read_exact(&mut cursor, &mut buf2).is_err() { continue; }
         let group_len = u16::from_be_bytes(buf2);
 
         let mut group_bytes = vec![0u8; group_len as usize];
-        if cursor.read_exact(&mut group_bytes).is_err() { continue; }
+        if Read::read_exact(&mut cursor, &mut group_bytes).is_err() { continue; }
         let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
         // Last write wins

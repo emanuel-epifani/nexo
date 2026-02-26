@@ -20,12 +20,7 @@ await stream.delete();
 
 ## Persistence
 
-All streams are **persisted to disk** by default using an append-only segment file format. Two modes are available:
-
-| Mode | Behavior | Trade-off |
-|:---|:---|:---|
-| `file_async` **(default)** | Buffers writes and flushes every **50ms** | Fast & durable — best for most workloads |
-| `file_sync` | Flushes to disk on **every single message** | Safest, but slower — use for critical data where zero loss is required |
+All streams are **persisted to disk** by default using an append-only segment file format. Persistence is universally asynchronous to ensure maximum throughput without blocking the event loop. Writes are batched in RAM and flushed automatically by a background timer (default 50ms).
 
 ## Retention
 
@@ -74,7 +69,6 @@ await stream.seek('my-group', 'end');
 
 ```typescript
 const orders = await client.stream<Order>('orders').create({
-  persistence: 'file_sync',  // See Persistence section above
   retention: {
     maxAgeMs: 86400000,      // 1 Day
     maxBytes: 536870912      // 512 MB

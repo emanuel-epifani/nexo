@@ -13,12 +13,7 @@ pub const OP_S_DELETE: u8 = 0x36;
 pub const OP_S_NACK: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PersistenceOptions {
-    FileSync,
-    FileAsync,
-}
+
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +25,6 @@ pub struct RetentionOptions {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
-    pub persistence: Option<PersistenceOptions>,
     pub retention: Option<RetentionOptions>,
 }
 

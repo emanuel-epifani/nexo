@@ -1,4 +1,4 @@
-use nexo::brokers::stream::commands::{StreamCreateOptions, PersistenceOptions};
+use nexo::brokers::stream::commands::StreamCreateOptions;
 use nexo::config::Config;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
@@ -30,7 +30,6 @@ mod stream_tests {
 
             // 1. Create
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: None,
                 ..Default::default()
             }).await.unwrap();
 
@@ -243,7 +242,6 @@ mod stream_tests {
 
             // 1. Create
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             }).await.unwrap();
 
@@ -286,7 +284,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -298,7 +295,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -325,7 +321,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -348,7 +343,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -371,7 +365,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -390,7 +383,6 @@ mod stream_tests {
             {
                 let manager = StreamManager::new(config.clone());
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -409,23 +401,26 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = path_str.clone();
             config.max_segment_size = 100;
+            config.default_flush_ms = 50;
 
             let manager = StreamManager::new(config);
             let topic = "topic_segmentation";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             }).await.unwrap();
 
-            // Write messages
+            // Write messages with enough delay to trigger asynchronous flush batches
             manager.publish(topic, Bytes::from("msg1")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(60)).await;
             manager.publish(topic, Bytes::from("msg2")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(60)).await;
             manager.publish(topic, Bytes::from("msg3")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(60)).await;
             manager.publish(topic, Bytes::from("msg4")).await.unwrap();
 
-            // Wait for flush/rotation
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Wait for flush/rotation (flush timer is 50ms)
+            tokio::time::sleep(Duration::from_millis(300)).await;
 
             // Verify Filesystem
             let topic_path = temp_dir.path().join(topic);
@@ -447,7 +442,6 @@ mod stream_tests {
             let recovered_manager = StreamManager::new(recover_config);
 
             recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             }).await.unwrap();
 
@@ -479,22 +473,23 @@ mod stream_tests {
             config.max_segment_size = 100;
             config.retention_check_interval_ms = 100;
             config.default_retention_bytes = 250;
+            config.default_flush_ms = 50;
 
             let manager = StreamManager::new(config);
             let topic = "topic_retention";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             }).await.unwrap();
 
-            // Write large messages to create multiple segments
+            // Write large messages to create multiple segments, with delay to ensure flush
             for i in 1..=7 {
                 manager.publish(topic, Bytes::from(format!("msg{}-50bytes-payload-0000000000000000000000000000", i))).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
 
-            // Wait for retention check
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            // Wait for flush + retention check
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             // Verify filesystem
             let topic_path = temp_dir.path().join(topic);
@@ -527,12 +522,10 @@ mod stream_tests {
                 let manager = StreamManager::new(config.clone());
                 
                 manager.create_topic(topic1.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
                 manager.create_topic(topic2.to_string(), StreamCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 }).await.unwrap();
 
@@ -592,7 +585,6 @@ mod stream_tests {
             let topic = "eviction_test";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             }).await.unwrap();
 
@@ -627,31 +619,9 @@ mod stream_tests {
 
         const COUNT: usize = 10_000;
 
-        #[tokio::test]
-        async fn bench_stream_fsync() {
-            let temp_dir = tempfile::tempdir().unwrap();
-
-            let mut config = Config::global().stream.clone();
-            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-
-            let manager = StreamManager::new(config);
-            let topic = "bench-sync";
-            manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
-                ..Default::default()
-            }).await.unwrap();
-
-            let mut bench = Benchmark::start("STREAM PUSH - FSync", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.publish(topic, Bytes::from("data")).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
 
         #[tokio::test]
-        async fn bench_stream_fasync() {
+        async fn bench_stream_publish() {
             let temp_dir = tempfile::tempdir().unwrap();
 
             let mut config = Config::global().stream.clone();
@@ -660,11 +630,10 @@ mod stream_tests {
             let manager = StreamManager::new(config);
             let topic = "bench-async";
             manager.create_topic(topic.to_string(), StreamCreateOptions {
-                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             }).await.unwrap();
 
-            let mut bench = Benchmark::start("STREAM PUSH - FAsync", COUNT);
+            let mut bench = Benchmark::start("STREAM PUSH (Async Background)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager.publish(topic, Bytes::from("data")).await.unwrap();
