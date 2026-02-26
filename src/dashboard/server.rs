@@ -25,7 +25,7 @@ pub async fn start_dashboard_server(engine: NexoEngine, port: u16) {
         .route("/api/queue", get(get_queue))
         .route("/api/queue/{name}/messages", get(get_queue_messages))
         .route("/api/stream", get(get_stream))
-        .route("/api/stream/{topic}/{partition}/messages", get(get_stream_messages))
+        .route("/api/stream/{topic}/messages", get(get_stream_messages))
         .route("/api/pubsub", get(get_pubsub))
         .layer(CompressionLayer::new())
         .fallback(static_handler)

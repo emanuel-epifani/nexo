@@ -242,19 +242,19 @@ async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &Clie
                 Err(e) => Response::Error(e),
             }
         }
-        StreamCommand::Publish { topic, options, payload } => {
-            match stream.publish(&topic, options, payload).await {
-                Ok(offset_id) => Response::Data(Bytes::from(offset_id.to_be_bytes().to_vec())),
+        StreamCommand::Publish { topic, payload } => {
+            match stream.publish(&topic, payload).await {
+                Ok(seq) => Response::Data(Bytes::from(seq.to_be_bytes().to_vec())),
                 Err(e) => Response::Error(e),
             }
         }
-        StreamCommand::Fetch { gen_id, topic, group, partition, offset, limit } => {
-            match stream.fetch_group(&group, &client, gen_id, partition, offset, limit as usize, &topic).await {
+        StreamCommand::Fetch { topic, group, limit } => {
+            match stream.fetch(&group, &client, limit as usize, &topic).await {
                 Ok(msgs) => {
                     let mut buf = Vec::new();
                     buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
                     for msg in msgs {
-                        buf.extend_from_slice(&msg.offset.to_be_bytes());
+                        buf.extend_from_slice(&msg.seq.to_be_bytes());
                         buf.extend_from_slice(&msg.timestamp.to_be_bytes());
                         buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
                         buf.extend_from_slice(&msg.payload);
@@ -266,22 +266,26 @@ async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &Clie
         }
         StreamCommand::Join { group, topic } => {
             match stream.join_group(&group, &topic, &client).await {
-                Ok((gen_id, partitions, start_offsets)) => {
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&gen_id.to_be_bytes());
-                    buf.extend_from_slice(&(partitions.len() as u32).to_be_bytes());
-                    for p in partitions {
-                        buf.extend_from_slice(&p.to_be_bytes());
-                        let start_offset = start_offsets.get(&p).cloned().unwrap_or(0);
-                        buf.extend_from_slice(&start_offset.to_be_bytes());
-                    }
-                    Response::Data(Bytes::from(buf))
+                Ok(ack_floor) => {
+                    Response::Data(Bytes::from(ack_floor.to_be_bytes().to_vec()))
                 }
                 Err(e) => Response::Error(e),
             }
         }
-        StreamCommand::Commit { gen_id, group, topic, partition, offset } => {
-            match stream.commit_offset(&group, &topic, partition, offset, &client, gen_id).await {
+        StreamCommand::Ack { topic, group, seq } => {
+            match stream.ack(&group, &topic, seq).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+        StreamCommand::Nack { topic, group, seq } => {
+            match stream.nack(&group, &topic, seq).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+        StreamCommand::Seek { topic, group, target } => {
+            match stream.seek(&group, &topic, target).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

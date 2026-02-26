@@ -16,25 +16,20 @@ pub struct StreamBrokerSnapshot {
 #[derive(Serialize)]
 pub struct TopicSummary {
     pub name: String,
-    pub partitions: Vec<PartitionInfo>,
-}
-
-#[derive(Serialize)]
-pub struct PartitionInfo {
-    pub id: u32,
+    pub last_seq: u64,
     pub groups: Vec<ConsumerGroupSummary>,
-    pub last_offset: u64,
 }
 
 #[derive(Serialize)]
 pub struct ConsumerGroupSummary {
     pub id: String,
-    pub committed_offset: u64,
+    pub ack_floor: u64,
+    pub pending_count: usize,
 }
 
 #[derive(Serialize)]
 pub struct MessagePreview {
-    pub offset: u64,
+    pub seq: u64,
     pub timestamp: String,
     pub payload: Value,
 }
@@ -42,9 +37,9 @@ pub struct MessagePreview {
 #[derive(Serialize)]
 pub struct StreamMessages {
     pub messages: Vec<MessagePreview>,
-    pub from_offset: u64,
+    pub from_seq: u64,
     pub limit: usize,
-    pub last_offset: u64,
+    pub last_seq: u64,
 }
 
 #[derive(Deserialize)]
@@ -60,33 +55,30 @@ pub async fn get_stream(State(engine): State<NexoEngine>) -> impl IntoResponse {
 
 pub async fn get_stream_messages(
     State(engine): State<NexoEngine>,
-    Path((topic, partition)): Path<(String, u32)>,
+    Path(topic): Path<String>,
     Query(query): Query<StreamMessagesQuery>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(STREAM_PAGE_SIZE).min(STREAM_MAX_PAGE_SIZE);
 
     let snapshot = engine.stream.get_snapshot().await;
-    let partition_info = snapshot.topics.iter()
-        .find(|t| t.name == topic)
-        .and_then(|t| t.partitions.iter().find(|p| p.id == partition));
+    let topic_info = snapshot.topics.iter().find(|t| t.name == topic);
 
-    let last_offset = match partition_info {
-        Some(p) => p.last_offset,
-        None => return (StatusCode::NOT_FOUND, "Topic or partition not found").into_response(),
+    let last_seq = match topic_info {
+        Some(t) => t.last_seq,
+        None => return (StatusCode::NOT_FOUND, "Topic not found").into_response(),
     };
 
-    // Default: load the last N messages
-    let from_offset = query.from.unwrap_or_else(|| last_offset.saturating_sub(limit as u64));
+    let from_seq = query.from.unwrap_or_else(|| last_seq.saturating_sub(limit as u64).max(1));
 
-    let messages_raw = engine.stream.read_partition(&topic, partition, from_offset, limit).await;
+    let messages_raw = engine.stream.read(&topic, from_seq, limit).await;
 
     let messages = messages_raw.into_iter().map(|msg| MessagePreview {
-        offset: msg.offset,
+        seq: msg.seq,
         timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
             .unwrap_or_default()
             .to_rfc3339(),
         payload: crate::dashboard::utils::payload_to_dashboard_value(&msg.payload),
     }).collect();
 
-    axum::Json(StreamMessages { messages, from_offset, limit, last_offset }).into_response()
+    axum::Json(StreamMessages { messages, from_seq, limit, last_seq }).into_response()
 }

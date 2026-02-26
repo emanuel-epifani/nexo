@@ -1,124 +1,199 @@
-//! Consumer Group: Pure Logic (No Arc/Mutex)
-//! Tracks members and offsets.
-//! Handles Partition Assignment Logic (Rebalancing).
+//! Consumer Group: JetStream-like per-message ack tracking
+//!
+//! Each group tracks:
+//! - ack_floor: highest seq such that ALL seqs 1..=ack_floor are acked
+//! - pending: messages delivered but not yet acked
+//! - redeliver: messages that need to be redelivered (nack or timeout)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug)]
-pub struct MemberInfo {
+use crate::brokers::stream::message::Message;
+
+pub struct PendingMsg {
     pub client_id: String,
-    // Partitions assigned to this member
-    pub partitions: Vec<u32>,
+    pub delivered_at: Instant,
+    pub delivery_count: u32,
 }
 
 pub struct ConsumerGroup {
     pub id: String,
-    pub topic: String,
-    pub members: HashMap<String, MemberInfo>,
-    // Generation ID (Epoch) - Monotonically increasing on every rebalance
-    pub generation_id: u64,
-    // Last committed offsets per partition (PartitionID -> Offset)
-    pub committed_offsets: HashMap<u32, u64>,
+    // === Persistent state (saved to disk) ===
+    pub ack_floor: u64,
+    // === Volatile state (rebuilt on restart) ===
+    pub next_deliver_seq: u64,
+    pub pending: HashMap<u64, PendingMsg>,
+    pub redeliver: VecDeque<u64>,
+    // === Config ===
+    pub max_ack_pending: usize,
+    pub ack_wait: Duration,
+    // === Member tracking (for disconnect cleanup) ===
+    pub members: HashSet<String>,
 }
 
 impl ConsumerGroup {
-    pub fn new(id: String, topic: String) -> Self {
+    pub fn new(id: String, max_ack_pending: usize, ack_wait: Duration) -> Self {
         Self {
             id,
-            topic,
-            members: HashMap::new(),
-            generation_id: 0,
-            committed_offsets: HashMap::new(),
+            ack_floor: 0,
+            next_deliver_seq: 1, // sequences start at 1
+            pending: HashMap::new(),
+            redeliver: VecDeque::new(),
+            max_ack_pending,
+            ack_wait,
+            members: HashSet::new(),
         }
     }
 
-    pub fn add_member(&mut self, client_id: String) {
-        if !self.members.contains_key(&client_id) {
-            self.members.insert(client_id.clone(), MemberInfo {
-                client_id,
-                partitions: Vec::new(),
-            });
-            // Trigger implicit rebalance logic later (caller must call rebalance)
+    /// Restore from persisted ack_floor (on warm start)
+    pub fn restore(id: String, ack_floor: u64, max_ack_pending: usize, ack_wait: Duration) -> Self {
+        Self {
+            id,
+            ack_floor,
+            next_deliver_seq: ack_floor + 1,
+            pending: HashMap::new(),
+            redeliver: VecDeque::new(),
+            max_ack_pending,
+            ack_wait,
+            members: HashSet::new(),
         }
+    }
+
+    /// Fetch messages for a client. Serves redeliver queue first, then fresh messages.
+    pub fn fetch(&mut self, client_id: &str, limit: usize, log: &VecDeque<Message>, ram_start_seq: u64) -> Vec<Message> {
+        if self.pending.len() >= self.max_ack_pending {
+            return vec![]; // backpressure
+        }
+
+        let budget = limit.min(self.max_ack_pending - self.pending.len());
+        let mut result = Vec::with_capacity(budget);
+
+        // 1. Redeliver first
+        while result.len() < budget {
+            if let Some(seq) = self.redeliver.pop_front() {
+                if let Some(msg) = Self::read_from_log(log, ram_start_seq, seq) {
+                    let delivery_count = self.pending.get(&seq).map(|p| p.delivery_count).unwrap_or(0) + 1;
+                    self.pending.insert(seq, PendingMsg {
+                        client_id: client_id.to_string(),
+                        delivered_at: Instant::now(),
+                        delivery_count,
+                    });
+                    result.push(msg);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // 2. Fresh messages
+        while result.len() < budget {
+            let seq = self.next_deliver_seq;
+            if let Some(msg) = Self::read_from_log(log, ram_start_seq, seq) {
+                self.next_deliver_seq += 1;
+                self.pending.insert(seq, PendingMsg {
+                    client_id: client_id.to_string(),
+                    delivered_at: Instant::now(),
+                    delivery_count: 1,
+                });
+                result.push(msg);
+            } else {
+                break; // no more messages in log
+            }
+        }
+
+        result
+    }
+
+    /// Acknowledge a message. Removes from pending and tries to advance ack_floor.
+    pub fn ack(&mut self, seq: u64) -> Result<(), String> {
+        if self.pending.remove(&seq).is_none() {
+            return Err(format!("seq {} not pending", seq));
+        }
+        self.try_advance_floor();
+        Ok(())
+    }
+
+    /// Negative acknowledge: move message back to redeliver queue.
+    pub fn nack(&mut self, seq: u64) -> Result<(), String> {
+        if self.pending.remove(&seq).is_none() {
+            return Err(format!("seq {} not pending", seq));
+        }
+        self.redeliver.push_back(seq);
+        Ok(())
+    }
+
+    /// Check for expired pending messages and move them to redeliver queue.
+    pub fn check_redelivery(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<u64> = self.pending.iter()
+            .filter(|(_, msg)| now.duration_since(msg.delivered_at) > self.ack_wait)
+            .map(|(seq, _)| *seq)
+            .collect();
+
+        for seq in expired {
+            if let Some(msg) = self.pending.remove(&seq) {
+                tracing::debug!("[Group:{}] Redelivery timeout seq={} (attempts={})", self.id, seq, msg.delivery_count);
+                self.redeliver.push_back(seq);
+            }
+        }
+    }
+
+    /// Seek to a target position. Clears all pending/redeliver state.
+    pub fn seek_beginning(&mut self) {
+        self.ack_floor = 0;
+        self.next_deliver_seq = 1;
+        self.pending.clear();
+        self.redeliver.clear();
+    }
+
+    pub fn seek_end(&mut self, last_seq: u64) {
+        self.ack_floor = last_seq;
+        self.next_deliver_seq = last_seq + 1;
+        self.pending.clear();
+        self.redeliver.clear();
+    }
+
+    // --- Members ---
+
+    pub fn add_member(&mut self, client_id: String) {
+        self.members.insert(client_id);
     }
 
     pub fn remove_member(&mut self, client_id: &str) -> bool {
-        if self.members.remove(client_id).is_some() {
-            // Trigger implicit rebalance logic later (caller must call rebalance)
+        if self.members.remove(client_id) {
+            // Move any pending messages from this client back to redeliver
+            let seqs: Vec<u64> = self.pending.iter()
+                .filter(|(_, msg)| msg.client_id == client_id)
+                .map(|(seq, _)| *seq)
+                .collect();
+            for seq in seqs {
+                self.pending.remove(&seq);
+                self.redeliver.push_back(seq);
+            }
             return true;
         }
         false
     }
 
-    pub fn commit(&mut self, partition: u32, offset: u64) {
-        // Monotonic commit: only increase
-        let current = self.committed_offsets.entry(partition).or_insert(0);
-        if offset > *current {
-            *current = offset;
-        }
-    }
-
-    pub fn get_committed_offset(&self, partition: u32) -> u64 {
-        *self.committed_offsets.get(&partition).unwrap_or(&0)
-    }
-
-    /// REBALANCE ALGORITHM (Round Robin / Range)
-    /// Redistributes partitions among current members.
-    /// IMPORTANT: Increments generation_id FIRST to invalidate all in-flight requests.
-    pub fn rebalance(&mut self, total_partitions: u32) {
-        tracing::info!("[Group:{}] REBALANCE TRIGGERED (Members: {})", self.id, self.members.len());
-
-        // 1. FIRST: Bump generation to invalidate all in-flight FETCH/COMMIT
-        self.generation_id += 1;
-
-        if self.members.is_empty() {
-            tracing::info!("[Group:{}] Rebalanced Gen {} (No members)", self.id, self.generation_id);
-            return;
-        }
-
-        // 2. Clear current assignments
-        for m in self.members.values_mut() {
-            m.partitions.clear();
-        }
-
-        // 3. Sort members to ensure deterministic assignment
-        let mut member_ids: Vec<String> = self.members.keys().cloned().collect();
-        member_ids.sort();
-
-        let member_count = member_ids.len() as u32;
-        let partitions_per_member = total_partitions / member_count;
-        let remainder = total_partitions % member_count;
-
-        // 4. Distribute partitions
-        let mut current_partition = 0;
-        for (i, member_id) in member_ids.iter().enumerate() {
-            let extra = if (i as u32) < remainder { 1 } else { 0 };
-            let count = partitions_per_member + extra;
-
-            if let Some(member) = self.members.get_mut(member_id) {
-                for _ in 0..count {
-                    member.partitions.push(current_partition);
-                    current_partition += 1;
-                }
-            }
-        }
-        
-        tracing::info!("[Group:{}] REBALANCE COMPLETE -> Gen {}. Ownership:", self.id, self.generation_id);
-        for m in self.members.values() {
-            tracing::info!("[Group:{}]   -> Client {}: {:?}", self.id, m.client_id, m.partitions);
-        }
-    }
-
     pub fn is_member(&self, client_id: &str) -> bool {
-        self.members.contains_key(client_id)
+        self.members.contains(client_id)
     }
 
-    pub fn get_assignments(&self, client_id: &str) -> Option<&Vec<u32>> {
-        self.members.get(client_id).map(|m| &m.partitions)
+    // --- Internal ---
+
+    fn try_advance_floor(&mut self) {
+        while self.ack_floor + 1 < self.next_deliver_seq
+            && !self.pending.contains_key(&(self.ack_floor + 1))
+        {
+            self.ack_floor += 1;
+        }
     }
 
-    pub fn validate_epoch(&self, generation_id: u64) -> bool {
-        self.generation_id == generation_id
+    fn read_from_log(log: &VecDeque<Message>, ram_start_seq: u64, seq: u64) -> Option<Message> {
+        if seq < ram_start_seq || log.is_empty() {
+            return None; // cold read needed — handled by caller
+        }
+        let idx = (seq - ram_start_seq) as usize;
+        log.get(idx).cloned()
     }
-
 }

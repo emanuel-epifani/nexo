@@ -7,9 +7,11 @@ pub const OP_S_CREATE: u8 = 0x30;
 pub const OP_S_PUB: u8 = 0x31;
 pub const OP_S_FETCH: u8 = 0x32;
 pub const OP_S_JOIN: u8 = 0x33;
-pub const OP_S_COMMIT: u8 = 0x34;
+pub const OP_S_ACK: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
+pub const OP_S_NACK: u8 = 0x37;
+pub const OP_S_SEEK: u8 = 0x38;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,14 +30,15 @@ pub struct RetentionOptions {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
-    pub partitions: Option<u32>,
     pub persistence: Option<PersistenceOptions>,
     pub retention: Option<RetentionOptions>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct StreamPublishOptions {
-    pub key: Option<String>,
+#[serde(rename_all = "snake_case")]
+pub enum SeekTarget {
+    Beginning,
+    End,
 }
 
 #[derive(Debug)]
@@ -45,19 +48,15 @@ pub enum StreamCommand {
         topic: String,
         options: StreamCreateOptions,
     },
-    /// PUB: [TopicLen:4][Topic][JSONLen:4][JSON][Data...]
+    /// PUB: [TopicLen:4][Topic][Data...]
     Publish {
         topic: String,
-        options: StreamPublishOptions,
         payload: Bytes,
     },
-    /// FETCH: [GenID:8][TopicLen:4][Topic][GroupLen:4][Group][Partition:4][Offset:8][Limit:4]
+    /// FETCH: [TopicLen:4][Topic][GroupLen:4][Group][Limit:4]
     Fetch {
-        gen_id: u64,
         topic: String,
         group: String,
-        partition: u32,
-        offset: u64,
         limit: u32,
     },
     /// JOIN: [GroupLen:4][Group][TopicLen:4][Topic]
@@ -65,13 +64,23 @@ pub enum StreamCommand {
         group: String,
         topic: String,
     },
-    /// COMMIT: [GenID:8][GroupLen:4][Group][TopicLen:4][Topic][Partition:4][Offset:8]
-    Commit {
-        gen_id: u64,
-        group: String,
+    /// ACK: [TopicLen:4][Topic][GroupLen:4][Group][Seq:8]
+    Ack {
         topic: String,
-        partition: u32,
-        offset: u64,
+        group: String,
+        seq: u64,
+    },
+    /// NACK: [TopicLen:4][Topic][GroupLen:4][Group][Seq:8]
+    Nack {
+        topic: String,
+        group: String,
+        seq: u64,
+    },
+    /// SEEK: [TopicLen:4][Topic][GroupLen:4][Group][Target:1] (0=beginning, 1=end)
+    Seek {
+        topic: String,
+        group: String,
+        target: SeekTarget,
     },
     /// EXISTS: [TopicLen:4][Topic]
     Exists {
@@ -91,44 +100,46 @@ impl StreamCommand {
                 let json_str = cursor.read_string()?;
                 let options: StreamCreateOptions = serde_json::from_str(&json_str)
                     .map_err(|e| ParseError::Invalid(format!("Invalid JSON config: {}", e)))?;
-                tracing::debug!("Parsed S_CREATE: topic={}", topic);
                 Ok(Self::Create { topic, options })
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                
-                let options: StreamPublishOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
-
                 let payload = cursor.read_remaining();
-                tracing::debug!("Parsed S_PUB: topic={}, len={}", topic, payload.len());
-                Ok(Self::Publish { topic, options, payload })
+                Ok(Self::Publish { topic, payload })
             }
             OP_S_FETCH => {
-                let gen_id = cursor.read_u64()?;
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
-                let partition = cursor.read_u32()?;
-                let offset = cursor.read_u64()?;
                 let limit = cursor.read_u32()?;
-                tracing::debug!("Parsed S_FETCH: topic={} group={} p={} off={} lim={} gen={}", topic, group, partition, offset, limit, gen_id);
-                Ok(Self::Fetch { gen_id, topic, group, partition, offset, limit })
+                Ok(Self::Fetch { topic, group, limit })
             }
             OP_S_JOIN => {
                 let group = cursor.read_string()?;
                 let topic = cursor.read_string()?;
-                tracing::debug!("Parsed S_JOIN: topic={} group={}", topic, group);
                 Ok(Self::Join { group, topic })
             }
-            OP_S_COMMIT => {
-                let gen_id = cursor.read_u64()?;
-                let group = cursor.read_string()?;
+            OP_S_ACK => {
                 let topic = cursor.read_string()?;
-                let partition = cursor.read_u32()?;
-                let offset = cursor.read_u64()?;
-                tracing::debug!("Parsed S_COMMIT: topic={} group={} p={} off={} gen={}", topic, group, partition, offset, gen_id);
-                Ok(Self::Commit { gen_id, group, topic, partition, offset })
+                let group = cursor.read_string()?;
+                let seq = cursor.read_u64()?;
+                Ok(Self::Ack { topic, group, seq })
+            }
+            OP_S_NACK => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let seq = cursor.read_u64()?;
+                Ok(Self::Nack { topic, group, seq })
+            }
+            OP_S_SEEK => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let target_byte = cursor.read_u8()?;
+                let target = match target_byte {
+                    0 => SeekTarget::Beginning,
+                    1 => SeekTarget::End,
+                    _ => return Err(ParseError::Invalid(format!("Invalid seek target: {}", target_byte))),
+                };
+                Ok(Self::Seek { topic, group, target })
             }
             OP_S_EXISTS => {
                 let topic = cursor.read_string()?;

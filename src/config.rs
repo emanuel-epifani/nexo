@@ -137,45 +137,35 @@ impl PubSubConfig {
 // STREAM
 #[derive(Debug, Clone)]
 pub struct SystemStreamConfig {
-    pub default_partitions: u32,
-    pub max_partitions: u32,
     pub actor_channel_capacity: usize,
     pub persistence_path: String,
     pub default_flush_ms: u64,
-    pub compaction_threshold: u64,
     pub max_segment_size: u64,
     pub retention_check_interval_ms: u64,
     pub default_retention_bytes: u64,
     pub default_retention_age_ms: u64,
-    pub max_ram_messages: usize,
-    pub writer_channel_capacity: usize,
-    pub writer_batch_size: usize,
     pub eviction_interval_ms: u64,
-    pub eviction_batch_size: usize,
     pub ram_soft_limit: usize,
     pub ram_hard_limit: usize,
+    pub max_ack_pending: usize,
+    pub ack_wait_ms: u64,
 }
 
 impl SystemStreamConfig {
     fn load() -> Self {
         Self {
-            default_partitions:          get_env("STREAM_PARTITIONS", "4"),
-            max_partitions:              get_env("STREAM_MAX_PARTITIONS", "32"),
             actor_channel_capacity:      get_env("STREAM_ACTOR_CHAN_CAP", "10000"),
             persistence_path:            get_env("STREAM_ROOT_PERSISTENCE_PATH", "./data/streams"),
             default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", "50"),
-            compaction_threshold:        get_env("STREAM_COMPACTION_THRESHOLD", "10000"),
             max_segment_size:            get_env("STREAM_MAX_SEGMENT_SIZE", "104857600"), // 100MB
             retention_check_interval_ms: get_env("STREAM_RETENTION_CHECK_MS", "600000"),  // 10 minutes
             default_retention_bytes:     get_env("STREAM_DEFAULT_RETENTION_BYTES", "1073741824"), // 1GB
             default_retention_age_ms:    get_env("STREAM_DEFAULT_RETENTION_AGE_MS", "604800000"), // 7 days
-            max_ram_messages:            get_env("STREAM_MAX_RAM_MESSAGES", "20000"), // 2x default channel
-            writer_channel_capacity:     get_env("STREAM_WRITER_CHAN_CAP", "10000"),
-            writer_batch_size:           get_env("STREAM_WRITER_BATCH_SIZE", "5000"),
             eviction_interval_ms:        get_env("STREAM_EVICTION_INTERVAL_MS", "500"),
-            eviction_batch_size:         get_env("STREAM_EVICTION_BATCH_SIZE", "10000"),
             ram_soft_limit:              get_env("STREAM_RAM_SOFT_LIMIT", "1000"),
             ram_hard_limit:              get_env("STREAM_RAM_HARD_LIMIT", "20000"),
+            max_ack_pending:             get_env("STREAM_MAX_ACK_PENDING", "10000"),
+            ack_wait_ms:                 get_env("STREAM_ACK_WAIT_MS", "30000"), // 30 seconds
         }
     }
 }

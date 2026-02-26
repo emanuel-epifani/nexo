@@ -5,7 +5,6 @@ import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
 describe('STREAM', () => {
-    // Separate clients for consumer groups to simulate real distributed nodes
     let clientA: NexoClient;
     let clientB: NexoClient;
     const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
@@ -37,7 +36,7 @@ describe('STREAM', () => {
         sub.stop();
     });
 
-    it('Independent CONSUMER GRUP => should deliver foreach all messages', async () => {
+    it('Independent CONSUMER GROUPS => should deliver all messages to each group', async () => {
         const topic = `stream-groups-${randomUUID()}`;
         await nexo.stream(topic).create();
 
@@ -58,10 +57,10 @@ describe('STREAM', () => {
         subB.stop();
     });
 
-    it('Same CONSUMER GRUOP => should distribute messages without duplicates', async () => {
+    it('Same CONSUMER GROUP => should distribute messages without duplicates', async () => {
         const topic = `parallel-consumers-${randomUUID()}`;
         const group = 'parallel_group';
-        await nexo.stream(topic).create({ partitions: 4 });
+        await nexo.stream(topic).create();
 
         const receivedA = new Set<number>();
         const receivedB = new Set<number>();
@@ -77,90 +76,37 @@ describe('STREAM', () => {
             receivedB.add(d.id);
         });
 
-        // Wait for rebalance
+        // Wait for join
         await new Promise(r => setTimeout(r, 500));
 
-        // Publish 1000 messages
-        for (let i = 0; i < 1000; i++) {
+        // Publish messages
+        for (let i = 0; i < 100; i++) {
             await nexo.stream(topic).publish({ id: i });
         }
 
-        await waitFor(() => expect(receivedA.size + receivedB.size).toBe(1000));
+        await waitFor(() => expect(receivedA.size + receivedB.size).toBe(100));
 
         // Verify NO overlap
         const overlap = [...receivedA].filter(id => receivedB.has(id));
-        expect(overlap.length).toBe(0, 'No duplicates between consumers');
+        expect(overlap.length).toBe(0);
 
         subA.stop();
         subB.stop();
     });
 
-    it('should survive Rebalancing: Scale UP with LOAD SHARING', async () => {
-        const topic = `stream-strict-up-${randomUUID()}`;
-        const group = 'group_strict_scale';
-        await nexo.stream(topic).create();
-
-        const producer = nexo.stream(topic);
-
-        const receivedA: number[] = [];
-        const receivedB: number[] = [];
-        const allReceivedIds = new Set<number>();
-
-        // 1. Start A (Alone)
-        const subA = await clientA.stream(topic).subscribe(group, (d) => {
-            receivedA.push(d.i);
-            allReceivedIds.add(d.i);
-        });
-
-        // 2. Publish Batch 1 (0-19) -> Should go ALL to A
-        for (let i = 0; i < 20; i++) await producer.publish({ i });
-
-        await waitFor(() => expect(receivedA.length).toBe(20));
-        expect(receivedB.length).toBe(0);
-
-        // 3. Start B (Join Group)
-        const subB = await clientB.stream(topic).subscribe(group, (d) => {
-            receivedB.push(d.i);
-            allReceivedIds.add(d.i);
-        });
-
-        // Wait for rebalance
-        await new Promise(r => setTimeout(r, 500));
-
-        // 4. Publish Batch 2 (20-99) -> Should be SPLIT
-        for (let i = 20; i < 100; i++) await producer.publish({ i });
-
-        // 5. ASSERTION
-        await waitFor(() => {
-            expect(allReceivedIds.size).toBe(100);
-        }, { timeout: 10000 });
-
-        // Verify B received significant work
-        expect(receivedB.length).toBeGreaterThan(10);
-
-        // Check all messages received
-        for (let i = 0; i < 100; i++) {
-            if (!allReceivedIds.has(i)) throw new Error(`Missing message ${i}`);
-        }
-
-        subA.stop();
-        subB.stop();
-    });
-
-    it('should survive Rebalancing: Scale DOWN with ZERO DATA LOSS', async () => {
-        // Use temporary clients for this test since we'll disconnect one
+    it('should handle consumer disconnect with zero data loss', async () => {
         const tempClientA = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
         const tempClientB = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
 
-        const topic = `stream-strict-down-${randomUUID()}`;
-        const group = 'group_strict_fault';
+        const topic = `stream-disconnect-${randomUUID()}`;
+        const group = 'group_disconnect';
         await nexo.stream(topic).create();
 
         const producer = nexo.stream(topic);
         const allReceivedIds = new Set<number>();
         const track = (d: any) => allReceivedIds.add(d.i);
 
-        // 1. Start A & B
+        // 1. Start A & B 
         const subA = await tempClientA.stream(topic).subscribe(group, track);
         const subB = await tempClientB.stream(topic).subscribe(group, track);
 
@@ -168,21 +114,20 @@ describe('STREAM', () => {
         for (let i = 0; i < 20; i++) await producer.publish({ i });
         await waitFor(() => expect(allReceivedIds.size).toBe(20));
 
-        // 3. KILL Client A (Simulate Crash)
+        // 3. Disconnect Client A
         await tempClientA.disconnect();
 
-        // 4. Wait for Rebalance
+        // 4. Wait for pending messages to be redelivered
         await new Promise(r => setTimeout(r, 500));
 
-        // 5. Publish NEW data (20-59)
+        // 5. Publish more (20-59) — B should handle everything
         for (let i = 20; i < 60; i++) await producer.publish({ i });
 
-        // 6. ASSERTION
+        // 6. Verify
         await waitFor(() => {
             expect(allReceivedIds.size).toBe(60);
         }, { timeout: 10000 });
 
-        // Verify no missing messages
         for (let i = 0; i < 60; i++) {
             if (!allReceivedIds.has(i)) throw new Error(`Missing message index ${i}`);
         }

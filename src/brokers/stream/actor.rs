@@ -1,400 +1,548 @@
 //! Stream Topic Actor: Async actor owning a single topic's state
-//! 
-//! Each topic has its own actor that handles Pub/Sub/Groups sequentially.
-//! The StreamManager routes commands to the appropriate TopicActor.
+//!
+//! Single-log model (no partitions). Writer is embedded (no separate actor).
+//! Handles: Publish, Fetch, Ack, Nack, Seek, Join, Leave, Eviction, Flush, Retention.
 
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Write, BufWriter};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
-use crate::brokers::stream::topic::{TopicState, TopicConfig};
+use tracing::{error, info, warn};
+
+use crate::brokers::stream::topic::{TopicState, TopicConfig, PersistenceMode};
 use crate::brokers::stream::message::Message;
 use crate::brokers::stream::group::ConsumerGroup;
-use crate::brokers::stream::commands::StreamPublishOptions;
-use crate::brokers::stream::persistence::{recover_topic, StreamWriter, WriterCommand, StreamStorageOp};
-use crate::brokers::stream::persistence::types::PersistenceMode;
-use crate::brokers::stream::persistence::writer::Segment;
+use crate::brokers::stream::commands::SeekTarget;
+use crate::brokers::stream::persistence::{
+    recover_topic, read_log_segment, find_segments, Segment,
+    writer::{serialize_message, save_groups_file},
+};
+
 // ==========================================
 // COMMANDS (The Internal Protocol)
 // ==========================================
 
 pub enum TopicCommand {
     Publish {
-        options: StreamPublishOptions,
         payload: Bytes,
         reply: oneshot::Sender<Result<u64, String>>,
     },
     Fetch {
-        group_id: Option<String>,
-        client_id: Option<String>,
-        generation_id: Option<u64>,
-        partition: u32,
-        offset: u64,
+        group_id: String,
+        client_id: String,
         limit: usize,
         reply: oneshot::Sender<Result<Vec<Message>, String>>,
+    },
+    Ack {
+        group_id: String,
+        seq: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Nack {
+        group_id: String,
+        seq: u64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Seek {
+        group_id: String,
+        target: SeekTarget,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     JoinGroup {
         group_id: String,
         client_id: String,
-        reply: oneshot::Sender<Result<(u64, Vec<u32>, HashMap<u32, u64>), String>>,
-    },
-    Commit {
-        group_id: String,
-        partition: u32,
-        offset: u64,
-        client_id: String,
-        generation_id: u64,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<u64, String>>,
     },
     LeaveGroup {
         client_id: String,
         reply: oneshot::Sender<()>,
     },
+    Read {
+        from_seq: u64,
+        limit: usize,
+        reply: oneshot::Sender<Vec<Message>>,
+    },
     GetSnapshot {
         reply: oneshot::Sender<crate::dashboard::stream::TopicSummary>,
     },
-    PersistenceAck {
-        partition: u32,
-        last_persisted_offset: u64,
-    },
-    SegmentRotated {
-        partition: u32,
-        segment: Segment,
-    },
-    EvictOldMessages,
     Stop {
         reply: oneshot::Sender<()>,
-    }
+    },
 }
 
 // ==========================================
-// TOPIC ACTOR (The Engine)
+// TOPIC ACTOR
 // ==========================================
 
 pub(crate) struct TopicActor {
     state: TopicState,
     groups: HashMap<String, ConsumerGroup>,
-    client_map: HashMap<String, Vec<String>>, 
+    client_map: HashMap<String, Vec<String>>,
     rx: mpsc::Receiver<TopicCommand>,
-    last_partition: u32,
+    // Embedded writer
+    write_buffer: Vec<u8>,
+    log_file: Option<BufWriter<File>>,
+    log_file_size: u64,
+    groups_dirty: bool,
+    base_path: PathBuf,
+    segments: Vec<Segment>,
+    // Config
     persistence_mode: PersistenceMode,
-    writer_tx: mpsc::Sender<WriterCommand>,
-    self_tx: mpsc::Sender<TopicCommand>,
-    eviction_batch_size: usize,
+    max_segment_size: u64,
+    retention: crate::brokers::stream::commands::RetentionOptions,
+    max_ack_pending: usize,
+    ack_wait: Duration,
 }
 
 impl TopicActor {
     pub(crate) fn new(
-        name: String, 
+        name: String,
         rx: mpsc::Receiver<TopicCommand>,
-        self_tx: mpsc::Sender<TopicCommand>,
         config: TopicConfig,
     ) -> Self {
-        // 1. Recovery (SYNCHRONOUS DIRECTORY CREATION)
-        let persistence_path = PathBuf::from(&config.persistence_path).join(&name);
-        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
-            tracing::error!("FATAL: Failed to create topic directory at {:?}: {}", persistence_path, e);
-            // We proceed, but the writer will likely fail. At least we logged it early.
+        let base_path = PathBuf::from(&config.persistence_path).join(&name);
+
+        // Create directory
+        if let Err(e) = fs::create_dir_all(&base_path) {
+            error!("FATAL: Failed to create topic directory at {:?}: {}", base_path, e);
         }
 
-        let recovered = recover_topic(&name, config.partitions, PathBuf::from(config.persistence_path.clone()));
-        let state = TopicState::restore(
-            name.clone(), 
-            config.partitions, 
-            config.max_ram_messages,
+        // Recovery
+        let recovered = recover_topic(&name, PathBuf::from(config.persistence_path.clone()));
+        let mut state = TopicState::restore(
+            name.clone(),
             config.ram_soft_limit,
-            config.ram_hard_limit,
-            recovered.partitions_data
+            recovered.messages,
         );
-        
-        let mut groups = HashMap::new();
-        // Restore Groups
-        for (gid, (gen_id, committed)) in recovered.groups_data {
-            let mut g = ConsumerGroup::new(gid.clone(), name.clone());
-            g.generation_id = gen_id;
-            g.committed_offsets = committed;
-            groups.insert(gid, g);
+
+        // Restore segments index
+        let segments = recovered.segments;
+        if let Some(first) = segments.first() {
+            state.start_seq = first.start_seq;
         }
 
-        // 2. Spawn Writer
-        let (w_tx, w_rx) = mpsc::channel(config.writer_channel_capacity);
-        let writer = StreamWriter::new(
-            name.clone(), 
-            config.partitions, 
-            config.persistence_mode.clone(), 
-            w_rx,
-            PathBuf::from(config.persistence_path),
-            config.compaction_threshold,
-            config.max_segment_size,
-            config.retention,
-            config.retention_check_ms,
-            config.writer_batch_size,
-            self_tx.clone(),
-        );
-        tokio::spawn(writer.run());
+        // Restore groups
+        let mut groups = HashMap::new();
+        for (gid, ack_floor) in recovered.groups_data {
+            groups.insert(
+                gid.clone(),
+                ConsumerGroup::restore(gid, ack_floor, config.max_ack_pending, Duration::from_millis(config.ack_wait_ms)),
+            );
+        }
+
+        // Open active segment file
+        let mut segments = segments;
+        let (log_file, log_file_size) = Self::open_active_segment(&base_path, &segments);
+
+        // Ensure initial segment is in the index (for cold reads on fresh topics)
+        if segments.is_empty() {
+            segments.push(Segment {
+                path: base_path.join("1.log"),
+                start_seq: 1,
+            });
+        }
 
         Self {
             state,
             groups,
             client_map: HashMap::new(),
             rx,
-            last_partition: 0,
+            write_buffer: Vec::with_capacity(64 * 1024),
+            log_file,
+            log_file_size,
+            groups_dirty: false,
+            base_path,
+            segments,
             persistence_mode: config.persistence_mode,
-            writer_tx: w_tx,
-            self_tx,
-            eviction_batch_size: config.eviction_batch_size,
+            max_segment_size: config.max_segment_size,
+            retention: config.retention,
+            max_ack_pending: config.max_ack_pending,
+            ack_wait: Duration::from_millis(config.ack_wait_ms),
         }
     }
 
-    pub(crate) async fn run(mut self, eviction_interval_ms: u64) {
-        // Spawn eviction timer task
-        let eviction_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(eviction_interval_ms));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let _ = eviction_tx.send(TopicCommand::EvictOldMessages).await;
-            }
-        });
+    pub(crate) async fn run(mut self, config: TopicConfig) {
+        info!("TopicActor '{}' started ({:?})", self.state.name, self.persistence_mode);
 
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                TopicCommand::Publish { options, payload, reply } => {
-                    let p_count = self.state.get_partitions_count() as u32;
-                    
-                    let partition = if let Some(key) = &options.key {
-                        // Key-based partitioning (simple hash)
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        key.hash(&mut hasher);
-                        (hasher.finish() % (p_count as u64)) as u32
-                    } else {
-                        // Round-robin
-                        let p = self.last_partition % p_count;
-                        self.last_partition = (self.last_partition + 1) % p_count;
-                        p
-                    };
-                    
-                    let (offset, timestamp) = self.state.publish(partition, payload.clone());
-                    
-                    // Persistence
-                    let (tx, rx) = if let PersistenceMode::Sync = self.persistence_mode {
-                        let (tx, rx) = oneshot::channel();
-                        (Some(tx), Some(rx))
-                    } else {
-                        (None, None)
-                    };
+        // Flush timer
+        let flush_interval = match self.persistence_mode {
+            PersistenceMode::Sync => Duration::from_secs(3600), // effectively disabled for sync
+            PersistenceMode::Async { flush_ms } => Duration::from_millis(flush_ms),
+        };
+        let mut flush_timer = tokio::time::interval(flush_interval);
+        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    let op = StreamStorageOp::Append {
-                        partition,
-                        offset,
-                        timestamp,
-                        payload,
-                    };
+        // Eviction timer
+        let mut eviction_timer = tokio::time::interval(Duration::from_millis(config.eviction_interval_ms));
+        eviction_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    let _ = self.writer_tx.send(WriterCommand { op, reply: tx }).await;
+        // Retention timer
+        let mut retention_timer = tokio::time::interval(Duration::from_millis(config.retention_check_ms));
+        retention_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    if let Some(wait_rx) = rx {
-                        match wait_rx.await {
-                            Ok(Ok(_)) => { let _ = reply.send(Ok(offset)); },
-                            Ok(Err(e)) => { let _ = reply.send(Err(e)); },
-                            Err(_) => { let _ = reply.send(Err("Writer died".to_string())); }
-                        }
-                    } else {
-                        let _ = reply.send(Ok(offset));
-                    }
-                },
-                TopicCommand::Fetch { group_id, client_id, generation_id, partition, offset, limit, reply } => {
-                    if let (Some(gid), Some(cid), Some(gen_id)) = (group_id, client_id, generation_id) {
-                        if let Some(group) = self.groups.get(&gid) {
-                            if !group.validate_epoch(gen_id) || !group.is_member(&cid) {
-                                let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                                continue;
-                            }
-                            if let Some(assignments) = group.get_assignments(&cid) {
-                                if !assignments.contains(&partition) {
-                                    let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                                    continue;
-                                }
-                            } else {
-                                let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                                continue;
-                            }
-                        } else {
-                            let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                            continue;
-                        }
-                    }
-                    let msgs = self.state.read(partition, offset, limit);
-                    tracing::debug!("[TopicActor:{}] Fetch: P{} off={} lim={} -> got {} msgs", self.state.name, partition, offset, limit, msgs.len());
-                    let _ = reply.send(Ok(msgs));
-                },
-                TopicCommand::JoinGroup { group_id, client_id, reply } => {
-                    tracing::info!("[TopicActor:{}] JoinGroup: Group={}, Client={}", self.state.name, group_id, client_id);
-                    let g = self.groups.entry(group_id.clone())
-                        .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.state.name.clone()));
-                    
-                    let is_new = !g.is_member(&client_id);
-                    g.add_member(client_id.clone());
-                    
-                    let groups_list = self.client_map.entry(client_id.clone()).or_default();
-                    if !groups_list.contains(&group_id) {
-                        groups_list.push(group_id.clone());
-                    }
-                    
-                    if is_new {
-                        tracing::info!("[TopicActor:{}] NEW member. Triggering rebalance.", self.state.name);
-                        g.rebalance(self.state.get_partitions_count() as u32);
-                    } else {
-                        tracing::info!("[TopicActor:{}] EXISTING member. Current Gen: {}", self.state.name, g.generation_id);
-                    }
+        // Redelivery check timer
+        let mut redeliver_timer = tokio::time::interval(Duration::from_secs(5));
+        redeliver_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    let assigned = g.get_assignments(&client_id).cloned().unwrap_or_default();
-                    let mut start_offsets = HashMap::new();
-                    for &pid in &assigned {
-                        let off = g.get_committed_offset(pid);
-                        start_offsets.insert(pid, off);
-                        tracing::info!("[TopicActor:{}]   -> Assignment: P{} start_at={}", self.state.name, pid, off);
-                    }
-                    
-                    let _ = reply.send(Ok((g.generation_id, assigned, start_offsets)));
-                },
-                TopicCommand::Commit { group_id, partition, offset, client_id, generation_id, reply } => {
-                    if let Some(g) = self.groups.get_mut(&group_id) {
-                        if !g.validate_epoch(generation_id) || !g.is_member(&client_id) {
-                             let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                        } else {
-                            if let Some(assign) = g.get_assignments(&client_id) {
-                                if assign.contains(&partition) {
-                                    g.commit(partition, offset);
-                                    
-                                    // Persistence
-                                    let (tx, rx) = if let PersistenceMode::Sync = self.persistence_mode {
-                                        let (tx, rx) = oneshot::channel();
-                                        (Some(tx), Some(rx))
-                                    } else {
-                                        (None, None)
-                                    };
-
-                                    let op = StreamStorageOp::Commit {
-                                        group: group_id.clone(),
-                                        partition,
-                                        offset,
-                                        generation_id,
-                                    };
-
-                                    let _ = self.writer_tx.send(WriterCommand { op, reply: tx }).await;
-
-                                    if let Some(wait_rx) = rx {
-                                        match wait_rx.await {
-                                            Ok(Ok(_)) => { let _ = reply.send(Ok(())); },
-                                            Ok(Err(e)) => { let _ = reply.send(Err(e)); },
-                                            Err(_) => { let _ = reply.send(Err("Writer died".to_string())); }
-                                        }
-                                    } else {
-                                        let _ = reply.send(Ok(()));
-                                    }
-
-                                } else {
-                                    let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
-                                }
-                            } else {
-                                let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
+        loop {
+            tokio::select! {
+                cmd = self.rx.recv() => {
+                    match cmd {
+                        Some(cmd) => {
+                            if self.handle_command(cmd) {
+                                break; // Stop command received
                             }
                         }
-                    } else {
-                        let _ = reply.send(Err("REBALANCE_NEEDED".to_string()));
+                        None => break, // Channel closed
                     }
-                },
-                TopicCommand::LeaveGroup { client_id, reply } => {
-                     tracing::info!("[TopicActor:{}] LeaveGroup Req: Client={}", self.state.name, client_id);
-                     if let Some(g_ids) = self.client_map.remove(&client_id) {
-                         tracing::info!("[TopicActor:{}] Found client in groups: {:?}", self.state.name, g_ids);
-                         for gid in g_ids {
-                             if let Some(g) = self.groups.get_mut(&gid) {
-                                 if g.remove_member(&client_id) {
-                                     tracing::info!("[TopicActor:{}] Client {} removed from Group {}. Triggering rebalance.", self.state.name, client_id, gid);
-                                     g.rebalance(self.state.get_partitions_count() as u32);
-                                 } else {
-                                     tracing::warn!("[TopicActor:{}] Client {} NOT found in Group members {}", self.state.name, client_id, gid);
-                                 }
-                             }
-                         }
-                     } else {
-                         tracing::warn!("[TopicActor:{}] Client {} NOT found in client_map", self.state.name, client_id);
-                     }
-                     let _ = reply.send(());
-                },
-                    TopicCommand::GetSnapshot { reply } => {
-                        let mut partitions_info = Vec::new();
-                        
-                        for (i, partition) in self.state.partitions.iter().enumerate() {
-                            let p_id = i as u32;
-
-                            // 1. Groups Info
-                            let mut groups_info = Vec::new();
-                            for group in self.groups.values() {
-                                // Get committed offset for this partition (defaults to 0 if not found)
-                                let committed = group.get_committed_offset(p_id);
-                                
-                                // We include the group if it exists on this topic
-                                groups_info.push(crate::dashboard::stream::ConsumerGroupSummary {
-                                    id: group.id.clone(),
-                                    committed_offset: committed,
-                                });
-                            }
-                            
-                            partitions_info.push(crate::dashboard::stream::PartitionInfo {
-                                id: p_id,
-                                groups: groups_info,
-                                last_offset: partition.next_offset,
-                            });
-                        }
-                        
-                        let summary = crate::dashboard::stream::TopicSummary {
-                             name: self.state.name.clone(),
-                             partitions: partitions_info,
-                        };
-                        let _ = reply.send(summary);
-                    },
-                TopicCommand::PersistenceAck { partition, last_persisted_offset } => {
-                    if let Some(p) = self.state.partitions.get_mut(partition as usize) {
-                        p.persisted_offset = last_persisted_offset;
-                    }
-                },
-                TopicCommand::SegmentRotated { partition, segment } => {
-                    if let Some(p) = self.state.partitions.get_mut(partition as usize) {
-                        p.segments.push(segment);
-                        p.segments.sort_by_key(|s| s.start_offset);
-                    }
-                },
-                TopicCommand::EvictOldMessages => {
-                    for partition in &mut self.state.partitions {
-                        let target_evict = partition.log.len().saturating_sub(partition.soft_limit);
-                        let evict_count = target_evict.min(self.eviction_batch_size);
-                        
-                        for _ in 0..evict_count {
-                            let should_evict = if let Some(front) = partition.log.front() {
-                                front.offset < partition.persisted_offset
-                            } else {
-                                false
-                            };
-                            
-                            if should_evict {
-                                if let Some(removed) = partition.log.pop_front() {
-                                    partition.ram_start_offset = removed.offset + 1;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                },
-                TopicCommand::Stop { reply } => {
-                    let _ = reply.send(());
-                    break;
                 }
+                _ = flush_timer.tick() => {
+                    self.flush_to_disk();
+                }
+                _ = eviction_timer.tick() => {
+                    self.state.evict();
+                }
+                _ = retention_timer.tick() => {
+                    if let Err(e) = self.check_retention() {
+                        error!("Retention check failed for '{}': {}", self.state.name, e);
+                    }
+                }
+                _ = redeliver_timer.tick() => {
+                    for group in self.groups.values_mut() {
+                        group.check_redelivery();
+                    }
+                }
+            }
+        }
+
+        // Final flush on shutdown
+        self.flush_to_disk();
+        if self.groups_dirty {
+            self.save_groups();
+        }
+        info!("TopicActor '{}' stopped", self.state.name);
+    }
+
+    /// Returns true if the actor should stop.
+    fn handle_command(&mut self, cmd: TopicCommand) -> bool {
+        match cmd {
+            TopicCommand::Publish { payload, reply } => {
+                let (seq, timestamp) = self.state.append(payload.clone());
+
+                // Buffer for disk
+                serialize_message(&mut self.write_buffer, seq, timestamp, &payload);
+
+                // Sync mode: flush immediately
+                if let PersistenceMode::Sync = self.persistence_mode {
+                    self.flush_to_disk();
+                    if let Some(ref mut f) = self.log_file {
+                        if let Err(e) = f.get_ref().sync_all() {
+                            let _ = reply.send(Err(format!("sync_all failed: {}", e)));
+                            return false;
+                        }
+                    }
+                }
+
+                let _ = reply.send(Ok(seq));
+            }
+
+            TopicCommand::Fetch { group_id, client_id, limit, reply } => {
+                let group = self.groups.entry(group_id.clone())
+                    .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.max_ack_pending, self.ack_wait));
+
+                if !group.is_member(&client_id) {
+                    let _ = reply.send(Err("NOT_MEMBER".to_string()));
+                    return false;
+                }
+
+                let msgs = group.fetch(&client_id, limit, &self.state.log, self.state.ram_start_seq);
+                let _ = reply.send(Ok(msgs));
+            }
+
+            TopicCommand::Ack { group_id, seq, reply } => {
+                if let Some(group) = self.groups.get_mut(&group_id) {
+                    match group.ack(seq) {
+                        Ok(()) => {
+                            self.groups_dirty = true;
+                            let _ = reply.send(Ok(()));
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(e));
+                        }
+                    }
+                } else {
+                    let _ = reply.send(Err("Group not found".to_string()));
+                }
+            }
+
+            TopicCommand::Nack { group_id, seq, reply } => {
+                if let Some(group) = self.groups.get_mut(&group_id) {
+                    match group.nack(seq) {
+                        Ok(()) => { let _ = reply.send(Ok(())); }
+                        Err(e) => { let _ = reply.send(Err(e)); }
+                    }
+                } else {
+                    let _ = reply.send(Err("Group not found".to_string()));
+                }
+            }
+
+            TopicCommand::Seek { group_id, target, reply } => {
+                if let Some(group) = self.groups.get_mut(&group_id) {
+                    match target {
+                        SeekTarget::Beginning => group.seek_beginning(),
+                        SeekTarget::End => group.seek_end(self.state.next_seq.saturating_sub(1)),
+                    }
+                    self.groups_dirty = true;
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let _ = reply.send(Err("Group not found".to_string()));
+                }
+            }
+
+            TopicCommand::JoinGroup { group_id, client_id, reply } => {
+                let group = self.groups.entry(group_id.clone())
+                    .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.max_ack_pending, self.ack_wait));
+
+                group.add_member(client_id.clone());
+
+                let g_list = self.client_map.entry(client_id).or_default();
+                if !g_list.contains(&group_id) {
+                    g_list.push(group_id);
+                }
+
+                let _ = reply.send(Ok(group.ack_floor));
+            }
+
+            TopicCommand::LeaveGroup { client_id, reply } => {
+                if let Some(g_ids) = self.client_map.remove(&client_id) {
+                    for gid in g_ids {
+                        if let Some(g) = self.groups.get_mut(&gid) {
+                            g.remove_member(&client_id);
+                        }
+                    }
+                }
+                let _ = reply.send(());
+            }
+
+            TopicCommand::Read { from_seq, limit, reply } => {
+                let mut msgs = self.state.read(from_seq, limit);
+                // If hot read returned nothing, try cold read from segments
+                if msgs.is_empty() {
+                    msgs = self.cold_read(from_seq, limit);
+                }
+                let _ = reply.send(msgs);
+            }
+
+            TopicCommand::GetSnapshot { reply } => {
+                let groups_info: Vec<_> = self.groups.values().map(|g| {
+                    crate::dashboard::stream::ConsumerGroupSummary {
+                        id: g.id.clone(),
+                        ack_floor: g.ack_floor,
+                        pending_count: g.pending.len(),
+                    }
+                }).collect();
+
+                let summary = crate::dashboard::stream::TopicSummary {
+                    name: self.state.name.clone(),
+                    last_seq: self.state.next_seq.saturating_sub(1),
+                    groups: groups_info,
+                };
+                let _ = reply.send(summary);
+            }
+
+            TopicCommand::Stop { reply } => {
+                let _ = reply.send(());
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // ==========================================
+    // EMBEDDED WRITER
+    // ==========================================
+
+    fn flush_to_disk(&mut self) {
+        if self.write_buffer.is_empty() {
+            return;
+        }
+
+        // Ensure file is open
+        if self.log_file.is_none() {
+            let (f, s) = Self::open_active_segment(&self.base_path, &self.segments);
+            self.log_file = f;
+            self.log_file_size = s;
+        }
+
+        if let Some(ref mut writer) = self.log_file {
+            // Check segmentation BEFORE writing
+            let buf_len = self.write_buffer.len() as u64;
+            if self.log_file_size + buf_len > self.max_segment_size && self.log_file_size > 0 {
+                // Rotate segment
+                let _ = writer.flush();
+
+                let new_seq = self.state.next_seq.saturating_sub(1); // approximate
+                let new_path = self.base_path.join(format!("{}.log", new_seq));
+
+                match File::create(&new_path) {
+                    Ok(new_file) => {
+                        *writer = BufWriter::new(new_file);
+                        self.log_file_size = 0;
+                        let segment = Segment { path: new_path, start_seq: new_seq };
+                        self.segments.push(segment);
+                        info!("Rotated log for '{}' at seq {}", self.state.name, new_seq);
+                    }
+                    Err(e) => {
+                        error!("Failed to create new segment: {}", e);
+                    }
+                }
+            }
+
+            if let Err(e) = writer.write_all(&self.write_buffer) {
+                error!("Failed to write to log: {}", e);
+            } else {
+                self.log_file_size += buf_len;
+                self.state.persisted_seq = self.state.next_seq.saturating_sub(1);
+            }
+
+            if let Err(e) = writer.flush() {
+                error!("Failed to flush log: {}", e);
+            }
+        }
+
+        self.write_buffer.clear();
+
+        // Save groups if dirty (periodically, not every ack)
+        if self.groups_dirty {
+            self.save_groups();
+            self.groups_dirty = false;
+        }
+    }
+
+    fn save_groups(&self) {
+        let groups_map: HashMap<String, u64> = self.groups.iter()
+            .map(|(id, g)| (id.clone(), g.ack_floor))
+            .collect();
+
+        if let Err(e) = save_groups_file(&self.base_path, &groups_map) {
+            error!("Failed to save groups for '{}': {}", self.state.name, e);
+        }
+    }
+
+    fn cold_read(&self, from_seq: u64, limit: usize) -> Vec<Message> {
+        // Find the segment with max(start_seq) such that start_seq <= from_seq
+        if let Some(segment) = self.segments.iter()
+            .filter(|s| s.start_seq <= from_seq)
+            .last()
+        {
+            let msgs = read_log_segment(&segment.path, from_seq, limit);
+            if !msgs.is_empty() {
+                return msgs;
+            }
+        }
+        Vec::new()
+    }
+
+    fn check_retention(&mut self) -> std::io::Result<()> {
+        if self.retention.max_age_ms.is_none() && self.retention.max_bytes.is_none() {
+            return Ok(());
+        }
+
+        let mut segments = match find_segments(&self.base_path) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Retention: Failed to list segments: {}", e);
+                return Err(e);
+            }
+        };
+
+        // Never delete the active segment (last one)
+        if segments.len() <= 1 {
+            return Ok(());
+        }
+        let _active = segments.pop();
+
+        // Time retention
+        if let Some(max_age) = self.retention.max_age_ms {
+            let limit = std::time::SystemTime::now() - Duration::from_millis(max_age);
+            let mut survivors = Vec::new();
+            for seg in segments {
+                let mut deleted = false;
+                if let Ok(metadata) = fs::metadata(&seg.path) {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified < limit {
+                            info!("Retention (Time): Deleting {:?}", seg.path);
+                            if let Err(e) = fs::remove_file(&seg.path) {
+                                error!("Failed to delete {:?}: {}", seg.path, e);
+                            } else {
+                                deleted = true;
+                            }
+                        }
+                    }
+                }
+                if !deleted {
+                    survivors.push(seg);
+                }
+            }
+            segments = survivors;
+        }
+
+        // Size retention
+        if let Some(max_bytes) = self.retention.max_bytes {
+            let active_size = self.log_file_size;
+            let mut current_total: u64 = active_size;
+            for seg in &segments {
+                if let Ok(meta) = fs::metadata(&seg.path) {
+                    current_total += meta.len();
+                }
+            }
+
+            let mut i = 0;
+            while current_total > max_bytes && i < segments.len() {
+                let seg = &segments[i];
+                if let Ok(meta) = fs::metadata(&seg.path) {
+                    let size = meta.len();
+                    info!("Retention (Size): Deleting {:?} (Total {} > Max {})", seg.path, current_total, max_bytes);
+                    if let Err(e) = fs::remove_file(&seg.path) {
+                        error!("Failed to delete {:?}: {}", seg.path, e);
+                    } else {
+                        current_total = current_total.saturating_sub(size);
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        // Refresh segments index
+        if let Ok(new_segments) = find_segments(&self.base_path) {
+            self.segments = new_segments;
+            if let Some(first) = self.segments.first() {
+                self.state.start_seq = first.start_seq;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn open_active_segment(base_path: &PathBuf, segments: &[Segment]) -> (Option<BufWriter<File>>, u64) {
+        let path = if let Some(last) = segments.last() {
+            last.path.clone()
+        } else {
+            base_path.join("1.log") // first segment starts at seq 1
+        };
+
+        match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                (Some(BufWriter::new(file)), size)
+            }
+            Err(e) => {
+                error!("Failed to open log file {:?}: {}", path, e);
+                (None, 0)
             }
         }
     }

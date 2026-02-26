@@ -67,10 +67,10 @@ const QueueCommands = {
   },
 
   ack: (conn: NexoConnection, name: string, id: string) =>
-    conn.send(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
+    conn.sendFireAndForget(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
 
   nack: (conn: NexoConnection, name: string, id: string, reason: string) =>
-    conn.send(
+    conn.sendFireAndForget(
       QueueOpcode.Q_NACK,
       FrameCodec.uuid(id),
       FrameCodec.string(name),
@@ -285,19 +285,18 @@ export class NexoQueue<T = any> {
           await runConcurrent(messages, concurrency, async (msg) => {
             if (!active) {
               if (this.conn.isConnected) {
-                // If stopped while consuming, release message immediately so it's available for others
-                await this.nack(msg.id, "Consumer stopped").catch(() => {});
+                this.nack(msg.id, "Consumer stopped");
               }
               return;
             }
             try {
               await callback(msg.data);
-              await this.ack(msg.id);
+              this.ack(msg.id);
             } catch (e: any) {
               if (!this.conn.isConnected) return;
               const reason = e instanceof Error ? e.message : String(e);
               this.logger.error(`[Queue:${this.name}] Consumer error, sending NACK. Reason: ${reason}`);
-              await this.nack(msg.id, reason);
+              this.nack(msg.id, reason);
             }
           });
 
@@ -327,11 +326,11 @@ export class NexoQueue<T = any> {
     };
   }
 
-  private async ack(id: string): Promise<void> {
-    await QueueCommands.ack(this.conn, this.name, id);
+  private ack(id: string): void {
+    QueueCommands.ack(this.conn, this.name, id);
   }
 
-  private async nack(id: string, reason: string): Promise<void> {
-    await QueueCommands.nack(this.conn, this.name, id, reason);
+  private nack(id: string, reason: string): void {
+    QueueCommands.nack(this.conn, this.name, id, reason);
   }
 }

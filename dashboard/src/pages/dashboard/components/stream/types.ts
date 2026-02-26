@@ -4,29 +4,25 @@ export interface StreamBrokerSnapshot {
 
 export interface TopicSummary {
   name: string;
-  partitions: PartitionInfo[];
-}
-
-export interface PartitionInfo {
-  id: number;
+  last_seq: number;
   groups: ConsumerGroupSummary[];
-  last_offset: number;
 }
 
 export interface ConsumerGroupSummary {
   id: string;
-  committed_offset: number;
+  ack_floor: number;
+  pending_count: number;
 }
 
 export interface MessagePreview {
-  offset: number;
+  seq: number;
   timestamp: string;
   payload: unknown;
 }
 
 export interface StreamMessages {
   messages: MessagePreview[];
-  from_offset: number;
+  from_seq: number;
   limit: number;
-  last_offset: number;
+  last_seq: number;
 }

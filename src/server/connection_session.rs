@@ -36,7 +36,6 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
 
     engine.pubsub.connect(client_id.clone(), push_tx);
-    let _stream_guard = engine.stream.register_session(client_id.0.clone());
 
     let outbound_bridge = outbound_tx.clone();
     let bridge_handle = tokio::spawn(async move {
@@ -125,7 +124,6 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     engine.pubsub.disconnect(&client_id).await;
     engine.stream.disconnect(client_id.0.clone()).await;
 
-    drop(_stream_guard);
     drop(outbound_tx);
     let _ = socket_task.await;
     Ok(())

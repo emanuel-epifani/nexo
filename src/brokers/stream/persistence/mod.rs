@@ -1,5 +1,3 @@
-pub mod types;
 pub mod writer;
 
-pub use types::{StreamStorageOp, WriterCommand};
-pub use writer::{StreamWriter, recover_topic};
+pub use writer::{recover_topic, read_log_segment, find_segments, Segment, RecoveredState};
