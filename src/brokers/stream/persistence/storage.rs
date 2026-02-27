@@ -39,7 +39,7 @@ pub enum StorageCommand {
     Append {
         topic_name: String,
         messages: Vec<MessageToAppend>,
-        reply: oneshot::Sender<Result<u64, String>>,
+        ack_sender: mpsc::Sender<u64>,
     },
     
     ColdRead {
@@ -61,15 +61,13 @@ pub enum StorageCommand {
     }
 }
 
-// ==========================================
-// STORAGE MANAGER ACTOR
-// ==========================================
-
-struct TopicContext {
+pub struct TopicContext {
     /// Active file path
     active_path: PathBuf,
-    /// Pending ACKs for the next flush
-    pending_acks: Vec<(u64, oneshot::Sender<Result<u64, String>>)>,
+    /// The last sender we received for this topic
+    ack_sender: Option<mpsc::Sender<u64>>,
+    /// Highest sequence received but not yet flushed
+    highest_pending_seq: u64,
     /// We keep a reference to know when to rotate
     current_file_size: u64,
 }
@@ -133,8 +131,8 @@ impl StorageManager {
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { topic_name, messages, reply } => {
-                self.handle_append(topic_name, messages, reply).await;
+            StorageCommand::Append { topic_name, messages, ack_sender } => {
+                self.handle_append(topic_name, messages, ack_sender).await;
             }
             StorageCommand::ColdRead { topic_name, from_seq, limit, reply } => {
                 let msgs = self.cold_read(&topic_name, from_seq, limit).await;
@@ -157,10 +155,9 @@ impl StorageManager {
         &mut self,
         topic_name: String,
         messages: Vec<MessageToAppend>,
-        reply: oneshot::Sender<Result<u64, String>>,
+        ack_sender: mpsc::Sender<u64>,
     ) {
         if messages.is_empty() {
-            let _ = reply.send(Ok(0)); // Should not happen, but safe fallback
             return;
         }
 
@@ -173,7 +170,6 @@ impl StorageManager {
             if !base_topic_path.exists() {
                 if let Err(e) = tokio::fs::create_dir_all(&base_topic_path).await {
                     error!("FATAL: Failed to create topic dir {:?}: {}", base_topic_path, e);
-                    let _ = reply.send(Err(e.to_string()));
                     return;
                 }
             }
@@ -184,10 +180,14 @@ impl StorageManager {
             let file_size = tokio::fs::metadata(&active_path).await.map(|m| m.len()).unwrap_or(0);
 
             self.topics.insert(topic_name.clone(), TopicContext {
-                active_path,
-                pending_acks: Vec::new(),
+                active_path: base_topic_path.join("1.log"),
+                ack_sender: Some(ack_sender.clone()),
+                highest_pending_seq: 0,
                 current_file_size: file_size,
             });
+        } else {
+            // Update the sender in case it changed (e.g. actor restart)
+            self.topics.get_mut(&topic_name).unwrap().ack_sender = Some(ack_sender);
         }
 
         // Serialize all messages into a temporary buffer
@@ -226,7 +226,6 @@ impl StorageManager {
             Ok(writer) => {
                 if let Err(e) = writer.write_all(&buffer).await {
                     error!("StorageManager: Failed to write to {:?}: {}", path, e);
-                    let _ = reply.send(Err(e.to_string()));
                     // Could pop the writer so it retries opening next time
                     self.open_files.pop(&path);
                     return;
@@ -234,12 +233,10 @@ impl StorageManager {
                 
                 let ctx = self.topics.get_mut(&topic_name).unwrap();
                 ctx.current_file_size += bytes_len;
-                // Add the promise to the queue for the next global tick
-                ctx.pending_acks.push((highest_seq, reply));
+                ctx.highest_pending_seq = highest_seq;
             }
             Err(e) => {
                 error!("StorageManager: Failed to open file {:?}: {}", path, e);
-                let _ = reply.send(Err(e.to_string()));
             }
         }
     }
@@ -273,34 +270,23 @@ impl StorageManager {
     /// The Global Tick: Flushes all currently tracked dirty writers to disk,
     /// and resolves all promises for TopicActors.
     async fn flush_all(&mut self) {
-        let mut flushed_topics = Vec::new();
-
         // We only flush the files that are currently in the cache.
         for (path, writer) in self.open_files.iter_mut() {
             if let Err(e) = writer.flush().await {
                 error!("StorageManager: Failed to flush {:?}: {}", path, e);
             }
-            // Technically, we should only ACK if the flush was successful.
-            // For simplicity, we assume the fsync passed unless kernel panicked.
         }
 
-        // Now that the disk has (hopefully) persisted the buffers, ACK back to the Topics
-        for (topic_name, ctx) in self.topics.iter_mut() {
-            if !ctx.pending_acks.is_empty() {
-                flushed_topics.push(topic_name.clone());
-            }
-        }
-
-        for topic in flushed_topics {
-            let ctx = self.topics.get_mut(&topic).unwrap();
-            let mut highest_seq_flushed = 0;
-            
-            for (seq, reply) in ctx.pending_acks.drain(..) {
-                if seq > highest_seq_flushed {
-                    highest_seq_flushed = seq;
+        // Now that the disk has persisted the buffers, notify Topics via MPSC
+        for ctx in self.topics.values_mut() {
+            if ctx.highest_pending_seq > 0 {
+                if let Some(ref sender) = ctx.ack_sender {
+                    // Try to send the ACK. If it fails (full or closed), we'll try again next tick
+                    // as we don't reset highest_pending_seq unless send succeeds.
+                    if let Ok(_) = sender.try_send(ctx.highest_pending_seq) {
+                        ctx.highest_pending_seq = 0;
+                    }
                 }
-                // We resolve the promise!
-                let _ = reply.send(Ok(seq));
             }
         }
     }

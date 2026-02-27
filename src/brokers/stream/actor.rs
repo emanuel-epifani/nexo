@@ -70,10 +70,6 @@ pub enum TopicCommand {
     Stop {
         reply: oneshot::Sender<()>,
     },
-    // ---- Internal Commands ----
-    PersistedAck {
-        seq: u64,
-    }
 }
 
 // ==========================================
@@ -87,6 +83,9 @@ pub(crate) struct TopicActor {
     rx: mpsc::Receiver<TopicCommand>,
     self_tx: mpsc::Sender<TopicCommand>, // Added self-reference for internal commands
     storage_tx: mpsc::Sender<StorageCommand>,
+    // New: dedicated channel for persistence ACKs from StorageManager
+    ack_tx: mpsc::Sender<u64>,
+    ack_rx: mpsc::Receiver<u64>,
     // Groups state
     groups_dirty: bool,
     // Config
@@ -134,6 +133,9 @@ impl TopicActor {
             );
         }
 
+        // Create explicit persistence ACK channel
+        let (ack_tx, ack_rx) = mpsc::channel(100);
+
         // Remove local segments reference, as StorageManager handles filesystem indexing completely.
 
         Self {
@@ -143,6 +145,8 @@ impl TopicActor {
             rx,
             self_tx,
             storage_tx,
+            ack_tx,
+            ack_rx,
             groups_dirty: false,
             max_segment_size: config.max_segment_size,
             retention: config.retention,
@@ -154,16 +158,6 @@ impl TopicActor {
     pub(crate) async fn run(mut self, config: TopicConfig) {
         info!("TopicActor '{}' started", self.state.name);
         
-        // We will create a local clone of the actor's own TX channel 
-        // to send itself InternalCommands (like PersistedAck)
-        let self_tx = mpsc::channel::<TopicCommand>(10).0; 
-        // Wait, TopicActor doesn't take its own Sender in `new`. 
-        // Let's modify TopicActor::new or just pass it in. 
-        // Actually, we can just pass the tx into `run` or `new` if we had it, but `StreamManager` owns `tx`.
-        // Alternatively, we use `self.storage_tx`? No, StorageManager replies via oneshot!
-        // So we can just poll those oneshots in the main `select!`, but that requires maintaining a Data Structure of Futures.
-        // A much simpler actor-pattern is: we pass the parent's `mpsc::Sender<TopicCommand>` into the TopicActor so it can send messages to itself!
-
         let mut groups_save_timer = tokio::time::interval(Duration::from_millis(config.default_flush_ms * 10));
         groups_save_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -209,6 +203,13 @@ impl TopicActor {
                         group.check_redelivery();
                     }
                 }
+                ack_msg = self.ack_rx.recv() => {
+                    if let Some(seq) = ack_msg {
+                        if seq > self.state.persisted_seq {
+                            self.state.persisted_seq = seq;
+                        }
+                    }
+                }
             }
         }
 
@@ -225,31 +226,19 @@ impl TopicActor {
             TopicCommand::Publish { payload, reply } => {
                 let (seq, timestamp) = self.state.append(payload.clone());
 
-                let payload_clone = payload.clone();
-                let topic_name = self.state.name.clone();
-                let (ack_tx, ack_rx) = oneshot::channel();
-
                 let storage_msg = StorageCommand::Append {
-                    topic_name,
+                    topic_name: self.state.name.clone(),
                     messages: vec![MessageToAppend {
                         seq,
                         timestamp,
-                        payload: payload_clone,
+                        payload,
                     }],
-                    reply: ack_tx,
+                    ack_sender: self.ack_tx.clone(),
                 };
                 
                 let _ = self.storage_tx.send(storage_msg).await;
 
-                // Spawn a tiny task to await the ACK and send an Internal Command to self
-                let self_tx = self.self_tx.clone();
-                tokio::spawn(async move {
-                    if let Ok(Ok(persisted_seq)) = ack_rx.await {
-                        let _ = self_tx.send(TopicCommand::PersistedAck { seq: persisted_seq }).await;
-                    }
-                });
-
-                // Rely on the Internal Command to update state! No fake synchronous update anymore.
+                // Reply immediately to client with the assigned sequence
                 let _ = reply.send(Ok(seq));
             }
 
@@ -361,12 +350,6 @@ impl TopicActor {
                     groups: groups_info,
                 };
                 let _ = reply.send(summary);
-            }
-
-            TopicCommand::PersistedAck { seq } => {
-                if seq > self.state.persisted_seq {
-                    self.state.persisted_seq = seq;
-                }
             }
 
             TopicCommand::Stop { reply } => {
