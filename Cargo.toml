@@ -22,6 +22,7 @@ tower-http = { version = "0.6", features = ["compression-gzip"] }
 rust-embed = "8.9.0"
 mime_guess = "2.0.5"
 hashlink = "0.11.0"
+lru = "0.12.3"
 hex = "0.4"
 rusqlite = { version = "0.38.0", features = ["bundled", "uuid", "time"] }
 crc32fast = "1.4"

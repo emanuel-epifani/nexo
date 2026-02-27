@@ -289,6 +289,7 @@ mod stream_tests {
 
                 manager.publish(topic, Bytes::from("msg1")).await.unwrap();
                 manager.publish(topic, Bytes::from("msg2")).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
             // 2. Recovery
@@ -335,8 +336,8 @@ mod stream_tests {
 
                 // Force a flush by publishing another message (sync mode)
                 manager.publish(topic, Bytes::from("msg3")).await.unwrap();
-                // Give time for groups to be saved
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                // Give time for groups to be saved (requires > default_flush_ms * 10)
+                tokio::time::sleep(Duration::from_millis(600)).await;
             }
 
             // Recover
@@ -617,7 +618,7 @@ mod stream_tests {
         use super::*;
         use nexo::brokers::stream::StreamManager;
 
-        const COUNT: usize = 10_000;
+        const COUNT: usize = 500_000;
 
 
         #[tokio::test]

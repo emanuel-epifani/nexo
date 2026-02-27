@@ -10,6 +10,7 @@ use crate::brokers::stream::topic::TopicConfig;
 use crate::brokers::stream::message::Message;
 use crate::brokers::stream::commands::{StreamCreateOptions, SeekTarget};
 use crate::brokers::stream::actor::{TopicCommand, TopicActor};
+use crate::brokers::stream::persistence::{StorageManager, StorageCommand};
 use crate::config::SystemStreamConfig;
 use crate::dashboard::stream::StreamBrokerSnapshot;
 
@@ -57,6 +58,20 @@ impl StreamManager {
         tokio::spawn(async move {
             let mut actors = HashMap::<String, mpsc::Sender<TopicCommand>>::new();
             
+            // SPAWN STORAGE MANAGER
+            let (storage_tx, storage_rx) = mpsc::channel(50_000); // Backpressure protection buffer
+            let max_open_files = 1024; // TODO: move to config
+            let max_segment_size = system_config.max_segment_size;
+            
+            let storage_manager = StorageManager::new(
+                system_config.persistence_path.clone(),
+                storage_rx,
+                max_open_files,
+                system_config.default_flush_ms,
+                max_segment_size,
+            );
+            tokio::spawn(storage_manager.run());
+
             // WARM START: Discover and restore topics from filesystem
             let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
             if persistence_path.exists() {
@@ -72,7 +87,9 @@ impl StreamManager {
                                 let actor = TopicActor::new(
                                     topic_name.to_string(),
                                     t_rx,
+                                    t_tx.clone(),
                                     topic_config,
+                                    storage_tx.clone(),
                                 ).await;
                                 tokio::spawn(actor.run(config_clone));
                                 actors.insert(topic_name.to_string(), t_tx);
@@ -96,7 +113,9 @@ impl StreamManager {
                             let actor = TopicActor::new(
                                 name.clone(),
                                 t_rx,
+                                t_tx.clone(),
                                 topic_config,
+                                storage_tx.clone(),
                             ).await;
                             tokio::spawn(actor.run(config_clone));
                             actors.insert(name, t_tx);

@@ -1,13 +1,11 @@
 //! Stream Topic Actor: Async actor owning a single topic's state
 //!
-//! Single-log model (no partitions). Writer is embedded (no separate actor).
-//! Handles: Publish, Fetch, Ack, Nack, Seek, Join, Leave, Eviction, Flush, Retention.
+//! High-level Brain: delegates ALL disk operations to StorageManager.
+//! Handles: Publish, Fetch, Ack, Nack, Seek, Join, Leave, Eviction.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
@@ -18,8 +16,8 @@ use crate::brokers::stream::message::Message;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::commands::SeekTarget;
 use crate::brokers::stream::persistence::{
-    recover_topic, read_log_segment, find_segments, Segment,
-    writer::{serialize_message, save_groups_file},
+    recover_topic,
+    storage::{StorageCommand, MessageToAppend},
 };
 
 // ==========================================
@@ -72,6 +70,10 @@ pub enum TopicCommand {
     Stop {
         reply: oneshot::Sender<()>,
     },
+    // ---- Internal Commands ----
+    PersistedAck {
+        seq: u64,
+    }
 }
 
 // ==========================================
@@ -83,13 +85,10 @@ pub(crate) struct TopicActor {
     groups: HashMap<String, ConsumerGroup>,
     client_map: HashMap<String, Vec<String>>,
     rx: mpsc::Receiver<TopicCommand>,
-    // Embedded writer
-    write_buffer: Vec<u8>,
-    log_file: Option<BufWriter<File>>,
-    log_file_size: u64,
+    self_tx: mpsc::Sender<TopicCommand>, // Added self-reference for internal commands
+    storage_tx: mpsc::Sender<StorageCommand>,
+    // Groups state
     groups_dirty: bool,
-    base_path: PathBuf,
-    segments: Vec<Segment>,
     // Config
     max_segment_size: u64,
     retention: crate::brokers::stream::commands::RetentionOptions,
@@ -101,7 +100,9 @@ impl TopicActor {
     pub(crate) async fn new(
         name: String,
         rx: mpsc::Receiver<TopicCommand>,
+        self_tx: mpsc::Sender<TopicCommand>, // Require self_tx
         config: TopicConfig,
+        storage_tx: mpsc::Sender<StorageCommand>,
     ) -> Self {
         let base_path = PathBuf::from(&config.persistence_path).join(&name);
 
@@ -133,29 +134,16 @@ impl TopicActor {
             );
         }
 
-        // Open active segment file
-        let mut segments = segments;
-        let (log_file, log_file_size) = Self::open_active_segment(&base_path, &segments).await;
-
-        // Ensure initial segment is in the index (for cold reads on fresh topics)
-        if segments.is_empty() {
-            segments.push(Segment {
-                path: base_path.join("1.log"),
-                start_seq: 1,
-            });
-        }
+        // Remove local segments reference, as StorageManager handles filesystem indexing completely.
 
         Self {
             state,
             groups,
             client_map: HashMap::new(),
             rx,
-            write_buffer: Vec::with_capacity(64 * 1024),
-            log_file,
-            log_file_size,
+            self_tx,
+            storage_tx,
             groups_dirty: false,
-            base_path,
-            segments,
             max_segment_size: config.max_segment_size,
             retention: config.retention,
             max_ack_pending: config.max_ack_pending,
@@ -165,10 +153,19 @@ impl TopicActor {
 
     pub(crate) async fn run(mut self, config: TopicConfig) {
         info!("TopicActor '{}' started", self.state.name);
+        
+        // We will create a local clone of the actor's own TX channel 
+        // to send itself InternalCommands (like PersistedAck)
+        let self_tx = mpsc::channel::<TopicCommand>(10).0; 
+        // Wait, TopicActor doesn't take its own Sender in `new`. 
+        // Let's modify TopicActor::new or just pass it in. 
+        // Actually, we can just pass the tx into `run` or `new` if we had it, but `StreamManager` owns `tx`.
+        // Alternatively, we use `self.storage_tx`? No, StorageManager replies via oneshot!
+        // So we can just poll those oneshots in the main `select!`, but that requires maintaining a Data Structure of Futures.
+        // A much simpler actor-pattern is: we pass the parent's `mpsc::Sender<TopicCommand>` into the TopicActor so it can send messages to itself!
 
-        let flush_interval = Duration::from_millis(config.default_flush_ms);
-        let mut flush_timer = tokio::time::interval(flush_interval);
-        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut groups_save_timer = tokio::time::interval(Duration::from_millis(config.default_flush_ms * 10));
+        groups_save_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Eviction timer
         let mut eviction_timer = tokio::time::interval(Duration::from_millis(config.eviction_interval_ms));
@@ -194,9 +191,8 @@ impl TopicActor {
                         None => break, // Channel closed
                     }
                 }
-                _ = flush_timer.tick() => {
-                    self.flush_to_disk().await;
-                    // Periodically save groups if dirty (not strictly tied to message buffer flush)
+                _ = groups_save_timer.tick() => {
+                    // Periodically save groups if dirty
                     if self.groups_dirty {
                         self.save_groups().await;
                         self.groups_dirty = false;
@@ -206,9 +202,7 @@ impl TopicActor {
                     self.state.evict();
                 }
                 _ = retention_timer.tick() => {
-                    if let Err(e) = self.check_retention().await {
-                        error!("Retention check failed for '{}': {}", self.state.name, e);
-                    }
+                    self.check_retention().await;
                 }
                 _ = redeliver_timer.tick() => {
                     for group in self.groups.values_mut() {
@@ -218,8 +212,7 @@ impl TopicActor {
             }
         }
 
-        // Final flush on shutdown
-        self.flush_to_disk().await;
+        // Non-blocking groups save on shutdown (no disk writer to flush here since it's global)
         if self.groups_dirty {
             self.save_groups().await;
         }
@@ -232,9 +225,31 @@ impl TopicActor {
             TopicCommand::Publish { payload, reply } => {
                 let (seq, timestamp) = self.state.append(payload.clone());
 
-                // Buffer for disk
-                serialize_message(&mut self.write_buffer, seq, timestamp, &payload);
+                let payload_clone = payload.clone();
+                let topic_name = self.state.name.clone();
+                let (ack_tx, ack_rx) = oneshot::channel();
 
+                let storage_msg = StorageCommand::Append {
+                    topic_name,
+                    messages: vec![MessageToAppend {
+                        seq,
+                        timestamp,
+                        payload: payload_clone,
+                    }],
+                    reply: ack_tx,
+                };
+                
+                let _ = self.storage_tx.send(storage_msg).await;
+
+                // Spawn a tiny task to await the ACK and send an Internal Command to self
+                let self_tx = self.self_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(persisted_seq)) = ack_rx.await {
+                        let _ = self_tx.send(TopicCommand::PersistedAck { seq: persisted_seq }).await;
+                    }
+                });
+
+                // Rely on the Internal Command to update state! No fake synchronous update anymore.
                 let _ = reply.send(Ok(seq));
             }
 
@@ -317,12 +332,18 @@ impl TopicActor {
             }
 
             TopicCommand::Read { from_seq, limit, reply } => {
-                let mut msgs = self.state.read(from_seq, limit);
-                // If hot read returned nothing, try cold read from segments
+                let msgs = self.state.read(from_seq, limit);
+                // If hot read returned nothing, try cold read from segments via StorageManager
                 if msgs.is_empty() {
-                    msgs = self.cold_read(from_seq, limit).await;
+                    let _ = self.storage_tx.send(StorageCommand::ColdRead {
+                        topic_name: self.state.name.clone(),
+                        from_seq,
+                        limit,
+                        reply, // We forward the reply oneshot directly to the StorageManager!
+                    }).await;
+                } else {
+                    let _ = reply.send(msgs);
                 }
-                let _ = reply.send(msgs);
             }
 
             TopicCommand::GetSnapshot { reply } => {
@@ -342,6 +363,12 @@ impl TopicActor {
                 let _ = reply.send(summary);
             }
 
+            TopicCommand::PersistedAck { seq } => {
+                if seq > self.state.persisted_seq {
+                    self.state.persisted_seq = seq;
+                }
+            }
+
             TopicCommand::Stop { reply } => {
                 let _ = reply.send(());
                 return true;
@@ -352,195 +379,25 @@ impl TopicActor {
     }
 
     // ==========================================
-    // EMBEDDED WRITER
+    // PERSISTENCE HELPERS
     // ==========================================
-
-    async fn flush_to_disk(&mut self) {
-        if self.write_buffer.is_empty() {
-            return;
-        }
-
-        // Ensure file is open
-        if self.log_file.is_none() {
-            let (f, s) = Self::open_active_segment(&self.base_path, &self.segments).await;
-            self.log_file = f;
-            self.log_file_size = s;
-        }
-
-        if let Some(ref mut writer) = self.log_file {
-            // Check segmentation BEFORE writing
-            let buf_len = self.write_buffer.len() as u64;
-            if self.log_file_size + buf_len > self.max_segment_size && self.log_file_size > 0 {
-                // Rotate segment
-                let _ = writer.flush().await;
-
-                let new_seq = self.state.next_seq.saturating_sub(1); // approximate
-                let new_path = self.base_path.join(format!("{}.log", new_seq));
-
-                match File::create(&new_path).await {
-                    Ok(new_file) => {
-                        *writer = BufWriter::new(new_file);
-                        self.log_file_size = 0;
-                        let segment = Segment { path: new_path, start_seq: new_seq };
-                        self.segments.push(segment);
-                        info!("Rotated log for '{}' at seq {}", self.state.name, new_seq);
-                    }
-                    Err(e) => {
-                        error!("Failed to create new segment: {}", e);
-                    }
-                }
-            }
-
-            if let Err(e) = writer.write_all(&self.write_buffer).await {
-                error!("Failed to write to log: {}", e);
-            } else {
-                self.log_file_size += buf_len;
-                self.state.persisted_seq = self.state.next_seq.saturating_sub(1);
-            }
-
-            if let Err(e) = writer.flush().await {
-                error!("Failed to flush log: {}", e);
-            }
-        }
-
-        self.write_buffer.clear();
-
-
-    }
 
     async fn save_groups(&self) {
         let groups_map: HashMap<String, u64> = self.groups.iter()
             .map(|(id, g)| (id.clone(), g.ack_floor))
             .collect();
 
-        if let Err(e) = save_groups_file(&self.base_path, &groups_map).await {
-            error!("Failed to save groups for '{}': {}", self.state.name, e);
-        }
+        let _ = self.storage_tx.send(StorageCommand::SaveGroups {
+            topic_name: self.state.name.clone(),
+            groups_data: groups_map,
+        }).await;
     }
 
-    async fn cold_read(&self, from_seq: u64, limit: usize) -> Vec<Message> {
-        let segments = self.segments.clone();
-        
-        let mut all_msgs = Vec::new();
-        let mut current_from_seq = from_seq;
-        let mut remaining_limit = limit;
-
-        // Find the index of the first segment to read from
-        let first_seg_idx = segments.iter()
-            .rposition(|s| s.start_seq <= from_seq);
-
-        if let Some(idx) = first_seg_idx {
-            for segment in segments.iter().skip(idx) {
-                if remaining_limit == 0 { break; }
-                let msgs = read_log_segment(&segment.path, current_from_seq, remaining_limit).await;
-                if !msgs.is_empty() {
-                    let last_seq = msgs.last().unwrap().seq;
-                    current_from_seq = last_seq + 1;
-                    remaining_limit = remaining_limit.saturating_sub(msgs.len());
-                    all_msgs.extend(msgs);
-                }
-            }
-        }
-        all_msgs
-    }
-
-    async fn check_retention(&mut self) -> std::io::Result<()> {
-        if self.retention.max_age_ms.is_none() && self.retention.max_bytes.is_none() {
-            return Ok(());
-        }
-
-        let mut segments = match find_segments(&self.base_path).await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("Retention: Failed to list segments: {}", e);
-                return Err(e);
-            }
-        };
-
-        // Never delete the active segment (last one)
-        if segments.len() <= 1 {
-            return Ok(());
-        }
-        let _active = segments.pop();
-
-        // Time retention
-        if let Some(max_age) = self.retention.max_age_ms {
-            let limit = std::time::SystemTime::now() - Duration::from_millis(max_age);
-            let mut survivors = Vec::new();
-            for seg in segments {
-                let mut deleted = false;
-                if let Ok(metadata) = tokio::fs::metadata(&seg.path).await {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified < limit {
-                            info!("Retention (Time): Deleting {:?}", seg.path);
-                            if let Err(e) = tokio::fs::remove_file(&seg.path).await {
-                                error!("Failed to delete {:?}: {}", seg.path, e);
-                            } else {
-                                deleted = true;
-                            }
-                        }
-                    }
-                }
-                if !deleted {
-                    survivors.push(seg);
-                }
-            }
-            segments = survivors;
-        }
-
-        // Size retention
-        if let Some(max_bytes) = self.retention.max_bytes {
-            let active_size = self.log_file_size;
-            let mut current_total: u64 = active_size;
-            for seg in &segments {
-                if let Ok(meta) = tokio::fs::metadata(&seg.path).await {
-                    current_total += meta.len();
-                }
-            }
-
-            let mut i = 0;
-            while current_total > max_bytes && i < segments.len() {
-                let seg = &segments[i];
-                if let Ok(meta) = tokio::fs::metadata(&seg.path).await {
-                    let size = meta.len();
-                    info!("Retention (Size): Deleting {:?} (Total {} > Max {})", seg.path, current_total, max_bytes);
-                    if let Err(e) = tokio::fs::remove_file(&seg.path).await {
-                        error!("Failed to delete {:?}: {}", seg.path, e);
-                    } else {
-                        current_total = current_total.saturating_sub(size);
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        // Refresh segments index
-        if let Ok(new_segments) = find_segments(&self.base_path).await {
-            self.segments = new_segments;
-            if let Some(first) = self.segments.first() {
-                self.state.start_seq = first.start_seq;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn open_active_segment(base_path: &PathBuf, segments: &[Segment]) -> (Option<BufWriter<File>>, u64) {
-        let path = if let Some(last) = segments.last() {
-            last.path.clone()
-        } else {
-            base_path.join("1.log") // first segment starts at seq 1
-        };
-
-        match OpenOptions::new().create(true).append(true).open(&path).await {
-            Ok(file) => {
-                let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-                (Some(BufWriter::new(file)), size)
-            }
-            Err(e) => {
-                error!("Failed to open log file {:?}: {}", path, e);
-                (None, 0)
-            }
-        }
+    async fn check_retention(&mut self) {
+        let _ = self.storage_tx.send(StorageCommand::ApplyRetention {
+            topic_name: self.state.name.clone(),
+            retention: self.retention.clone(),
+            max_segment_size: self.max_segment_size,
+        }).await;
     }
 }

@@ -1,7 +1,7 @@
 //! Stream Persistence: Recovery and Segment I/O
 //!
 //! Contains functions for reading/writing segment files and recovering topic state from disk.
-//! The StreamWriter actor has been removed — write logic is embedded in the TopicActor.
+//! All disk mutation is exclusively handled by the global StorageManager.
 
 use std::path::PathBuf;
 use tokio::fs::{File, OpenOptions};
