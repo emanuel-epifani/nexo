@@ -58,6 +58,11 @@ pub enum StorageCommand {
         topic_name: String,
         retention: RetentionOptions,
         max_segment_size: u64,
+    },
+
+    DropTopic {
+        topic_name: String,
+        reply: oneshot::Sender<()>,
     }
 }
 
@@ -147,6 +152,22 @@ impl StorageManager {
             StorageCommand::ApplyRetention { topic_name, retention, max_segment_size: _ } => {
                 let base_path = self.base_path.join(&topic_name);
                 self.apply_retention(&topic_name, &base_path, &retention).await;
+            }
+            StorageCommand::DropTopic { topic_name, reply } => {
+                if let Some(ctx) = self.topics.remove(&topic_name) {
+                    self.open_files.pop(&ctx.active_path);
+                    info!("StorageManager: Dropping context for '{}'", topic_name);
+                }
+                // Physical deletion of the topic directory
+                let topic_path = self.base_path.join(&topic_name);
+                if topic_path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&topic_path) {
+                        error!("StorageManager: Failed to physically delete topic dir {:?}: {}", topic_path, e);
+                    } else {
+                        info!("StorageManager: Physically deleted topic dir {:?}", topic_path);
+                    }
+                }
+                let _ = reply.send(());
             }
         }
     }

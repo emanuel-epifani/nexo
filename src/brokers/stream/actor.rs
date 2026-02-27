@@ -67,7 +67,7 @@ pub enum TopicCommand {
     GetSnapshot {
         reply: oneshot::Sender<crate::dashboard::stream::TopicSummary>,
     },
-    Stop {
+    Delete {
         reply: oneshot::Sender<()>,
     },
 }
@@ -352,7 +352,16 @@ impl TopicActor {
                 let _ = reply.send(summary);
             }
 
-            TopicCommand::Stop { reply } => {
+            TopicCommand::Delete { reply } => {
+                let (st_tx, st_rx) = oneshot::channel();
+                let _ = self.storage_tx.send(StorageCommand::DropTopic { 
+                    topic_name: self.state.name.clone(),
+                    reply: st_tx,
+                }).await;
+                
+                // Wait for the StorageManager to confirm it deleted the files
+                let _ = st_rx.await;
+                
                 let _ = reply.send(());
                 return true;
             }
