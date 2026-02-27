@@ -204,13 +204,19 @@ impl StorageManager {
                 }
             }
             
-            // For now, we naively append to the last segment or create 1.log
-            // TODO: In a full refactor, the StorageManager should fetch the active segment from the filesystem on init
-            let active_path = base_topic_path.join("1.log"); 
-            let file_size = tokio::fs::metadata(&active_path).await.map(|m| m.len()).unwrap_or(0);
+            // Find the last existing segment or default to 1.log
+            let segments = crate::brokers::stream::persistence::find_segments(&base_topic_path).await.unwrap_or_default();
+            
+            let (active_path, file_size) = if let Some(last) = segments.last() {
+                let size = tokio::fs::metadata(&last.path).await.map(|m| m.len()).unwrap_or(0);
+                (last.path.clone(), size)
+            } else {
+                let path = base_topic_path.join("1.log");
+                (path, 0)
+            };
 
             self.topics.insert(topic_name.clone(), TopicContext {
-                active_path: base_topic_path.join("1.log"),
+                active_path,
                 ack_sender: Some(ack_sender.clone()),
                 highest_pending_seq: 0,
                 current_file_size: file_size,

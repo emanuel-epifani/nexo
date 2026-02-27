@@ -612,6 +612,50 @@ mod stream_tests {
 
             println!("✅ RAM eviction test passed");
         }
+
+        #[tokio::test]
+        async fn test_fetch_cold_read_from_disk() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path_str = temp_dir.path().to_str().unwrap().to_string();
+
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = path_str.clone();
+            config.ram_soft_limit = 2; // Only 2 messages allowed in RAM
+            config.eviction_interval_ms = 50;
+            config.default_flush_ms = 50;
+
+            let manager = StreamManager::new(config);
+            let topic = "cold-fetch-test";
+            let group = "g-cold";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // 1. Publish 5 messages
+            for i in 1..=5 {
+                manager.publish(topic, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            // 2. Wait for flush and eviction
+            // Messages 1, 2, 3 should be evicted from RAM because limit is 2 and they are flushed
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // 3. Join group and fetch
+            manager.join_group(group, topic, "client-A").await.unwrap();
+            
+            // This should trigger a Cold Read within the TopicActor
+            let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+
+            assert_eq!(msgs.len(), 5, "Should have fetched all 5 messages (3 from disk, 2 from RAM)");
+            assert_eq!(msgs[0].seq, 1);
+            assert_eq!(msgs[0].payload, Bytes::from("msg-1"));
+            assert_eq!(msgs[4].seq, 5);
+            assert_eq!(msgs[4].payload, Bytes::from("msg-5"));
+            
+            // 4. Verify we can ACK them correctly
+            for msg in &msgs {
+                manager.ack(group, topic, msg.seq).await.unwrap();
+            }
+        }
     }
 
     mod performance {

@@ -70,6 +70,12 @@ pub enum TopicCommand {
     Delete {
         reply: oneshot::Sender<()>,
     },
+    InternalColdFetchResult {
+        group_id: String,
+        client_id: String,
+        messages: Vec<Message>,
+        reply: oneshot::Sender<Result<Vec<Message>, String>>,
+    },
 }
 
 // ==========================================
@@ -252,6 +258,43 @@ impl TopicActor {
                 }
 
                 let msgs = group.fetch(&client_id, limit, &self.state.log, self.state.ram_start_seq);
+                
+                // If RAM returned nothing but disk might have it...
+                if msgs.is_empty() && !group.is_fetching_cold && group.next_deliver_seq < self.state.next_seq {
+                    let next_seq = if let Some(r_seq) = group.redeliver.front() { *r_seq } else { group.next_deliver_seq };
+                    
+                    if next_seq < self.state.ram_start_seq {
+                        group.is_fetching_cold = true;
+                        let st_tx = self.storage_tx.clone();
+                        let self_tx = self.self_tx.clone();
+                        let topic_name = self.state.name.clone();
+                        let g_id = group_id.clone();
+                        let c_id = client_id.clone();
+
+                        tokio::spawn(async move {
+                            let (otx, orx) = oneshot::channel();
+                            let _ = st_tx.send(StorageCommand::ColdRead {
+                                topic_name,
+                                from_seq: next_seq,
+                                limit,
+                                reply: otx,
+                            }).await;
+
+                            if let Ok(msgs) = orx.await {
+                                let _ = self_tx.send(TopicCommand::InternalColdFetchResult {
+                                    group_id: g_id,
+                                    client_id: c_id,
+                                    messages: msgs,
+                                    reply,
+                                }).await;
+                            } else {
+                                let _ = reply.send(Err("Disk read failed".to_string()));
+                            }
+                        });
+                        return false; // Result will be sent later
+                    }
+                }
+
                 let _ = reply.send(Ok(msgs));
             }
 
@@ -350,6 +393,17 @@ impl TopicActor {
                     groups: groups_info,
                 };
                 let _ = reply.send(summary);
+            }
+
+            TopicCommand::InternalColdFetchResult { group_id, client_id, messages, reply } => {
+                if let Some(group) = self.groups.get_mut(&group_id) {
+                    group.is_fetching_cold = false;
+                    // Register what we got from disk
+                    let msgs = group.register_cold_messages(&client_id, messages);
+                    let _ = reply.send(Ok(msgs));
+                } else {
+                    let _ = reply.send(Err("Group disappeared during cold read".to_string()));
+                }
             }
 
             TopicCommand::Delete { reply } => {

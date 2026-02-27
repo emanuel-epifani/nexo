@@ -29,6 +29,8 @@ pub struct ConsumerGroup {
     pub ack_wait: Duration,
     // === Member tracking (for disconnect cleanup) ===
     pub members: HashSet<String>,
+    // === Runtime State ===
+    pub is_fetching_cold: bool,
 }
 
 impl ConsumerGroup {
@@ -42,6 +44,7 @@ impl ConsumerGroup {
             max_ack_pending,
             ack_wait,
             members: HashSet::new(),
+            is_fetching_cold: false,
         }
     }
 
@@ -56,6 +59,7 @@ impl ConsumerGroup {
             max_ack_pending,
             ack_wait,
             members: HashSet::new(),
+            is_fetching_cold: false,
         }
     }
 
@@ -79,6 +83,10 @@ impl ConsumerGroup {
                         delivery_count,
                     });
                     result.push(msg);
+                } else {
+                    // Cold message: put back and stop (needs disk read or wait for RAM)
+                    self.redeliver.push_front(seq);
+                    break;
                 }
             } else {
                 break;
@@ -180,6 +188,45 @@ impl ConsumerGroup {
     }
 
     // --- Internal ---
+
+    /// Specifically registers messages retrieved from disk into the group's pending state.
+    pub fn register_cold_messages(&mut self, client_id: &str, messages: Vec<Message>) -> Vec<Message> {
+        let mut result = Vec::new();
+        let now = Instant::now();
+
+        for msg in messages {
+            if self.pending.len() >= self.max_ack_pending { break; }
+
+            let seq = msg.seq;
+
+            // 1. Is it a redelivery?
+            let mut is_redelivery = false;
+            // Check if it's in our redeliver queue
+            if let Some(pos) = self.redeliver.iter().position(|&s| s == seq) {
+                self.redeliver.remove(pos);
+                is_redelivery = true;
+            }
+
+            // 2. Is it a fresh message?
+            let is_fresh = seq == self.next_deliver_seq;
+
+            if is_redelivery || is_fresh {
+                if is_fresh {
+                    self.next_deliver_seq += 1;
+                }
+
+                let delivery_count = self.pending.get(&seq).map(|p| p.delivery_count).unwrap_or(0) + 1;
+                self.pending.insert(seq, PendingMsg {
+                    client_id: client_id.to_string(),
+                    delivered_at: now,
+                    delivery_count,
+                });
+                result.push(msg);
+            }
+        }
+
+        result
+    }
 
     fn try_advance_floor(&mut self) {
         while self.ack_floor + 1 < self.next_deliver_seq
