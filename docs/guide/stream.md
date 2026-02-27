@@ -13,93 +13,145 @@ await stream.publish({ type: 'login', userId: 'u1' });
 
 // Subscribe with consumer group
 await stream.subscribe('analytics', (msg) => { console.log(`User ${msg.userId} performed ${msg.type}`); });
-
-// Delete stream
-await stream.delete();
 ```
+
+---
+
+## The Scaling Model
+
+Nexo abandons the traditional "Kafka-style" partitioning model in favor of a **Virtual Distributed Queue**. 
+
+### The Problem with Partitions
+In Kafka, concurrency is tied to the number of partitions. If you have 3 partitions, you can only have 3 active consumers in a group. Adding a 4th consumer does nothing; it stays idle.
+
+### The Nexo Way: Dynamic Fan-Out
+Nexo streams are single, unified logs. The broker dynamically coordinates message delivery to any number of consumers in a group. You can scale from 1 to 100 consumers at runtime without repartitioning or restarting.
+
+```text
+KAFKA (Static)                      NEXO (Dynamic)
+┌──────────────────────────┐        ┌──────────────────────────┐
+│ Topic: [P0] [P1] [P2]    │        │ Topic: [ Unified Log ]   │
+└────┬─────┬─────┬─────────┘        └────┬─────┬─────┬─────┬───┘
+     │     │     │                       │     │     │     │
+   [C1]  [C2]  [C3]  [C4:Idle]        [C1]  [C2]  [C3]  [C4]  [C5...]
+```
+
+*   **Zero Rebalancing**: No heavy rebalancing protocols when consumers join or leave.
+*   **True Elasticity**: Scale your worker pods up or down instantly based on the actual load.
+
+---
+
 
 ## Persistence
 
-All streams are **persisted to disk** by default using an append-only segment file format. Persistence is universally asynchronous to ensure maximum throughput without blocking the event loop. Writes are batched in RAM and flushed automatically by a background timer (default 50ms).
+Nexo uses an **Asynchronous Draining Pattern** to balance high-speed ingestion and durability.
+
+*   **Optimized Batching**: Under load, Nexo automatically "drains" the message queue into optimized batches for maximum disk throughput.
+*   **Flush Interval**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) ensures data is synced even during low traffic, defining your maximum durability window.
+
+[//]: # ()
+### High-Cardinality: Treat Streams like Keys
+
+In Nexo, creating a stream is as cheap and safe as writing a key in a database. You can generate thousands of streams dynamically at runtime (e.g., `ai_chat_{id}` or `sensor_{id}`) without worrying about server stability.
+
+*   **Safety via LRU**: Traditional brokers crash when topic counts grow (hitting "Too Many Open Files" limits). Nexo uses a **Global FD Cache** to rotate handles automatically.
+*   **Zero Overhead**: Only the most active streams stay open in memory, controlled by `STREAM_MAX_OPEN_FILES` (Default: 256).
+*   **Performance Tip**: 
+::: tip BEST PERFORMANCE
+Set `STREAM_MAX_OPEN_FILES` to match your average *concurrently active* topics to eliminate rotation overhead.
+::: 
+
+```text
+    [ Topic A ] [ Topic B ] [ Topic C ] ... [ Topic ZZZZZ ]
+          \          |           /                /
+           \         |          /                /
+         ┌──────────────────────────────────────────┐
+         │        Global FD Manager (LRU)           │
+         │  (Only keeps N files open at a time)     │
+         └──────────────────┬───────────────────────┘
+                            ▼
+                    [ FILE SYSTEM ]
+```
 
 ## Retention
 
-Streams grow indefinitely by default (up to the retention limits). When **either** limit is reached, old segments are deleted:
+When your stream reaches its limits, old data is automatically purged.
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| `maxAgeMs` | **7 days** (604800000ms) | Delete segments older than this |
-| `maxBytes` | **1 GB** (1073741824 bytes) | Delete oldest segments when total size exceeds this |
+| `maxAgeMs` | **7 days** | Delete data older than this |
+| `maxBytes` | **1 GB** | Delete oldest data when total size exceeds this |
 
-Retention is checked periodically (every 10 minutes by default). Both limits can be set independently — whichever is reached first triggers cleanup.
+## Acknowledgments & Lifecycle
 
-## Acknowledgments
+Nexo guarantees that every message is processed.
 
-Each message delivered to a consumer must be **acknowledged** (acked) or **negative-acknowledged** (nacked):
+*   **Ack**: Successful processing. Move forward.
+*   **Nack**: Explicit failure. Redeliver immediately.
+*   **Timeout**: If a worker crashes, the message is automatically redelivered after 30s.
 
-- **Ack** → message is confirmed as processed. The consumer group's `ack_floor` advances past contiguous acked messages.
-- **Nack** → message is put back in the redelivery queue and will be delivered again on the next fetch.
-- **Timeout** → if a message is not acked within the `ack_wait` period (default: 30 seconds), it is automatically redelivered.
-
-Acks are handled automatically by the SDK's `subscribe()` method:
-- If your callback completes successfully → **ack**
-- If your callback throws an error → **nack** (message will be redelivered)
-
-```
-  Message Lifecycle:
-  
-  Published → Pending (delivered to consumer) → Acked ✓
-                                              → Nacked → Redelivered
-                                              → Timeout → Redelivered
-```
-
-## Seek
-
-You can reset a consumer group's position in the stream:
-
-```typescript
-// Replay all messages from the beginning
-await stream.seek('my-group', 'beginning');
-
-// Skip to the end (ignore all existing messages)
-await stream.seek('my-group', 'end');
-```
-
-## Advanced Creation
-
-```typescript
-const orders = await client.stream<Order>('orders').create({
-  retention: {
-    maxAgeMs: 86400000,      // 1 Day
-    maxBytes: 536870912      // 512 MB
-  },
-});
+```text
+Published ──▶ Delivered ──▶ [ Processing ] ──┬──▶ Ack (Done)
+                               ▲             │
+                               └─────────────┴──▶ Nack/Timeout (Retry)
 ```
 
 ## Consumer Groups
 
-Every consumer subscribes to a stream through a **group name**. The group name determines how messages are distributed:
+Every consumer subscribes through a **group name**. This determines how messages are distributed:
 
-- **Same group** = work is split across consumers (each message processed once)
-- **Different groups** = each group reads all messages independently
+*   **Same group** = Work is split (Load Balancing).
+*   **Different groups** = Each group gets everything (Broadcast).
 
-### Scaling: Same Group
-
-You have an order processing service and a single instance can't keep up. You deploy 3 replicas — all subscribe with the **same group name**. The server delivers different messages to each consumer, so each order is processed exactly once.
+### Scaling Service (Same Group)
+To scale horizontally, run multiple instances of your worker using the same group name. Nexo will automatically distribute messages across them.
 
 ```typescript
-// Pod-1, Pod-2, Pod-3 — same group, work is split
-await orders.subscribe('workers', (order) => process(order));
-await orders.subscribe('workers', (order) => process(order));
-await orders.subscribe('workers', (order) => process(order));
+// Process 'orders' stream using 3 parallel workers
+// Run this code in 3 different instances/pods:
+await orders.subscribe('worker-group', (order) => {
+  console.log(`Processing order ${order.id}`);
+});
 ```
 
-### Broadcast: Different Groups
-
-You need analytics **and** an audit log for the same orders. These are two independent services that both need to see **every** order. Each subscribes with a **different group name**, so each gets a full copy of the stream.
+### Multiple Services (Different Groups)
+If you have independent services (e.g., Audit and Metrics), give them different group names.
+Each group gets a full copy of every message.
 
 ```typescript
-// Two independent services, each reads ALL orders
-await orders.subscribe('analytics', (order) => trackMetrics(order));
-await orders.subscribe('audit-log', (order) => saveAudit(order));
+// Instance A: Audit Service
+await orders.subscribe('audit-service', (order) => saveToDb(order));
+
+// Instance B: Metrics Service
+await orders.subscribe('metrics-service', (order) => updateGrafana(order));
+```
+
+
+## Seek & Replay
+
+By default, new consumer groups start reading from the **beginning** of the stream history. You can use `seek` to reset the group's cursor on the server.
+
+> [!NOTE]
+> `seek` impacts the **Consumer Group state**. If you have active subscribers (via `.subscribe()`), they will immediately start receiving messages from the new position on their next fetch.
+
+### Typical Patterns
+
+#### 1. Replay from Beginning
+Use this when you update your processing logic and need to re-scan the entire history.
+```typescript
+// 1. Reset the group position
+await stream.seek('analytics-v2', 'beginning');
+
+// 2. Start (or resume) processing
+await stream.subscribe('analytics-v2', (msg) => { ... });
+```
+
+#### 2. Skip to End
+Best for real-time dashboards or monitors that don't need historical data.
+```typescript
+// 1. Skip all existing history
+await stream.seek('live-dashboard', 'end');
+
+// 2. Process only future messages
+await stream.subscribe('live-dashboard', (msg) => { ... });
 ```

@@ -14,7 +14,7 @@ use crate::brokers::stream::topic::TopicConfig;
 use crate::brokers::stream::message::Message;
 use crate::brokers::stream::commands::{StreamCreateOptions, SeekTarget};
 use crate::brokers::stream::actor::{TopicCommand, TopicActor};
-use crate::brokers::stream::persistence::{StorageManager, StorageCommand};
+use crate::brokers::stream::storage::{StorageManager, StorageCommand};
 use crate::config::SystemStreamConfig;
 use crate::dashboard::stream::StreamBrokerSnapshot;
 
@@ -35,11 +35,10 @@ impl StreamManager {
         let (storage_tx, storage_rx) = mpsc::channel(50_000); // Backpressure protection buffer
         
         // SPAWN STORAGE MANAGER
-        let max_open_files = 1024; // TODO: move to config
         let storage_manager = StorageManager::new(
             config.persistence_path.clone(),
             storage_rx,
-            max_open_files,
+            config.max_open_files,
             config.default_flush_ms,
             config.max_segment_size,
         );

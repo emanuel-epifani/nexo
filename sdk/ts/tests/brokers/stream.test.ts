@@ -135,4 +135,59 @@ describe('STREAM', () => {
         subB.stop();
         await tempClientB.disconnect();
     });
+
+    it('should support History Sync (new groups start from beginning)', async () => {
+        const topic = `stream-history-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        // 1. Publish 5 messages before anyone joins
+        for (let i = 0; i < 5; i++) {
+            await nexo.stream(topic).publish({ i });
+        }
+
+        // 2. Join with a new group
+        const received: any[] = [];
+        const sub = await clientA.stream(topic).subscribe('history-group', (d) => received.push(d));
+
+        // 3. Should receive all 5 messages
+        await waitFor(() => expect(received.length).toBe(5));
+        expect(received[0].i).toBe(0);
+        expect(received[4].i).toBe(4);
+
+        sub.stop();
+    });
+
+    it('should support Seek (Beginning/End)', async () => {
+        const topic = `stream-seek-${randomUUID()}`;
+        const group = 'seek-group';
+        await nexo.stream(topic).create();
+
+        // 1. Push 10 messages
+        for (let i = 0; i < 10; i++) await nexo.stream(topic).publish({ i });
+
+        // 2. Scenario: Group joins and skips to END
+        await clientA.stream(topic).seek(group, 'end');
+        
+        const receivedEnd: any[] = [];
+        const subEnd = await clientA.stream(topic).subscribe(group, (d) => receivedEnd.push(d));
+
+        // 3. Publish #11, only #11 should be received
+        await nexo.stream(topic).publish({ i: 10 });
+        await waitFor(() => expect(receivedEnd.length).toBe(1));
+        expect(receivedEnd[0].i).toBe(10);
+        subEnd.stop();
+
+        // 4. Scenario: Seek back to BEGINNING
+        await clientA.stream(topic).seek(group, 'beginning');
+        
+        const receivedStart: any[] = [];
+        const subStart = await clientA.stream(topic).subscribe(group, (d) => receivedStart.push(d));
+
+        // 5. Should receive ALL 11 messages
+        await waitFor(() => expect(receivedStart.length).toBe(11));
+        expect(receivedStart[0].i).toBe(0);
+        expect(receivedStart[10].i).toBe(10);
+        
+        subStart.stop();
+    });
 });

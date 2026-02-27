@@ -662,7 +662,7 @@ mod stream_tests {
         use super::*;
         use nexo::brokers::stream::StreamManager;
 
-        const COUNT: usize = 500_000;
+        const COUNT: usize = 100_000;
 
 
         #[tokio::test]

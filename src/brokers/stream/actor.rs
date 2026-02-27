@@ -11,15 +11,12 @@ use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use tracing::{error, info, warn};
 
-use crate::brokers::stream::topic::{TopicState, TopicConfig};
+use crate::brokers::stream::topic::{TopicConfig, TopicState};
 use crate::brokers::stream::message::Message;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::commands::SeekTarget;
-use crate::brokers::stream::persistence::{
-    recover_topic,
-    storage::{StorageCommand, MessageToAppend},
-};
-
+use crate::brokers::stream::storage::recover_topic;
+use crate::brokers::stream::storage::{MessageToAppend, StorageCommand};
 // ==========================================
 // COMMANDS (The Internal Protocol)
 // ==========================================
@@ -281,6 +278,7 @@ impl TopicActor {
                             }).await;
 
                             if let Ok(msgs) = orx.await {
+                                //TODO: look if there's a cleaner way to do read cold not splitted in different scope
                                 let _ = self_tx.send(TopicCommand::InternalColdFetchResult {
                                     group_id: g_id,
                                     client_id: c_id,
@@ -326,16 +324,15 @@ impl TopicActor {
             }
 
             TopicCommand::Seek { group_id, target, reply } => {
-                if let Some(group) = self.groups.get_mut(&group_id) {
-                    match target {
-                        SeekTarget::Beginning => group.seek_beginning(),
-                        SeekTarget::End => group.seek_end(self.state.next_seq.saturating_sub(1)),
-                    }
-                    self.groups_dirty = true;
-                    let _ = reply.send(Ok(()));
-                } else {
-                    let _ = reply.send(Err("Group not found".to_string()));
+                let group = self.groups.entry(group_id.clone())
+                    .or_insert_with(|| ConsumerGroup::new(group_id.clone(), self.max_ack_pending, self.ack_wait));
+
+                match target {
+                    SeekTarget::Beginning => group.seek_beginning(),
+                    SeekTarget::End => group.seek_end(self.state.next_seq.saturating_sub(1)),
                 }
+                self.groups_dirty = true;
+                let _ = reply.send(Ok(()));
             }
 
             TopicCommand::JoinGroup { group_id, client_id, reply } => {
