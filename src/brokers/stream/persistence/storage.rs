@@ -6,7 +6,7 @@
 //! - Manages an LRU Cache of file descriptors to prevent OS limits exhaustion.
 //! - Executes a global periodic flush to sync bytes to disk and notify topic actors.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -90,6 +90,7 @@ pub struct StorageManager {
     
     flush_interval: Duration,
     max_segment_size: u64,
+    dirty_topics: HashSet<String>,
 }
 
 impl StorageManager {
@@ -107,6 +108,7 @@ impl StorageManager {
             topics: HashMap::new(),
             flush_interval: Duration::from_millis(flush_interval_ms),
             max_segment_size,
+            dirty_topics: HashSet::new(),
         }
     }
 
@@ -117,10 +119,17 @@ impl StorageManager {
 
         loop {
             tokio::select! {
-                cmd = self.rx.recv() => {
-                    match cmd {
-                        Some(cmd) => self.handle_command(cmd).await,
-                        None => break, // Channel closed
+                cmd_res = self.rx.recv() => {
+                    match cmd_res {
+                        Some(cmd) => {
+                            self.handle_command(cmd).await;
+                            
+                            // DRAIN: Process as many waiting commands as possible
+                            while let Ok(next) = self.rx.try_recv() {
+                                self.handle_command(next).await;
+                            }
+                        }
+                        None => break,
                     }
                 }
                 _ = flush_timer.tick() => {
@@ -220,6 +229,8 @@ impl StorageManager {
 
         let path = {
             let ctx = self.topics.get_mut(&topic_name).unwrap();
+            ctx.highest_pending_seq = highest_seq;
+            self.dirty_topics.insert(topic_name.clone());
 
             // Check if we need to rotate segment BEFORE writing
             // Include bytes_len to see if this append pushes us over the limit
@@ -291,21 +302,27 @@ impl StorageManager {
     /// The Global Tick: Flushes all currently tracked dirty writers to disk,
     /// and resolves all promises for TopicActors.
     async fn flush_all(&mut self) {
-        // We only flush the files that are currently in the cache.
-        for (path, writer) in self.open_files.iter_mut() {
+        // 1. Flush only active file writers
+        for (_, writer) in self.open_files.iter_mut() {
             if let Err(e) = writer.flush().await {
-                error!("StorageManager: Failed to flush {:?}: {}", path, e);
+                error!("StorageManager: Flush error: {}", e);
             }
         }
 
-        // Now that the disk has persisted the buffers, notify Topics via MPSC
-        for ctx in self.topics.values_mut() {
-            if ctx.highest_pending_seq > 0 {
-                if let Some(ref sender) = ctx.ack_sender {
-                    // Try to send the ACK. If it fails (full or closed), we'll try again next tick
-                    // as we don't reset highest_pending_seq unless send succeeds.
-                    if let Ok(_) = sender.try_send(ctx.highest_pending_seq) {
-                        ctx.highest_pending_seq = 0;
+        // 2. Notify ACKs only for topics that received messages (O(active) instead of O(total))
+        if !self.dirty_topics.is_empty() {
+            let topics_to_flush: Vec<String> = self.dirty_topics.drain().collect();
+            for name in topics_to_flush {
+                if let Some(ctx) = self.topics.get_mut(&name) {
+                    if ctx.highest_pending_seq > 0 {
+                        if let Some(ref sender) = ctx.ack_sender {
+                            if let Ok(_) = sender.try_send(ctx.highest_pending_seq) {
+                                ctx.highest_pending_seq = 0;
+                            } else {
+                                // If send fails, keep it dirty for next flush
+                                self.dirty_topics.insert(name);
+                            }
+                        }
                     }
                 }
             }
