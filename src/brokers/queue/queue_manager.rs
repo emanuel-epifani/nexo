@@ -1,9 +1,10 @@
 //! Queue Manager: Router and lifecycle manager for Queue Actors
 
+use std::sync::Arc;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use uuid::Uuid;
-use std::collections::HashMap;
 
 use crate::brokers::queue::queue::{QueueConfig, Message};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
@@ -13,76 +14,22 @@ use crate::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 
 // ==========================================
-// MANAGER COMMANDS
-// ==========================================
-
-pub enum ManagerCommand {
-    CreateQueue {
-        name: String,
-        options: QueueCreateOptions,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    GetQueueActor {
-        name: String,
-        reply: oneshot::Sender<Option<mpsc::Sender<QueueActorCommand>>>,
-    },
-    MoveToDLQ {
-        queue_name: String,
-        payload: Bytes,
-        priority: u8,
-    },
-    Nack {
-        queue_name: String,
-        id: Uuid,
-        reason: String,
-        reply: oneshot::Sender<bool>,
-    },
-    DeleteQueue {
-        name: String,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    GetSnapshot {
-        reply: oneshot::Sender<Vec<QueueSummary>>,
-    },
-    GetMessages {
-        queue_name: String,
-        state_filter: String,
-        offset: usize,
-        limit: usize,
-        search: Option<String>,
-        reply: oneshot::Sender<Option<(usize, Vec<crate::dashboard::queue::MessageSummary>)>>,
-    },
-}
-
-// ==========================================
 // QUEUE MANAGER (Router)
 // ==========================================
 
 #[derive(Clone)]
 pub struct QueueManager {
-    tx: mpsc::Sender<ManagerCommand>,
+    queue_actors: Arc<DashMap<String, mpsc::Sender<QueueActorCommand>>>,
     config: SystemQueueConfig,
 }
 
 impl QueueManager {
     pub fn new(system_config: SystemQueueConfig) -> Self {
-        let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
-        let manager_tx = tx.clone();
-        
-        tokio::spawn(Self::run_manager_loop(rx, manager_tx, system_config.clone()));
-        
-        Self { 
-            tx,
-            config: system_config,
-        }
-    }
-
-    async fn run_manager_loop(
-        mut rx: mpsc::Receiver<ManagerCommand>,
-        manager_tx: mpsc::Sender<ManagerCommand>,
-        system_config: SystemQueueConfig,
-    ) {
-        let mut actors: HashMap<String, mpsc::Sender<QueueActorCommand>> = HashMap::new();
+        let queue_actors = Arc::new(DashMap::new());
+        let manager = Self { 
+            queue_actors: queue_actors.clone(),
+            config: system_config.clone(),
+        };
 
         // WARM START: Discover and restore queues from filesystem
         let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
@@ -95,13 +42,12 @@ impl QueueManager {
                             if filename.ends_with(".db") && !filename.ends_with(".db-wal") && !filename.ends_with(".db-shm") {
                                 let queue_name = filename.trim_end_matches(".db").to_string();
                                 let config = QueueConfig::from_options(QueueCreateOptions::default(), &system_config);
-                                let actor_tx = Self::spawn_queue_actor(
+                                let actor_tx = manager.spawn_queue_actor(
                                     queue_name.clone(),
                                     config,
-                                    manager_tx.clone(),
                                     &system_config
                                 );
-                                actors.insert(queue_name.clone(), actor_tx);
+                                queue_actors.insert(queue_name.clone(), actor_tx);
                                 tracing::info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
                             }
                         }
@@ -110,135 +56,20 @@ impl QueueManager {
             }
         }
 
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                ManagerCommand::CreateQueue { name, options, reply } => {
-                    if !actors.contains_key(&name) {
-                        let config = QueueConfig::from_options(options, &system_config);
-                        let actor_tx = Self::spawn_queue_actor(
-                            name.clone(), 
-                            config, 
-                            manager_tx.clone(),
-                            &system_config
-                        );
-                        actors.insert(name, actor_tx);
-                    }
-                    let _ = reply.send(Ok(()));
-                }
-                
-                ManagerCommand::GetQueueActor { name, reply } => {
-                    let _ = reply.send(actors.get(&name).cloned());
-                }
-                
-                ManagerCommand::MoveToDLQ { queue_name, payload, priority } => {
-                    let actor_tx = if let Some(tx) = actors.get(&queue_name) {
-                        tx.clone()
-                    } else {
-                        let options = QueueCreateOptions {
-                            visibility_timeout_ms: None,
-                            max_retries: None,
-                            ttl_ms: None,
-                            persistence: Some(PersistenceOptions::FileSync),
-                        };
-                        let config = QueueConfig::from_options(options, &system_config);
-                        
-                        let tx = Self::spawn_queue_actor(
-                            queue_name.clone(),
-                            config,
-                            manager_tx.clone(),
-                            &system_config
-                        );
-                        actors.insert(queue_name, tx.clone());
-                        tx
-                    };
-                    
-                    let (reply_tx, _) = oneshot::channel();
-                    let _ = actor_tx.send(QueueActorCommand::Push {
-                        payload,
-                        priority,
-                        delay_ms: None,
-                        reply: reply_tx,
-                    }).await;
-                }
-
-                ManagerCommand::Nack { queue_name, id, reason, reply } => {
-                    if let Some(actor_tx) = actors.get(&queue_name) {
-                        let (tx, rx) = oneshot::channel();
-                        if actor_tx.send(QueueActorCommand::Nack { id, reason, reply: tx }).await.is_ok() {
-                            let _ = reply.send(rx.await.unwrap_or(false));
-                        } else {
-                             let _ = reply.send(false);
-                        }
-                    } else {
-                        let _ = reply.send(false);
-                    }
-                }
-
-                ManagerCommand::DeleteQueue { name, reply } => {
-                    if let Some(actor_tx) = actors.remove(&name) {
-                        // 1. Stop Actor
-                        let (stop_tx, stop_rx) = oneshot::channel();
-                        if actor_tx.send(QueueActorCommand::Stop { reply: stop_tx }).await.is_ok() {
-                            let _ = stop_rx.await;
-                        }
-                    }
-                    
-                    // 2. Delete Persistence
-                    // Use system_config path
-                    let base_path = std::path::PathBuf::from(&system_config.persistence_path);
-                    let db_path = base_path.join(format!("{}.db", name));
-                    let wal_path = base_path.join(format!("{}.db-wal", name));
-                    let shm_path = base_path.join(format!("{}.db-shm", name));
-
-                    // Best effort cleanup
-                    let _ = std::fs::remove_file(db_path);
-                    let _ = std::fs::remove_file(wal_path);
-                    let _ = std::fs::remove_file(shm_path);
-
-                    let _ = reply.send(Ok(()));
-                }
-                
-                ManagerCommand::GetSnapshot { reply } => {
-                    let mut queues = Vec::new();
-                    
-                    for (_, actor_tx) in &actors {
-                        let (tx, rx) = oneshot::channel();
-                        if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
-                            if let Ok(summary) = rx.await {
-                                queues.push(summary);
-                            }
-                        }
-                    }
-                    let _ = reply.send(queues);
-                }
-                
-                ManagerCommand::GetMessages { queue_name, state_filter, offset, limit, search, reply } => {
-                    if let Some(actor_tx) = actors.get(&queue_name) {
-                        let (tx, rx) = oneshot::channel();
-                        if actor_tx.send(QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply: tx }).await.is_ok() {
-                            let _ = reply.send(rx.await.ok());
-                        } else {
-                            let _ = reply.send(None);
-                        }
-                    } else {
-                        let _ = reply.send(None);
-                    }
-                }
-            }
-        }
+        manager
     }
 
     fn spawn_queue_actor(
+        &self,
         name: String,
         config: QueueConfig,
-        manager_tx: mpsc::Sender<ManagerCommand>,
         system_config: &SystemQueueConfig,
     ) -> mpsc::Sender<QueueActorCommand> {
         let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
         
         // Spawn actor with path from system_config
         let path = std::path::PathBuf::from(&system_config.persistence_path);
-        let actor = QueueActor::new(name, config.clone(), path, rx, manager_tx);
+        let actor = QueueActor::new(name, config.clone(), path, rx);
         tokio::spawn(actor.run());
         
         tx
@@ -247,23 +78,49 @@ impl QueueManager {
     // --- Public API ---
 
     pub async fn create_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::CreateQueue { name, options, reply: tx })
-            .await
-            .map_err(|_| "Manager closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())?
+        use dashmap::mapref::entry::Entry;
+        
+        match self.queue_actors.entry(name.clone()) {
+            Entry::Occupied(_) => Ok(()), // Already exists
+            Entry::Vacant(v) => {
+                let config = QueueConfig::from_options(options, &self.config);
+                let actor_tx = self.spawn_queue_actor(
+                    name.clone(), 
+                    config, 
+                    &self.config
+                );
+                v.insert(actor_tx);
+                Ok(())
+            }
+        }
     }
 
     pub async fn delete_queue(&self, name: String) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::DeleteQueue { name, reply: tx })
-            .await
-            .map_err(|_| "Manager closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())?
+        if let Some((_, actor_tx)) = self.queue_actors.remove(&name) {
+            // 1. Stop Actor
+            let (stop_tx, stop_rx) = oneshot::channel();
+            if actor_tx.send(QueueActorCommand::Stop { reply: stop_tx }).await.is_ok() {
+                let _ = stop_rx.await;
+            }
+        }
+        
+        // 2. Delete Persistence
+        // Use system_config path
+        let base_path = std::path::PathBuf::from(&self.config.persistence_path);
+        let db_path = base_path.join(format!("{}.db", name));
+        let wal_path = base_path.join(format!("{}.db-wal", name));
+        let shm_path = base_path.join(format!("{}.db-shm", name));
+
+        // Best effort cleanup
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_file(wal_path);
+        let _ = std::fs::remove_file(shm_path);
+
+        Ok(())
     }
 
     pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8, delay_ms: Option<u64>) -> Result<(), String> {
-        let actor = self.get_actor(&queue_name).await
+        let actor = self.get_actor(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
@@ -275,14 +132,14 @@ impl QueueManager {
     }
 
     pub async fn pop(&self, queue_name: &str) -> Option<Message> {
-        let actor = self.get_actor(queue_name).await?;
+        let actor = self.get_actor(queue_name)?;
         let (tx, rx) = oneshot::channel();
         actor.send(QueueActorCommand::Pop { reply: tx }).await.ok()?;
         rx.await.ok()?
     }
 
     pub async fn ack(&self, queue_name: &str, id: Uuid) -> bool {
-        if let Some(actor) = self.get_actor(queue_name).await {
+        if let Some(actor) = self.get_actor(queue_name) {
             let (tx, rx) = oneshot::channel();
             if actor.send(QueueActorCommand::Ack { id, reply: tx }).await.is_ok() {
                 return rx.await.unwrap_or(false);
@@ -292,16 +149,17 @@ impl QueueManager {
     }
 
     pub async fn nack(&self, queue_name: &str, id: Uuid, reason: String) -> bool {
-        let (tx, rx) = oneshot::channel();
-        if self.tx.send(ManagerCommand::Nack { queue_name: queue_name.to_string(), id, reason, reply: tx }).await.is_ok() {
-             rx.await.unwrap_or(false)
-        } else {
-             false
+        if let Some(actor) = self.get_actor(queue_name) {
+            let (tx, rx) = oneshot::channel();
+            if actor.send(QueueActorCommand::Nack { id, reason, reply: tx }).await.is_ok() {
+                return rx.await.unwrap_or(false);
+            }
         }
+        false
     }
 
     pub async fn consume_batch(&self, queue_name: String, max: Option<usize>, wait_ms: Option<u64>) -> Result<Vec<Message>, String> {
-        let actor = self.get_actor(&queue_name).await
+        let actor = self.get_actor(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
         
         let max_val = max.unwrap_or(self.config.default_batch_size);
@@ -315,32 +173,69 @@ impl QueueManager {
     }
 
     pub async fn get_snapshot(&self) -> Vec<QueueSummary> {
-        let (tx, rx) = oneshot::channel();
-        if self.tx.send(ManagerCommand::GetSnapshot { reply: tx }).await.is_ok() {
-            rx.await.unwrap_or(vec![])
-        } else {
-            vec![]
+        let mut queues = Vec::new();
+        
+        for entry in self.queue_actors.iter() {
+            let actor_tx = entry.value();
+            let (tx, rx) = oneshot::channel();
+            if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
+                if let Ok(summary) = rx.await {
+                    queues.push(summary);
+                }
+            }
         }
+        queues
     }
 
     pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<crate::dashboard::queue::MessageSummary>)> {
-        let (tx, rx) = oneshot::channel();
-        if self.tx.send(ManagerCommand::GetMessages { queue_name, state_filter, offset, limit, search, reply: tx }).await.is_ok() {
-            rx.await.unwrap_or(None)
-        } else {
-            None
+        if let Some(actor_tx) = self.get_actor(&queue_name) {
+            let (tx, rx) = oneshot::channel();
+            if actor_tx.send(QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply: tx }).await.is_ok() {
+                return rx.await.ok();
+            }
         }
+        None
     }
 
     pub async fn exists(&self, name: &str) -> bool {
-        self.get_actor(name).await.is_some()
+        self.queue_actors.contains_key(name)
     }
 
     // --- DLQ Operations ---
 
+    pub async fn move_to_dlq(&self, queue_name: String, payload: Bytes, priority: u8) {
+        let actor_tx = if let Some(tx) = self.get_actor(&queue_name) {
+            tx
+        } else {
+            let options = QueueCreateOptions {
+                visibility_timeout_ms: None,
+                max_retries: None,
+                ttl_ms: None,
+                persistence: Some(PersistenceOptions::FileSync),
+            };
+            let config = QueueConfig::from_options(options, &self.config);
+            
+            let tx = self.spawn_queue_actor(
+                queue_name.clone(),
+                config,
+                &self.config
+            );
+            self.queue_actors.insert(queue_name, tx.clone());
+            tx
+        };
+        
+        let (reply_tx, _) = oneshot::channel();
+        let _ = actor_tx.send(QueueActorCommand::Push {
+            payload,
+            priority,
+            delay_ms: None,
+            reply: reply_tx,
+        }).await;
+    }
+
     /// Peek messages from DLQ without consuming them
     pub async fn peek_dlq(&self, queue_name: &str, limit: usize, offset: usize) -> Result<(usize, Vec<DlqMessage>), String> {
-        let actor = self.get_actor(queue_name).await
+        let actor = self.get_actor(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
@@ -352,7 +247,7 @@ impl QueueManager {
 
     /// Move a message from DLQ back to main queue (replay/retry)
     pub async fn move_to_queue(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
-        let actor = self.get_actor(queue_name).await
+        let actor = self.get_actor(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
@@ -364,7 +259,7 @@ impl QueueManager {
 
     /// Delete a specific message from DLQ
     pub async fn delete_dlq(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
-        let actor = self.get_actor(queue_name).await
+        let actor = self.get_actor(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
@@ -376,7 +271,7 @@ impl QueueManager {
 
     /// Purge all messages from DLQ
     pub async fn purge_dlq(&self, queue_name: &str) -> Result<usize, String> {
-        let actor = self.get_actor(queue_name).await
+        let actor = self.get_actor(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
         
         let (tx, rx) = oneshot::channel();
@@ -386,12 +281,9 @@ impl QueueManager {
         rx.await.map_err(|_| "No reply".to_string())
     }
 
-    async fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(ManagerCommand::GetQueueActor { 
-            name: name.to_string(), 
-            reply: tx 
-        }).await.ok()?;
-        rx.await.ok()?
+    #[inline]
+    fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
+        self.queue_actors.get(name).map(|r| r.value().clone())
     }
 }
+

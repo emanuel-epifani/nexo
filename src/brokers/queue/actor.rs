@@ -12,7 +12,6 @@ use crate::brokers::queue::MessageState;
 use crate::brokers::queue::queue::{QueueState, QueueConfig, Message, current_time_ms};
 use crate::brokers::queue::dlq::{DlqState, DlqMessage};
 use crate::brokers::queue::persistence::{QueueStore, types::StorageOp};
-use crate::brokers::queue::queue_manager::ManagerCommand;
 use crate::config::Config;
 use crate::dashboard::queue;
 use crate::dashboard::queue::{QueueSummary, DlqMessageSummary};
@@ -92,7 +91,6 @@ pub struct QueueActor {
     config: QueueConfig,
     store: QueueStore,
     rx: mpsc::Receiver<QueueActorCommand>,
-    manager_tx: mpsc::Sender<ManagerCommand>,
     waiters: VecDeque<WaitingConsumer>,
 }
 
@@ -102,7 +100,6 @@ impl QueueActor {
         config: QueueConfig,
         persistence_path: PathBuf,
         rx: mpsc::Receiver<QueueActorCommand>,
-        manager_tx: mpsc::Sender<ManagerCommand>,
     ) -> Self {
         
         if let Err(e) = std::fs::create_dir_all(&persistence_path) {
@@ -124,7 +121,6 @@ impl QueueActor {
             config,
             store,
             rx,
-            manager_tx,
             waiters: VecDeque::new(),
         }
     }

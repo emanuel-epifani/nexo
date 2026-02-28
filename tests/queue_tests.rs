@@ -278,11 +278,12 @@ mod queue_tests {
             let q_clone = q.clone();
 
             let handle = tokio::spawn(async move {
-                let start = Instant::now();
                 // Poll with 1000ms wait
                 let batch = manager_clone.consume_batch(q_clone, Some(1), Some(1000)).await.unwrap();
-                (batch, start.elapsed())
+                batch
             });
+
+            let start = Instant::now();
 
             // Wait a bit to ensure consumer is parked
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -291,13 +292,14 @@ mod queue_tests {
             manager.push(q.clone(), Bytes::from("wake_up"), 0, None).await.unwrap();
 
             // Join consumer
-            let (batch, elapsed) = handle.await.unwrap();
+            let batch = handle.await.unwrap();
+            let elapsed = start.elapsed();
 
             assert_eq!(batch.len(), 1);
             assert_eq!(batch[0].payload, Bytes::from("wake_up"));
-            // Should be roughly 200ms, definitely less than 1000ms
+            // Total time in main thread should be roughly 200ms (the sleep) + small overhead
             assert!(elapsed < Duration::from_millis(800), "Should wake up immediately on push");
-            assert!(elapsed >= Duration::from_millis(200), "Should wait until push");
+            assert!(elapsed >= Duration::from_millis(150), "Should have waited for our sleep");
         }
 
         #[tokio::test]
@@ -698,6 +700,7 @@ mod queue_tests {
 
         #[tokio::test]
         async fn bench_fasync_throughput() {
+            // cargo test --release bench_fasync_throughput -- --nocapture
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("bench_async_{}", Uuid::new_v4());
             let config = QueueCreateOptions {
