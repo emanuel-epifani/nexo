@@ -156,9 +156,9 @@ Everything is available instantly via a unified Client.
 
 ### 4. STREAM (Event Log)
 
-**Append-only immutable log with offset tracking.**
+**Strictly ordered append-only log without partition complexity.**
 
-**Use Case:** The source of truth for your system's history. Perfect for Event Sourcing, audit trails, and replaying historical data for analytics or debugging.
+**Use Case:** The source of truth for your system's history. Perfect for Event Sourcing, audit trails, and replaying historical data for analytics or debugging where global ordering is critical.
 
 ```text
 ┌──────────────┐       APPEND           ┌────────────────────────────────────┐
@@ -171,6 +171,7 @@ Everything is available instantly via a unified Client.
                                      └────────────┘   └────────────┘
 ```
 
+*   **Partition-Free Architecture:** Unlike Kafka, Nexo streams are a single, contiguous log. This guarantees absolute global ordering of events and eliminates the operational headache of managing and rebalancing partitions.
 *   **Immutable History:** Events are strictly appended and never modified, ensuring a tamper-proof audit log.
 *   **Consumer Groups:** Maintains separate read cursors (offsets) for different consumers, allowing independent processing speeds.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.

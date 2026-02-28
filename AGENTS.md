@@ -1,263 +1,224 @@
-# NEXO - Unified Development Rules
 
-> All-in-one high-performance broker for scale-up projects. Single instance, maximum hardware utilization, exceptional developer experience.
+# NEXO
 
-**Language:** Italian for communication, English for code/comments.
+## The Mission
 
----
+Modern backend architecture suffers from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized systems—Redis for caching, RabbitMQ for jobs, Kafka for streams—each with its own protocol, configuration, and maintenance overhead.
 
-## 🎯 Project Vision & Core Priorities
+Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**.
 
-1. **Performance Philosophy**: Throughput > Latency. Multithread everywhere, squeeze hardware to maximum
-2. **Developer Experience First**: Intuitive SDK > raw performance. One broker does everything, zero external dependencies
-3. **Scale-Up Not Scale-Out**: Single instance optimized to delay "need something else" moment as long as possible
-4. **Indie Hacker Pragmatism**: Fast iteration, minimal abstraction, clean enough to maintain solo
+Here's the reality: most scale-ups will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 99%—companies that need **high throughput without operational complexity**.
 
-**Core Brokers**: STORE (cache), QUEUE (jobs+DLQ), PUBSUB (realtime topics), STREAM (event logs), DASHBOARD (debug UI)
+## Architecture
 
----
+Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in dashboard.
 
-## 🏗️ Architecture Principles (Cross-Stack)
-
-### Consistency is King
-- **Symmetry Across Brokers**: If Queue has `QueueManager`, Store MUST have `StoreManager` (not `StoreHandler` or `StoreService`)
-- **Uniform Structure**: Every broker follows identical file organization pattern
-- **Predictable Naming**: Same conventions everywhere (no creative variations)
-
-### No Magic Values
-**Always use named constants for numbers/strings**:
-- Thresholds, timeouts, limits → `MAX_RETRIES`, `TIMEOUT_MS`, `MAX_SIZE`
-- Test timing → `TEST_OPERATION_TIMEOUT_MS` (not random `sleep(2000)`)
-- Protocol values OK hardcoded → `HEADER_SIZE`, `MAGIC_BYTES`
-
-### Configuration Over Hardcoding
-**Configurable**: Thresholds, ports, paths, feature flags, test timing
-**Hardcoded OK**: Protocol constants, business enums
-
-### Code Splitting Rules (Indie Hacker Balance)
-**Split if**: File >500 LOC, reused 2+ times, clear layer separation
-**Don't split**: Single use, <50 LOC, no enterprise patterns unless needed
-
-### Dependencies
-Always consult before adding. Prefer removing when feasible.
-
----
-
-## 🦀 Rust Backend Standards
-
-### File Organization (Per Broker)
-
-**Mandatory Structure**:
-```
-src/brokers/{broker}/
-├── mod.rs                    # ONLY exports (public API surface)
-├── {broker}_manager.rs       # Facade pattern, routing, lifecycle
-├── commands.rs               # Protocol command definitions
-├── actor.rs                  # Actor implementation (if using actor model)
-├── persistence/              # Persistence layer (if needed)
-│   ├── mod.rs
-│   ├── writer.rs
-│   └── types.rs
-└── {domain_entity}.rs        # Core business logic (e.g., queue.rs, topic.rs)
-```
-
-**Rules**:
-- `mod.rs` is ONLY an exporter, no implementation
-- Manager is the single entry point for external interaction
-- Business logic isolated within broker directory
-- No cross-broker direct dependencies (go through managers)
-
-### Naming Conventions
-**Structs/Enums**: `PascalCase` | **Functions**: `snake_case` | **Constants**: `SCREAMING_SNAKE_CASE` | **Files**: `snake_case.rs`
-
-### Testing Strategy
-
-**Rust Tests** (`tests/`):
-- **Unit tests**: Inline `#[cfg(test)]` modules for pure logic
-- **Integration tests**: `tests/integration/*.rs` for multi-module flows
-- **Benchmarks**: `tests/benchmark_*.rs`
-
-### Code Quality Gates
-- No magic numbers/strings (use named constants)
-- Symmetry maintained with similar brokers
-- No refactoring leftovers (old comments, TODO, dead code)
-- File structure matches mandatory pattern
-- Manager is the only public entry point
-- Comments only for complex logic, reflect current state, always English
-
----
-
-## ⚛️ TypeScript SDK & Dashboard
-
-### SDK Philosophy
-- **Developer Experience Above All**: Should be intuitive without reading docs
-- **Facade Pattern**: 1-2 export classes per broker type
-- **Centralized Complexity**: Socket/parsing logic hidden in `send()` or few core methods
-- **Clean Business Logic**: Use `switch` over nested `if/else if` when not compromising performance
-
-### File Organization (SDK)
+*   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
+*   **Dev Dashboard:** The server expose built-in Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
 
 ```
-sdk/ts/
-├── src/                      # SDK source code
-│   ├── client.ts             # Main entry point
-│   ├── brokers/
-│   │   ├── queue.ts          # Queue broker facade
-│   │   ├── store.ts          # Store broker facade
-│   │   ├── pubsub.ts         # PubSub broker facade
-│   │   └── stream.ts         # Stream broker facade
-│   ├── protocol/             # Protocol implementation
-│   └── types/                # Type definitions
-├── tests/                    # Test suite (not published)
-│   ├── brokers/              # Broker E2E tests (one file per broker)
-│   │   ├── store.test.ts
-│   │   ├── queue.test.ts
-│   │   ├── pubsub.test.ts
-│   │   ├── stream.test.ts
-│   │   ├── cross-broker.test.ts
-│   │   ├── reconnection.test.ts
-│   │   └── dashboard-prefill.test.ts
-│   ├── performance/          # Performance tests
-│   ├── utils/                # Test utilities (wait-for, server, etc.)
-│   ├── global-setup.ts       # Vitest global setup (build + start server)
-│   └── nexo.ts               # Test client singleton (pre-connected)
-├── dist/                     # Build output (published)
-├── package.json
-├── vitest.config.ts
-└── .npmignore                # Exclude tests/ from npm package
+                            ┌──────────────────────────────────────┐
+                            │              NEXO SERVER             │
+                            │                                      │       ┌──────────────┐
+                            │   ┌──────────────────────────────┐   │──────▶│              │
+                            │   │            STORE             │   │       │     RAM      │
+                            │   │        (Shared State)        │   │       │              │
+     ┌─────────────┐        │   └──────────────────────────────┘   │       │  (Volatile)  │
+     │             │        │                                      │       │              │
+     │   Client    │───────▶│   ┌──────────────────────────────┐   │──────▶│              │
+     │  (SDK/API)  │        │   │            PUBSUB            │   │       └──────────────┘
+     │             │        │   │          (Realtime)          │   │
+     └─────────────┘        │   └──────────────────────────────┘   │
+                            │                                      │
+                            │   ┌──────────────────────────────┐   │       ┌──────────────┐
+                            │   │            QUEUE             │   │──────▶│              │
+                            │   │        (Job Processing)      │   │       │     DISK     │
+                            │   └──────────────────────────────┘   │       │              │
+                            │                                      │       │   (Durable)  │
+                            │   ┌──────────────────────────────┐   │──────▶│              │
+                            │   │           STREAM             │   │       └──────────────┘
+                            │   │          (Event Log)         │   │
+                            │   └──────────────────────────────┘   │
+                            └───────────────┬──────────────────────┘
+                                            │
+                                            ▼
+                                    ┌─────────────────┐
+                                    │    Dashboard    │
+                                    │     (Web UI)    │
+                                    └─────────────────┘
 ```
 
-### File Organization (Dashboard)
+## BROKERS
 
-**Feature-Based Structure**:
-```
-dashboard/src/
-├── app/
-│   ├── {feature}/                    # Self-contained feature
-│   │   ├── page.tsx
-│   │   ├── components/               # {feature}-*.tsx
-│   │   ├── hooks/                    # use-{feature}-*.ts
-│   │   ├── lib/
-│   │   │   ├── {feature}-constants.ts    # Enums, numbers (NO text)
-│   │   │   ├── {feature}-texts.ts        # ALL user-visible text
-│   │   │   ├── {feature}-logic.ts        # Pure business logic (Tier 1)
-│   │   │   ├── {feature}-utils.ts        # Data transformation
-│   │   │   └── {feature}-store.ts        # Zustand state (Tier 2)
-│   │   └── types/
-│   │       └── {feature}-types.ts
-├── components/ui/                    # Reusable shadcn components
-├── lib/utils.ts                      # Global utilities only
-└── hooks/                            # Global reusable hooks
+### 1. STORE (Shared State)
+**In-memory concurrent data structures.**
+
+**Use Case:** Ideal for high-velocity data that needs to be instantly accessible across all your services, such as user sessions, API rate-limiting counters, and temporary caching.
+
+```text
+┌──────────────┐     SET(key, val)      ┌──────────────────┐
+│   Client A   │───────────────────────▶│    NEXO STORE    │
+└──────────────┘                        │   (Shared RAM)   │
+┌──────────────┐      GET(key)          │    [Map<K,V>]    │
+│   Client B   │◀───────────────────────│                  │
+└──────────────┘                        └──────────────────┘
 ```
 
-**Key Principles**:
-- Each feature self-contained in own directory
-- ALL files prefixed with feature name (`queue-card.tsx`, NOT `card.tsx`)
-- Feature-specific code stays within feature directory
-- Relative imports within features (`./`, `../`)
-- Absolute imports only for global (`@/components/ui/*`, `@/lib/utils`)
+for more detailed info:
+- docs: docs/guide/store.md
+- code: src/brokers/store/store_manager.rs
 
-### 3-Tier Architecture (Dashboard)
-**Tier 1 - Pure Logic** (`lib/{feature}-logic.ts`): Zero React deps, pure functions
-**Tier 2 - State & Hooks** (`hooks/use-{feature}.ts` + `lib/{feature}-store.ts`): React hooks + Zustand
-**Tier 3 - UI** (`components/{feature}-*.tsx`): Dumb components, minimal logic
 
-### Naming Conventions
-**Components**: `PascalCase` | **Functions**: `camelCase` | **Constants**: `SCREAMING_SNAKE_CASE` | **Files**: `kebab-case`
 
-### TypeScript Standards
+### 2. PUB/SUB (Real-Time Broadcast)
 
-**Type Usage**: `interface` for objects | `enum` for constants | `type` for utilities (Pick/Omit/&/|) | `class` for runtime behavior
+**Transient message bus with Topic-based routing.**
 
-**Strict Rules**:
-- No `any` (use `unknown` - forces type guards before usage)
-- No `@ts-ignore` (fix the issue)
-- Props have interfaces (or inline for single prop: `{ data }: { data: QueueSnapshot }`)
-- Explicit return types for complex functions
+**Use Case:** Designed for "fire-and-forget" scenarios where low latency is critical and message persistence is not required, such as live chat updates, stock tickers, or multi-service notifications.
 
-### CSS & Styling (Dashboard)
+```text
+                                           ┌───────────────────────────┐
+                                           │        NEXO PUBSUB        │
+                                           │                           │──────▶ Sub 1 (Exact)
+┌─────────────┐         PUBLISH            │  Topic: "home/kitchen/sw" │        "home/kitchen/sw"
+│  Publisher  │───────────────────────────▶│                           │
+└─────────────┘  msg: "home/kitchen/sw"    │  Topic: "home/+/sw"       │──────▶ Sub 2 (Wildcard +)
+                                           │                           │        "matches single level"
+                                           │  Topic: "home/#"          │
+                                           │                           │──────▶ Sub 3 (Wildcard #)       
+                                           └───────────────────────────┘        "matches everything under home"
+```
 
-**Follow shadcn/ui Style System**:
-- **Components**: ALWAYS use shadcn/ui components (Button, Card, Badge, etc.) - no custom alternatives
-- **Colors**: Use ONLY semantic tokens (`bg-background`, `bg-card`, `bg-accent`, `text-foreground`, `text-muted-foreground`, `border`) - NEVER hardcoded colors or arbitrary Tailwind shades
-- **Spacing**: Use Tailwind scale (`p-2/4/6/8`, `gap-2/4/6/8`, `space-y-2/4/6/8`) - NEVER custom values like `p-5`, `mt-[13px]`
-- **Typography**: Use scale (`text-sm/base/lg/xl/2xl`, `font-normal/medium/semibold/bold`) - NEVER custom sizes like `text-[17px]`
-- **Borders**: `rounded-lg` (cards), `rounded-md` (inputs/buttons) - consistent across all components
-- **Shadows**: `shadow-sm` (subtle), `shadow-md` (elevated), `shadow-lg` (modals) - no custom shadows
-- **Transitions**: ALWAYS add `transition-colors` or `transition-all` with `duration-200/300` for interactive elements
-- **Hover States**: ALWAYS present on interactive elements (`hover:bg-accent`, `hover:scale-105`)
-- **Inline styles**: ONLY for dynamic runtime values (e.g., `style={{ backgroundColor: team.color }}`)
+*   **Fan-Out Routing:** Efficiently broadcasts a single incoming message to thousands of connected subscribers.
+*   **Pattern Matching:**
+  *   `+` **Single Level Wildcard:** Matches exactly one segment.
+    *   *Example:* `sensors/+/temp` matches `sensors/kitchen/temp`.
+  *   `#` **Multi Level Wildcard:** Matches all remaining segments to the end.
+    *   *Example:* `logs/#` matches `logs/error`, `logs/app/backend`, etc.
 
-### State Management
-**Priority**: Local (`useState`) → Shared (Zustand) → Server (TanStack Query) → URL (React Router)
+for more detailed info:
+- docs: docs/guide/store.md
+- code: src/brokers/pub-sub/pub_sub_manager.rs
 
+### 3. QUEUE (Job Processing)
+
+**Durable FIFO buffer with acknowledgments.**
+
+**Use Case:** Essential for load leveling and ensuring reliable background processing. Use it to decouple heavy tasks (like video transcoding or email sending) from your user-facing API.
+
+```text
+┌──────────────┐        PUSH            ┌──────────────────┐
+│   Producer   │───────────────────────▶│ 1. [ Job A ]     │
+└──────────────┘                        │ 2. [ Job B ]     │───┐
+                                        └────────▲─────────┘   │ POP
+                                                 │             │
+                                             ACK │             │
+                                        ┌────────┴─────────┐   │
+                                        │     Consumer     │◀──┘
+                                        └──────────────────┘
+```
+*   **Smart Scheduling:** Supports **Delayed Jobs** (process in the future) and **Priority Queues** (urgent jobs first).
+*   **Failure Recovery:** Automatically retries failed jobs and isolates permanent failures in **Dead Letter Queues (DLQ)**.
+*   **Disk Persistence:** Safely persists all jobs to a Write-Ahead Log (WAL) to ensure data survival across restarts.
+
+for more detailed info:
+- docs: docs/guide/queue.md
+- code: src/brokers/queue/queue_manager.rs
+
+### 4. STREAM (Event Log)
+
+**Append-only immutable log with offset tracking.**
+
+**Use Case:** The source of truth for your system's history. Perfect for Event Sourcing, audit trails, and replaying historical data for analytics or debugging.
+
+```text
+┌──────────────┐       APPEND           ┌────────────────────────────────────┐
+│   Producer   │───────────────────────▶│ 0:Event | 1:Event | 2:Event | ...  │
+└──────────────┘                        └────────────────────────────────────┘
+                                            ▲             ▲
+                                     OFFSET │      OFFSET │
+                                     ┌────────────┐   ┌────────────┐
+                                     │ Consumer A │   │ Consumer B │
+                                     └────────────┘   └────────────┘
+```
+
+*   **Immutable History:** Events are strictly appended and never modified, ensuring a tamper-proof audit log.
+*   **Consumer Groups:** Maintains separate read cursors (offsets) for different consumers, allowing independent processing speeds.
+*   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
+
+for more detailed info:
+- docs: docs/guide/stream.md
+- code: src/brokers/stream/stream_manager.rs
+
+##  Dashboard
+
+Nexo comes with a built-in, zero-config dashboard exposed to local development.
+Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
+
+for more detailed info:
+- code: dashboard/src/pages/dashboard/components
+
+## Getting Started
+
+### 1. Run the Server
+
+```bash
+docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo
+```
+This exposes:
+- Port 7654 (TCP): Main server socket for SDK clients.
+- Port 8080 (HTTP): Web Dashboard with status of all brokers.
+
+
+### 2. Install the SDK
+
+```bash
+npm install @emanuelepifani/nexo-client
+```
+
+### 3. Usage Example
+Connect, execute operations, inspect data via the dashboard at `http://localhost:8080`.
+
+```typescript
+import { NexoClient } from '@emanuelepifani/nexo-client';
+// Connect once
+const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
+
+
+// --- 1. Store (Shared state Redis-like) ---
+await client.store.map.set("user:1", { name: "Max", role: "admin" });
+const user = await client.store.map.get<User>("user:1");
+await client.store.map.del("user:1");
+
+
+// --- 2. Pub/Sub (Realtime events MQTT-style + wildcards) ---
+client.pubsub<Heartbeat>('edge/42/hb').publish({ ts: Date.now() });
+await client.pubsub<Heartbeat>('edge/+/hb').subscribe(hb => console.log('edge alive:', hb.ts));
+await client.pubsub<EdgeEvent>('edge/42/#').subscribe(ev => console.log('edge event:', ev.type));
+
+
+// --- 3. Queue (Reliable background jobs) ---
+const mailQ = await client.queue<MailJob>("emails").create();
+await mailQ.push({ to: "test@test.com" });
+await mailQ.subscribe((msg) => console.log(msg));
+
+
+// --- 4. Stream (Durable history Event Log) ---
+const stream = await client.stream<UserEvent>('user-events').create();
+await stream.publish({ type: 'login', userId: 'u1' });
+await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+
+
+//Every broker support Binary format (zero JSON overhead)
+const chunk = Buffer.alloc(1024 * 1024);
+await client.store.map.set("blob", chunk);
+client.pubsub<Buffer>('edge/42/video').publish(chunk);
+client.stream<Buffer>('video-archive').publish(chunk);
+client.queue<Buffer>('video-processing').push(chunk);
+```
 ---
 
-## 🧪 Testing Standards (Cross-Stack)
-
-### Test Philosophy
-- **Deterministic**: Calculate exact wait times (no random timeouts)
-- **Independent**: Each test runnable alone, no shared state pollution
-- **Complete Coverage**: ALL implemented features tested
-- **Unique Names**: Always use `randomUUID()` for resource names (queues, topics, keys)
-
-### Setup/Teardown
-**Global** (`global-setup.ts`): Build binary (not in `--release` to be faster), start server once, kill after all tests
-**Per-File**: Reuse singleton Nexo client from `nexo.ts` (avoid unnecessary `connect()`/`disconnect()`)
-**Exception**: `stream.test.ts` creates 2 shared clients in `beforeAll` for consumer group tests
-
-### Deterministic Test Timing
-**Bad**: `await sleep(2000)` (random guess)
-**Good**: `await sleep(PERSISTENCE_INTERVAL_MS + 100)` (calculated)
-**Better**: Polling with `waitFor(() => condition, { maxAttempts, intervalMs })`
-
-### Test Naming & Organization
-**Structure**: `describe('BROKER')` → `describe('FEATURE')` → `it('specific scenario')`
-**Naming**: UPPERCASE for macro features, explicit about what's tested, group by feature
-
-### Test Cleanup
-No leftover state. Delete created resources in `afterEach` if not auto-cleaned.
-
----
-
-## 🛡️ Guardrails: Idiomatic Code & Stack Awareness
-
-### Proactive Deviation Alerts
-When the user proposes or asks for an approach that goes against established
-patterns in the relevant language/framework, the AI MUST:
-1. **Flag it explicitly** before implementing: "⚠️ This goes against [pattern/convention] in [language]. The idiomatic approach is [X]. Want to proceed anyway?"
-2. **Explain the tradeoff** in 1-2 sentences (not a lecture)
-3. **Suggest the idiomatic alternative** with a concrete code example
-
-This applies to: error handling patterns, concurrency models, memory management,
-type system usage, project structure, dependency choices, testing patterns.
-
-### De Facto Standards
-When multiple valid approaches exist for a problem, prefer the **de facto standard**
-in that ecosystem over creative alternatives:
-- If a well-known crate/library solves the problem, mention it before hand-rolling
-- If the language has a conventional pattern (e.g., Rust's Error trait, Go's error wrapping,
-  React's composition model), use it by default
-- If the framework has an official recommendation, follow it unless there's a
-  measured performance reason not to
-
-### Anti-Footgun Rule
-Never silently introduce patterns that are known footguns in the target language:
-- Rust: unbounded collections in long-lived tasks, .unwrap() in non-test code,
-  String where enums fit, missing Error/Display impls
-- TypeScript: `any` types, unhandled promise rejections, mutable shared state
-- React: prop drilling >3 levels, useEffect for derived state,
-  inline object/function props causing re-renders
-
-When the user explicitly asks for a footgun pattern, implement it but add a
-one-line comment noting the risk.
-
-### Brainstorming Mode
-During architecture/design discussions, ALWAYS:
-1. State the conventional/boring solution first
-2. Only then suggest creative alternatives if they have concrete benefits
-3. For each option, note: ecosystem maturity, community adoption, maintenance burden
-
----
-
-**Remember**: Indie hacker project. Pragmatism over perfection. Fast iteration with clean, maintainable code. No enterprise over-engineering, no cowboy coding. Find the balance.
+AI-RULES:
+- for REACT dashboard: ai-rules/rules-react.md    
+- for RUST server: ai-rules/rules-rust.md     
+- for SDK ts: ai-rules/rules-sdk-ts.md    
