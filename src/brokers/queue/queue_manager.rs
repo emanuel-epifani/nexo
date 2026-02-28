@@ -41,7 +41,15 @@ impl QueueManager {
                         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                             if filename.ends_with(".db") && !filename.ends_with(".db-wal") && !filename.ends_with(".db-shm") {
                                 let queue_name = filename.trim_end_matches(".db").to_string();
-                                let config = QueueConfig::from_options(QueueCreateOptions::default(), &system_config);
+                                
+                                // Load config if it exists
+                                let config_path = persistence_path.join(format!("{}.config.json", queue_name));
+                                let config = if let Ok(data) = std::fs::read_to_string(&config_path) {
+                                    serde_json::from_str(&data).unwrap_or_else(|_| QueueConfig::from_options(QueueCreateOptions::default(), &system_config))
+                                } else {
+                                    QueueConfig::from_options(QueueCreateOptions::default(), &system_config)
+                                };
+
                                 let actor_tx = manager.spawn_queue_actor(
                                     queue_name.clone(),
                                     config,
@@ -84,6 +92,18 @@ impl QueueManager {
             Entry::Occupied(_) => Ok(()), // Already exists
             Entry::Vacant(v) => {
                 let config = QueueConfig::from_options(options, &self.config);
+                
+                // Persist config
+                let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
+                if let Err(e) = std::fs::create_dir_all(&persistence_path) {
+                    tracing::error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
+                } else {
+                    let config_path = persistence_path.join(format!("{}.config.json", name));
+                    if let Ok(data) = serde_json::to_string_pretty(&config) {
+                        let _ = std::fs::write(&config_path, data);
+                    }
+                }
+
                 let actor_tx = self.spawn_queue_actor(
                     name.clone(), 
                     config, 
@@ -110,11 +130,13 @@ impl QueueManager {
         let db_path = base_path.join(format!("{}.db", name));
         let wal_path = base_path.join(format!("{}.db-wal", name));
         let shm_path = base_path.join(format!("{}.db-shm", name));
+        let config_path = base_path.join(format!("{}.config.json", name));
 
         // Best effort cleanup
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(wal_path);
         let _ = std::fs::remove_file(shm_path);
+        let _ = std::fs::remove_file(config_path);
 
         Ok(())
     }

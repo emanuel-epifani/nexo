@@ -293,6 +293,10 @@ impl QueueActor {
             QueueActorCommand::GetSnapshot { reply } => {
                 let mut snapshot = self.main_state.get_snapshot(&self.name);
                 snapshot.dlq = self.dlq_state.len();
+                // Override config with the real one instead of empty struct from queue.rs if needed,
+                // but main_state.get_snapshot doesn't know about config.
+                // We'll update the main_state snapshot method to handle it or inject it here.
+                snapshot.config = self.config.clone();
                 let _ = reply.send(snapshot);
                 true
             }

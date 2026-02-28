@@ -58,10 +58,18 @@ impl StreamManager {
                     let path = entry.path();
                     if path.is_dir() {
                         if let Some(topic_name) = path.file_name().and_then(|n| n.to_str()) {
-                            let topic_config = TopicConfig::from_options(StreamCreateOptions::default(), &config);
+                            let name = topic_name.to_string();
+                            
+                            // Load config if it exists
+                            let config_path = path.join("config.json");
+                            let topic_config = if let Ok(data) = std::fs::read_to_string(&config_path) {
+                                serde_json::from_str(&data).unwrap_or_else(|_| TopicConfig::from_options(StreamCreateOptions::default(), &config))
+                            } else {
+                                TopicConfig::from_options(StreamCreateOptions::default(), &config)
+                            };
+
                             let (t_tx, t_rx) = mpsc::channel(topic_config.actor_channel_capacity);
                             
-                            let name = topic_name.to_string();
                             let config_clone = topic_config.clone();
                             let st_tx = storage_tx.clone();
                             let self_tx = t_tx.clone();
@@ -102,6 +110,17 @@ impl StreamManager {
                 let (t_tx, t_rx) = mpsc::channel(topic_config.actor_channel_capacity);
                 
                 info!("[StreamManager] Creating topic '{}'", name);
+                
+                // Persist config
+                let base_path = std::path::PathBuf::from(&topic_config.persistence_path).join(&name);
+                if let Err(e) = std::fs::create_dir_all(&base_path) {
+                    tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
+                } else {
+                    let config_path = base_path.join("config.json");
+                    if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                        let _ = std::fs::write(&config_path, data);
+                    }
+                }
                 
                 let config_clone = topic_config.clone();
                 let storage_tx = self.storage_tx.clone();

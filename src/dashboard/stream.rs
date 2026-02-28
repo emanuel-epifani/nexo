@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::NexoEngine;
+use crate::brokers::stream::topic::TopicConfig;
 
 const STREAM_PAGE_SIZE: usize = 50;
 const STREAM_MAX_PAGE_SIZE: usize = 500;
@@ -18,6 +19,7 @@ pub struct TopicSummary {
     pub name: String,
     pub last_seq: u64,
     pub groups: Vec<ConsumerGroupSummary>,
+    pub config: TopicConfig,
 }
 
 #[derive(Serialize)]

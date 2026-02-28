@@ -370,6 +370,14 @@ impl Message {
                 inflight,
                 scheduled,
                 dlq: 0, // Sarà popolato dall'Actor
+                config: QueueConfig {
+                    visibility_timeout_ms: 0,
+                    max_retries: 0,
+                    ttl_ms: 0,
+                    flush_ms: 0,
+                    writer_channel_capacity: 0,
+                    writer_batch_size: 0,
+                }, // Sarà popolato dall'Actor
             }
         }
 
