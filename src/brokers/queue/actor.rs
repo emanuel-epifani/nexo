@@ -109,7 +109,7 @@ impl QueueActor {
         let db_path = persistence_path.join(format!("{}.db", name));
         let store = QueueStore::new(
             db_path, 
-            config.persistence.clone(),
+            config.flush_ms,
             config.writer_channel_capacity,
             config.writer_batch_size,
         );

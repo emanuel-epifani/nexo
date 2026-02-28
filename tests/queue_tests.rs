@@ -1,5 +1,5 @@
 use nexo::brokers::queue::{QueueManager};
-use nexo::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
+use nexo::brokers::queue::commands::QueueCreateOptions;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -154,7 +154,6 @@ mod queue_tests {
                 // Pop 2 (att=2). Timeout. 2 < 3 -> Requeue.
                 // Pop 3 (att=3). Timeout. 3 >= 3 -> DLQ.
                 ttl_ms: Some(60000),
-                persistence: Some(PersistenceOptions::FileSync),
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
@@ -340,13 +339,14 @@ mod queue_tests {
             {
                 let manager1 = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync), // Ensure written immediately
                     ..Default::default()
                 };
                 manager1.create_queue(q.clone(), config).await.unwrap();
 
                 manager1.push(q.clone(), Bytes::from("survivor"), 0, None).await.unwrap();
-                // Drop manager1 (Actor stops)
+
+                // Wait for async flush before dropping manager
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
             // Simulating Restart
@@ -355,7 +355,6 @@ mod queue_tests {
                 // We must "redeclare" the queue to spawn the actor again,
                 // but the actor should find the DB and recover.
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager2.create_queue(q.clone(), config).await.unwrap();
@@ -376,13 +375,15 @@ mod queue_tests {
             {
                 let manager = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
 
                 // Push with delay 500ms
                 manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
+
+                // Wait for async flush before dropping manager
+                tokio::time::sleep(Duration::from_millis(150)).await;
 
                 // Immediate check (should be empty)
                 assert!(manager.pop(&q).await.is_none());
@@ -392,7 +393,6 @@ mod queue_tests {
             {
                 let manager2 = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager2.create_queue(q.clone(), config).await.unwrap();
@@ -420,7 +420,6 @@ mod queue_tests {
             {
                 let manager = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
@@ -431,13 +430,15 @@ mod queue_tests {
 
                 // Ack it (Should delete from DB)
                 manager.ack(&q, msg.id).await;
+
+                // Wait for the async writer to flush (using double the default max flush time just to be safe)
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
 
             // Restart
             {
                 let manager2 = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager2.create_queue(q.clone(), config).await.unwrap();
@@ -459,7 +460,6 @@ mod queue_tests {
                 let manager = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500), // Short timeout
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
@@ -478,7 +478,6 @@ mod queue_tests {
                 let manager2 = QueueManager::new(sys_config.clone());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500),
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager2.create_queue(q.clone(), config).await.unwrap();
@@ -508,7 +507,6 @@ mod queue_tests {
                 let manager = QueueManager::new(sys_config.clone());
                 
                 let config = QueueCreateOptions {
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 
@@ -519,7 +517,8 @@ mod queue_tests {
                 manager.push(q1.clone(), Bytes::from("msg2_q1"), 0, None).await.unwrap();
                 manager.push(q2.clone(), Bytes::from("msg1_q2"), 0, None).await.unwrap();
 
-                // Drop manager (simulating server shutdown)
+                // Wait for async flush before dropping manager
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
             // Small delay to ensure files are flushed
@@ -563,7 +562,6 @@ mod queue_tests {
             let config = QueueCreateOptions {
                 visibility_timeout_ms: Some(100),
                 max_retries: Some(0), // Immediate DLQ
-                persistence: Some(PersistenceOptions::FileSync),
                 ..Default::default()
             };
             manager.create_queue(q.clone(), config).await.unwrap();
@@ -622,7 +620,6 @@ mod queue_tests {
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(100),
                     max_retries: Some(0),
-                    persistence: Some(PersistenceOptions::FileSync),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
@@ -679,37 +676,18 @@ mod queue_tests {
 
         const COUNT: usize = 200_000;
 
-        #[tokio::test]
-        async fn bench_fsync_throughput() {
-            let (manager, _tmp) = setup_queue_manager().await;
-            let q = format!("bench_sync_{}", Uuid::new_v4());
-            let config = QueueCreateOptions {
-                persistence: Some(PersistenceOptions::FileSync),
-                ..Default::default()
-            };
-            manager.create_queue(q.clone(), config).await.unwrap();
-
-            let mut bench = Benchmark::start("PUSH - FSync (write on disdk once per message)", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
 
         #[tokio::test]
-        async fn bench_fasync_throughput() {
-            // cargo test --release bench_fasync_throughput -- --nocapture
+        async fn bench_queue_throughput() {
+            // cargo test --release bench_queue_throughput -- --nocapture
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("bench_async_{}", Uuid::new_v4());
             let config = QueueCreateOptions {
-                persistence: Some(PersistenceOptions::FileAsync),
                 ..Default::default()
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
-            let mut bench = Benchmark::start("PUSH - FAsync (write on disk once every x ms)", COUNT);
+            let mut bench = Benchmark::start("PUSH - Queue Throughput (Async Disk Flush)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();

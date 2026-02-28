@@ -14,8 +14,7 @@ use chrono::{DateTime, Utc};
 use crate::dashboard::utils::payload_to_dashboard_value;
 
 use crate::dashboard::queue::{QueueSummary, MessageSummary, DlqMessageSummary};
-use crate::brokers::queue::persistence::types::PersistenceMode;
-use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
+use crate::brokers::queue::commands::QueueCreateOptions;
 use crate::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::DlqMessage;
 
@@ -86,7 +85,7 @@ impl Message {
         pub visibility_timeout_ms: u64,
         pub max_retries: u32,
         pub ttl_ms: u64,
-        pub persistence: PersistenceMode,
+        pub flush_ms: u64,
         // Persistence Tuning
         pub writer_channel_capacity: usize,
         pub writer_batch_size: usize,
@@ -94,19 +93,11 @@ impl Message {
 
     impl QueueConfig {
         pub fn from_options(opts: QueueCreateOptions, sys: &SystemQueueConfig) -> Self {
-            let persistence = match opts.persistence {
-                Some(PersistenceOptions::FileSync) => PersistenceMode::Sync,
-                Some(PersistenceOptions::FileAsync) => PersistenceMode::Async {
-                    flush_ms: sys.default_flush_ms,
-                },
-                None => PersistenceMode::Async { flush_ms: sys.default_flush_ms },
-            };
-
             Self {
                 visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
                 max_retries: opts.max_retries.unwrap_or(sys.max_retries),
                 ttl_ms: opts.ttl_ms.unwrap_or(sys.ttl_ms),
-                persistence,
+                flush_ms: sys.default_flush_ms,
                 writer_channel_capacity: sys.writer_channel_capacity,
                 writer_batch_size: sys.writer_batch_size,
             }

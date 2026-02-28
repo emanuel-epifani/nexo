@@ -1,31 +1,30 @@
 use std::path::PathBuf;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use rusqlite::Connection;
 
 use crate::brokers::queue::queue::Message;
 use crate::brokers::queue::dlq::DlqMessage;
-use crate::brokers::queue::persistence::types::{PersistenceMode, StorageOp, StoreCommand};
+use crate::brokers::queue::persistence::types::StorageOp;
 use crate::brokers::queue::persistence::sqlite::{init_db, load_all_messages, load_dlq_messages};
 use crate::brokers::queue::persistence::writer::run_writer;
 
 #[derive(Clone)]
 pub struct QueueStore {
-    sender: Option<mpsc::Sender<StoreCommand>>,
-    mode: PersistenceMode,
+    sender: Option<mpsc::Sender<StorageOp>>,
     db_path: PathBuf,
 }
 
 impl QueueStore {
     pub fn new(
         db_path: PathBuf, 
-        mode: PersistenceMode, 
+        flush_ms: u64,
         writer_channel_capacity: usize,
         batch_size: usize
     ) -> Self {
         // 1. SYNCHRONOUS INIT: Ensure DB schema exists before anything else
         // This prevents race conditions where recover() runs before Writer creates tables.
         if let Ok(conn) = Connection::open(&db_path) {
-            if let Err(e) = init_db(&conn, &mode) {
+            if let Err(e) = init_db(&conn) {
                 tracing::error!("FATAL: Failed to initialize Queue DB at {:?}: {}", db_path, e);
                 // We proceed, but the actor will likely fail later.
             }
@@ -35,16 +34,14 @@ impl QueueStore {
 
         let (tx, rx) = mpsc::channel(writer_channel_capacity);
         
-        let mode_clone = mode.clone();
         let path_clone = db_path.clone();
         // Spawn Writer Thread
         tokio::spawn(async move {
-            run_writer(rx, path_clone, mode_clone, batch_size).await;
+            run_writer(rx, path_clone, flush_ms, batch_size).await;
         });
 
         Self {
             sender: Some(tx),
-            mode,
             db_path,
         }
     }
@@ -67,23 +64,12 @@ impl QueueStore {
     pub async fn execute(&self, op: StorageOp) -> Result<(), String> {
         let sender = self.sender.as_ref().ok_or("Store uninitialized")?;
 
-        match self.mode {
-            PersistenceMode::Sync => {
-                let (tx, rx) = oneshot::channel();
-                sender
-                    .send(StoreCommand { op, sync_channel: Some(tx) })
-                    .await
-                    .map_err(|_| "Writer channel closed".to_string())?;
-                
-                rx.await.map_err(|_| "Writer dropped reply".to_string())?
-            }
-            PersistenceMode::Async { .. } => {
-                sender
-                    .send(StoreCommand { op, sync_channel: None })
-                    .await
-                    .map_err(|_| "Writer channel closed".to_string())?;
-                Ok(())
-            }
-        }
+        sender
+            .send(op)
+            .await
+            .map_err(|_| "Writer channel closed".to_string())?;
+            
+        Ok(())
     }
 }
+

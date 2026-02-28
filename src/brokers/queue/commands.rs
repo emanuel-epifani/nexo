@@ -18,20 +18,12 @@ pub const OP_Q_MOVE_TO_QUEUE: u8 = 0x17;
 pub const OP_Q_DELETE_DLQ: u8 = 0x18;
 pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum PersistenceOptions {
-    FileSync,
-    FileAsync,
-}
-
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub ttl_ms: Option<u64>,
-    pub persistence: Option<PersistenceOptions>,
 }
 
 #[derive(Debug, Deserialize)]

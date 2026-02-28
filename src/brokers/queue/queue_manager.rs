@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::brokers::queue::queue::{QueueConfig, Message};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
-use crate::brokers::queue::commands::{QueueCreateOptions, PersistenceOptions};
+use crate::brokers::queue::commands::QueueCreateOptions;
 use crate::dashboard::queue::QueueSummary;
 use crate::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
@@ -211,7 +211,6 @@ impl QueueManager {
                 visibility_timeout_ms: None,
                 max_retries: None,
                 ttl_ms: None,
-                persistence: Some(PersistenceOptions::FileSync),
             };
             let config = QueueConfig::from_options(options, &self.config);
             

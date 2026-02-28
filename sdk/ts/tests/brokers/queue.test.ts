@@ -69,7 +69,6 @@ describe('QUEUE', () => {
         const q = await nexo.queue(qName).create({
             visibilityTimeoutMs: 5000, 
             maxRetries: 1,
-            persistence: 'file_sync'
         });
 
         // Push 3 messages

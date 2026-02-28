@@ -20,18 +20,16 @@ await mailQ.delete();
 
 ## Persistence
 
-All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. Two modes are available:
+All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. 
 
-| Mode | Behavior | Trade-off |
-|:---|:---|:---|
-| `file_async` **(default)** | Buffers writes and flushes every **200ms** or every **50k messages** (whichever comes first) | Fast & durable — best for most workloads |
-| `file_sync` | Flushes to disk on **every single message** | Safest, but slower — use for critical data where zero loss is required |
+To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically. 
 
-In `file_async` mode, if the server crashes between flush intervals, you may lose up to 200ms of messages. For most use cases this is an acceptable trade-off given the significant throughput improvement.
+By default, the server flushes data to disk every **200ms**. This interval is globally configurable when starting the Nexo server via the `NEXO_QUEUE_DEFAULT_FLUSH_MS` environment variable. 
+
 
 ## Advanced Creation
 
-Configure reliability, persistence, and timeout settings:
+Configure reliability and timeout settings:
 
 ```typescript
 const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create({
@@ -39,9 +37,6 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
   visibilityTimeoutMs: 10000,  // Retry if not ACKed within 10s (default: 30s)
   maxRetries: 5,               // Move to DLQ after 5 failures (default: 5)
   ttlMs: 60000,                // Expires if not consumed in 60s (default: 7 days)
-
-  // PERSISTENCE (see above)
-  persistence: 'file_sync',
 });
 ```
 

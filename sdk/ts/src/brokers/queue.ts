@@ -129,13 +129,10 @@ const QueueCommands = {
   },
 };
 
-export type PersistenceStrategy = 'file_sync' | 'file_async';
-
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
   ttlMs?: number;
-  persistence?: PersistenceStrategy;
 }
 
 export interface QueueSubscribeOptions {
