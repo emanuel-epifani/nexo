@@ -291,8 +291,15 @@ impl QueueActor {
             }
             
             QueueActorCommand::GetSnapshot { reply } => {
-                let mut snapshot = self.main_state.get_snapshot(&self.name);
-                snapshot.dlq = self.dlq_state.len();
+                let (pending, inflight, scheduled) = self.main_state.get_counters();
+                let snapshot = QueueSummary {
+                    name: self.name.clone(),
+                    pending,
+                    inflight,
+                    scheduled,
+                    dlq: self.dlq_state.len(),
+                    config: self.config.clone(),
+                };
                 let _ = reply.send(snapshot);
                 true
             }

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use crate::NexoEngine;
+use crate::brokers::queue::queue::QueueConfig;
 
 #[derive(Deserialize)]
 pub struct QueueMessagesQuery {
@@ -20,6 +21,7 @@ pub struct QueueSummary {
     pub inflight: usize,
     pub scheduled: usize,
     pub dlq: usize,
+    pub config: QueueConfig,
 }
 
 #[derive(Serialize)]

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
 use crate::server::protocol::ParseError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const OP_S_CREATE: u8 = 0x30;
 pub const OP_S_PUB: u8 = 0x31;
@@ -15,7 +15,7 @@ pub const OP_S_SEEK: u8 = 0x38;
 
 
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionOptions {
     pub max_age_ms: Option<u64>,

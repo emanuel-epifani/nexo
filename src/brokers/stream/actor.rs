@@ -96,6 +96,7 @@ pub(crate) struct TopicActor {
     retention: crate::brokers::stream::commands::RetentionOptions,
     max_ack_pending: usize,
     ack_wait: Duration,
+    full_config: TopicConfig,
 }
 
 impl TopicActor {
@@ -152,9 +153,10 @@ impl TopicActor {
             ack_rx,
             groups_dirty: false,
             max_segment_size: config.max_segment_size,
-            retention: config.retention,
+            retention: config.retention.clone(),
             max_ack_pending: config.max_ack_pending,
             ack_wait: Duration::from_millis(config.ack_wait_ms),
+            full_config: config,
         }
     }
 
@@ -384,10 +386,14 @@ impl TopicActor {
                     }
                 }).collect();
 
+                let mut safe_config = self.full_config.clone();
+                safe_config.persistence_path = "".to_string(); // Don't expose server paths
+
                 let summary = crate::dashboard::stream::TopicSummary {
                     name: self.state.name.clone(),
                     last_seq: self.state.next_seq.saturating_sub(1),
                     groups: groups_info,
+                    config: safe_config,
                 };
                 let _ = reply.send(summary);
             }

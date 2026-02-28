@@ -347,7 +347,7 @@ impl Message {
             (requeued_msgs, dlq_msgs)
         }
 
-        pub fn get_snapshot(&self, name: &str) -> QueueSummary {
+        pub fn get_counters(&self) -> (usize, usize, usize) {
             let mut pending = 0;
             let mut inflight = 0;
             let mut scheduled = 0;
@@ -364,13 +364,7 @@ impl Message {
                 scheduled += list.len();
             }
 
-            QueueSummary {
-                name: name.to_string(),
-                pending,
-                inflight,
-                scheduled,
-                dlq: 0, // Sarà popolato dall'Actor
-            }
+            (pending, inflight, scheduled)
         }
 
         pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<MessageSummary>) {

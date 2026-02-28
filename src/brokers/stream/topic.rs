@@ -7,8 +7,9 @@ use crate::config::SystemStreamConfig;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicConfig {
     pub persistence_path: String,
     pub max_segment_size: u64,
