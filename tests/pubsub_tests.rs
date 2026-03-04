@@ -115,7 +115,7 @@ mod pubsub_tests {
             
             let mut config = nexo::config::Config::global().pubsub.clone();
             config.persistence_path = path;
-            let manager = Arc::new(nexo::brokers::pub_sub::PubSubManager::new(config));
+            let manager = Arc::new(PubSubManager::new(Arc::new(config)));
             
             let client_id = ClientId("leaver".to_string());
             let (tx, _rx) = mpsc::unbounded_channel();
@@ -208,7 +208,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager = Arc::new(nexo::brokers::pub_sub::PubSubManager::new(config));
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
                 
                 manager.publish(topic, payload.clone(), true, None).await;
 
@@ -226,7 +226,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager2 = Arc::new(nexo::brokers::pub_sub::PubSubManager::new(config));
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
 
                 // Subscribe - should receive retained from disk
                 let client_id = ClientId("after_restart".to_string());

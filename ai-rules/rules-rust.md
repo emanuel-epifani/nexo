@@ -22,6 +22,9 @@ src/brokers/{broker}/
 - Business logic isolated within broker directory
 - No cross-broker direct dependencies (go through managers)
 
+**Imports:** 
+- Always bring types into scope using `use` statements at the top of the file. DO NOT use fully qualified paths (e.g., `crate::...`) inline within the business logic unless strictly necessary to avoid unresolvable name collisions. Use `as` aliases for conflicting names.
+
 ### Naming Conventions
 **Structs/Enums**: `PascalCase` | **Functions**: `snake_case` | **Constants**: `SCREAMING_SNAKE_CASE` | **Files**: `snake_case.rs`
 

@@ -13,7 +13,7 @@ mod stream_tests {
         use super::*;
         use nexo::brokers::stream::StreamManager;
 
-        fn get_test_config(path: Option<&str>) -> nexo::config::SystemStreamConfig {
+        fn get_test_config(path: Option<&str>) -> nexo::brokers::stream::config::SystemStreamConfig {
             let mut config = Config::global().stream.clone();
             if let Some(p) = path {
                 config.persistence_path = p.to_string();
@@ -25,7 +25,7 @@ mod stream_tests {
         async fn test_stream_basic_flow() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "test-basic-flow";
 
             // 1. Create
@@ -51,7 +51,7 @@ mod stream_tests {
         async fn test_stream_ordering() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "ordering-topic";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
@@ -77,7 +77,7 @@ mod stream_tests {
         async fn test_ack_nack_flow() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "ack-nack-flow";
             let group = "g-ack";
 
@@ -114,7 +114,7 @@ mod stream_tests {
         async fn test_ack_floor_advancement() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "ack-floor";
             let group = "g-floor";
 
@@ -148,7 +148,7 @@ mod stream_tests {
         async fn test_seek_beginning_end() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "seek-topic";
             let group = "g-seek";
 
@@ -198,7 +198,7 @@ mod stream_tests {
         async fn test_multi_consumer_parallel_fetch() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "multi-consumer";
             let group = "g-multi";
 
@@ -237,7 +237,7 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = path_str.clone();
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "delete-topic-test";
 
             // 1. Create
@@ -282,7 +282,7 @@ mod stream_tests {
 
             // 1. Create & Publish (Sync)
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -294,7 +294,7 @@ mod stream_tests {
 
             // 2. Recovery
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -320,7 +320,7 @@ mod stream_tests {
             let group = "g-persist";
 
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -342,7 +342,7 @@ mod stream_tests {
 
             // Recover
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -364,7 +364,7 @@ mod stream_tests {
 
             // 1. Write Data
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -382,7 +382,7 @@ mod stream_tests {
 
             // 3. Recover
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 manager.create_topic(topic.to_string(), StreamCreateOptions {
                     ..Default::default()
                 }).await.unwrap();
@@ -404,7 +404,7 @@ mod stream_tests {
             config.max_segment_size = 100;
             config.default_flush_ms = 50;
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "topic_segmentation";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -440,7 +440,7 @@ mod stream_tests {
 
             let mut recover_config = Config::global().stream.clone();
             recover_config.persistence_path = path_str;
-            let recovered_manager = StreamManager::new(recover_config);
+            let recovered_manager = StreamManager::new(std::sync::Arc::new(recover_config));
 
             recovered_manager.create_topic(topic.to_string(), StreamCreateOptions {
                 ..Default::default()
@@ -476,7 +476,7 @@ mod stream_tests {
             config.default_retention_bytes = 250;
             config.default_flush_ms = 50;
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "topic_retention";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -520,7 +520,7 @@ mod stream_tests {
 
             // Phase 1: Create topics, publish messages
             {
-                let manager = StreamManager::new(config.clone());
+                let manager = StreamManager::new(std::sync::Arc::new(config.clone()));
                 
                 manager.create_topic(topic1.to_string(), StreamCreateOptions {
                     ..Default::default()
@@ -551,7 +551,7 @@ mod stream_tests {
 
             // Phase 2: Warm restart
             {
-                let manager2 = StreamManager::new(config.clone());
+                let manager2 = StreamManager::new(std::sync::Arc::new(config.clone()));
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 assert!(manager2.exists(topic1).await, "Topic 1 should be auto-restored");
@@ -582,7 +582,7 @@ mod stream_tests {
             config.default_flush_ms = 50;
             config.max_segment_size = 500;
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "eviction_test";
 
             manager.create_topic(topic.to_string(), StreamCreateOptions {
@@ -624,7 +624,7 @@ mod stream_tests {
             config.eviction_interval_ms = 50;
             config.default_flush_ms = 50;
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "cold-fetch-test";
             let group = "g-cold";
 
@@ -672,7 +672,7 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
 
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             let topic = "bench-async";
             manager.create_topic(topic.to_string(), StreamCreateOptions {
                 ..Default::default()
@@ -699,7 +699,7 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
             
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             
             let result = manager.publish("nonexistent_topic", Bytes::from("msg")).await;
             
@@ -713,7 +713,7 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
             
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             manager.create_topic("test_topic".to_string(), StreamCreateOptions::default()).await.unwrap();
             
             // Publish 10 messages (seq 1-10)
@@ -742,7 +742,7 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
             
-            let manager = StreamManager::new(config);
+            let manager = StreamManager::new(std::sync::Arc::new(config));
             manager.create_topic("test_topic".to_string(), StreamCreateOptions::default()).await.unwrap();
             manager.publish("test_topic", Bytes::from("msg")).await.unwrap();
             

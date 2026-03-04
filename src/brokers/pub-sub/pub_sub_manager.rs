@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use bytes::Bytes;
 use dashmap::DashMap;
+use crate::brokers::pub_sub::config::PubSubConfig;
 use crate::brokers::pub_sub::types::{ClientId, PubSubMessage};
 use crate::brokers::pub_sub::actor::{RootCommand, RootActor, ClientRegistry};
 
@@ -38,11 +39,11 @@ pub struct PubSubManager {
     client_subscriptions: DashMap<ClientId, HashSet<String>>,
     /// Global "#" subscribers — only stores ClientIds, resolved from `clients` at publish time.
     global_hash_subscribers: RwLock<HashSet<ClientId>>,
-    config: crate::config::PubSubConfig,
+    config: Arc<PubSubConfig>,
 }
 
 impl PubSubManager {
-    pub fn new(config: crate::config::PubSubConfig) -> Self {
+    pub fn new(config: Arc<PubSubConfig>) -> Self {
         let manager = Self {
             actors: DashMap::new(),
             clients: Arc::new(DashMap::new()),

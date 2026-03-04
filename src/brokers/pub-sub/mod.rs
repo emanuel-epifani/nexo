@@ -1,3 +1,4 @@
+pub mod config;
 pub mod pub_sub_manager;
 pub mod commands;
 pub mod types;

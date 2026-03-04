@@ -1,3 +1,4 @@
+pub mod config;
 pub mod store_manager;
 pub mod commands;
 pub mod types;

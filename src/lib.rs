@@ -29,7 +29,7 @@ pub struct NexoEngine {
 
 impl NexoEngine {
     pub fn new(config: &Config) -> Self {
-        let pubsub = Arc::new(PubSubManager::new(config.pubsub.clone()));
+        let pubsub = Arc::new(PubSubManager::new(Arc::new(config.pubsub.clone())));
         
         // Start background cleanup task for expired retained messages
         let pubsub_clone = pubsub.clone();
@@ -43,10 +43,10 @@ impl NexoEngine {
         });
         
         Self {
-            store: Arc::new(StoreManager::new(config.store.clone())),
-            queue: Arc::new(QueueManager::new(config.queue.clone())),
+            store: Arc::new(StoreManager::new(Arc::new(config.store.clone()))),
+            queue: Arc::new(QueueManager::new(Arc::new(config.queue.clone()))),
             pubsub,
-            stream: Arc::new(StreamManager::new(config.stream.clone())),
+            stream: Arc::new(StreamManager::new(Arc::new(config.stream.clone()))),
             start_time: Instant::now(),
         }
     }

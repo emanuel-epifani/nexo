@@ -5,21 +5,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::time;
-
+use crate::brokers::store::config::StoreConfig;
 use crate::brokers::store::types::{Entry, Value};
 use crate::config::Config;
 
 #[derive(Clone)]
 pub struct MapStore {
     inner: Arc<DashMap<String, Entry>>,
-    config: crate::config::StoreConfig,
+    config: Arc<StoreConfig>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MapValue(pub Bytes);
 
 impl MapStore {
-    pub fn new(config: crate::config::StoreConfig) -> Self {
+    pub fn new(config: Arc<StoreConfig>) -> Self {
         let inner = Arc::new(DashMap::new());
 
         // Weak reference for the cleanup thread

@@ -10,7 +10,7 @@ use crate::brokers::queue::queue::{QueueConfig, Message};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queue::commands::QueueCreateOptions;
 use crate::dashboard::queue::QueueSummary;
-use crate::config::SystemQueueConfig;
+use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 
 // ==========================================
@@ -20,11 +20,11 @@ use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 #[derive(Clone)]
 pub struct QueueManager {
     queue_actors: Arc<DashMap<String, mpsc::Sender<QueueActorCommand>>>,
-    config: SystemQueueConfig,
+    config: Arc<SystemQueueConfig>,
 }
 
 impl QueueManager {
-    pub fn new(system_config: SystemQueueConfig) -> Self {
+    pub fn new(system_config: Arc<SystemQueueConfig>) -> Self {
         let queue_actors = Arc::new(DashMap::new());
         let manager = Self { 
             queue_actors: queue_actors.clone(),
@@ -52,8 +52,7 @@ impl QueueManager {
 
                                 let actor_tx = manager.spawn_queue_actor(
                                     queue_name.clone(),
-                                    config,
-                                    &system_config
+                                    config
                                 );
                                 queue_actors.insert(queue_name.clone(), actor_tx);
                                 tracing::info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
@@ -71,12 +70,11 @@ impl QueueManager {
         &self,
         name: String,
         config: QueueConfig,
-        system_config: &SystemQueueConfig,
     ) -> mpsc::Sender<QueueActorCommand> {
-        let (tx, rx) = mpsc::channel(system_config.actor_channel_capacity);
+        let (tx, rx) = mpsc::channel(self.config.actor_channel_capacity);
         
         // Spawn actor with path from system_config
-        let path = std::path::PathBuf::from(&system_config.persistence_path);
+        let path = std::path::PathBuf::from(&self.config.persistence_path);
         let actor = QueueActor::new(name, config.clone(), path, rx);
         tokio::spawn(actor.run());
         
@@ -106,8 +104,7 @@ impl QueueManager {
 
                 let actor_tx = self.spawn_queue_actor(
                     name.clone(), 
-                    config, 
-                    &self.config
+                    config
                 );
                 v.insert(actor_tx);
                 Ok(())
@@ -238,8 +235,7 @@ impl QueueManager {
             
             let tx = self.spawn_queue_actor(
                 queue_name.clone(),
-                config,
-                &self.config
+                config
             );
             self.queue_actors.insert(queue_name, tx.clone());
             tx

@@ -1,3 +1,4 @@
+pub mod config;
 pub mod queue_manager;
 pub mod queue;
 pub mod actor;

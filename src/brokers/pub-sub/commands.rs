@@ -2,6 +2,7 @@ use bytes::Bytes;
 use crate::server::payload_cursor::PayloadCursor;
 use crate::server::protocol::ParseError;
 use serde::Deserialize;
+use crate::brokers::pub_sub::config::PubSubConfig;
 
 pub const OP_PUB: u8 = 0x21;
 pub const OP_SUB: u8 = 0x22;
@@ -22,7 +23,7 @@ pub struct PubSubPublishConfig {
 }
 
 impl PubSubPublishConfig {
-    pub fn from_options(opts: PubSubPublishOptions, sys: &crate::config::PubSubConfig) -> Self {
+    pub fn from_options(opts: PubSubPublishOptions, sys: &PubSubConfig) -> Self {
         Self {
             retain: opts.retain.unwrap_or(false),
             ttl_seconds: opts.ttl.unwrap_or(sys.default_retained_ttl_seconds),

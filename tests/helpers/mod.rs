@@ -18,7 +18,7 @@ pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
     let mut config = Config::global().queue.clone();
     config.persistence_path = path;
     
-    let manager = QueueManager::new(config);
+    let manager = QueueManager::new(Arc::new(config));
     (manager, temp_dir)
 }
 
@@ -29,7 +29,7 @@ pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let mut config = Config::global().pubsub.clone();
     config.persistence_path = path;
     
-    let manager = Arc::new(PubSubManager::new(config));
+    let manager = Arc::new(PubSubManager::new(Arc::new(config)));
     (manager, temp_dir)
 }
 
@@ -40,14 +40,14 @@ pub async fn setup_stream_manager() -> (StreamManager, TempDir) {
     let mut config = Config::global().stream.clone();
     config.persistence_path = path;
 
-    let manager = StreamManager::new(config);
+    let manager = StreamManager::new(Arc::new(config));
     (manager, temp_dir)
 }
 
 pub async fn setup_store_manager() -> (StoreManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = Config::global().store.clone();
-    let manager = StoreManager::new(config);
+    let manager = StoreManager::new(Arc::new(config));
     (manager, temp_dir)
 }
 

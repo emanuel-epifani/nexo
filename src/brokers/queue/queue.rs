@@ -15,7 +15,7 @@ use crate::dashboard::utils::payload_to_dashboard_value;
 
 use crate::dashboard::queue::{QueueSummary, MessageSummary, DlqMessageSummary};
 use crate::brokers::queue::commands::QueueCreateOptions;
-use crate::config::SystemQueueConfig;
+use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::DlqMessage;
 
 // ==========================================

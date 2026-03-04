@@ -1,5 +1,6 @@
 pub mod stream_manager;
 pub mod actor;
+pub mod config;
 pub mod topic;
 pub mod group;
 pub mod message;

@@ -15,7 +15,7 @@ use crate::brokers::stream::message::Message;
 use crate::brokers::stream::commands::{StreamCreateOptions, SeekTarget};
 use crate::brokers::stream::actor::{TopicCommand, TopicActor};
 use crate::brokers::stream::storage::{StorageManager, StorageCommand};
-use crate::config::SystemStreamConfig;
+use crate::brokers::stream::config::SystemStreamConfig;
 use crate::dashboard::stream::StreamBrokerSnapshot;
 
 // ==========================================
@@ -26,11 +26,11 @@ use crate::dashboard::stream::StreamBrokerSnapshot;
 pub struct StreamManager {
     actors: Arc<DashMap<String, mpsc::Sender<TopicCommand>>>,
     storage_tx: mpsc::Sender<StorageCommand>,
-    config: SystemStreamConfig,
+    config: Arc<SystemStreamConfig>,
 }
 
 impl StreamManager {
-    pub fn new(config: SystemStreamConfig) -> Self {
+    pub fn new(config: Arc<SystemStreamConfig>) -> Self {
         let actors = Arc::new(DashMap::new());
         let (storage_tx, storage_rx) = mpsc::channel(50_000); // Backpressure protection buffer
         
