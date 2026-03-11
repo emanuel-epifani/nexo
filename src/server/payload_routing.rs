@@ -24,282 +24,293 @@ pub const OP_DEBUG_ECHO: u8 = 0x00;
 // ROUTING
 // ========================================
 
-pub async fn route(opcode: u8, payload: Bytes, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    let mut cursor = PayloadCursor::new(payload);
-
-    match opcode {
-        // DEBUG
-        OP_DEBUG_ECHO => { Response::Data(cursor.read_remaining()) }
-
-        // STORE
-        OPCODE_MIN_STORE..=OPCODE_MAX_STORE => {
-            match StoreCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_store(cmd, engine),
-                Err(e) => Response::Error(e.to_string()),
-            }
-        }
-
-        // QUEUE
-        OPCODE_MIN_QUEUE..=OPCODE_MAX_QUEUE => {
-            match QueueCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_queue(cmd, engine).await,
-                Err(e) => Response::Error(e.to_string()),
-            }
-        }
-
-        // PUBSUB
-        OPCODE_MIN_PUBSUB..=OPCODE_MAX_PUBSUB => {
-            match PubSubCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_pubsub(cmd, engine, client_id).await,
-                Err(e) => Response::Error(e.to_string()),
-            }
-        }
-
-        // STREAM
-        OPCODE_MIN_STREAM..=OPCODE_MAX_STREAM => {
-            match StreamCommand::parse(opcode, &mut cursor) {
-                Ok(cmd) => handle_stream(cmd, engine, client_id).await,
-                Err(e) => Response::Error(e.to_string()),
-            }
-        }
-
-        _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
-    }
+pub struct RequestHandler<'a> {
+    engine: &'a NexoEngine,
+    client_id: &'a ClientId,
 }
 
-// ========================================
-// HANDLERS
-// ========================================
-
-fn handle_store(cmd: StoreCommand, engine: &NexoEngine) -> Response {
-    match cmd {
-        StoreCommand::Map(map_cmd) => match map_cmd {
-            MapCommand::Set { key, options, value } => {
-                let ttl = options.ttl;
-                // Updated to use the new nested structure
-                engine.store.map.set(key, value, ttl);
-                Response::Ok
-            }
-            MapCommand::Get { key } => {
-                engine.store.map.get(&key)
-                    .map(Response::Data)
-                    .unwrap_or(Response::Null)
-            }
-            MapCommand::Del { key } => {
-                engine.store.map.del(&key);
-                Response::Ok
-            }
-        }
+impl<'a> RequestHandler<'a> {
+    pub fn new(engine: &'a NexoEngine, client_id: &'a ClientId) -> Self {
+        Self { engine, client_id }
     }
-}
 
-async fn handle_queue(cmd: QueueCommand, engine: &NexoEngine) -> Response {
-    let queue_manager = &engine.queue;
+    pub async fn route(&self, opcode: u8, payload: Bytes) -> Response {
+        let mut cursor = PayloadCursor::new(payload);
 
-    match cmd {
-        QueueCommand::Create { options, q_name } => {
-            match queue_manager.create_queue(q_name, options).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
-        }
-        QueueCommand::Push { q_name, options, payload } => {
-            let priority = options.priority.unwrap_or(0);
-            let delay = options.delay_ms;
-            match queue_manager.push(q_name, payload, priority, delay).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
-            }
-        }
-        QueueCommand::Consume { q_name, options } => {
-            let max_batch = options.batch_size;
-            let wait_ms = options.wait_ms;
-            
-            match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
-                Ok(messages) => {
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
-                    for msg in messages {
-                        buf.extend_from_slice(msg.id.as_bytes());
-                        buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&msg.payload);
-                    }
-                    Response::Data(Bytes::from(buf))
+        match opcode {
+            // DEBUG
+            OP_DEBUG_ECHO => { Response::Data(cursor.read_remaining()) }
+
+            // STORE
+            OPCODE_MIN_STORE..=OPCODE_MAX_STORE => {
+                match StoreCommand::parse(opcode, &mut cursor) {
+                    Ok(cmd) => self.handle_store(cmd),
+                    Err(e) => Response::Error(e.to_string()),
                 }
-                Err(e) => Response::Error(e),
+            }
+
+            // QUEUE
+            OPCODE_MIN_QUEUE..=OPCODE_MAX_QUEUE => {
+                match QueueCommand::parse(opcode, &mut cursor) {
+                    Ok(cmd) => self.handle_queue(cmd).await,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            }
+
+            // PUBSUB
+            OPCODE_MIN_PUBSUB..=OPCODE_MAX_PUBSUB => {
+                match PubSubCommand::parse(opcode, &mut cursor) {
+                    Ok(cmd) => self.handle_pubsub(cmd).await,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            }
+
+            // STREAM
+            OPCODE_MIN_STREAM..=OPCODE_MAX_STREAM => {
+                match StreamCommand::parse(opcode, &mut cursor) {
+                    Ok(cmd) => self.handle_stream(cmd).await,
+                    Err(e) => Response::Error(e.to_string()),
+                }
+            }
+
+            _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
+        }
+    }
+
+    // ========================================
+    // HANDLERS
+    // ========================================
+
+    fn handle_store(&self, cmd: StoreCommand) -> Response {
+        match cmd {
+            StoreCommand::Map(map_cmd) => match map_cmd {
+                MapCommand::Set { key, options, value } => {
+                    let ttl = options.ttl;
+                    // Updated to use the new nested structure
+                    self.engine.store.map.set(key, value, ttl);
+                    Response::Ok
+                }
+                MapCommand::Get { key } => {
+                    self.engine.store.map.get(&key)
+                        .map(Response::Data)
+                        .unwrap_or(Response::Null)
+                }
+                MapCommand::Del { key } => {
+                    self.engine.store.map.del(&key);
+                    Response::Ok
+                }
             }
         }
-        QueueCommand::Ack { id, q_name } => {
-            match queue_manager.ack(&q_name, id).await {
-                true => Response::Ok,
-                false => Response::Error("ACK failed".to_string()),
+    }
+
+    async fn handle_queue(&self, cmd: QueueCommand) -> Response {
+        let queue_manager = &self.engine.queue;
+
+        match cmd {
+            QueueCommand::Create { options, q_name } => {
+                match queue_manager.create_queue(q_name, options).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        QueueCommand::Nack { id, q_name, reason } => {
-            match queue_manager.nack(&q_name, id, reason).await {
-                true => Response::Ok,
-                false => Response::Error("NACK failed".to_string()),
+            QueueCommand::Push { q_name, options, payload } => {
+                let priority = options.priority.unwrap_or(0);
+                let delay = options.delay_ms;
+                match queue_manager.push(q_name, payload, priority, delay).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        QueueCommand::Exists { q_name } => {
-            match queue_manager.exists(&q_name).await {
-                true => Response::Ok,
-                false => Response::Error("Queue not found".to_string()),
+            QueueCommand::Consume { q_name, options } => {
+                let max_batch = options.batch_size;
+                let wait_ms = options.wait_ms;
+                
+                match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
+                    Ok(messages) => {
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
+                        for msg in messages {
+                            buf.extend_from_slice(msg.id.as_bytes());
+                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(&msg.payload);
+                        }
+                        Response::Data(Bytes::from(buf))
+                    }
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        QueueCommand::Delete { q_name } => {
-            match queue_manager.delete_queue(q_name).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+            QueueCommand::Ack { id, q_name } => {
+                match queue_manager.ack(&q_name, id).await {
+                    true => Response::Ok,
+                    false => Response::Error("ACK failed".to_string()),
+                }
             }
-        }
-        QueueCommand::PeekDLQ { q_name, limit, offset } => {
-            match queue_manager.peek_dlq(&q_name, limit, offset).await {
-                Ok((total, messages)) => {
-                    let mut buf = Vec::new();
-                    
-                    // Metadata: Total Count & Item Count
-                    buf.extend_from_slice(&(total as u32).to_be_bytes());
-                    buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
-                    
-                    for msg in messages {
-                        buf.extend_from_slice(msg.id.as_bytes());
-                        buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&msg.payload);
-                        buf.extend_from_slice(&msg.attempts.to_be_bytes());
+            QueueCommand::Nack { id, q_name, reason } => {
+                match queue_manager.nack(&q_name, id, reason).await {
+                    true => Response::Ok,
+                    false => Response::Error("NACK failed".to_string()),
+                }
+            }
+            QueueCommand::Exists { q_name } => {
+                match queue_manager.exists(&q_name).await {
+                    true => Response::Ok,
+                    false => Response::Error("Queue not found".to_string()),
+                }
+            }
+            QueueCommand::Delete { q_name } => {
+                match queue_manager.delete_queue(q_name).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
+            }
+            QueueCommand::PeekDLQ { q_name, limit, offset } => {
+                match queue_manager.peek_dlq(&q_name, limit, offset).await {
+                    Ok((total, messages)) => {
+                        let mut buf = Vec::new();
                         
-                        let reason_bytes = msg.failure_reason.as_bytes();
-                        buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(reason_bytes);
+                        // Metadata: Total Count & Item Count
+                        buf.extend_from_slice(&(total as u32).to_be_bytes());
+                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
+                        
+                        for msg in messages {
+                            buf.extend_from_slice(msg.id.as_bytes());
+                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(&msg.payload);
+                            buf.extend_from_slice(&msg.attempts.to_be_bytes());
+                            
+                            let reason_bytes = msg.failure_reason.as_bytes();
+                            buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(reason_bytes);
+                        }
+                        Response::Data(Bytes::from(buf))
                     }
-                    Response::Data(Bytes::from(buf))
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
-        }
-        QueueCommand::MoveToQueue { q_name, message_id } => {
-            match queue_manager.move_to_queue(&q_name, message_id).await {
-                Ok(found) => {
-                    let mut buf = Vec::new();
-                    buf.push(if found { 1u8 } else { 0u8 });
-                    Response::Data(Bytes::from(buf))
+            QueueCommand::MoveToQueue { q_name, message_id } => {
+                match queue_manager.move_to_queue(&q_name, message_id).await {
+                    Ok(found) => {
+                        let mut buf = Vec::new();
+                        buf.push(if found { 1u8 } else { 0u8 });
+                        Response::Data(Bytes::from(buf))
+                    }
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
-        }
-        QueueCommand::DeleteDLQ { q_name, message_id } => {
-            match queue_manager.delete_dlq(&q_name, message_id).await {
-                Ok(found) => {
-                    let mut buf = Vec::new();
-                    buf.push(if found { 1u8 } else { 0u8 });
-                    Response::Data(Bytes::from(buf))
+            QueueCommand::DeleteDLQ { q_name, message_id } => {
+                match queue_manager.delete_dlq(&q_name, message_id).await {
+                    Ok(found) => {
+                        let mut buf = Vec::new();
+                        buf.push(if found { 1u8 } else { 0u8 });
+                        Response::Data(Bytes::from(buf))
+                    }
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
-        }
-        QueueCommand::PurgeDLQ { q_name } => {
-            match queue_manager.purge_dlq(&q_name).await {
-                Ok(count) => {
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&(count as u32).to_be_bytes());
-                    Response::Data(Bytes::from(buf))
+            QueueCommand::PurgeDLQ { q_name } => {
+                match queue_manager.purge_dlq(&q_name).await {
+                    Ok(count) => {
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&(count as u32).to_be_bytes());
+                        Response::Data(Bytes::from(buf))
+                    }
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
         }
     }
-}
 
-async fn handle_pubsub(cmd: PubSubCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    let pubsub = &engine.pubsub;
-    let client = client_id.clone();
+    async fn handle_pubsub(&self, cmd: PubSubCommand) -> Response {
+        let pubsub = &self.engine.pubsub;
+        let client = self.client_id.clone();
 
-    match cmd {
-        PubSubCommand::Publish { options, topic, payload } => {
-            let config = PubSubPublishConfig::from_options(options, &Config::global().pubsub);
-            let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds)).await;
-            Response::Ok
-        }
-        PubSubCommand::Subscribe { topic } => {
-            pubsub.subscribe(&topic, client).await;
-            Response::Ok
-        }
-        PubSubCommand::Unsubscribe { topic } => {
-            pubsub.unsubscribe(&topic, &client).await;
-            Response::Ok
+        match cmd {
+            PubSubCommand::Publish { options, topic, payload } => {
+                let config = PubSubPublishConfig::from_options(options, &Config::global().pubsub);
+                let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds)).await;
+                Response::Ok
+            }
+            PubSubCommand::Subscribe { topic } => {
+                pubsub.subscribe(&topic, client).await;
+                Response::Ok
+            }
+            PubSubCommand::Unsubscribe { topic } => {
+                pubsub.unsubscribe(&topic, &client).await;
+                Response::Ok
+            }
         }
     }
-}
 
-async fn handle_stream(cmd: StreamCommand, engine: &NexoEngine, client_id: &ClientId) -> Response {
-    let stream = &engine.stream;
-    let client = client_id.0.clone();
+    async fn handle_stream(&self, cmd: StreamCommand) -> Response {
+        let stream = &self.engine.stream;
+        let client = self.client_id.0.clone();
 
-    match cmd {
-        StreamCommand::Create { topic, options } => {
-            match stream.create_topic(topic, options).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+        match cmd {
+            StreamCommand::Create { topic, options } => {
+                match stream.create_topic(topic, options).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        StreamCommand::Publish { topic, payload } => {
-            match stream.publish(&topic, payload).await {
-                Ok(seq) => Response::Data(Bytes::from(seq.to_be_bytes().to_vec())),
-                Err(e) => Response::Error(e),
+            StreamCommand::Publish { topic, payload } => {
+                match stream.publish(&topic, payload).await {
+                    Ok(seq) => Response::Data(Bytes::from(seq.to_be_bytes().to_vec())),
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        StreamCommand::Fetch { topic, group, limit } => {
-            match stream.fetch(&group, &client, limit as usize, &topic).await {
-                Ok(msgs) => {
-                    let mut buf = Vec::new();
-                    buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
-                    for msg in msgs {
-                        buf.extend_from_slice(&msg.seq.to_be_bytes());
-                        buf.extend_from_slice(&msg.timestamp.to_be_bytes());
-                        buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                        buf.extend_from_slice(&msg.payload);
+            StreamCommand::Fetch { topic, group, limit } => {
+                match stream.fetch(&group, &client, limit as usize, &topic).await {
+                    Ok(msgs) => {
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
+                        for msg in msgs {
+                            buf.extend_from_slice(&msg.seq.to_be_bytes());
+                            buf.extend_from_slice(&msg.timestamp.to_be_bytes());
+                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
+                            buf.extend_from_slice(&msg.payload);
+                        }
+                        Response::Data(Bytes::from(buf))
                     }
-                    Response::Data(Bytes::from(buf))
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
-        }
-        StreamCommand::Join { group, topic } => {
-            match stream.join_group(&group, &topic, &client).await {
-                Ok(ack_floor) => {
-                    Response::Data(Bytes::from(ack_floor.to_be_bytes().to_vec()))
+            StreamCommand::Join { group, topic } => {
+                match stream.join_group(&group, &topic, &client).await {
+                    Ok(ack_floor) => {
+                        Response::Data(Bytes::from(ack_floor.to_be_bytes().to_vec()))
+                    }
+                    Err(e) => Response::Error(e),
                 }
-                Err(e) => Response::Error(e),
             }
-        }
-        StreamCommand::Ack { topic, group, seq } => {
-            match stream.ack(&group, &topic, seq).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+            StreamCommand::Ack { topic, group, seq } => {
+                match stream.ack(&group, &topic, seq).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        StreamCommand::Nack { topic, group, seq } => {
-            match stream.nack(&group, &topic, seq).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+            StreamCommand::Nack { topic, group, seq } => {
+                match stream.nack(&group, &topic, seq).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        StreamCommand::Seek { topic, group, target } => {
-            match stream.seek(&group, &topic, target).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+            StreamCommand::Seek { topic, group, target } => {
+                match stream.seek(&group, &topic, target).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
-        }
-        StreamCommand::Exists { topic } => {
-            match stream.exists(&topic).await {
-                true => Response::Ok,
-                false => Response::Error("Stream not found".to_string()),
+            StreamCommand::Exists { topic } => {
+                match stream.exists(&topic).await {
+                    true => Response::Ok,
+                    false => Response::Error("Stream not found".to_string()),
+                }
             }
-        }
-        StreamCommand::Delete { topic } => {
-            match stream.delete_topic(topic).await {
-                Ok(_) => Response::Ok,
-                Err(e) => Response::Error(e),
+            StreamCommand::Delete { topic } => {
+                match stream.delete_topic(topic).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
             }
         }
     }

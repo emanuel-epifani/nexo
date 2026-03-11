@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 use crate::config::Config;
-use crate::server::payload_routing::route;
+use crate::server::payload_routing::RequestHandler;
 use crate::server::protocol::{
     InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, PUSH_TYPE_PUBSUB,
 };
@@ -24,15 +24,16 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let client_uuid = Uuid::new_v4();
     let client_id = ClientId(client_uuid.to_string());
 
+    // CHANNEL 1: to READ from socket
     let (inbound_tx, mut inbound_rx) =
         mpsc::channel::<InboundFrame>(config.server.channel_capacity_socket_write);
+    // CHANNEL 2: to WRITE to socket
     let (outbound_tx, outbound_rx) =
         mpsc::channel::<OutboundFrame>(config.server.channel_capacity_socket_write);
 
     let mut socket_task = tokio::spawn(run_socket(reader, writer, inbound_tx, outbound_rx));
 
-    // Channel for PubSubManager to send push notifications to this client
-    // We use Unbounded channel for high throughput, but we should monitor for memory usage
+    // CHANNEL 1: to RECEIVE push from pubsub
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
 
     engine.pubsub.connect(client_id.clone(), push_tx);
@@ -79,7 +80,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                 request_set.spawn(async move {
                     match frame_type {
                         TYPE_REQUEST => {
-                            let response = route(meta, payload, &engine_clone, &client_id_clone).await;
+                            let handler = RequestHandler::new(&engine_clone, &client_id_clone);
+                            let response = handler.route(meta, payload).await;
                             let _ = tx_clone
                                 .send(OutboundFrame::Response { id, response })
                                 .await;
