@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use uuid::Uuid;
-use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::cursor::PayloadCursor;
 use crate::server::protocol::ParseError;
 use serde::Deserialize;
 

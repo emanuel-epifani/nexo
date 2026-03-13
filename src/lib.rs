@@ -2,7 +2,6 @@
 
 pub mod server;
 pub mod brokers;
-pub mod utils;
 pub mod dashboard;
 pub mod config;
 

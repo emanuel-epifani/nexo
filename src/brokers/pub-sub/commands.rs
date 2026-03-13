@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::cursor::PayloadCursor;
 use crate::server::protocol::ParseError;
 use serde::Deserialize;
 use crate::brokers::pub_sub::config::PubSubConfig;

@@ -2,7 +2,7 @@
 //! Uses specific Command enums for each broker to ensure type safety and clean parsing.
 
 use crate::server::protocol::*;
-use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::cursor::PayloadCursor;
 use crate::NexoEngine;
 use bytes::Bytes;
 use crate::brokers::pub_sub::ClientId;
@@ -11,8 +11,10 @@ use crate::brokers::pub_sub::ClientId;
 use crate::brokers::store::commands::StoreCommand;
 use crate::brokers::store::map::commands::MapCommand;
 use crate::brokers::queue::commands::{QueueCommand, QueueCreateOptions, OP_Q_DELETE, OP_Q_NACK};
+use crate::brokers::queue::responses::{ConsumeBatchResponse, PeekDlqResponse, BoolResponse, CountResponse};
 use crate::brokers::pub_sub::commands::{PubSubCommand, PubSubPublishConfig};
 use crate::brokers::stream::commands::StreamCommand;
+use crate::brokers::stream::responses::{PublishResponse, FetchResponse, JoinGroupResponse};
 use crate::config::Config;
 
 // ========================================
@@ -124,18 +126,8 @@ impl<'a> RequestHandler<'a> {
             QueueCommand::Consume { q_name, options } => {
                 let max_batch = options.batch_size;
                 let wait_ms = options.wait_ms;
-                
                 match queue_manager.consume_batch(q_name, max_batch, wait_ms).await {
-                    Ok(messages) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
-                        for msg in messages {
-                            buf.extend_from_slice(msg.id.as_bytes());
-                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&msg.payload);
-                        }
-                        Response::Data(Bytes::from(buf))
-                    }
+                    Ok(messages) => Response::Data(ConsumeBatchResponse { messages }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
@@ -165,55 +157,25 @@ impl<'a> RequestHandler<'a> {
             }
             QueueCommand::PeekDLQ { q_name, limit, offset } => {
                 match queue_manager.peek_dlq(&q_name, limit, offset).await {
-                    Ok((total, messages)) => {
-                        let mut buf = Vec::new();
-                        
-                        // Metadata: Total Count & Item Count
-                        buf.extend_from_slice(&(total as u32).to_be_bytes());
-                        buf.extend_from_slice(&(messages.len() as u32).to_be_bytes());
-                        
-                        for msg in messages {
-                            buf.extend_from_slice(msg.id.as_bytes());
-                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&msg.payload);
-                            buf.extend_from_slice(&msg.attempts.to_be_bytes());
-                            
-                            let reason_bytes = msg.failure_reason.as_bytes();
-                            buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(reason_bytes);
-                        }
-                        Response::Data(Bytes::from(buf))
-                    }
+                    Ok((total, messages)) => Response::Data(PeekDlqResponse { total, messages }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
             QueueCommand::MoveToQueue { q_name, message_id } => {
                 match queue_manager.move_to_queue(&q_name, message_id).await {
-                    Ok(found) => {
-                        let mut buf = Vec::new();
-                        buf.push(if found { 1u8 } else { 0u8 });
-                        Response::Data(Bytes::from(buf))
-                    }
+                    Ok(found) => Response::Data(BoolResponse { value: found }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
             QueueCommand::DeleteDLQ { q_name, message_id } => {
                 match queue_manager.delete_dlq(&q_name, message_id).await {
-                    Ok(found) => {
-                        let mut buf = Vec::new();
-                        buf.push(if found { 1u8 } else { 0u8 });
-                        Response::Data(Bytes::from(buf))
-                    }
+                    Ok(found) => Response::Data(BoolResponse { value: found }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
             QueueCommand::PurgeDLQ { q_name } => {
                 match queue_manager.purge_dlq(&q_name).await {
-                    Ok(count) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(count as u32).to_be_bytes());
-                        Response::Data(Bytes::from(buf))
-                    }
+                    Ok(count) => Response::Data(CountResponse { count }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
@@ -254,40 +216,19 @@ impl<'a> RequestHandler<'a> {
             }
             StreamCommand::Publish { topic, payload } => {
                 match stream.publish(&topic, payload).await {
-                    Ok(seq) => {
-                        use bytes::{BufMut, BytesMut};
-                        let mut buf = BytesMut::with_capacity(8);
-                        buf.put_u64(seq);
-                        Response::Data(buf.into())
-                    }
+                    Ok(seq) => Response::Data(PublishResponse { seq }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
             StreamCommand::Fetch { topic, group, limit } => {
                 match stream.fetch(&group, &client, limit as usize, &topic).await {
-                    Ok(msgs) => {
-                        use bytes::{BufMut, BytesMut};
-                        let mut buf = BytesMut::new();
-                        buf.put_u32(msgs.len() as u32);
-                        for msg in msgs {
-                            buf.put_u64(msg.seq);
-                            buf.put_u64(msg.timestamp);
-                            buf.put_u32(msg.payload.len() as u32);
-                            buf.put_slice(&msg.payload);
-                        }
-                        Response::Data(buf.into())
-                    }
+                    Ok(messages) => Response::Data(FetchResponse { messages }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }
             StreamCommand::Join { group, topic } => {
                 match stream.join_group(&group, &topic, &client).await {
-                    Ok(ack_floor) => {
-                        use bytes::{BufMut, BytesMut};
-                        let mut buf = BytesMut::with_capacity(8);
-                        buf.put_u64(ack_floor);
-                        Response::Data(buf.into())
-                    }
+                    Ok(ack_floor) => Response::Data(JoinGroupResponse { ack_floor }.to_wire()),
                     Err(e) => Response::Error(e),
                 }
             }

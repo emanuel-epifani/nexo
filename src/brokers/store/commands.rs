@@ -1,4 +1,4 @@
-use crate::server::payload_cursor::PayloadCursor;
+use crate::server::protocol::cursor::PayloadCursor;
 use crate::server::protocol::ParseError;
 use crate::brokers::store::map::commands::{MapCommand, OP_MAP_SET, OP_MAP_GET, OP_MAP_DEL};
 

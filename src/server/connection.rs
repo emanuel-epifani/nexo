@@ -1,19 +1,17 @@
 //! Connection Session Layer: lifecycle + routing for a single client session.
 //! Owns broker registration, push bridge, and request dispatch.
-
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 use crate::config::Config;
-use crate::server::payload_routing::RequestHandler;
-use crate::server::protocol::{
-    InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, PUSH_TYPE_PUBSUB,
-};
-use crate::server::socket_network::run_socket;
+use crate::server::routing::RequestHandler;
+use crate::server::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, PUSH_TYPE_PUBSUB, NexoCodec};
 use crate::NexoEngine;
 
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
@@ -102,6 +100,46 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     bridge_handle.abort();
     engine.pubsub.disconnect(&client_id).await;
     engine.stream.disconnect(client_id.0.clone()).await;
+
+    Ok(())
+}
+
+
+async fn run_socket(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    inbound_tx: mpsc::Sender<InboundFrame>,
+    mut outbound_rx: mpsc::Receiver<OutboundFrame>,
+) -> Result<(), ParseError> {
+    let mut framed_reader = FramedRead::new(reader, NexoCodec::new());
+    let mut framed_writer = FramedWrite::new(writer, NexoCodec::new());
+
+    loop {
+        tokio::select! {
+            // Read fram by socket
+            frame = framed_reader.next() => {
+                match frame {
+                    Some(Ok(frame)) => {
+                        if inbound_tx.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => return Err(err),
+                    None => break,
+                }
+            }
+            outbound = outbound_rx.recv() => {
+                match outbound {
+                    Some(message) => {
+                        if let Err(err) = framed_writer.send(message).await {
+                            return Err(err);
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
 
     Ok(())
 }

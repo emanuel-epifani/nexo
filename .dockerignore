@@ -17,10 +17,22 @@ dashboard/dist
 Dockerfile
 README.md
 debug/*
+scratch/*
+scripts/*
 examples/*
 .idea/*
+*.iml
 ai-rules/*
 docs/*
 
 # Tests (non servono per release build)
 tests/*
+smoke-test/*
+
+# CI & Task management
+.github/*
+.todo/*
+
+# Other components not necessary
+sdk/*
+data/*

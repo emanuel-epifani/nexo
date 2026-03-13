@@ -4,6 +4,7 @@ pub mod queue;
 pub mod actor;
 pub mod persistence;
 pub mod commands;
+pub mod responses;
 pub mod dlq;
 
 pub use queue_manager::*;
