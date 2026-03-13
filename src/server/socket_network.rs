@@ -19,6 +19,7 @@ pub async fn run_socket(
 
     loop {
         tokio::select! {
+            // Read fram by socket
             frame = framed_reader.next() => {
                 match frame {
                     Some(Ok(frame)) => {

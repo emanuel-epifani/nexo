@@ -362,6 +362,7 @@ impl StorageManager {
 
 /// Serialize a message into a buffer (does NOT write to disk).
 pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, payload: &[u8]) {
+    use bytes::BufMut;
     let len = 8 + 8 + payload.len() as u32;
     let mut hasher = Hasher::new();
     hasher.update(&seq.to_be_bytes());
@@ -369,15 +370,16 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, payload: &
     hasher.update(payload);
     let crc = hasher.finalize();
 
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(&crc.to_be_bytes());
-    buf.extend_from_slice(&seq.to_be_bytes());
-    buf.extend_from_slice(&timestamp.to_be_bytes());
-    buf.extend_from_slice(payload);
+    buf.put_u32(len);
+    buf.put_u32(crc);
+    buf.put_u64(seq);
+    buf.put_u64(timestamp);
+    buf.put_slice(payload);
 }
 
 /// Read messages from a log segment file starting at a given seq.
 pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
+    use bytes::Buf;
     let mut msgs = Vec::new();
     let file = match File::open(path).await {
         Ok(f) => f,
@@ -402,9 +404,12 @@ pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> V
         if hasher.finalize() != stored_crc { continue; }
 
         if content_buf.len() < 16 { continue; }
-        let seq = u64::from_be_bytes(content_buf[0..8].try_into().unwrap());
-        let timestamp = u64::from_be_bytes(content_buf[8..16].try_into().unwrap());
-        let payload = Bytes::copy_from_slice(&content_buf[16..]);
+        
+        let mut cursor = std::io::Cursor::new(content_buf);
+        let seq = cursor.get_u64();
+        let timestamp = cursor.get_u64();
+        let payload_len = cursor.remaining();
+        let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
         if seq >= start_seq {
             msgs.push(Message { seq, timestamp, payload });
@@ -476,6 +481,7 @@ pub async fn save_groups_file(base_path: &Path, groups: &HashMap<String, u64>) -
 }
 
 async fn write_group_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer: &mut W, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
+    use bytes::{BufMut, BytesMut};
     let group_bytes = group_id.as_bytes();
     let group_len = group_bytes.len() as u16;
     let len = 8 + 2 + group_len as u32;
@@ -486,15 +492,19 @@ async fn write_group_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
     hasher.update(group_bytes);
     let crc = hasher.finalize();
 
-    writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&crc.to_be_bytes()).await?;
-    writer.write_all(&ack_floor.to_be_bytes()).await?;
-    writer.write_all(&group_len.to_be_bytes()).await?;
-    writer.write_all(group_bytes).await?;
+    let mut buf = BytesMut::with_capacity((4 + 4 + len) as usize);
+    buf.put_u32(len);
+    buf.put_u32(crc);
+    buf.put_u64(ack_floor);
+    buf.put_u16(group_len);
+    buf.put_slice(group_bytes);
+
+    writer.write_all(&buf).await?;
     Ok(())
 }
 
 async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
+    use bytes::Buf;
     let mut msgs = VecDeque::new();
     let file = match File::open(path).await {
         Ok(f) => f,
@@ -519,9 +529,12 @@ async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
         if hasher.finalize() != stored_crc { break; }
 
         if content_buf.len() < 16 { break; }
-        let seq = u64::from_be_bytes(content_buf[0..8].try_into().unwrap());
-        let timestamp = u64::from_be_bytes(content_buf[8..16].try_into().unwrap());
-        let payload = Bytes::copy_from_slice(&content_buf[16..]);
+        
+        let mut cursor = std::io::Cursor::new(content_buf);
+        let seq = cursor.get_u64();
+        let timestamp = cursor.get_u64();
+        let payload_len = cursor.remaining();
+        let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
         msgs.push_back(Message { seq, timestamp, payload });
     }
@@ -529,6 +542,7 @@ async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
 }
 
 async fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::io::Error> {
+    use bytes::Buf;
     let mut groups = HashMap::new();
     let file = File::open(path).await?;
     let mut reader = BufReader::new(file);
@@ -550,19 +564,13 @@ async fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::i
         if hasher.finalize() != stored_crc { break; }
 
         let mut cursor = std::io::Cursor::new(content_buf);
-        use std::io::Read;
         
-        let mut buf8 = [0u8; 8];
-        let mut buf2 = [0u8; 2];
+        if cursor.remaining() < 10 { continue; }
+        let ack_floor = cursor.get_u64();
+        let group_len = cursor.get_u16();
 
-        if Read::read_exact(&mut cursor, &mut buf8).is_err() { continue; }
-        let ack_floor = u64::from_be_bytes(buf8);
-
-        if Read::read_exact(&mut cursor, &mut buf2).is_err() { continue; }
-        let group_len = u16::from_be_bytes(buf2);
-
-        let mut group_bytes = vec![0u8; group_len as usize];
-        if Read::read_exact(&mut cursor, &mut group_bytes).is_err() { continue; }
+        if cursor.remaining() < group_len as usize { continue; }
+        let group_bytes = cursor.copy_to_bytes(group_len as usize);
         let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
         groups.insert(group_id, ack_floor);

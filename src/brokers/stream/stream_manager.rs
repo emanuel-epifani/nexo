@@ -226,10 +226,8 @@ impl StreamManager {
     pub async fn disconnect(&self, client_id: String) {
         info!("[StreamManager] Disconnecting client: {}", client_id);
         let mut waits = Vec::new();
-        // Since we are iterating all actors, this might take time if there are many.
-        // But DashMap allows parallel iteration if needed. For now, simple loop.
-        for entry in self.actors.iter() {
-            let actor = entry.value();
+        
+        for actor in self.get_all_actors() {
             let (tx, rx) = oneshot::channel();
             if actor.send(TopicCommand::LeaveGroup { client_id: client_id.clone(), reply: tx }).await.is_ok() {
                 waits.push(rx);
@@ -242,8 +240,8 @@ impl StreamManager {
 
     pub async fn get_snapshot(&self) -> StreamBrokerSnapshot {
         let mut summaries = Vec::new();
-        for entry in self.actors.iter() {
-            let actor = entry.value();
+        
+        for actor in self.get_all_actors() {
             let (s_tx, s_rx) = oneshot::channel();
             let _ = actor.send(TopicCommand::GetSnapshot { reply: s_tx }).await;
             if let Ok(summary) = s_rx.await {
@@ -255,5 +253,10 @@ impl StreamManager {
 
     pub async fn exists(&self, name: &str) -> bool {
         self.actors.contains_key(name)
+    }
+
+    #[inline]
+    fn get_all_actors(&self) -> Vec<mpsc::Sender<TopicCommand>> {
+        self.actors.iter().map(|entry| entry.value().clone()).collect()
     }
 }

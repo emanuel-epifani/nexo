@@ -1,46 +1,38 @@
 use crate::server::protocol::ParseError;
-use bytes::Bytes;
-use std::convert::TryInto;
+use bytes::{Buf, Bytes};
 
 pub struct PayloadCursor {
     data: Bytes,
-    offset: usize,
 }
 
 impl PayloadCursor {
     pub fn new(data: Bytes) -> Self {
-        Self { data, offset: 0 }
+        Self { data }
     }
 
     pub fn has_remaining(&self, len: usize) -> bool {
-        self.offset + len <= self.data.len()
+        self.data.remaining() >= len
     }
 
     pub fn read_u8(&mut self) -> Result<u8, ParseError> {
         if !self.has_remaining(1) {
             return Err(ParseError::Invalid("Payload too short for u8".into()));
         }
-        let val = self.data[self.offset];
-        self.offset += 1;
-        Ok(val)
+        Ok(self.data.get_u8())
     }
 
     pub fn read_u32(&mut self) -> Result<u32, ParseError> {
         if !self.has_remaining(4) {
             return Err(ParseError::Invalid("Payload too short for u32".into()));
         }
-        let val = u32::from_be_bytes(self.data[self.offset..self.offset + 4].try_into().unwrap());
-        self.offset += 4;
-        Ok(val)
+        Ok(self.data.get_u32())
     }
 
     pub fn read_u64(&mut self) -> Result<u64, ParseError> {
         if !self.has_remaining(8) {
             return Err(ParseError::Invalid("Payload too short for u64".into()));
         }
-        let val = u64::from_be_bytes(self.data[self.offset..self.offset + 8].try_into().unwrap());
-        self.offset += 8;
-        Ok(val)
+        Ok(self.data.get_u64())
     }
 
     pub fn read_string(&mut self) -> Result<String, ParseError> {
@@ -48,28 +40,26 @@ impl PayloadCursor {
         if !self.has_remaining(len) {
             return Err(ParseError::Invalid(format!("Incomplete string: expected {} bytes", len)));
         }
-        let s = std::str::from_utf8(&self.data[self.offset..self.offset + len])
-            .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8 in string: {}", e)))?;
-        self.offset += len;
+        let chunk = self.data.copy_to_bytes(len);
+        let s = std::str::from_utf8(&chunk).map_err(|e| ParseError::Invalid(format!("Invalid UTF-8 in string: {}", e)))?;
         Ok(s.to_string())
     }
 
     pub fn read_remaining(&mut self) -> Bytes {
-        let b = self.data.slice(self.offset..);
-        self.offset = self.data.len();
-        b
+        let len = self.data.remaining();
+        self.data.copy_to_bytes(len)
     }
 
     pub fn read_uuid_bytes(&mut self) -> Result<[u8; 16], ParseError> {
         if !self.has_remaining(16) {
             return Err(ParseError::Invalid("Payload too short for UUID".into()));
         }
-        let val = self.data[self.offset..self.offset + 16].try_into().unwrap();
-        self.offset += 16;
+        let mut val = [0u8; 16];
+        self.data.copy_to_slice(&mut val);
         Ok(val)
     }
 
     pub fn len(&self) -> usize {
-        self.data.len() - self.offset
+        self.data.remaining()
     }
 }

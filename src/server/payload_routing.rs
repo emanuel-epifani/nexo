@@ -254,22 +254,28 @@ impl<'a> RequestHandler<'a> {
             }
             StreamCommand::Publish { topic, payload } => {
                 match stream.publish(&topic, payload).await {
-                    Ok(seq) => Response::Data(Bytes::from(seq.to_be_bytes().to_vec())),
+                    Ok(seq) => {
+                        use bytes::{BufMut, BytesMut};
+                        let mut buf = BytesMut::with_capacity(8);
+                        buf.put_u64(seq);
+                        Response::Data(buf.into())
+                    }
                     Err(e) => Response::Error(e),
                 }
             }
             StreamCommand::Fetch { topic, group, limit } => {
                 match stream.fetch(&group, &client, limit as usize, &topic).await {
                     Ok(msgs) => {
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&(msgs.len() as u32).to_be_bytes());
+                        use bytes::{BufMut, BytesMut};
+                        let mut buf = BytesMut::new();
+                        buf.put_u32(msgs.len() as u32);
                         for msg in msgs {
-                            buf.extend_from_slice(&msg.seq.to_be_bytes());
-                            buf.extend_from_slice(&msg.timestamp.to_be_bytes());
-                            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-                            buf.extend_from_slice(&msg.payload);
+                            buf.put_u64(msg.seq);
+                            buf.put_u64(msg.timestamp);
+                            buf.put_u32(msg.payload.len() as u32);
+                            buf.put_slice(&msg.payload);
                         }
-                        Response::Data(Bytes::from(buf))
+                        Response::Data(buf.into())
                     }
                     Err(e) => Response::Error(e),
                 }
@@ -277,7 +283,10 @@ impl<'a> RequestHandler<'a> {
             StreamCommand::Join { group, topic } => {
                 match stream.join_group(&group, &topic, &client).await {
                     Ok(ack_floor) => {
-                        Response::Data(Bytes::from(ack_floor.to_be_bytes().to_vec()))
+                        use bytes::{BufMut, BytesMut};
+                        let mut buf = BytesMut::with_capacity(8);
+                        buf.put_u64(ack_floor);
+                        Response::Data(buf.into())
                     }
                     Err(e) => Response::Error(e),
                 }

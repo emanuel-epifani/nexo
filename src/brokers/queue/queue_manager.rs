@@ -194,8 +194,7 @@ impl QueueManager {
     pub async fn get_snapshot(&self) -> Vec<QueueSummary> {
         let mut queues = Vec::new();
         
-        for entry in self.queue_actors.iter() {
-            let actor_tx = entry.value();
+        for actor_tx in self.get_all_actors() {
             let (tx, rx) = oneshot::channel();
             if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
                 if let Ok(summary) = rx.await {
@@ -301,6 +300,11 @@ impl QueueManager {
     #[inline]
     fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
         self.queue_actors.get(name).map(|r| r.value().clone())
+    }
+
+    #[inline]
+    fn get_all_actors(&self) -> Vec<mpsc::Sender<QueueActorCommand>> {
+        self.queue_actors.iter().map(|entry| entry.value().clone()).collect()
     }
 }
 

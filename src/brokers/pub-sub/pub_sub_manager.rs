@@ -33,7 +33,7 @@ use crate::brokers::pub_sub::actor::{RootCommand, RootActor, ClientRegistry};
 // ==========================================
 
 pub struct PubSubManager {
-    actors: DashMap<String, mpsc::Sender<RootCommand>>,
+    actors: Arc<DashMap<String, mpsc::Sender<RootCommand>>>,
     /// Single source of truth for client Senders. Actors resolve ClientId → Sender via this.
     clients: ClientRegistry,
     client_subscriptions: DashMap<ClientId, HashSet<String>>,
@@ -45,14 +45,14 @@ pub struct PubSubManager {
 impl PubSubManager {
     pub fn new(config: Arc<PubSubConfig>) -> Self {
         let manager = Self {
-            actors: DashMap::new(),
+            actors: Arc::new(DashMap::new()),
             clients: Arc::new(DashMap::new()),
             client_subscriptions: DashMap::new(),
             global_hash_subscribers: RwLock::new(HashSet::new()),
             config: config.clone(),
         };
         
-        let actors = manager.actors.clone();
+        let actors = Arc::clone(&manager.actors);
         let cleanup_interval = std::time::Duration::from_secs(config.cleanup_interval_seconds);
         
         tokio::spawn(async move {
@@ -123,7 +123,7 @@ impl PubSubManager {
         let root = parts[0];
         let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
-        if let Some(actor) = self.actors.get(root) {
+        if let Some(actor) = self.get_actor(root) {
             let _ = actor.send(RootCommand::Unsubscribe { pattern, client: client.clone() }).await;
         }
     }
@@ -141,7 +141,7 @@ impl PubSubManager {
         let mut sent = 0;
 
         // 1. Dispatch to actor
-        if let Some(actor) = self.actors.get(root) {
+        if let Some(actor) = self.get_actor(root) {
             let (tx, rx) = oneshot::channel();
             if actor.send(RootCommand::Publish {
                 parts: sub_parts.clone(),
@@ -201,7 +201,7 @@ impl PubSubManager {
 
             let mut waits = Vec::new();
             for root in roots {
-                if let Some(actor) = self.actors.get(&root) {
+                if let Some(actor) = self.get_actor(&root) {
                     let (tx, rx) = oneshot::channel();
                     if actor.send(RootCommand::Disconnect { 
                         client: client_id.clone(),
@@ -220,8 +220,8 @@ impl PubSubManager {
 
     /// Cleanup expired retained messages in all actors
     pub async fn cleanup_expired_retained(&self) {
-        for entry in self.actors.iter() {
-            let _ = entry.value().send(RootCommand::CleanupExpired).await;
+        for actor in self.get_all_actors() {
+            let _ = actor.send(RootCommand::CleanupExpired).await;
         }
     }
 
@@ -250,9 +250,9 @@ impl PubSubManager {
 
         // Collect filtered topics from all root actors
         let mut all_topics = Vec::new();
-        for entry in self.actors.iter() {
+        for actor in self.get_all_actors() {
             let (tx, rx) = oneshot::channel();
-            if entry.value().send(RootCommand::ScanTopics { search: search.clone(), reply: tx }).await.is_ok() {
+            if actor.send(RootCommand::ScanTopics { search: search.clone(), reply: tx }).await.is_ok() {
                 if let Ok(topics) = rx.await {
                     all_topics.extend(topics);
                 }
@@ -277,6 +277,16 @@ impl PubSubManager {
 
     // --- HELPERS ---
 
+    #[inline]
+    fn get_actor(&self, root: &str) -> Option<mpsc::Sender<RootCommand>> {
+        self.actors.get(root).map(|r| r.value().clone())
+    }
+
+    #[inline]
+    fn get_all_actors(&self) -> Vec<mpsc::Sender<RootCommand>> {
+        self.actors.iter().map(|entry| entry.value().clone()).collect()
+    }
+
     fn get_or_create_actor(&self, root: &str) -> mpsc::Sender<RootCommand> {
         self.actors.entry(root.to_string()).or_insert_with(|| {
             let (tx, rx) = mpsc::channel(self.config.actor_channel_capacity);
@@ -293,48 +303,39 @@ impl PubSubManager {
         }).clone()
     }
 
-    /// Background task: cleanup empty actors in parallel
+    /// Background task: cleanup empty actors (sequentially without spawning tasks)
     async fn background_cleanup_empty_actors(actors: &DashMap<String, mpsc::Sender<RootCommand>>) {
         let start = std::time::Instant::now();
-        let mut tasks = Vec::new();
-        
-        for entry in actors.iter() {
-            let root = entry.key().clone();
-            let actor = entry.value().clone();
-            let actors_ref = actors.clone();
-            
-            let task = tokio::spawn(async move {
-                let (tx, rx) = oneshot::channel();
-                
-                if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
-                    match tokio::time::timeout(std::time::Duration::from_millis(100), rx).await {
-                        Ok(Ok(true)) => {
-                            actors_ref.remove(&root);
-                            Some(root)
-                        }
-                        _ => None
-                    }
-                } else {
-                    None
+        let mut to_remove = Vec::new();
+
+        // 1. Snapshot the actors to avoid holding the lock during await
+        let actor_snapshots: Vec<(String, mpsc::Sender<RootCommand>)> = actors
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        // 2. Query each actor sequentially
+        for (root, actor) in actor_snapshots {
+            let (tx, rx) = oneshot::channel();
+            if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
+                if let Ok(Ok(true)) = tokio::time::timeout(std::time::Duration::from_millis(100), rx).await {
+                    to_remove.push(root);
                 }
-            });
-            
-            tasks.push(task);
-        }
-        
-        let mut removed = Vec::new();
-        for task in tasks {
-            if let Ok(Some(root)) = task.await {
-                removed.push(root);
             }
         }
         
-        if !removed.is_empty() {
+        // 3. Remove empty actors
+        if !to_remove.is_empty() {
+            let count = to_remove.len();
+            for root in &to_remove {
+                actors.remove(root);
+            }
+            
             tracing::info!(
                 "Background cleanup: removed {} empty actors in {:?}: {:?}",
-                removed.len(),
+                count,
                 start.elapsed(),
-                removed
+                to_remove
             );
         }
     }
