@@ -91,9 +91,9 @@ for more detailed info:
 
 *   **Fan-Out Routing:** Efficiently broadcasts a single incoming message to thousands of connected subscribers.
 *   **Pattern Matching:**
-  *   `+` **Single Level Wildcard:** Matches exactly one segment.
+*   `+` **Single Level Wildcard:** Matches exactly one segment.
     *   *Example:* `sensors/+/temp` matches `sensors/kitchen/temp`.
-  *   `#` **Multi Level Wildcard:** Matches all remaining segments to the end.
+*   `#` **Multi Level Wildcard:** Matches all remaining segments to the end.
     *   *Example:* `logs/#` matches `logs/error`, `logs/app/backend`, etc.
 
 for more detailed info:
@@ -219,6 +219,6 @@ client.queue<Buffer>('video-processing').push(chunk);
 ---
 
 AI-RULES:
-- for REACT dashboard: ai-rules/rules-react.md    
-- for RUST server: ai-rules/rules-rust.md     
+- for REACT dashboard: ai-rules/rules-react.md
+- for RUST server: ai-rules/rules-rust.md
 - for SDK ts: ai-rules/rules-sdk-ts.md    
