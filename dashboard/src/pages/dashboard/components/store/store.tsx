@@ -23,7 +23,6 @@ export function StoreView() {
   const [activeStructure, setActiveStructure] = useState<StructureType>('hashmap')
   const [inputValue, setInputValue] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [limit] = useState(500)
   const [offset, setOffset] = useState(0)
   const [selectedKey, setSelectedKey] = useState<KeyDetail | null>(null)
@@ -212,7 +211,7 @@ export function StoreView() {
                    <>
                        <div className="p-4 border-b border-border flex justify-between items-center bg-section-header">
                            <div className="flex items-center gap-2">
-                               <h2 className="text-sm font-bold text-foreground">{selectedKey.key}</h2>
+                               <h2 className="text-sm text-foreground">{selectedKey.key}</h2>
                            </div>
                            <div className="flex items-center gap-4 text-xs text-muted-foreground uppercase tracking-wide">
                                <span className="flex items-center gap-1.5">

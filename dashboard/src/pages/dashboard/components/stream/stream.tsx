@@ -1,18 +1,46 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { StreamBrokerSnapshot, TopicSummary, ConsumerGroupSummary, StreamMessages } from "./types"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
     Search,
     Database,
-    Box,
     RefreshCw,
     AlertCircle,
     ChevronLeft,
     ChevronRight,
 } from "lucide-react"
+
+
+interface StreamBrokerSnapshot {
+    topics: TopicSummary[];
+}
+
+interface TopicSummary {
+    name: string;
+    last_seq: number;
+    groups: ConsumerGroupSummary[];
+}
+
+interface ConsumerGroupSummary {
+    id: string;
+    ack_floor: number;
+    pending_count: number;
+}
+
+interface MessagePreview {
+    seq: number;
+    timestamp: string;
+    payload: unknown;
+}
+
+interface StreamMessages {
+    messages: MessagePreview[];
+    from_seq: number;
+    limit: number;
+    last_seq: number;
+}
 
 const PAGE_SIZE = 50
 
@@ -32,13 +60,7 @@ export function StreamView() {
     const [selectedMessageSeq, setSelectedMessageSeq] = useState<number | null>(null)
     const [fromSeq, setFromSeq] = useState<number | null>(null)
 
-    // Default: select first topic
-    useEffect(() => {
-        if (!selectedTopicName && data.topics.length > 0) {
-            setSelectedTopicName(data.topics[0].name)
-        }
-    }, [data.topics, selectedTopicName])
-
+    
     // Reset when topic changes
     useEffect(() => {
         setSelectedMessageSeq(null)
@@ -96,9 +118,12 @@ export function StreamView() {
         <div className="flex h-full gap-0 border-2 border-border rounded-sm bg-panel overflow-hidden font-mono text-sm">
 
             {/* COL 1: Topics */}
-            <div className="w-[260px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
+            <div className="w-[300px] flex flex-col border-r-2 border-border bg-sidebar shrink-0">
                 <div className="p-3 border-b-2 border-border">
+                    <h2 className="text-xs font-bold uppercase text-muted-foreground mb-2">TOPICS ({filteredTopics.length})</h2>
+
                     <div className="relative">
+
                         <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
                         <Input
                             placeholder="FILTER TOPICS..."
@@ -120,14 +145,10 @@ export function StreamView() {
                                 `}
                             >
                                 <div className="flex items-center gap-2 overflow-hidden">
-                                    <Box className={`h-3.5 w-3.5 shrink-0 ${selectedTopicName === t.name ? 'text-primary' : 'text-muted-foreground'}`} />
-                                    <span className={`font-mono text-xs truncate ${selectedTopicName === t.name ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
+                                    <div className={`font-mono text-xs truncate ${selectedTopicName === t.name ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
                                         {t.name}
-                                    </span>
+                                    </div>
                                 </div>
-                                <span className="text-xs text-muted-foreground font-mono">
-                                    {t.last_seq} msgs
-                                </span>
                             </div>
                         ))}
                     </div>

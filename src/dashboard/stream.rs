@@ -72,9 +72,10 @@ pub async fn get_stream_messages(
 
     let from_seq = query.from.unwrap_or_else(|| last_seq.saturating_sub(limit as u64).max(1));
 
-    let messages_raw = engine.stream.read(&topic, from_seq, limit).await;
-
-    let messages = messages_raw.into_iter().map(|msg| MessagePreview {
+    let messages = engine.stream.read(&topic, from_seq, limit).await
+        .into_iter()
+        .rev()
+        .map(|msg| MessagePreview {
         seq: msg.seq,
         timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
             .unwrap_or_default()

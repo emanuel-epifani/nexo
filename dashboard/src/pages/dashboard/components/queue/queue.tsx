@@ -1,23 +1,57 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { QueueBrokerSnapshot, QueueSummary, MessageSummary, ScheduledMessageSummary, DlqMessageSummary, PaginatedMessages, PaginatedDlqMessages } from "./types"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { 
-    Search, 
-    MessageSquare,
+import {
+    Search,
     RefreshCw,
     AlertCircle,
     Box,
-    AlertTriangle,
-    Copy,
-    Check,
     ChevronLeft,
-    ChevronRight,
+    ChevronRight, MessageSquare,
 } from "lucide-react"
-import { Badge } from "@/components/ui/badge"
+
+type QueueBrokerSnapshot = QueueSummary[];
+
+interface QueueSummary {
+    name: string;
+    pending: number;
+    inflight: number;
+    scheduled: number;
+    dlq: number;
+}
+
+interface PaginatedMessages {
+    messages: MessageSummary[];
+    total: number;
+}
+
+interface PaginatedDlqMessages {
+    messages: DlqMessageSummary[];
+    total: number;
+}
+
+interface MessageSummary {
+    id: string; // UUID
+    payload: any;
+    state: string; // "Pending", "InFlight", "Scheduled"
+    priority: number; // u8
+    attempts: number; // u32
+}
+
+interface ScheduledMessageSummary extends MessageSummary {
+    next_delivery_at: string;
+}
+
+interface DlqMessageSummary {
+    id: string; // UUID
+    payload: any;
+    attempts: number; // u32
+    failure_reason: string;
+    created_at: number;
+}
 
 const PAGE_SIZE = 50
 
@@ -39,8 +73,7 @@ export function QueueView() {
   const [viewMode, setViewMode] = useState<'traffic' | 'dlq'>('traffic')
 
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
-  
+
   // Message State Filter (for Traffic view)
   const [messageState, setMessageState] = useState<'Pending' | 'InFlight' | 'Scheduled'>('Pending')
   
@@ -80,12 +113,6 @@ export function QueueView() {
       ? paginatedData.messages.find(m => m.id === selectedMessageId)
       : undefined
 
-  // Copy to clipboard helper
-  const copyToClipboard = (text: string, id: string) => {
-      navigator.clipboard.writeText(text)
-      setCopiedId(id)
-      setTimeout(() => setCopiedId(null), 2000)
-  }
 
   const messages = paginatedData?.messages || []
   const total = paginatedData?.total || 0
@@ -141,9 +168,6 @@ export function QueueView() {
                           </div>
                       ) : (
                           filteredQueues.map((q) => {
-                              const hasDlq = q.dlq > 0
-                              const totalPending = q.pending
-                              
                               return (
                                   <div
                                       key={q.name}
@@ -154,33 +178,9 @@ export function QueueView() {
                                       `}
                                   >
                                       <div className="flex items-center gap-3 overflow-hidden">
-                                          <div className={`p-1.5 rounded relative ${
-                                              selectedQueueName === q.name 
-                                                ? 'bg-primary/20 text-foreground'
-                                                : 'bg-muted text-muted-foreground'
-                                          }`}>
-                                              <MessageSquare className="h-3.5 w-3.5" />
-                                              {hasDlq && (
-                                                  <div className="absolute -top-1 -right-1 h-2.5 w-2.5 bg-destructive rounded-full border border-sidebar animate-pulse" />
-                                              )}
-                                          </div>
-                                          <span className={`font-mono text-xs truncate ${selectedQueueName === q.name ? 'text-foreground font-bold' : 'text-muted-foreground'}`}>
+                                          <span className={`font-mono text-xs truncate ${selectedQueueName === q.name ? 'text-foreground' : 'text-muted-foreground'}`}>
                                               {q.name}
                                           </span>
-                                      </div>
-
-                                      <div className="flex items-center gap-2">
-                                          {hasDlq && (
-                                              <div className="flex items-center gap-1 text-xs text-destructive font-bold bg-destructive/10 px-1.5 py-0.5 rounded">
-                                                  <AlertTriangle className="h-3 w-3" />
-                                                  {q.dlq}
-                                              </div>
-                                          )}
-                                          {totalPending > 0 && (
-                                              <Badge variant="outline" className="h-4 px-1.5 text-xs rounded-sm border border-status-pending bg-status-pending/10 text-status-pending">
-                                                  {totalPending}
-                                              </Badge>
-                                          )}
                                       </div>
                                   </div>
                               )
@@ -190,14 +190,17 @@ export function QueueView() {
               </ScrollArea>
           </div>
 
-          {/* CENTER AREA: Messages Table */}
-          <div className="w-[550px] bg-content flex flex-col min-w-0 border-r-2 border-border">
-             {selectedQueue ? (
+          {/* CENTER AREA: Messages Table + RIGHT PANEL: Message Details */}
+          <div className="flex-1 flex min-w-0 bg-content">
+              {selectedQueue ? (
+                  <>
+                      {/* Messages Table */}
+                      <div className="w-[550px] bg-content flex flex-col min-w-0 border-r-2 border-border">
                  <div className="flex flex-col h-full">
                      {/* Header Stats & Tabs */}
                      <div className="p-3 border-b-2 border-border bg-section-header">
                          <div className="flex justify-between items-center mb-3">
-                             <h2 className="text-xs font-bold text-foreground">{selectedQueue.name}</h2>
+                             <h2 className="text-xs text-foreground">{selectedQueue.name}</h2>
                              
                              <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as 'traffic' | 'dlq')} className="h-7">
                                 <TabsList className="h-7 bg-muted/50 p-0.5">
@@ -211,22 +214,17 @@ export function QueueView() {
                              </Tabs>
                          </div>
 
-                         {viewMode === 'traffic' ? (
+                         {viewMode === 'traffic' && (
                              <div className="flex gap-1">
                                  <FilterButton label="Pending" count={selectedQueue.pending} active={messageState === 'Pending'} onClick={() => setMessageState('Pending')} />
                                  <FilterButton label="InFlight" count={selectedQueue.inflight} active={messageState === 'InFlight'} onClick={() => setMessageState('InFlight')} />
                                  <FilterButton label="Scheduled" count={selectedQueue.scheduled} active={messageState === 'Scheduled'} onClick={() => setMessageState('Scheduled')} />
                              </div>
-                         ) : (
-                             <div className="h-7 flex items-center text-xs text-destructive font-bold bg-destructive/5 px-2 rounded border border-destructive/20">
-                                 <AlertTriangle className="h-3.5 w-3.5 mr-2" />
-                                 DEAD LETTER QUEUE
-                             </div>
                          )}
                      </div>
 
                      {/* Messages Table - Simple Map */}
-                     <div className="flex-1 overflow-y-auto bg-background flex flex-col">
+                     <div className="flex-1 overflow-y-auto bg-content flex flex-col">
                         {isLoading ? (
                             <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                                 <RefreshCw className="h-6 w-6 animate-spin mb-4 opacity-50" />
@@ -244,16 +242,15 @@ export function QueueView() {
                                 {/* Table Header */}
                                 {viewMode === 'traffic' ? (
                                     <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_80px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
-                                        <div>ID</div>
+                                        <div>Message ID</div>
                                         <div className="text-center">Priority</div>
                                         <div className="text-center">Attempts</div>
                                     </div>
                                 ) : (
-                                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[120px_1fr_60px_60px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
-                                        <div>Failed At</div>
-                                        <div>Reason</div>
-                                        <div className="text-center">Tries</div>
-                                        <div className="text-right">ID</div>
+                                    <div className="sticky top-0 bg-section-header border-b border-border px-3 py-2 grid grid-cols-[1fr_80px_120px] gap-2 text-xs font-bold uppercase text-muted-foreground z-10 shadow-sm">
+                                        <div>Message ID</div>
+                                        <div className="text-center">Attempts</div>
+                                        <div className="text-right">Failed At</div>
                                     </div>
                                 )}
 
@@ -269,21 +266,18 @@ export function QueueView() {
                                                     key={msg.id}
                                                     onClick={() => setSelectedMessageId(msg.id)}
                                                     className={`
-                                                        grid grid-cols-[120px_1fr_60px_60px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
-                                                        ${isSelected ? 'bg-destructive/10 border-destructive/20' : 'hover:bg-destructive/5'}
+                                                        grid grid-cols-[1fr_80px_120px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
+                                                        ${isSelected ? 'bg-destructive/10 border-l-2 border-l-destructive' : 'hover:bg-destructive/5'}
                                                     `}
                                                 >
-                                                    <span className="font-mono text-xs text-muted-foreground truncate">
-                                                        {new Date(dlqMsg.created_at).toLocaleTimeString()}
-                                                    </span>
-                                                    <span className="font-mono text-xs text-destructive truncate font-medium" title={dlqMsg.failure_reason}>
-                                                        {dlqMsg.failure_reason}
+                                                    <span className={`font-mono text-xs truncate ${isSelected ? 'text-foreground' : 'text-muted-foreground'}`} title={dlqMsg.id}>
+                                                        {dlqMsg.id}
                                                     </span>
                                                     <span className="font-mono text-xs text-center text-muted-foreground">
                                                         {dlqMsg.attempts}
                                                     </span>
-                                                    <span className="font-mono text-xs text-right opacity-40 truncate">
-                                                        ...{dlqMsg.id.slice(-4)}
+                                                    <span className="font-mono text-xs text-right text-muted-foreground">
+                                                        {new Date(dlqMsg.created_at).toLocaleTimeString()}
                                                     </span>
                                                 </div>
                                             )
@@ -296,10 +290,10 @@ export function QueueView() {
                                                 onClick={() => setSelectedMessageId(msg.id)}
                                                 className={`
                                                     grid grid-cols-[1fr_80px_80px] gap-2 px-3 py-2 border-b border-border/50 cursor-pointer transition-all items-center h-9
-                                                    ${isSelected ? 'bg-secondary' : 'hover:bg-muted/50'}
+                                                    ${isSelected ? 'bg-secondary border-l-2 border-l-primary' : 'hover:bg-muted/50'}
                                                 `}
                                             >
-                                                <span className={`font-mono text-sm truncate ${isSelected ? 'text-foreground font-bold' : 'text-muted-foreground'}`} title={msg.id}>
+                                                <span className={`font-mono text-xs truncate ${isSelected ? 'text-foreground' : 'text-muted-foreground'}`} title={msg.id}>
                                                     {msg.id}
                                                 </span>
                                                 <div className={`text-center text-xs ${trafficMsg.priority > 0 ? 'text-status-pending font-bold' : 'text-muted-foreground'}`}>
@@ -345,11 +339,6 @@ export function QueueView() {
                          </div>
                      </div>
                  </div>
-             ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
-                    <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_QUEUE</p>
-                </div>
-             )}
           </div>
 
           {/* RIGHT PANEL: Message Details (Expanded) */}
@@ -374,43 +363,24 @@ export function QueueView() {
                           </div>
                       )}
 
-                      {/* Header - Compact */}
-                      <div className="p-3 border-b border-border bg-section-header flex-shrink-0">
-                          <div className="flex items-center justify-between mb-2">
-                              <h3 className="text-xs font-bold uppercase text-muted-foreground">MESSAGE ID</h3>
-                              <button
-                                  onClick={() => copyToClipboard(selectedMessage.id, selectedMessage.id)}
-                                  className="p-1 hover:bg-muted rounded transition-colors"
-                                  title="Copy Message ID"
-                              >
-                                  {copiedId === selectedMessage.id ? (
-                                      <Check className="h-3 w-3 text-status-success" />
-                                  ) : (
-                                      <Copy className="h-3 w-3 text-muted-foreground" />
-                                  )}
-                              </button>
-                          </div>
-                          <div className="bg-muted/50 p-2 rounded border border-border break-all">
-                              <span className="font-mono text-sm text-foreground">{selectedMessage.id}</span>
-                          </div>
-                      </div>
-
                       {/* Delivery Time - Only for Scheduled */}
                       {viewMode === 'traffic' && messageState === 'Scheduled' && 'next_delivery_at' in selectedMessage && (
-                          <div className="p-3 border-b border-border bg-section-header">
+                          <div className="p-3 border-b border-border bg-card">
                               <h3 className="text-xs font-bold uppercase text-muted-foreground mb-2">DELIVERY AT</h3>
                               <div className="bg-panel p-2 rounded border border-border">
-                                  <span className="font-mono text-sm text-foreground">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
+                                  <span className="font-mono text-xs text-foreground">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
                               </div>
                           </div>
                       )}
 
-                      {/* Payload - Full Space */}
-                      <div className="flex-1 flex flex-col min-h-0 p-3">
-                          <h4 className="text-sm font-bold uppercase text-muted-foreground mb-2 flex-shrink-0">PAYLOAD</h4>
-                          <ScrollArea className="flex-1 border border-border rounded bg-muted/50">
-                              <div className="p-3">
-                                  <pre className="font-mono text-sm text-foreground whitespace-pre-wrap break-words">
+                      {/* Payload Inspector */}
+                      <div className="flex-1 flex flex-col min-h-0">
+                          <div className="px-5 py-3 border-b border-border bg-section-header flex items-center justify-between shrink-0">
+                              <span className="text-xs text-muted-foreground uppercase tracking-wider font-bold">PAYLOAD</span>
+                          </div>
+                          <ScrollArea className="flex-1">
+                              <div className="p-5">
+                                  <pre className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
                                       {typeof selectedMessage.payload === 'string' 
                                           ? selectedMessage.payload 
                                           : JSON.stringify(selectedMessage.payload, null, 2)}
@@ -422,6 +392,14 @@ export function QueueView() {
               ) : (
                   <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
                       <p className="text-xs font-mono uppercase tracking-widest opacity-50">SELECT_MESSAGE</p>
+                  </div>
+              )}
+          </div>
+                  </>
+              ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
+                      <MessageSquare className="h-10 w-10 mb-3 opacity-20" />
+                      <p className="text-xs font-mono uppercase tracking-widest opacity-60">SELECT A QUEUE</p>
                   </div>
               )}
           </div>
