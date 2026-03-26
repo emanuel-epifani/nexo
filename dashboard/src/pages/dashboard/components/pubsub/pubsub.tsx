@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { PubSubBrokerSnapshot, WildcardSubscription } from "./types"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -17,6 +16,8 @@ import {
     RefreshCw,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { QueryError } from "@/components/ui/query-error"
+import {PubSubBrokerSnapshot, WildcardSubscription} from "@/pages/dashboard/components/pubsub/types.ts";
 
 const PAGE_SIZE = 50
 
@@ -43,7 +44,7 @@ export function PubSubView() {
         setSelectedPath(null)
     }, [activeTab])
 
-    const { data, isLoading } = useQuery({
+    const { data, isLoading, error, refetch } = useQuery({
         queryKey: ['pubsub-snapshot', offset, debouncedSearch],
         queryFn: async (): Promise<PubSubBrokerSnapshot> => {
             const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
@@ -53,6 +54,10 @@ export function PubSubView() {
             return res.json()
         },
     })
+
+    if (error) {
+        return <QueryError error={error} onRetry={refetch} title="ERROR_LOADING_PUBSUB" />
+    }
 
     const topics = data?.topics ?? []
     const totalTopics = data?.total_topics ?? 0

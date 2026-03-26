@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { useQuery } from '@tanstack/react-query'
-import { StoreBrokerSnapshot, KeyDetail } from "./types"
+import { StoreBrokerSnapshot, KeyDetail } from "./map-types.ts"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { 
@@ -12,10 +12,11 @@ import {
     FileJson,
     Binary,
     Loader2,
-    AlertCircle,
     ChevronLeft,
     ChevronRight
 } from "lucide-react"
+
+import { QueryError } from "@/components/ui/query-error"
 
 type StructureType = 'hashmap' | 'list' | 'set' 
 
@@ -60,18 +61,7 @@ export function StoreView() {
   }, [data?.keys, selectedKey])
 
   if (error) {
-    return (
-        <div className="flex h-full flex-col items-center justify-center gap-4 text-destructive p-8 border-2 border-destructive/20 rounded-lg bg-destructive/5 m-4">
-            <AlertCircle className="h-12 w-12" />
-            <div className="text-center">
-                <h3 className="font-bold">ERROR_LOADING_STORE</h3>
-                <p className="text-xs opacity-70 mt-1">{(error as Error).message}</p>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => refetch()}>
-                TRY_AGAIN
-            </Button>
-        </div>
-    )
+    return <QueryError error={error} onRetry={refetch} title="ERROR_LOADING_STORE" />
   }
 
   const startRange = offset + 1

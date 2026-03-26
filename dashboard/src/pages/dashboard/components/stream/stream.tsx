@@ -1,46 +1,24 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
     Search,
     Database,
     RefreshCw,
-    AlertCircle,
     ChevronLeft,
     ChevronRight,
 } from "lucide-react"
 
 
-interface StreamBrokerSnapshot {
-    topics: TopicSummary[];
-}
+import { QueryError } from "@/components/ui/query-error"
+import {
+    ConsumerGroupSummary,
+    StreamBrokerSnapshot,
+    StreamMessages,
+    TopicSummary
+} from "@/pages/dashboard/components/stream/types.ts";
 
-interface TopicSummary {
-    name: string;
-    last_seq: number;
-    groups: ConsumerGroupSummary[];
-}
-
-interface ConsumerGroupSummary {
-    id: string;
-    ack_floor: number;
-    pending_count: number;
-}
-
-interface MessagePreview {
-    seq: number;
-    timestamp: string;
-    payload: unknown;
-}
-
-interface StreamMessages {
-    messages: MessagePreview[];
-    from_seq: number;
-    limit: number;
-    last_seq: number;
-}
 
 const PAGE_SIZE = 50
 
@@ -93,16 +71,7 @@ export function StreamView() {
     const hasTopics = data.topics.length > 0
 
     if (snapshotError) {
-        return (
-            <div className="flex h-full flex-col items-center justify-center gap-4 text-destructive p-8 border-2 border-destructive/20 rounded-lg bg-destructive/5 m-4">
-                <AlertCircle className="h-12 w-12" />
-                <div className="text-center">
-                    <h3 className="font-bold">ERROR_LOADING_STREAM</h3>
-                    <p className="text-xs opacity-70 mt-1">{(snapshotError as Error).message}</p>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => refetch()}>TRY_AGAIN</Button>
-            </div>
-        )
+        return <QueryError error={snapshotError} onRetry={refetch} title="ERROR_LOADING_STREAM" />
     }
 
     if (snapshotLoading) {

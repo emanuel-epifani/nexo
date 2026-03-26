@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -13,45 +12,16 @@ import {
     ChevronRight, MessageSquare,
 } from "lucide-react"
 
-type QueueBrokerSnapshot = QueueSummary[];
+import { QueryError } from "@/components/ui/query-error"
+import {
+    DlqMessageSummary, FilterButtonProps, MessageSummary,
+    PaginatedDlqMessages,
+    PaginatedMessages,
+    QueueBrokerSnapshot,
+    QueueSummary, ScheduledMessageSummary
+} from "@/pages/dashboard/components/queue/types.ts";
 
-interface QueueSummary {
-    name: string;
-    pending: number;
-    inflight: number;
-    scheduled: number;
-    dlq: number;
-}
 
-interface PaginatedMessages {
-    messages: MessageSummary[];
-    total: number;
-}
-
-interface PaginatedDlqMessages {
-    messages: DlqMessageSummary[];
-    total: number;
-}
-
-interface MessageSummary {
-    id: string; // UUID
-    payload: any;
-    state: string; // "Pending", "InFlight", "Scheduled"
-    priority: number; // u8
-    attempts: number; // u32
-}
-
-interface ScheduledMessageSummary extends MessageSummary {
-    next_delivery_at: string;
-}
-
-interface DlqMessageSummary {
-    id: string; // UUID
-    payload: any;
-    attempts: number; // u32
-    failure_reason: string;
-    created_at: number;
-}
 
 const PAGE_SIZE = 50
 
@@ -119,16 +89,7 @@ export function QueueView() {
   const hasMore = offset + PAGE_SIZE < total
 
   if (snapshotError) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 text-destructive p-8 border-2 border-destructive/20 rounded-lg bg-destructive/5 m-4">
-        <AlertCircle className="h-12 w-12" />
-        <div className="text-center">
-          <h3 className="font-bold">ERROR_LOADING_QUEUE</h3>
-          <p className="text-xs opacity-70 mt-1">{(snapshotError as Error).message}</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()}>TRY_AGAIN</Button>
-      </div>
-    )
+    return <QueryError error={snapshotError} onRetry={refetch} title="ERROR_LOADING_QUEUE" />
   }
 
   if (snapshotLoading) {
@@ -408,12 +369,6 @@ export function QueueView() {
   )
 }
 
-interface FilterButtonProps {
-  label: string
-  count: number
-  active: boolean
-  onClick: () => void
-}
 
 function FilterButton({ label, count, active, onClick }: FilterButtonProps) {
     return (
