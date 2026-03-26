@@ -149,6 +149,7 @@ For every refactor, always provide this output before coding:
   - If complexity is `high` or distributed, propose a simpler alternative before implementation.
 5. **Tests**: semantic check on existing tests (`tests/`, `sdk/ts/tests/`), plus new tests needed (if any).
 6. **Alignment**: confirm final alignment across server/sdk/dashboard/docs.
+7. **Commit message**: recomend commit message aligned to "conventional commits" standard
 
 ---
 
