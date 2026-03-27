@@ -1,9 +1,15 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, types::Type, Connection, Result};
 use super::types::StorageOp;
 
 use crate::brokers::queue::queue::{Message, MessageState, current_time_ms};
 use crate::brokers::queue::dlq::DlqMessage;
 use uuid::Uuid;
+
+fn uuid_from_blob(id_blob: Vec<u8>) -> Result<Uuid> {
+    Uuid::from_slice(&id_blob).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(id_blob.len(), Type::Blob, Box::new(e))
+    })
+}
 
 pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -18,7 +24,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     // Main Queue Table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS queue (
-            id TEXT PRIMARY KEY,
+            id BLOB PRIMARY KEY,
             payload BLOB NOT NULL,
             priority INTEGER NOT NULL,
             visible_at INTEGER NOT NULL,
@@ -31,7 +37,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     // DLQ Table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS dlq_messages (
-            id TEXT PRIMARY KEY,
+            id BLOB PRIMARY KEY,
             payload BLOB NOT NULL,
             priority INTEGER NOT NULL,
             attempts INTEGER NOT NULL,
@@ -51,7 +57,8 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     )?;
 
     let message_iter = stmt.query_map([], |row| {
-        let id_str: String = row.get(0)?;
+        let id_blob: Vec<u8> = row.get(0)?;
+        let id = uuid_from_blob(id_blob)?;
         let payload: Vec<u8> = row.get(1)?;
         let priority: u8 = row.get(2)?;
         let visible_at = row.get::<_, i64>(3)? as u64;
@@ -70,7 +77,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         };
 
         Ok(Message {
-            id: Uuid::parse_str(&id_str).unwrap_or_default(),
+            id,
             payload: bytes::Bytes::from(payload),
             priority,
             attempts,
@@ -95,7 +102,8 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     )?;
 
     let message_iter = stmt.query_map([], |row| {
-        let id_str: String = row.get(0)?;
+        let id_blob: Vec<u8> = row.get(0)?;
+        let id = uuid_from_blob(id_blob)?;
         let payload: Vec<u8> = row.get(1)?;
         let priority: u8 = row.get(2)?;
         let attempts: u32 = row.get(3)?;
@@ -104,7 +112,7 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
         let error: Option<String> = row.get(6)?;
 
         Ok(DlqMessage {
-            id: Uuid::parse_str(&id_str).unwrap_or_default(),
+            id,
             payload: bytes::Bytes::from(payload),
             priority,
             attempts,
@@ -129,7 +137,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
             stmt.execute(params![
-                msg.id.to_string(),
+                msg.id.as_bytes(),
                 msg.payload.as_ref(), // Bytes -> &[u8]
                 msg.priority,
                 msg.visible_at as i64,
@@ -139,13 +147,13 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         }
         StorageOp::Delete(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            stmt.execute(params![id.to_string()])?;
+            stmt.execute(params![id.as_bytes()])?;
         }
         StorageOp::UpdateState { id, visible_at, attempts } => {
             let mut stmt = tx.prepare_cached(
                 "UPDATE queue SET visible_at = ?1, attempts = ?2 WHERE id = ?3"
             )?;
-            stmt.execute(params![*visible_at as i64, *attempts, id.to_string()])?;
+            stmt.execute(params![*visible_at as i64, *attempts, id.as_bytes()])?;
         }
         
         // DLQ Operations
@@ -155,7 +163,7 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             )?;
             stmt.execute(params![
-                msg.id.to_string(),
+                msg.id.as_bytes(),
                 msg.payload.as_ref(),
                 msg.priority,
                 msg.attempts,
@@ -166,19 +174,19 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         }
         StorageOp::DeleteDLQ(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
-            stmt.execute(params![id.to_string()])?;
+            stmt.execute(params![id.as_bytes()])?;
         }
         StorageOp::MoveToDLQ { id, msg } => {
             // Atomic: delete from queue, insert into DLQ
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            stmt.execute(params![id.to_string()])?;
+            stmt.execute(params![id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             )?;
             stmt.execute(params![
-                msg.id.to_string(),
+                msg.id.as_bytes(),
                 msg.payload.as_ref(),
                 msg.priority,
                 msg.attempts,
@@ -190,14 +198,14 @@ pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         StorageOp::MoveToMain { id, msg } => {
             // Atomic: delete from DLQ, insert into queue
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
-            stmt.execute(params![id.to_string()])?;
+            stmt.execute(params![id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
             stmt.execute(params![
-                msg.id.to_string(),
+                msg.id.as_bytes(),
                 msg.payload.as_ref(),
                 msg.priority,
                 0i64, // visible_at = 0 (ready immediately)
