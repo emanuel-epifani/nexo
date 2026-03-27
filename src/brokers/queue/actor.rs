@@ -179,7 +179,7 @@ impl QueueActor {
         let now_ms = current_time_ms();
         
         let next_msg_ts = self.main_state.next_timeout();
-        let next_waiter_ts = self.waiters.front().map(|w| w.expires_at);
+        let next_waiter_ts = self.waiters.iter().map(|w| w.expires_at).min();
 
         let next_event_ts = match (next_msg_ts, next_waiter_ts) {
             (Some(t1), Some(t2)) => Some(t1.min(t2)),
@@ -406,21 +406,19 @@ impl QueueActor {
         }
 
         // 2. Process Waiter Expirations
-        // Waiters are ordered by arrival? Not necessarily expiration. 
-        // We should iterate and remove expired ones.
-        // Or if we use VecDeque, we assume FIFO... but expiration might differ if variable wait_ms.
-        // Simple scan:
-        let mut i = 0;
-        while i < self.waiters.len() {
-            if self.waiters[i].expires_at <= now {
-                if let Some(waiter) = self.waiters.remove(i) {
-                    // Reply empty
-                    let _ = waiter.reply.send(vec![]);
-                }
+        let mut pending_waiters = VecDeque::with_capacity(self.waiters.len());
+        while let Some(waiter) = self.waiters.pop_front() {
+            if waiter.reply.is_closed() {
+                continue;
+            }
+
+            if waiter.expires_at <= now {
+                let _ = waiter.reply.send(vec![]);
             } else {
-                i += 1;
+                pending_waiters.push_back(waiter);
             }
         }
+        self.waiters = pending_waiters;
     }
 
     async fn process_waiters(&mut self) {

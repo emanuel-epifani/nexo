@@ -318,6 +318,90 @@ mod queue_tests {
             assert!(elapsed < Duration::from_millis(450), "Should timeout reasonably fast");
         }
 
+        #[tokio::test]
+        async fn test_long_polling_uses_earliest_waiter_expiration() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("adv_poll_order_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            let manager_long = manager.clone();
+            let q_long = q.clone();
+            let long_handle = tokio::spawn(async move {
+                let started = Instant::now();
+                let batch = manager_long.consume_batch(q_long, Some(1), Some(900)).await.unwrap();
+                (started.elapsed(), batch)
+            });
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let manager_short = manager.clone();
+            let q_short = q.clone();
+            let short_handle = tokio::spawn(async move {
+                let started = Instant::now();
+                let batch = manager_short.consume_batch(q_short, Some(1), Some(150)).await.unwrap();
+                (started.elapsed(), batch)
+            });
+
+            let (short_elapsed, short_batch) = tokio::time::timeout(Duration::from_millis(400), short_handle)
+                .await
+                .expect("Short waiter should time out before the long waiter")
+                .unwrap();
+
+            assert!(short_batch.is_empty());
+            assert!(short_elapsed >= Duration::from_millis(150), "Short waiter should wait for its own timeout");
+            assert!(short_elapsed < Duration::from_millis(350), "Short waiter should not be delayed by an earlier long waiter");
+            assert!(!long_handle.is_finished(), "Long waiter should still be pending after the short timeout");
+
+            let (long_elapsed, long_batch) = long_handle.await.unwrap();
+            assert!(long_batch.is_empty());
+            assert!(long_elapsed >= Duration::from_millis(850), "Long waiter should remain parked until its own timeout");
+        }
+
+        #[tokio::test]
+        async fn test_long_polling_dispatch_preserves_fifo_waiter_order() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("adv_poll_fifo_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            let manager_first = manager.clone();
+            let q_first = q.clone();
+            let first_handle = tokio::spawn(async move {
+                manager_first.consume_batch(q_first, Some(1), Some(1000)).await.unwrap()
+            });
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let manager_second = manager.clone();
+            let q_second = q.clone();
+            let second_handle = tokio::spawn(async move {
+                manager_second.consume_batch(q_second, Some(1), Some(1000)).await.unwrap()
+            });
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            manager.push(q.clone(), Bytes::from("first"), 0, None).await.unwrap();
+
+            let first_batch = tokio::time::timeout(Duration::from_millis(300), first_handle)
+                .await
+                .expect("First waiter should receive the first message")
+                .unwrap();
+            assert_eq!(first_batch.len(), 1);
+            assert_eq!(first_batch[0].payload, Bytes::from("first"));
+            assert!(!second_handle.is_finished(), "Second waiter should still be pending after the first dispatch");
+
+            manager.push(q.clone(), Bytes::from("second"), 0, None).await.unwrap();
+
+            let second_batch = tokio::time::timeout(Duration::from_millis(300), second_handle)
+                .await
+                .expect("Second waiter should receive the second message")
+                .unwrap();
+            assert_eq!(second_batch.len(), 1);
+            assert_eq!(second_batch[0].payload, Bytes::from("second"));
+
+            assert!(manager.ack(&q, first_batch[0].id).await);
+            assert!(manager.ack(&q, second_batch[0].id).await);
+        }
+
     }
 
     // =========================================================================================
