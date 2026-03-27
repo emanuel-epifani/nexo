@@ -42,20 +42,6 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         [],
     )?;
 
-    // Crucial index for fast POP
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pop 
-         ON queue (visible_at ASC, priority DESC, created_at ASC)",
-        [],
-    )?;
-
-    // Index for DLQ queries
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dlq_failed 
-         ON dlq_messages (failed_at DESC)",
-        [],
-    )?;
-
     Ok(())
 }
 
