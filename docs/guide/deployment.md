@@ -77,8 +77,8 @@ docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
 |:---|:---|:---|
 | `NEXO_ENV` | `dev` | Set to `prod` to disable dashboard |
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
-| `SERVER_PORT` | `7654` | Client connection port |
-| `DASHBOARD_PORT` | `8080` | Dashboard HTTP port |
+| `SERVER_SOCKET_TCP_PORT` | `7654` | Client TCP socket port |
+| `SERVER_DASHBOARD_HTTP_PORT` | `8080` | Dashboard HTTP port |
 | `NEXO_LOG` | `error` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `MAX_PAYLOAD_SIZE` | `10485760` | Max frame payload in bytes (10 MB) |
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Queue data directory |

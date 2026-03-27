@@ -33,11 +33,6 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
 COPY . .
 
 # 4. Final Build
-# FIX 1: Definiamo le ENV necessarie a Vite per buildare
-ENV SERVER_HOST="0.0.0.0"
-ENV SERVER_DASHBOARD_PORT="8080"
-# (Aggiungi qui altre ENV se vite.config.ts ne richiede altre, es. VITE_API_URL)
-
 # FIX 2: Rimuoviamo RUSTFLAGS specifico per x86 se buildi da Mac (ARM)
 # Lascia vuoto o rimuovi la riga. Il compilatore userà il default sicuro per l'architettura corrente.
 # ENV RUSTFLAGS="-C target-cpu=x86-64-v2"  <-- RIMOSSO/COMMENTATO
@@ -72,8 +67,8 @@ USER nexo
 
 # Default configuration via environment variables
 ENV SERVER_HOST=0.0.0.0 \
-    SERVER_PORT=7654 \
-    DASHBOARD_PORT=8080 \
+    SERVER_SOCKET_TCP_PORT=7654 \
+    SERVER_DASHBOARD_HTTP_PORT=8080 \
     DATA_PATH=/app/data
 
 EXPOSE 7654 8080

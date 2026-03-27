@@ -13,7 +13,7 @@ docker run -d -p 7654:7654 -p 8080:8080 emanuelepifani/nexo
 
 This exposes:
 
-- **Port 7654 (TCP):** Main server socket for SDK clients.
+- **Port 7654 (TCP):** Client TCP socket for SDK connections.
 - **Port 8080 (HTTP):** Built-in Web Dashboard — open `http://localhost:8080` to inspect all brokers in real-time. No extra tools needed.
 
 

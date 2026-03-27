@@ -55,8 +55,8 @@ impl ServerConfig {
 
         Self {
             host:           get_env("SERVER_HOST", "0.0.0.0"),
-            port:           get_env("SERVER_PORT", "7654"),
-            dashboard_port: get_env("SERVER_DASHBOARD_PORT", "8080"),
+            port:           get_env("SERVER_SOCKET_TCP_PORT", "7654"),
+            dashboard_port: get_env("SERVER_DASHBOARD_HTTP_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "error"),
             dashboard_enabled: env_mode != "prod",
             max_payload_size: get_env("MAX_PAYLOAD_SIZE", "10485760"), // 10MB
