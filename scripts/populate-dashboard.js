@@ -10,7 +10,7 @@ const { NexoClient } = require('../sdk/ts/dist');
 async function main() {
     console.log('🔧 Connecting to NEXO server...');
     // console.log("process.env.SERVER_HOST",process.env.SERVER_HOST)
-    // console.log("process.env.SERVER_PORT",process.env.SERVER_PORT)
+    // console.log("process.env.SERVER_SOCKET_TCP_PORT",process.env.SERVER_SOCKET_TCP_PORT)
 
     
     const nexo = await NexoClient.connect({

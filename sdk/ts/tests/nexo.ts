@@ -6,7 +6,7 @@ import { NexoClient } from '../src/client';
  */
 export const nexo = await NexoClient.connect({ 
   host: process.env.SERVER_HOST!, 
-  port: parseInt(process.env.SERVER_PORT!, 10) 
+  port: parseInt(process.env.SERVER_SOCKET_TCP_PORT!, 10)
 });
 
 /**
@@ -16,7 +16,7 @@ export const nexo = await NexoClient.connect({
  */
 export async function fetchBrokerSnapshot(brokerPath: string) {
   const host = process.env.SERVER_HOST;
-  const port = process.env.SERVER_DASHBOARD_PORT;
+  const port = process.env.SERVER_SOCKET_TCP_PORT;
   
   try {
     const response = await fetch(`http://${host}:${port}${brokerPath}`);

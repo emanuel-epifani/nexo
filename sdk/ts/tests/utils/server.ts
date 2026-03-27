@@ -27,7 +27,7 @@ export async function runNexoServer(host: string, port: number): Promise<void> {
   serverProcess = spawn(BINARY_PATH, [], {
     stdio: 'inherit',
     cwd: ROOT_DIR,
-    env: { ...process.env, SERVER_HOST: host, SERVER_PORT: port.toString() }
+    env: { ...process.env, SERVER_HOST: host, SERVER_SOCKET_TCP_PORT: port.toString() }
   });
 
   await waitForPort(host, port);

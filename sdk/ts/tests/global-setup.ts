@@ -4,7 +4,7 @@ import { runNexoServer, killServer, isServerRunning } from './utils/server';
 
 export default async function setup() {
   const host = process.env.SERVER_HOST!;
-  const port = parseInt(process.env.SERVER_PORT!, 10);
+  const port = parseInt(process.env.SERVER_SOCKET_TCP_PORT!, 10);
   const ROOT_DIR = path.resolve(__dirname, '../../');
 
 

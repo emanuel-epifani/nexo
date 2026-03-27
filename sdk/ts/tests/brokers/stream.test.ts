@@ -7,12 +7,12 @@ import { randomUUID } from 'crypto';
 describe('STREAM', () => {
     let clientA: NexoClient;
     let clientB: NexoClient;
-    const SERVER_PORT = parseInt(process.env.SERVER_PORT!);
+    const SERVER_SOCKET_TCP_PORT = parseInt(process.env.SERVER_SOCKET_TCP_PORT!);
     const SERVER_HOST = process.env.SERVER_HOST!;
 
     beforeAll(async () => {
-        clientA = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
-        clientB = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
+        clientA = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_SOCKET_TCP_PORT });
+        clientB = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_SOCKET_TCP_PORT });
     });
 
     afterAll(async () => {
@@ -95,8 +95,8 @@ describe('STREAM', () => {
     });
 
     it('should handle consumer disconnect with zero data loss', async () => {
-        const tempClientA = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
-        const tempClientB = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_PORT });
+        const tempClientA = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_SOCKET_TCP_PORT });
+        const tempClientB = await NexoClient.connect({ host: SERVER_HOST, port: SERVER_SOCKET_TCP_PORT });
 
         const topic = `stream-disconnect-${randomUUID()}`;
         const group = 'group_disconnect';

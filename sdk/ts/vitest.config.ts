@@ -12,8 +12,7 @@ loadEnvFile(resolve(__dirname, '../../.env'));
 // 2. Define Env Schema
 const envSchema = z.object({
   SERVER_HOST: z.string().min(1, "SERVER_HOST is required"),
-  SERVER_PORT: z.string().min(4, "SENTINEL_PORT è richiesta"),
-  SERVER_DASHBOARD_PORT: z.string().min(4, "SERVER_DASHBOARD_PORT is required"),
+  SERVER_SOCKET_TCP_PORT: z.string().min(4, "SERVER_SOCKET_TCP_PORT is required"),
 });
 
 // 3. Validate
