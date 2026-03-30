@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { formatDashboardValue } from "@/lib/dashboard-value"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -342,9 +343,7 @@ export function QueueView() {
                           <ScrollArea className="flex-1">
                               <div className="p-5">
                                   <pre className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
-                                      {typeof selectedMessage.payload === 'string' 
-                                          ? selectedMessage.payload 
-                                          : JSON.stringify(selectedMessage.payload, null, 2)}
+                                      {formatDashboardValue(selectedMessage.payload)}
                                   </pre>
                               </div>
                           </ScrollArea>

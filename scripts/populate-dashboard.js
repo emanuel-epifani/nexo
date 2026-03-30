@@ -45,12 +45,12 @@ async function populateStore(nexo) {
     for (let i = 0; i < 10000; i++) {
         await nexo.store.map.set(`user:${i}:name`, `User ${i}`);
         await nexo.store.map.set(`user:${i}:email`, `user${i}@example.com`);
-        await nexo.store.map.set(`user:${i}:profile`, JSON.stringify({
+        await nexo.store.map.set(`user:${i}:profile`, {
             id: i,
             name: `User ${i}`,
             email: `user${i}@example.com`,
             created: new Date().toISOString()
-        }));
+        });
     }
 
     // Session keys with different TTLs
@@ -60,22 +60,22 @@ async function populateStore(nexo) {
     await nexo.store.map.set('session:temp', { temp: true, expires_soon: true }, { ttl: 10 });
 
     // Cache data
-    await nexo.store.map.set('cache:product:featured', JSON.stringify({
+    await nexo.store.map.set('cache:product:featured', {
         products: [
             { id: 1, name: 'Laptop Pro', price: 1299.99, rating: 4.8 },
             { id: 2, name: 'Wireless Mouse', price: 49.99, rating: 4.5 },
             { id: 3, name: 'Mechanical Keyboard', price: 159.99, rating: 4.9 }
         ]
-    }));
+    });
 
-    await nexo.store.map.set('cache:stats:daily', JSON.stringify({
+    await nexo.store.map.set('cache:stats:daily', {
         users: 1523,
         orders: 447,
         revenue: 45678.90,
         timestamp: Date.now()
-    }));
+    });
 
-    await nexo.store.map.set('cache:config:app', JSON.stringify({
+    await nexo.store.map.set('cache:config:app', {
         version: '2.1.0',
         debug: false,
         maintenance: false,
@@ -84,22 +84,22 @@ async function populateStore(nexo) {
             notifications: true,
             analytics: false
         }
-    }));
+    });
 
     // Configuration
-    await nexo.store.map.set('config:database', JSON.stringify({
+    await nexo.store.map.set('config:database', {
         host: 'localhost',
         port: 5432,
         name: 'nexo_prod',
         pool_size: 20
-    }));
+    });
 
-    await nexo.store.map.set('config:redis', JSON.stringify({
+    await nexo.store.map.set('config:redis', {
         host: 'localhost',
         port: 6379,
         db: 0,
         ttl: 3600
-    }));
+    });
 
     // Text data
     await nexo.store.map.set('text:welcome', 'Welcome to NEXO Dashboard!');
@@ -107,12 +107,12 @@ async function populateStore(nexo) {
     await nexo.store.map.set('text:logo:svg', '<svg>...</svg>'); // SVG logo data
 
     // JSON configuration
-    await nexo.store.map.set('json:theme', JSON.stringify({
+    await nexo.store.map.set('json:theme', {
         primary: '#3b82f6',
         secondary: '#64748b',
         accent: '#f59e0b',
         mode: 'dark'
-    }));
+    });
 
     // Binary data
     await nexo.store.map.set('binary:pdf:sample', Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2D, 0x31, 0x2E, 0x34]));

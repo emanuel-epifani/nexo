@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { formatDashboardValue } from "@/lib/dashboard-value"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -244,7 +245,7 @@ export function StreamView() {
                                 <div className="p-5">
                                     {selectedMessage ? (
                                         <pre className="font-mono text-sm leading-relaxed text-foreground whitespace-pre-wrap break-all">
-                                            {JSON.stringify(selectedMessage.payload, null, 2)}
+                                            {formatDashboardValue(selectedMessage.payload)}
                                         </pre>
                                     ) : (
                                         <div className="flex flex-col items-center justify-center h-40 text-muted-foreground mt-10">

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { formatDashboardValue, getDashboardValueSize } from "@/lib/dashboard-value"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -269,7 +270,7 @@ export function PubSubView() {
                             <div className="flex-1 relative">
                                 <div className="absolute inset-0 overflow-auto p-6 scrollbar-thin">
                                     <pre className="text-xs text-foreground font-mono leading-relaxed whitespace-pre-wrap">
-                                        {JSON.stringify(selectedItem.retained_value, null, 2)}
+                                        {formatDashboardValue(selectedItem.retained_value)}
                                     </pre>
                                 </div>
                             </div>
@@ -283,7 +284,7 @@ export function PubSubView() {
                             <div className="px-4 py-2 border-t border-border bg-section-header text-xs text-muted-foreground flex justify-between font-mono uppercase">
                                 <div className="flex items-center gap-2">
                                     <Binary className="h-3 w-3" />
-                                    <span>SIZE: {new Blob([JSON.stringify(selectedItem.retained_value)]).size} BYTES</span>
+                                    <span>SIZE: {getDashboardValueSize(selectedItem.retained_value)} BYTES</span>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <FileJson className="h-3 w-3" />

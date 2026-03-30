@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react"
 import { useQuery } from '@tanstack/react-query'
 import { StoreBrokerSnapshot, KeyDetail } from "./map-types.ts"
+import { formatDashboardValue, getDashboardValueKind, getDashboardValueSize } from "@/lib/dashboard-value"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { 
@@ -198,10 +199,10 @@ export function StoreView() {
              {/* COLUMN 2: Value Inspector */}
              <div className="flex-1 flex flex-col bg-content overflow-hidden">
                {selectedKey ? (
-                   <>
-                       <div className="p-4 border-b border-border flex justify-between items-center bg-section-header">
-                           <div className="flex items-center gap-2">
-                               <h2 className="text-sm text-foreground">{selectedKey.key}</h2>
+                  <>
+                      <div className="p-4 border-b border-border flex justify-between items-center bg-section-header">
+                          <div className="flex items-center gap-2">
+                              <h2 className="text-sm text-foreground">{selectedKey.key}</h2>
                            </div>
                            <div className="flex items-center gap-4 text-xs text-muted-foreground uppercase tracking-wide">
                                <span className="flex items-center gap-1.5">
@@ -214,7 +215,7 @@ export function StoreView() {
                        <div className="flex-1 overflow-auto custom-scrollbar">
                            <div className="p-6 min-w-0">
                                <pre className="text-xs text-foreground font-mono leading-relaxed whitespace-pre min-w-0">
-                                   {typeof selectedKey.value === 'string' ? selectedKey.value : JSON.stringify(selectedKey.value, null, 2)}
+                                   {formatDashboardValue(selectedKey.value)}
                                </pre>
                            </div>
                        </div>
@@ -223,11 +224,11 @@ export function StoreView() {
                        <div className="px-4 py-2 border-t border-border bg-section-header text-xs text-muted-foreground flex justify-between font-mono uppercase">
                            <div className="flex items-center gap-2">
                                <Binary className="h-3 w-3" />
-                               <span>SIZE: {new Blob([typeof selectedKey.value === 'string' ? selectedKey.value : JSON.stringify(selectedKey.value)]).size} BYTES</span>
+                               <span>SIZE: {getDashboardValueSize(selectedKey.value)} BYTES</span>
                            </div>
                            <div className="flex items-center gap-2">
                                <FileJson className="h-3 w-3" />
-                               <span>{typeof selectedKey.value === 'string' && selectedKey.value.startsWith('0x') ? 'BINARY DATA' : 'UTF-8 TEXT'}</span>
+                               <span>{getDashboardValueKind(selectedKey.value)}</span>
                            </div>
                        </div>
                    </>
