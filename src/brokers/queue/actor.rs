@@ -9,13 +9,11 @@ use tracing::{error, info};
 use uuid::Uuid;
 use std::path::PathBuf;
 use crate::brokers::queue::MessageState;
-use crate::brokers::queue::queue::{QueueState, QueueConfig, Message, current_time_ms};
+use crate::brokers::queue::queue::{QueueState, QueueConfig, Message, QueueMessageView, current_time_ms};
 use crate::brokers::queue::dlq::{DlqState, DlqMessage};
 use crate::brokers::queue::persistence::{QueueStore, types::StorageOp};
 use crate::config::Config;
-use crate::dashboard::queue;
-use crate::dashboard::queue::{QueueSummary, DlqMessageSummary};
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::dashboard::queue::QueueSummary;
 
 // ==========================================
 // ACTOR COMMANDS
@@ -53,7 +51,7 @@ pub enum QueueActorCommand {
         offset: usize,
         limit: usize,
         search: Option<String>,
-        reply: oneshot::Sender<(usize, Vec<crate::dashboard::queue::MessageSummary>)>,
+        reply: oneshot::Sender<(usize, Vec<QueueMessageView>)>,
     },
     Stop {
         reply: oneshot::Sender<()>,

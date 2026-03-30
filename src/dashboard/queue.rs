@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use crate::NexoEngine;
+use crate::dashboard::utils::payload_to_dashboard_value;
 use crate::brokers::queue::queue::QueueConfig;
 
 #[derive(Deserialize)]
@@ -90,6 +91,14 @@ pub async fn get_queue_messages(
     } else {
         match engine.queue.get_messages(name, state_filter, offset, limit, search).await {
             Some((total, messages)) => {
+                let messages = messages.into_iter().map(|msg| MessageSummary {
+                    id: msg.id,
+                    payload: payload_to_dashboard_value(&msg.payload),
+                    state: msg.state,
+                    priority: msg.priority,
+                    attempts: msg.attempts,
+                    next_delivery_at: msg.next_delivery_at,
+                }).collect();
                 axum::Json(PaginatedMessages { messages, total }).into_response()
             },
             None => (StatusCode::NOT_FOUND, "Queue not found").into_response()

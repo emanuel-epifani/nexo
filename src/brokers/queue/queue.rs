@@ -7,13 +7,11 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 use hashlink::LinkedHashSet;
 use chrono::{DateTime, Utc};
-use crate::dashboard::utils::payload_to_dashboard_value;
 
-use crate::dashboard::queue::{QueueSummary, MessageSummary, DlqMessageSummary};
+use crate::dashboard::queue::QueueSummary;
 use crate::brokers::queue::commands::QueueCreateOptions;
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::DlqMessage;
@@ -40,6 +38,16 @@ pub struct Message {
     pub delayed_until: Option<u64>,
     pub failure_reason: Option<String>,
     pub state: MessageState,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueMessageView {
+    pub id: Uuid,
+    pub payload: Bytes,
+    pub state: String,
+    pub priority: u8,
+    pub attempts: u32,
+    pub next_delivery_at: Option<String>,
 }
 
 impl Message {
@@ -367,11 +375,7 @@ impl Message {
             (pending, inflight, scheduled)
         }
 
-        pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<MessageSummary>) {
-            let parse_payload = |msg: &Message| {
-                payload_to_dashboard_value(&msg.payload)
-            };
-
+        pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessageView>) {
             let iter: Box<dyn Iterator<Item = &Uuid>> = match state_filter.to_lowercase().as_str() {
                 "pending" => Box::new(self.waiting_for_dispatch.values().flat_map(|q| q.iter())),
                 "inflight" => Box::new(self.waiting_for_ack.values().flat_map(|q| q.iter())),
@@ -385,11 +389,7 @@ impl Message {
                 if let Some(msg) = self.registry.get(id) {
                     let matches_search = match &search {
                         Some(s) => {
-                            if let Value::String(str_val) = payload_to_dashboard_value(&msg.payload) {
-                                str_val.contains(s)
-                            } else {
-                                format!("{:?}", payload_to_dashboard_value(&msg.payload)).contains(s)
-                            }
+                            String::from_utf8_lossy(&msg.payload).contains(s)
                         },
                         None => true,
                     };
@@ -401,7 +401,7 @@ impl Message {
             }
 
             let total = all_filtered.len();
-            let paged: Vec<MessageSummary> = all_filtered
+            let paged: Vec<QueueMessageView> = all_filtered
                 .into_iter()
                 .skip(offset)
                 .take(limit)
@@ -410,9 +410,9 @@ impl Message {
                         MessageState::Scheduled(ts) => Some(format_time(ts)),
                         _ => None,
                     };
-                    MessageSummary {
+                    QueueMessageView {
                         id: msg.id,
-                        payload: parse_payload(msg),
+                        payload: msg.payload.clone(),
                         state: state_filter.clone(),
                         priority: msg.priority,
                         attempts: msg.attempts,

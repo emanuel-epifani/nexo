@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::brokers::queue::queue::{QueueConfig, Message};
+use crate::brokers::queue::queue::{QueueConfig, Message, QueueMessageView};
 use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
 use crate::brokers::queue::commands::QueueCreateOptions;
 use crate::dashboard::queue::QueueSummary;
@@ -205,7 +205,7 @@ impl QueueManager {
         queues
     }
 
-    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<crate::dashboard::queue::MessageSummary>)> {
+    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<QueueMessageView>)> {
         if let Some(actor_tx) = self.get_actor(&queue_name) {
             let (tx, rx) = oneshot::channel();
             if actor_tx.send(QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply: tx }).await.is_ok() {
