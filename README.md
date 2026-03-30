@@ -185,22 +185,6 @@ Instantly verify if your microservices are communicating correctly by inspecting
 
 ## Getting Started
 
-### Configuration Model (Local + Docker)
-
-Nexo uses a single set of server environment variables across Rust runtime and local dashboard development:
-
-- `SERVER_HOST` (default Rust: `0.0.0.0`)
-- `SERVER_SOCKET_TCP_PORT` (default Rust: `7654`) - TCP socket for SDK clients
-- `SERVER_DASHBOARD_HTTP_PORT` (default Rust: `8080`) - HTTP server for UI + API
-
-Behavior by scenario:
-
-- **Rust runtime (local or Docker):** if env vars are not provided, Rust falls back to internal defaults.
-- **Dashboard with Vite (`npm run dev`):** Vite enables a dev proxy for `/api` and points to `SERVER_HOST:SERVER_DASHBOARD_HTTP_PORT` (with local fallback defaults).
-- **Embedded dashboard (production build):** frontend assets are compiled and embedded in the binary; API calls use relative `/api` paths and resolve on the same origin at runtime.
-
-This means Docker runtime variables are optional unless you want to override defaults.
-
 ### 1. Run the Server
 
 ```bash

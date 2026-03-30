@@ -141,7 +141,8 @@ function handleCopy() {
           <strong>Cache</strong>, <strong>Pub/Sub</strong>, <strong>Streams</strong>, <strong>Queues</strong>, and a built-in dashboard for local debugging. Everything out of the box in a single high-performance <strong>Rust</strong> binary.
         </p>
         <p class="hero-desc">
-          No external dependencies, no complex setup. One SDK, one connection—just <code>docker run</code> and start coding.
+          No external dependencies, no complex setup. One SDK, one connection <br>
+            just <code>docker run</code> and start coding.
         </p>
         <a href="/guide/quickstart" class="hero-cta">
           Get Started →
