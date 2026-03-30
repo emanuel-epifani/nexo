@@ -98,7 +98,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
     request_set.abort_all();
     bridge_handle.abort();
-    engine.pubsub.disconnect(&client_id).await;
+    engine.pubsub.disconnect(&client_id);
     engine.stream.disconnect(client_id.0.clone()).await;
 
     Ok(())

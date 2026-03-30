@@ -62,6 +62,6 @@ await client.pubsub<string>('config/theme').subscribe((theme) => {
 });
 ```
 
-Retained messages are **persisted to disk** and survive server restarts. They have a default **TTL of 1 hour** (configurable via `PUBSUB_DEFAULT_RETAINED_TTL_SECS`), after which they are automatically cleaned up.
+Retained messages are **persisted to SQLite** and survive server restarts. They have a default **TTL of 1 hour** (configurable via `PUBSUB_DEFAULT_RETAINED_TTL_SECS`), after which they are automatically cleaned up.
 
 To clear a retained message, publish an empty payload with `retain: true`.

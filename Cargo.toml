@@ -27,6 +27,7 @@ hex = "0.4"
 rusqlite = { version = "0.38.0", features = ["bundled", "uuid", "time"] }
 crc32fast = "1.4"
 bytemuck = { version = "1.14", features = ["derive"] }
+parking_lot = "0.12"
 
 [profile.release]
 lto = "fat"

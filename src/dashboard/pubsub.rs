@@ -27,7 +27,7 @@ pub struct WildcardSubscription {
     pub client_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct TopicSnapshot {
     pub full_path: String,
     pub subscribers: usize,
@@ -47,6 +47,6 @@ pub async fn get_pubsub(
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(PUBSUB_PAGE_SIZE).min(PUBSUB_MAX_PAGE_SIZE);
     let offset = query.offset.unwrap_or(0);
-    let snapshot = engine.pubsub.scan_topics(limit, offset, query.search).await;
+    let snapshot = engine.pubsub.scan_topics(limit, offset, query.search.as_deref());
     axum::Json(snapshot)
 }

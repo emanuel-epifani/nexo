@@ -720,6 +720,7 @@ dependencies = [
  "lru",
  "mime_guess",
  "once_cell",
+ "parking_lot",
  "rusqlite",
  "rust-embed",
  "serde",

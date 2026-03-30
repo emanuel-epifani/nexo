@@ -1,342 +1,249 @@
-//! PubSub Manager: MQTT-style Publish/Subscribe Router
-//! 
-//! Architecture: Actor per Root
-//! - Each root topic (first segment) has its own actor with a radix tree
-//! - Actors process commands sequentially (no internal locking)
-//! - Parallelism between different root topics
-//! - Global "#" subscribers handled separately
-//!
-//! Sender Ownership:
-//! - PubSubManager.clients (Arc<DashMap>) is the SINGLE SOURCE OF TRUTH for Senders
-//! - Radix tree nodes store only ClientId (HashSet<ClientId>)
-//! - Actors resolve ClientId → Sender via shared DashMap read at publish time
-//! - disconnect() removes from DashMap → all actors see None on next lookup
-//!
-//! Supports:
-//! - Exact matching: "home/kitchen/temp"
-//! - Single-level wildcard: "home/+/temp"
-//! - Multi-level wildcard: "home/#"
-//! - Active Push to connected clients
-//! - Retained Messages (Last Value Caching)
-
 use std::sync::Arc;
-use std::collections::HashSet;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use bytes::Bytes;
 use dashmap::DashMap;
-use crate::brokers::pub_sub::config::PubSubConfig;
-use crate::brokers::pub_sub::types::{ClientId, PubSubMessage};
-use crate::brokers::pub_sub::actor::{RootCommand, RootActor, ClientRegistry};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
+use std::collections::HashSet;
 
-// ==========================================
-// PUBSUB MANAGER
-// ==========================================
+use crate::brokers::pub_sub::config::PubSubConfig;
+use crate::brokers::pub_sub::radix_tree::Node;
+use crate::brokers::pub_sub::types::{ClientId, ClientInfo, ClientRegistry, PubSubMessage};
+use crate::brokers::pub_sub::retained;
+use crate::dashboard::pubsub::{PubSubBrokerSnapshot, TopicSnapshot, WildcardSubscription, WildcardSubscriptions};
 
 pub struct PubSubManager {
-    actors: Arc<DashMap<String, mpsc::Sender<RootCommand>>>,
-    /// Single source of truth for client Senders. Actors resolve ClientId → Sender via this.
+    tree: Arc<RwLock<Node>>,
     clients: ClientRegistry,
-    client_subscriptions: DashMap<ClientId, HashSet<String>>,
-    /// Global "#" subscribers — only stores ClientIds, resolved from `clients` at publish time.
-    global_hash_subscribers: RwLock<HashSet<ClientId>>,
+    retained_dirty: Arc<AtomicBool>,
     config: Arc<PubSubConfig>,
 }
 
 impl PubSubManager {
     pub fn new(config: Arc<PubSubConfig>) -> Self {
-        let manager = Self {
-            actors: Arc::new(DashMap::new()),
-            clients: Arc::new(DashMap::new()),
-            client_subscriptions: DashMap::new(),
-            global_hash_subscribers: RwLock::new(HashSet::new()),
-            config: config.clone(),
-        };
-        
-        let actors = Arc::clone(&manager.actors);
-        let cleanup_interval = std::time::Duration::from_secs(config.cleanup_interval_seconds);
+        let tree = Arc::new(RwLock::new(Node::new()));
+        let retained_dirty = Arc::new(AtomicBool::new(false));
+        let clients = Arc::new(DashMap::new());
+        let persistence_path = format!("{}/retained.db", config.persistence_path);
+
+        // Load retained from SQLite
+        if let Ok(conn) = retained::init_db(&persistence_path) {
+            if let Ok(loaded) = retained::load_all(&conn) {
+                let mut root = tree.write();
+                for (path, msg) in loaded {
+                    let parts: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
+                    root.set_retained(&parts, Some(msg));
+                }
+            } else {
+                tracing::warn!("Failed to load retained topics from SQLite DB");
+            }
+        } else {
+             tracing::warn!("Failed to initialize SQLite for retained at {}", persistence_path);
+        }
+
+        // Background Flush Task
+        let flush_tree = tree.clone();
+        let flush_dirty = retained_dirty.clone();
+        let flush_path = persistence_path.clone();
+        let flush_ms = config.retained_flush_ms;
         
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(cleanup_interval);
-            
-            loop {
-                interval.tick().await;
-                Self::background_cleanup_empty_actors(&actors).await;
+            if let Ok(mut conn) = retained::init_db(&flush_path) {
+                let mut interval = tokio::time::interval(Duration::from_millis(flush_ms));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if !flush_dirty.swap(false, Ordering::Relaxed) {
+                        continue;
+                    }
+
+                    let entries = {
+                        let root = flush_tree.read();
+                        let mut results = Vec::new();
+                        root.collect_all_retained("", &mut results);
+                        results
+                    };
+
+                    if let Err(e) = retained::flush(&mut conn, &entries) {
+                        tracing::error!("Failed to flush retained messages to SQLite: {}", e);
+                    }
+                }
             }
         });
-        
-        manager
+
+        // Background Cleanup Task
+        let cleanup_tree = tree.clone();
+        let cleanup_dirty = retained_dirty.clone();
+        let cleanup_secs = config.cleanup_interval_seconds;
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(cleanup_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // skip first
+            loop {
+                interval.tick().await;
+                let cleaned = {
+                    let mut root = cleanup_tree.write();
+                    root.cleanup_expired_retained()
+                };
+                if cleaned {
+                    cleanup_dirty.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+        Self {
+            tree,
+            clients,
+            retained_dirty,
+            config,
+        }
     }
 
-    /// Register a new client connection
     pub fn connect(&self, client_id: ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
-        self.clients.insert(client_id.clone(), sender);
-        self.client_subscriptions.insert(client_id, HashSet::new());
+        self.clients.insert(client_id, ClientInfo {
+            sender,
+            subscriptions: HashSet::new(),
+        });
     }
 
-    /// Subscribe to a topic pattern
-    pub async fn subscribe(&self, topic: &str, client: ClientId) {
-        self.client_subscriptions
-            .entry(client.clone())
-            .or_default()
-            .insert(topic.to_string());
+    pub fn disconnect(&self, client_id: &ClientId) {
+        if let Some((_, info)) = self.clients.remove(client_id) {
+            let mut root = self.tree.write();
+            for sub in info.subscriptions {
+                let parts: Vec<String> = sub.split('/').map(|s| s.to_string()).collect();
+                root.remove_subscriber(&parts, client_id);
+            }
+        }
+    }
 
-        let parts: Vec<&str> = topic.split('/').collect();
-
-        // Handle global "#" subscription
-        if parts.len() == 1 && parts[0] == "#" {
-            self.global_hash_subscribers.write().await.insert(client);
+    pub fn subscribe(&self, client_id: &ClientId, pattern: &str) {
+        let sender = if let Some(mut info) = self.clients.get_mut(client_id) {
+            info.subscriptions.insert(pattern.to_string());
+            info.sender.clone()
+        } else {
             return;
-        }
+        };
 
-        let root = parts[0].to_string();
-        let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+        let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
+        let mut root = self.tree.write();
+        root.insert_subscriber(&parts, client_id);
 
-        let actor = self.get_or_create_actor(&root);
-        let (tx, rx) = oneshot::channel();
-        
-        if actor.send(RootCommand::Subscribe { pattern, client: client.clone(), reply: tx }).await.is_ok() {
-            // Send retained messages to the client
-            if let Ok(retained) = rx.await {
-                if let Some(sender) = self.clients.get(&client) {
-                    for (topic_str, payload) in retained {
-                        let msg = Arc::new(PubSubMessage::new(topic_str, payload));
-                        let _ = sender.send(msg);
-                    }
-                }
-            }
+        let mut retained = Vec::new();
+        root.collect_retained_for_pattern(&parts, "", &mut retained);
+
+        for (p, b) in retained {
+            let p = if p.starts_with('/') { p[1..].to_string() } else { p };
+            let msg = Arc::new(PubSubMessage::new(p, b));
+            let _ = sender.send(msg);
         }
     }
 
-    /// Unsubscribe from a topic pattern
-    pub async fn unsubscribe(&self, topic: &str, client: &ClientId) {
-        if let Some(mut subs) = self.client_subscriptions.get_mut(client) {
-            subs.remove(topic);
+    pub fn unsubscribe(&self, client_id: &ClientId, pattern: &str) {
+        if let Some(mut info) = self.clients.get_mut(client_id) {
+            info.subscriptions.remove(pattern);
         }
-
-        let parts: Vec<&str> = topic.split('/').collect();
-
-        if parts.len() == 1 && parts[0] == "#" {
-            self.global_hash_subscribers.write().await.remove(client);
-            return;
-        }
-
-        let root = parts[0];
-        let pattern: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-
-        if let Some(actor) = self.get_actor(root) {
-            let _ = actor.send(RootCommand::Unsubscribe { pattern, client: client.clone() }).await;
-        }
+        let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
+        let mut root = self.tree.write();
+        root.remove_subscriber(&parts, client_id);
     }
 
-    /// Publish a message
-    pub async fn publish(&self, topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
-        let parts: Vec<&str> = topic.split('/').collect();
-        
-        if parts.is_empty() {
-            return 0;
+    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
+        let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
+        if parts.is_empty() { return 0; }
+
+        if retain {
+            let mut root = self.tree.write();
+            if data.is_empty() {
+                root.set_retained(&parts, None);
+            } else {
+                let effective_ttl = ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds);
+                root.set_retained(&parts, Some(retained::RetainedMessage::new(data.clone(), Some(effective_ttl))));
+            }
+            self.retained_dirty.store(true, Ordering::Relaxed);
         }
 
-        let root = parts[0];
-        let sub_parts: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-        let mut sent = 0;
-
-        // 1. Dispatch to actor
-        if let Some(actor) = self.get_actor(root) {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(RootCommand::Publish {
-                parts: sub_parts.clone(),
-                full_topic: topic.to_string(),
-                data: data.clone(),
-                retain,
-                ttl_seconds,
-                reply: tx,
-            }).await.is_ok() {
-                sent += rx.await.unwrap_or_default();
-            }
-        } else if retain {
-            let actor = self.get_or_create_actor(root);
-            let (tx, rx) = oneshot::channel();
-            if actor.send(RootCommand::Publish {
-                parts: sub_parts,
-                full_topic: topic.to_string(),
-                data: data.clone(),
-                retain,
-                ttl_seconds,
-                reply: tx,
-            }).await.is_ok() {
-                sent += rx.await.unwrap_or_default();
-            }
+        let mut matched = Vec::new();
+        {
+            let root = self.tree.read();
+            root.match_subscribers(&parts, &mut matched);
         }
 
-        // 2. Send to global "#" subscribers (resolve from clients DashMap)
-        let global_subs = self.global_hash_subscribers.read().await;
-        if !global_subs.is_empty() {
-            let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
-            for client_id in global_subs.iter() {
-                if let Some(sender) = self.clients.get(client_id) {
-                    if sender.send(msg.clone()).is_ok() {
-                        sent += 1;
-                    }
+        let mut seen = HashSet::new();
+        matched.retain(|id| seen.insert(id.clone()));
+
+        let msg = Arc::new(PubSubMessage::new(topic.to_string(), data));
+        let mut sent_count = 0;
+        let mut zombies = Vec::new();
+
+        for client_id in matched {
+            if let Some(info) = self.clients.get(&client_id) {
+                if info.sender.send(msg.clone()).is_ok() {
+                    sent_count += 1;
+                } else {
+                    zombies.push(client_id);
                 }
+            } else {
+                zombies.push(client_id);
             }
         }
 
-        sent
+        for client_id in zombies {
+            self.disconnect(&client_id);
+        }
+
+        sent_count
     }
 
-    /// Disconnect a client and cleanup subscriptions
-    pub async fn disconnect(&self, client_id: &ClientId) {
-        // Remove sender from single source of truth — all actors will see None on next lookup
-        self.clients.remove(client_id);
-        self.global_hash_subscribers.write().await.remove(client_id);
-
-        if let Some((_, topics)) = self.client_subscriptions.remove(client_id) {
-            let mut roots: HashSet<String> = HashSet::new();
-            for topic in &topics {
-                let parts: Vec<&str> = topic.split('/').collect();
-                if !parts.is_empty() && parts[0] != "#" {
-                    roots.insert(parts[0].to_string());
-                }
-            }
-
-            let mut waits = Vec::new();
-            for root in roots {
-                if let Some(actor) = self.get_actor(&root) {
-                    let (tx, rx) = oneshot::channel();
-                    if actor.send(RootCommand::Disconnect { 
-                        client: client_id.clone(),
-                        reply: tx 
-                    }).await.is_ok() {
-                        waits.push(rx);
-                    }
-                }
-            }
-            
-            for rx in waits {
-                let _ = rx.await;
-            }
-        }
-    }
-
-    /// Cleanup expired retained messages in all actors
-    pub async fn cleanup_expired_retained(&self) {
-        for actor in self.get_all_actors() {
-            let _ = actor.send(RootCommand::CleanupExpired).await;
-        }
-    }
-
-    /// Get paginated snapshot for dashboard
-    pub async fn scan_topics(&self, limit: usize, offset: usize, search: Option<String>) -> crate::dashboard::pubsub::PubSubBrokerSnapshot {
-        use crate::dashboard::pubsub::{PubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
-
-        let mut multi_level = Vec::new();
-        let mut single_level = Vec::new();
-        for entry in self.client_subscriptions.iter() {
-            let client_id = entry.key().0.clone();
-            for pattern in entry.value().iter() {
-                if pattern.contains('#') {
-                    multi_level.push(WildcardSubscription {
-                        pattern: pattern.clone(),
-                        client_id: client_id.clone(),
-                    });
-                } else if pattern.contains('+') {
-                    single_level.push(WildcardSubscription {
-                        pattern: pattern.clone(),
-                        client_id: client_id.clone(),
-                    });
-                }
-            }
-        }
-
-        // Collect filtered topics from all root actors
+    pub fn scan_topics(&self, limit: usize, offset: usize, search: Option<&str>) -> PubSubBrokerSnapshot {
         let mut all_topics = Vec::new();
-        for actor in self.get_all_actors() {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(RootCommand::ScanTopics { search: search.clone(), reply: tx }).await.is_ok() {
-                if let Ok(topics) = rx.await {
-                    all_topics.extend(topics);
+        {
+            let root = self.tree.read();
+            root.collect_filtered_topics("", search, &mut all_topics);
+        }
+
+        all_topics.sort_by(|a, b| a.full_path.cmp(&b.full_path));
+        let total_topics = all_topics.len();
+        
+        let end = (offset + limit).min(total_topics);
+        let paginated = if offset < total_topics {
+            all_topics[offset..end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let mut wildcards = WildcardSubscriptions {
+            multi_level: Vec::new(),
+            single_level: Vec::new(),
+        };
+
+        for entry in self.clients.iter() {
+            let client_id = entry.key().0.clone();
+            for sub in &entry.subscriptions {
+                if sub.contains('#') {
+                    if search.map_or(true, |s| sub.contains(s)) {
+                        wildcards.multi_level.push(WildcardSubscription {
+                            pattern: sub.clone(),
+                            client_id: client_id.clone(),
+                        });
+                    }
+                } else if sub.contains('+') {
+                    if search.map_or(true, |s| sub.contains(s)) {
+                        wildcards.single_level.push(WildcardSubscription {
+                            pattern: sub.clone(),
+                            client_id: client_id.clone(),
+                        });
+                    }
                 }
             }
         }
-
-        // Sort for deterministic pagination, then slice
-        all_topics.sort_unstable_by(|a, b| a.full_path.cmp(&b.full_path));
-        let total = all_topics.len();
-        let topics = all_topics.into_iter().skip(offset).take(limit).collect();
 
         PubSubBrokerSnapshot {
             active_clients: self.clients.len(),
-            total_topics: total,
-            topics,
-            wildcards: WildcardSubscriptions {
-                multi_level,
-                single_level,
-            },
-        }
-    }
-
-    // --- HELPERS ---
-
-    #[inline]
-    fn get_actor(&self, root: &str) -> Option<mpsc::Sender<RootCommand>> {
-        self.actors.get(root).map(|r| r.value().clone())
-    }
-
-    #[inline]
-    fn get_all_actors(&self) -> Vec<mpsc::Sender<RootCommand>> {
-        self.actors.iter().map(|entry| entry.value().clone()).collect()
-    }
-
-    fn get_or_create_actor(&self, root: &str) -> mpsc::Sender<RootCommand> {
-        self.actors.entry(root.to_string()).or_insert_with(|| {
-            let (tx, rx) = mpsc::channel(self.config.actor_channel_capacity);
-            let actor = RootActor::new(
-                root.to_string(), 
-                rx, 
-                &self.config.persistence_path,
-                self.config.default_retained_ttl_seconds,
-                self.config.retained_flush_ms,
-                Arc::clone(&self.clients),
-            );
-            tokio::spawn(actor.run());
-            tx
-        }).clone()
-    }
-
-    /// Background task: cleanup empty actors (sequentially without spawning tasks)
-    async fn background_cleanup_empty_actors(actors: &DashMap<String, mpsc::Sender<RootCommand>>) {
-        let start = std::time::Instant::now();
-        let mut to_remove = Vec::new();
-
-        // 1. Snapshot the actors to avoid holding the lock during await
-        let actor_snapshots: Vec<(String, mpsc::Sender<RootCommand>)> = actors
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-
-        // 2. Query each actor sequentially
-        for (root, actor) in actor_snapshots {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(RootCommand::IsEmpty { reply: tx }).await.is_ok() {
-                if let Ok(Ok(true)) = tokio::time::timeout(std::time::Duration::from_millis(100), rx).await {
-                    to_remove.push(root);
-                }
-            }
-        }
-        
-        // 3. Remove empty actors
-        if !to_remove.is_empty() {
-            let count = to_remove.len();
-            for root in &to_remove {
-                actors.remove(root);
-            }
-            
-            tracing::info!(
-                "Background cleanup: removed {} empty actors in {:?}: {:?}",
-                count,
-                start.elapsed(),
-                to_remove
-            );
+            total_topics,
+            topics: paginated,
+            wildcards,
         }
     }
 }

@@ -1,10 +1,20 @@
 //! PubSub Types: Public types used across PubSub modules
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
 use bytes::{Bytes, BytesMut, BufMut};
+use tokio::sync::mpsc;
+use dashmap::DashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientId(pub String);
+
+pub struct ClientInfo {
+    pub sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,
+    pub subscriptions: HashSet<String>,
+}
+
+pub type ClientRegistry = Arc<DashMap<ClientId, ClientInfo>>;
 
 #[derive(Debug)]
 pub struct PubSubMessage {

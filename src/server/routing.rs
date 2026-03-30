@@ -189,15 +189,15 @@ impl<'a> RequestHandler<'a> {
         match cmd {
             PubSubCommand::Publish { options, topic, payload } => {
                 let config = PubSubPublishConfig::from_options(options, &Config::global().pubsub);
-                let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds)).await;
+                let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds));
                 Response::Ok
             }
             PubSubCommand::Subscribe { topic } => {
-                pubsub.subscribe(&topic, client).await;
+                pubsub.subscribe(&client, &topic);
                 Response::Ok
             }
             PubSubCommand::Unsubscribe { topic } => {
-                pubsub.unsubscribe(&topic, &client).await;
+                pubsub.unsubscribe(&client, &topic);
                 Response::Ok
             }
         }
