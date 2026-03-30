@@ -1,9 +1,9 @@
 pub mod config;
 pub mod store_manager;
 pub mod commands;
-pub mod types;
-pub mod map;
+pub mod data_structures;
 
 pub use store_manager::*;
-pub use map::*;
+pub use data_structures::*;
+
 

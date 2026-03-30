@@ -1,8 +1,6 @@
 //! Store Manager: In-memory data store orchestrator
 
-use crate::brokers::store::map::MapStore;
-use crate::brokers::store::types::{Entry, Value};
-use crate::brokers::store::map::MapValue;
+use crate::brokers::store::data_structures::map::{MapStore, MapValue, Entry};
 use std::time::Instant;
 use crate::brokers::store::config::StoreConfig;
 use crate::dashboard::utils::payload_to_dashboard_value;
@@ -21,7 +19,7 @@ impl StoreManager {
 }
 
 pub struct ScanResult {
-    pub items: Vec<(String, Value, Option<Instant>)>,
+    pub items: Vec<(String, MapValue, Option<Instant>)>,
     pub total: usize,
 }
 

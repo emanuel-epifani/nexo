@@ -5,8 +5,7 @@ use axum::{
     extract::{State, Query},
 };
 use crate::NexoEngine;
-use crate::brokers::store::types::Value as StoreValue;
-use crate::brokers::store::map::MapValue;
+use crate::brokers::store::data_structures::map::MapValue;
 use std::time::Instant;
 use crate::dashboard::utils::payload_to_dashboard_value;
 
@@ -54,7 +53,7 @@ pub async fn get_store_handler(
         }
         
         let value = match &val {
-            StoreValue::Map(MapValue(b)) => {
+            MapValue(b) => {
                 payload_to_dashboard_value(b)
             }
         };
