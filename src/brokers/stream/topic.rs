@@ -21,10 +21,7 @@ pub struct TopicConfig {
     pub eviction_interval_ms: u64,
     pub max_ack_pending: usize,
     pub ack_wait_ms: u64,
-    pub actor_channel_capacity: usize,
 }
-
-
 
 impl TopicConfig {
     pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
@@ -56,7 +53,6 @@ impl TopicConfig {
             eviction_interval_ms: sys.eviction_interval_ms,
             max_ack_pending: sys.max_ack_pending,
             ack_wait_ms: sys.ack_wait_ms,
-            actor_channel_capacity: sys.actor_channel_capacity,
         }
     }
 }
@@ -68,7 +64,6 @@ pub struct TopicState {
     pub next_seq: u64,
     pub start_seq: u64,       // first seq available (after retention)
     pub ram_start_seq: u64,   // first seq in RAM window
-    pub persisted_seq: u64,   // last seq flushed to disk
     // Config
     pub ram_soft_limit: usize,
 }
@@ -81,7 +76,6 @@ impl TopicState {
             next_seq: 1, // sequences start at 1 (0 = "nothing processed")
             start_seq: 1,
             ram_start_seq: 1,
-            persisted_seq: 0,
             ram_soft_limit,
         }
     }
@@ -97,7 +91,6 @@ impl TopicState {
             next_seq,
             start_seq,
             ram_start_seq,
-            persisted_seq: next_seq.saturating_sub(1), // assume all recovered data is persisted
             ram_soft_limit,
         }
     }
@@ -132,15 +125,15 @@ impl TopicState {
                 return self.log.iter().skip(idx).take(limit).cloned().collect();
             }
         }
-        // Cold read is handled by the actor (segment files)
+        // Cold read is handled by the manager via StorageManager
         Vec::new()
     }
 
     /// Evict old messages from RAM front (only if persisted to disk)
-    pub fn evict(&mut self) {
+    pub fn evict(&mut self, persisted_seq: u64) {
         while self.log.len() > self.ram_soft_limit {
             if let Some(front) = self.log.front() {
-                if front.seq <= self.persisted_seq {
+                if front.seq <= persisted_seq {
                     if let Some(removed) = self.log.pop_front() {
                         self.ram_start_seq = removed.seq + 1;
                     }

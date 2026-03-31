@@ -74,6 +74,51 @@ mod stream_tests {
         }
 
         #[tokio::test]
+        async fn test_long_poll_fetch_wakes_on_publish() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = StreamManager::new(std::sync::Arc::new(config));
+            let topic = "long-poll-wakeup";
+            let group = "g-long-poll";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.join_group(group, topic, "client-A").await.unwrap();
+
+            let publisher = manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                publisher.publish(topic, Bytes::from("wake-me")).await.unwrap();
+            });
+
+            let start = Instant::now();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 2_000).await.unwrap();
+
+            assert_eq!(msgs.len(), 1);
+            assert_eq!(msgs[0].payload, Bytes::from("wake-me"));
+            assert!(start.elapsed() < Duration::from_millis(1_000));
+        }
+
+        #[tokio::test]
+        async fn test_long_poll_fetch_times_out() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = StreamManager::new(std::sync::Arc::new(config));
+            let topic = "long-poll-timeout";
+            let group = "g-timeout";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.join_group(group, topic, "client-A").await.unwrap();
+
+            let start = Instant::now();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 250).await.unwrap();
+            let elapsed = start.elapsed();
+
+            assert!(msgs.is_empty());
+            assert!(elapsed >= Duration::from_millis(200));
+            assert!(elapsed < Duration::from_millis(1_000));
+        }
+
+        #[tokio::test]
         async fn test_ack_nack_flow() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
@@ -92,7 +137,7 @@ mod stream_tests {
             manager.join_group(group, topic, "client-A").await.unwrap();
 
             // Fetch
-            let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert_eq!(msgs.len(), 3);
             assert_eq!(msgs[0].seq, 1);
 
@@ -104,7 +149,7 @@ mod stream_tests {
             manager.nack(group, topic, 3).await.unwrap();
 
             // Fetch again — should get the nacked message
-            let msgs2 = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let msgs2 = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert_eq!(msgs2.len(), 1);
             assert_eq!(msgs2[0].seq, 3);
             assert_eq!(msgs2[0].payload, Bytes::from("msg-3"));
@@ -127,7 +172,7 @@ mod stream_tests {
 
             // Join and fetch all
             manager.join_group(group, topic, "client-A").await.unwrap();
-            let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert_eq!(msgs.len(), 5);
 
             // Ack out of order: 1, 3, 2 — floor should advance to 3 after acking 2
@@ -161,7 +206,7 @@ mod stream_tests {
 
             // Join, fetch all, ack all
             manager.join_group(group, topic, "client-A").await.unwrap();
-            let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             for msg in &msgs {
                 manager.ack(group, topic, msg.seq).await.unwrap();
             }
@@ -171,7 +216,7 @@ mod stream_tests {
             assert_eq!(ack_floor, 10);
 
             // Fetch should return empty (all consumed)
-            let empty = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let empty = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert!(empty.is_empty());
 
             // Seek to beginning
@@ -179,7 +224,7 @@ mod stream_tests {
             manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
 
             // Fetch should return messages from beginning
-            let from_start = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let from_start = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert_eq!(from_start.len(), 10);
             assert_eq!(from_start[0].seq, 1);
 
@@ -190,7 +235,7 @@ mod stream_tests {
             manager.seek(group, topic, SeekTarget::End).await.unwrap();
 
             // Fetch should return empty
-            let after_end = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let after_end = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
             assert!(after_end.is_empty());
         }
 
@@ -214,9 +259,9 @@ mod stream_tests {
             manager.join_group(group, topic, "client-B").await.unwrap();
 
             // Client A fetches 3
-            let msgs_a = manager.fetch(group, "client-A", 3, topic).await.unwrap();
+            let msgs_a = manager.fetch(group, "client-A", 3, topic, 0).await.unwrap();
             // Client B fetches 3 — should get *different* messages
-            let msgs_b = manager.fetch(group, "client-B", 3, topic).await.unwrap();
+            let msgs_b = manager.fetch(group, "client-B", 3, topic, 0).await.unwrap();
 
             assert_eq!(msgs_a.len(), 3);
             assert_eq!(msgs_b.len(), 3);
@@ -329,7 +374,7 @@ mod stream_tests {
                 manager.publish(topic, Bytes::from("msg1")).await.unwrap();
                 manager.publish(topic, Bytes::from("msg2")).await.unwrap();
                 manager.join_group(group, topic, "client-A").await.unwrap();
-                let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+                let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
                 for msg in &msgs {
                     manager.ack(group, topic, msg.seq).await.unwrap();
                 }
@@ -536,7 +581,7 @@ mod stream_tests {
 
                 // Join group, fetch and ack
                 manager.join_group(group, topic1, "client-A").await.unwrap();
-                let msgs = manager.fetch(group, "client-A", 1, topic1).await.unwrap();
+                let msgs = manager.fetch(group, "client-A", 1, topic1, 0).await.unwrap();
                 if !msgs.is_empty() {
                     manager.ack(group, topic1, msgs[0].seq).await.unwrap();
                 }
@@ -643,7 +688,7 @@ mod stream_tests {
             manager.join_group(group, topic, "client-A").await.unwrap();
             
             // This should trigger a Cold Read within the TopicActor
-            let msgs = manager.fetch(group, "client-A", 10, topic).await.unwrap();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
 
             assert_eq!(msgs.len(), 5, "Should have fetched all 5 messages (3 from disk, 2 from RAM)");
             assert_eq!(msgs[0].seq, 1);
@@ -662,7 +707,7 @@ mod stream_tests {
         use super::*;
         use nexo::brokers::stream::StreamManager;
 
-        const COUNT: usize = 100_000;
+        const COUNT: usize = 500_000;
 
 
         #[tokio::test]
@@ -747,7 +792,7 @@ mod stream_tests {
             manager.publish("test_topic", Bytes::from("msg")).await.unwrap();
             
             // Fetch without joining should fail
-            let result = manager.fetch("test_group", "client-A", 10, "test_topic").await;
+            let result = manager.fetch("test_group", "client-A", 10, "test_topic", 0).await;
             assert!(result.is_err(), "Fetch without join should fail");
         }
     }

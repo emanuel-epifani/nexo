@@ -23,11 +23,11 @@ Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale"
 
 Benchmarks run on MacBook Pro M4 (Single Node):
 
-| Engine | Throughput | Latency (p99) |
-|--------|-----------|---------------|
+| Engine | Throughput   | Latency (p99) |
+|--------|--------------|---------------|
 | Store | 4.5M ops/sec | < 1 µs |
 | PubSub | 3.8M msg/sec | < 1 µs |
-| Stream | 650k ops/sec | 1 µs |
+| Stream | 1.1M ops/sec | 1 µs |
 | Queue | 160k ops/sec | 3 µs |
 
 ## Quick Example

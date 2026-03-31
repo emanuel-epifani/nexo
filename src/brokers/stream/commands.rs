@@ -22,7 +22,7 @@ pub struct RetentionOptions {
     pub max_bytes: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCreateOptions {
     pub retention: Option<RetentionOptions>,
@@ -47,11 +47,12 @@ pub enum StreamCommand {
         topic: String,
         payload: Bytes,
     },
-    /// FETCH: [TopicLen:4][Topic][GroupLen:4][Group][Limit:4]
+    /// FETCH: [TopicLen:4][Topic][GroupLen:4][Group][Limit:4][WaitMs:4]
     Fetch {
         topic: String,
         group: String,
         limit: u32,
+        wait_ms: u32,
     },
     /// JOIN: [GroupLen:4][Group][TopicLen:4][Topic]
     Join {
@@ -105,7 +106,8 @@ impl StreamCommand {
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let limit = cursor.read_u32()?;
-                Ok(Self::Fetch { topic, group, limit })
+                let wait_ms = cursor.read_u32()?;
+                Ok(Self::Fetch { topic, group, limit, wait_ms })
             }
             OP_S_JOIN => {
                 let group = cursor.read_string()?;

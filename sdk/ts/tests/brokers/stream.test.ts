@@ -33,7 +33,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).publish({ id: 2 });
 
         await waitFor(() => expect(received.length).toBe(2));
-        sub.stop();
+        await sub.stop();
     });
 
     it('Independent CONSUMER GROUPS => should deliver all messages to each group', async () => {
@@ -53,8 +53,8 @@ describe('STREAM', () => {
             expect(recvB.length).toBe(1);
         });
 
-        subA.stop();
-        subB.stop();
+        await subA.stop();
+        await subB.stop();
     });
 
     it('Same CONSUMER GROUP => should distribute messages without duplicates', async () => {
@@ -90,8 +90,8 @@ describe('STREAM', () => {
         const overlap = [...receivedA].filter(id => receivedB.has(id));
         expect(overlap.length).toBe(0);
 
-        subA.stop();
-        subB.stop();
+        await subA.stop();
+        await subB.stop();
     });
 
     it('should handle consumer disconnect with zero data loss', async () => {
@@ -132,7 +132,7 @@ describe('STREAM', () => {
             if (!allReceivedIds.has(i)) throw new Error(`Missing message index ${i}`);
         }
 
-        subB.stop();
+        await subB.stop();
         await tempClientB.disconnect();
     });
 
@@ -154,7 +154,7 @@ describe('STREAM', () => {
         expect(received[0].i).toBe(0);
         expect(received[4].i).toBe(4);
 
-        sub.stop();
+        await sub.stop();
     });
 
     it('should support Seek (Beginning/End)', async () => {
@@ -175,7 +175,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).publish({ i: 10 });
         await waitFor(() => expect(receivedEnd.length).toBe(1));
         expect(receivedEnd[0].i).toBe(10);
-        subEnd.stop();
+        await subEnd.stop();
 
         // 4. Scenario: Seek back to BEGINNING
         await clientA.stream(topic).seek(group, 'beginning');
@@ -188,6 +188,6 @@ describe('STREAM', () => {
         expect(receivedStart[0].i).toBe(0);
         expect(receivedStart[10].i).toBe(10);
         
-        subStart.stop();
+        await subStart.stop();
     });
 });

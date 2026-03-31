@@ -220,8 +220,8 @@ impl<'a> RequestHandler<'a> {
                     Err(e) => Response::Error(e),
                 }
             }
-            StreamCommand::Fetch { topic, group, limit } => {
-                match stream.fetch(&group, &client, limit as usize, &topic).await {
+            StreamCommand::Fetch { topic, group, limit, wait_ms } => {
+                match stream.fetch(&group, &client, limit as usize, &topic, wait_ms as u64).await {
                     Ok(messages) => Response::Data(FetchResponse { messages }.to_wire()),
                     Err(e) => Response::Error(e),
                 }

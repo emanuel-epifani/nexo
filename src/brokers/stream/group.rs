@@ -48,6 +48,10 @@ impl ConsumerGroup {
         }
     }
 
+    pub fn is_backpressured(&self) -> bool {
+        self.pending.len() >= self.max_ack_pending
+    }
+
     /// Restore from persisted ack_floor (on warm start)
     pub fn restore(id: String, ack_floor: u64, max_ack_pending: usize, ack_wait: Duration) -> Self {
         Self {
@@ -131,12 +135,16 @@ impl ConsumerGroup {
     }
 
     /// Check for expired pending messages and move them to redeliver queue.
-    pub fn check_redelivery(&mut self) {
+    pub fn check_redelivery(&mut self) -> bool {
         let now = Instant::now();
         let expired: Vec<u64> = self.pending.iter()
             .filter(|(_, msg)| now.duration_since(msg.delivered_at) > self.ack_wait)
             .map(|(seq, _)| *seq)
             .collect();
+
+        if expired.is_empty() {
+            return false;
+        }
 
         for seq in expired {
             if let Some(msg) = self.pending.remove(&seq) {
@@ -144,6 +152,8 @@ impl ConsumerGroup {
                 self.redeliver.push_back(seq);
             }
         }
+
+        true
     }
 
     /// Seek to a target position. Clears all pending/redeliver state.

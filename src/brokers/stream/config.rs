@@ -2,7 +2,6 @@ use std::env;
 
 #[derive(Debug, Clone)]
 pub struct SystemStreamConfig {
-    pub actor_channel_capacity: usize,
     pub persistence_path: String,
     pub default_flush_ms: u64,
     pub max_segment_size: u64,
@@ -20,7 +19,6 @@ pub struct SystemStreamConfig {
 impl Default for SystemStreamConfig {
     fn default() -> Self {
         Self {
-            actor_channel_capacity: 10000,
             persistence_path: "./data/streams".to_string(),
             default_flush_ms: 50,
             max_segment_size: 104857600, // 100MB
@@ -41,7 +39,6 @@ impl SystemStreamConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            actor_channel_capacity:      get_env("STREAM_ACTOR_CHAN_CAP", default.actor_channel_capacity),
             persistence_path:            get_env_str("STREAM_ROOT_PERSISTENCE_PATH", &default.persistence_path),
             default_flush_ms:            get_env("STREAM_DEFAULT_FLUSH_MS", default.default_flush_ms),
             max_segment_size:            get_env("STREAM_MAX_SEGMENT_SIZE", default.max_segment_size),

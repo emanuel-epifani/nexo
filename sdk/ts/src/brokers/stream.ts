@@ -26,6 +26,7 @@ export interface StreamCreateOptions {
 
 export interface StreamSubscribeOptions {
   batchSize?: number; // Default 100
+  waitMs?: number; // Default 500
 }
 
 export interface StreamMessage<T> {
@@ -70,13 +71,15 @@ const StreamCommands = {
     conn: NexoConnection,
     stream: string,
     group: string,
-    batchSize: number
+    batchSize: number,
+    waitMs: number
   ): Promise<StreamMessage<T>[]> => {
     const res = await conn.send(
       StreamOpcode.S_FETCH,
       FrameCodec.string(stream),
       FrameCodec.string(group),
-      FrameCodec.u32(batchSize)
+      FrameCodec.u32(batchSize),
+      FrameCodec.u32(waitMs)
     );
 
     const count = res.cursor.readU32();
@@ -119,6 +122,7 @@ const StreamCommands = {
 
 class StreamSubscription<T> {
   private active = false;
+  private loopDone: Promise<void> = Promise.resolve();
 
   constructor(
     private conn: NexoConnection,
@@ -133,19 +137,20 @@ class StreamSubscription<T> {
   ): Promise<void> {
     this.active = true;
     const batchSize = options.batchSize ?? 100;
+    const waitMs = options.waitMs ?? 20000;
 
-    // Run loop in background (fire & forget promise)
-    this.runConsumerLoop(callback, batchSize).catch(err => {
+    this.loopDone = this.runConsumerLoop(callback, batchSize, waitMs).catch(err => {
       this.logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
       this.active = false;
     });
   }
 
-  stop() {
+  async stop(): Promise<void> {
     this.active = false;
+    await this.loopDone;
   }
 
-  private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number) {
+  private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number, waitMs: number) {
     while (this.active) {
       if (!this.conn.isConnected) {
         await this.backoff(500);
@@ -155,7 +160,7 @@ class StreamSubscription<T> {
       try {
         // Join the group (idempotent — re-joining just returns ack_floor)
         await StreamCommands.join(this.conn, this.streamName, this.group);
-        await this.pollLoop(callback, batchSize);
+        await this.pollLoop(callback, batchSize, waitMs);
       } catch (e: any) {
         if (!this.active) break;
 
@@ -170,22 +175,28 @@ class StreamSubscription<T> {
     }
   }
 
-  private async pollLoop(callback: (data: T) => Promise<any> | any, batchSize: number): Promise<void> {
+  private async pollLoop(callback: (data: T) => Promise<any> | any, batchSize: number, waitMs: number): Promise<void> {
     while (this.active && this.conn.isConnected) {
       const messages = await StreamCommands.fetch<T>(
         this.conn,
         this.streamName,
         this.group,
-        batchSize
+        batchSize,
+        waitMs
       );
 
       if (messages.length === 0) {
-        await this.backoff(50);
         continue;
       }
 
-      for (const msg of messages) {
-        if (!this.active) return;
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        if (!this.active) {
+          for (let j = i; j < messages.length; j++) {
+            StreamCommands.nack(this.conn, this.streamName, this.group, messages[j].seq);
+          }
+          return;
+        }
 
         try {
           await callback(msg.data);
@@ -231,7 +242,7 @@ export class NexoStream<T = any> {
     group: string,
     callback: (data: T) => Promise<any> | any,
     options: StreamSubscribeOptions = {}
-  ): Promise<{ stop: () => void }> {
+  ): Promise<{ stop: () => Promise<void> }> {
     if (!group) throw new Error("Consumer Group is required for subscription");
 
     // Fail Fast: Check existence first
@@ -245,7 +256,7 @@ export class NexoStream<T = any> {
     await subscription.start(callback, options);
 
     return {
-      stop: () => subscription.stop()
+      stop: () => subscription.stop(),
     };
   }
 

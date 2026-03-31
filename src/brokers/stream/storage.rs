@@ -9,6 +9,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -58,7 +60,7 @@ pub enum StorageCommand {
     Append {
         topic_name: String,
         messages: Vec<MessageToAppend>,
-        ack_sender: mpsc::Sender<u64>,
+        persisted_seq: Arc<AtomicU64>,
     },
     
     ColdRead {
@@ -87,7 +89,7 @@ pub enum StorageCommand {
 
 pub struct TopicContext {
     active_path: PathBuf,
-    ack_sender: Option<mpsc::Sender<u64>>,
+    persisted_seq: Arc<AtomicU64>,
     highest_pending_seq: u64,
     current_file_size: u64,
 }
@@ -155,8 +157,8 @@ impl StorageManager {
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { topic_name, messages, ack_sender } => {
-                self.handle_append(topic_name, messages, ack_sender).await;
+            StorageCommand::Append { topic_name, messages, persisted_seq } => {
+                self.handle_append(topic_name, messages, persisted_seq).await;
             }
             StorageCommand::ColdRead { topic_name, from_seq, limit, reply } => {
                 let msgs = self.cold_read(&topic_name, from_seq, limit).await;
@@ -189,7 +191,7 @@ impl StorageManager {
         &mut self,
         topic_name: String,
         messages: Vec<MessageToAppend>,
-        ack_sender: mpsc::Sender<u64>,
+        persisted_seq: Arc<AtomicU64>,
     ) {
         if messages.is_empty() { return; }
 
@@ -214,12 +216,12 @@ impl StorageManager {
 
             self.topics.insert(topic_name.clone(), TopicContext {
                 active_path,
-                ack_sender: Some(ack_sender.clone()),
+                persisted_seq: persisted_seq.clone(),
                 highest_pending_seq: 0,
                 current_file_size: file_size,
             });
         } else {
-            self.topics.get_mut(&topic_name).unwrap().ack_sender = Some(ack_sender);
+            self.topics.get_mut(&topic_name).unwrap().persisted_seq = persisted_seq;
         }
 
         let mut buffer = Vec::new();
@@ -280,13 +282,8 @@ impl StorageManager {
             for name in topics_to_flush {
                 if let Some(ctx) = self.topics.get_mut(&name) {
                     if ctx.highest_pending_seq > 0 {
-                        if let Some(ref sender) = ctx.ack_sender {
-                            if let Ok(_) = sender.try_send(ctx.highest_pending_seq) {
-                                ctx.highest_pending_seq = 0;
-                            } else {
-                                self.dirty_topics.insert(name);
-                            }
-                        }
+                        ctx.persisted_seq.store(ctx.highest_pending_seq, Ordering::Release);
+                        ctx.highest_pending_seq = 0;
                     }
                 }
             }
