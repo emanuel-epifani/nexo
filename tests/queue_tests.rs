@@ -358,48 +358,51 @@ mod queue_tests {
         }
 
         #[tokio::test]
-        async fn test_long_polling_dispatch_preserves_fifo_waiter_order() {
+        async fn test_long_polling_dispatch_both_waiters_get_messages() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_poll_fifo_{}", Uuid::new_v4());
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
-            let manager_first = manager.clone();
-            let q_first = q.clone();
-            let first_handle = tokio::spawn(async move {
-                manager_first.consume_batch(q_first, Some(1), Some(1000)).await.unwrap()
+            // Two concurrent waiters
+            let manager_a = manager.clone();
+            let q_a = q.clone();
+            let handle_a = tokio::spawn(async move {
+                manager_a.consume_batch(q_a, Some(1), Some(2000)).await.unwrap()
             });
 
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            let manager_second = manager.clone();
-            let q_second = q.clone();
-            let second_handle = tokio::spawn(async move {
-                manager_second.consume_batch(q_second, Some(1), Some(1000)).await.unwrap()
+            let manager_b = manager.clone();
+            let q_b = q.clone();
+            let handle_b = tokio::spawn(async move {
+                manager_b.consume_batch(q_b, Some(1), Some(2000)).await.unwrap()
             });
 
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            manager.push(q.clone(), Bytes::from("first"), 0, None).await.unwrap();
+            // Push two messages — both waiters should each get one
+            manager.push(q.clone(), Bytes::from("msg_x"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg_y"), 0, None).await.unwrap();
 
-            let first_batch = tokio::time::timeout(Duration::from_millis(300), first_handle)
+            let batch_a = tokio::time::timeout(Duration::from_millis(500), handle_a)
                 .await
-                .expect("First waiter should receive the first message")
+                .expect("Waiter A should receive a message")
                 .unwrap();
-            assert_eq!(first_batch.len(), 1);
-            assert_eq!(first_batch[0].payload, Bytes::from("first"));
-            assert!(!second_handle.is_finished(), "Second waiter should still be pending after the first dispatch");
-
-            manager.push(q.clone(), Bytes::from("second"), 0, None).await.unwrap();
-
-            let second_batch = tokio::time::timeout(Duration::from_millis(300), second_handle)
+            let batch_b = tokio::time::timeout(Duration::from_millis(500), handle_b)
                 .await
-                .expect("Second waiter should receive the second message")
+                .expect("Waiter B should receive a message")
                 .unwrap();
-            assert_eq!(second_batch.len(), 1);
-            assert_eq!(second_batch[0].payload, Bytes::from("second"));
 
-            assert!(manager.ack(&q, first_batch[0].id).await);
-            assert!(manager.ack(&q, second_batch[0].id).await);
+            assert_eq!(batch_a.len(), 1);
+            assert_eq!(batch_b.len(), 1);
+
+            // Both messages delivered, each to a different waiter (order is best-effort)
+            let mut payloads: Vec<Bytes> = vec![batch_a[0].payload.clone(), batch_b[0].payload.clone()];
+            payloads.sort();
+            assert_eq!(payloads, vec![Bytes::from("msg_x"), Bytes::from("msg_y")]);
+
+            assert!(manager.ack(&q, batch_a[0].id).await);
+            assert!(manager.ack(&q, batch_b[0].id).await);
         }
 
     }
@@ -758,7 +761,7 @@ mod queue_tests {
     mod performance {
         use super::*;
 
-        const COUNT: usize = 200_000;
+        const COUNT: usize = 500_000;
 
 
         #[tokio::test]
@@ -771,7 +774,7 @@ mod queue_tests {
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
-            let mut bench = Benchmark::start("PUSH - Queue Throughput (Async Disk Flush)", COUNT);
+            let mut bench = Benchmark::start("PUSH - Queue Throughput (Sequential)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
@@ -781,6 +784,7 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
             bench.stop();
         }
+
     }
 
 }

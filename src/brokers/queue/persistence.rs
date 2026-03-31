@@ -1,9 +1,226 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use rusqlite::{params, types::Type, Connection, Result};
-use super::types::StorageOp;
+use tracing::{error, info};
+use uuid::Uuid;
 
 use crate::brokers::queue::queue::{Message, MessageState, current_time_ms};
 use crate::brokers::queue::dlq::DlqMessage;
-use uuid::Uuid;
+
+// ==========================================
+// STORAGE OPERATIONS
+// ==========================================
+
+/// Atomic operations that storage can execute
+#[derive(Debug)]
+pub enum StorageOp {
+    /// Insert a new message (Push)
+    Insert(Message),
+    /// Remove a message (Ack)
+    Delete(Uuid),
+    /// Update visibility and attempts (Nack / Timeout / In-flight)
+    UpdateState {
+        id: Uuid,
+        visible_at: u64,
+        attempts: u32,
+    },
+    
+    // DLQ Operations
+    /// Insert a message into DLQ
+    InsertDLQ(DlqMessage),
+    /// Delete a message from DLQ
+    DeleteDLQ(Uuid),
+    /// Move message from main queue to DLQ (atomic)
+    MoveToDLQ {
+        id: Uuid,
+        msg: DlqMessage,
+    },
+    /// Move message from DLQ to main queue (atomic)
+    MoveToMain {
+        id: Uuid,
+        msg: Message,
+    },
+    /// Purge all messages from DLQ
+    PurgeDLQ,
+}
+
+// ==========================================
+// QUEUE STORE (Public API)
+// ==========================================
+
+pub struct QueueStore {
+    sender: Mutex<Option<mpsc::UnboundedSender<StorageOp>>>,
+    writer_handle: Mutex<Option<JoinHandle<()>>>,
+    db_path: PathBuf,
+}
+
+impl QueueStore {
+    pub fn new(
+        db_path: PathBuf, 
+        flush_ms: u64,
+        batch_size: usize,
+    ) -> Self {
+        // SYNCHRONOUS INIT: Ensure DB schema exists before anything else
+        // This prevents race conditions where recover() runs before Writer creates tables.
+        if let Ok(conn) = Connection::open(&db_path) {
+            if let Err(e) = init_db(&conn) {
+                error!("FATAL: Failed to initialize Queue DB at {:?}: {}", db_path, e);
+            }
+        } else {
+            error!("FATAL: Failed to open Queue DB for initialization at {:?}", db_path);
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        
+        let path_clone = db_path.clone();
+        let handle = tokio::spawn(async move {
+            run_writer(rx, path_clone, flush_ms, batch_size).await;
+        });
+
+        Self {
+            sender: Mutex::new(Some(tx)),
+            writer_handle: Mutex::new(Some(handle)),
+            db_path,
+        }
+    }
+
+    /// Recover all messages from DB (Read-Only connection)
+    /// Returns (main_messages, dlq_messages)
+    pub fn recover(&self) -> Result<(Vec<Message>, Vec<DlqMessage>), String> {
+        let conn = Connection::open(&self.db_path)
+            .map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
+
+        let main_messages = load_all_messages(&conn)
+            .map_err(|e| format!("Failed to load main messages: {}", e))?;
+        
+        let dlq_messages = load_dlq_messages(&conn)
+            .map_err(|e| format!("Failed to load DLQ messages: {}", e))?;
+
+        Ok((main_messages, dlq_messages))
+    }
+
+    /// Send a storage op to the background writer (sync, never blocks)
+    #[inline]
+    pub fn execute(&self, op: StorageOp) {
+        if let Some(sender) = self.sender.lock().unwrap().as_ref() {
+            if let Err(e) = sender.send(op) {
+                error!("Writer channel closed, op lost: {:?}", e.0);
+            }
+        }
+    }
+
+    /// Graceful shutdown: drop sender so writer drains remaining ops, then wait for it to exit
+    pub async fn shutdown(&self) {
+        self.sender.lock().unwrap().take(); // drop sender → writer recv() returns None after draining
+        let handle = self.writer_handle.lock().unwrap().take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+}
+
+// ==========================================
+// BACKGROUND WRITER
+// ==========================================
+
+async fn run_writer(
+    mut rx: mpsc::UnboundedReceiver<StorageOp>,
+    db_path: PathBuf,
+    flush_ms: u64,
+    batch_size: usize,
+) {
+    let mut conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("FATAL: Cannot open queue DB at {:?}: {}", db_path, e);
+            return;
+        }
+    };
+    if let Err(e) = conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = OFF;
+         PRAGMA cache_size = -64000;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA mmap_size = 268435456;
+         PRAGMA page_size = 8192;"
+    ) {
+        error!("Failed to set writer pragmas: {}", e);
+    }
+
+    info!("Queue Persistence Writer started for {:?}", db_path);
+
+    let mut flush_timer = tokio::time::interval(Duration::from_millis(flush_ms));
+    flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut batch = Vec::with_capacity(batch_size);
+
+    loop {
+        tokio::select! {
+            recv_result = rx.recv() => {
+                match recv_result {
+                    Some(op) => {
+                        batch.push(op);
+
+                        // Drain everything currently available in the channel
+                        while batch.len() < batch_size {
+                            match rx.try_recv() {
+                                Ok(op) => batch.push(op),
+                                Err(_) => break,
+                            }
+                        }
+
+                        if batch.len() >= batch_size {
+                            flush_batch(&mut conn, &mut batch);
+                        }
+                    }
+                    None => {
+                        // Sender dropped — flush remaining and exit
+                        if !batch.is_empty() {
+                            flush_batch(&mut conn, &mut batch);
+                        }
+                        info!("Queue Persistence Writer stopped for {:?}", db_path);
+                        return;
+                    }
+                }
+            }
+            
+            _ = flush_timer.tick() => {
+                if !batch.is_empty() {
+                    flush_batch(&mut conn, &mut batch);
+                }
+            }
+        }
+    }
+}
+
+fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to start transaction: {}", e);
+            return;
+        }
+    };
+
+    for op in batch.iter() {
+        if let Err(e) = exec_op(&tx, op) {
+            error!("Failed to exec op {:?}: {}", op, e);
+        }
+    }
+
+    if let Err(e) = tx.commit() {
+        error!("Failed to commit batch: {}", e);
+    }
+    
+    batch.clear();
+}
+
+// ==========================================
+// SQLITE OPERATIONS
+// ==========================================
 
 fn uuid_from_blob(id_blob: Vec<u8>) -> Result<Uuid> {
     Uuid::from_slice(&id_blob).map_err(|e| {
@@ -11,14 +228,14 @@ fn uuid_from_blob(id_blob: Vec<u8>) -> Result<Uuid> {
     })
 }
 
-pub fn init_db(conn: &Connection) -> Result<()> {
+fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA cache_size = -64000;
          PRAGMA temp_store = MEMORY;
-         " // Tuned for high throughput
+         "
     )?;
 
     // Main Queue Table
@@ -51,7 +268,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
+fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(
         "SELECT id, payload, priority, visible_at, attempts, created_at FROM queue"
     )?;
@@ -96,7 +313,7 @@ pub fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
-pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
+fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     let mut stmt = conn.prepare(
         "SELECT id, payload, priority, attempts, created_at, failed_at, error FROM dlq_messages"
     )?;
@@ -129,7 +346,7 @@ pub fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     Ok(messages)
 }
 
-pub fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
+fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
         StorageOp::Insert(msg) => {
             let mut stmt = tx.prepare_cached(

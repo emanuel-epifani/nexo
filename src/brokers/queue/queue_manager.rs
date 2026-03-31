@@ -1,34 +1,62 @@
-//! Queue Manager: Router and lifecycle manager for Queue Actors
+//! Queue Manager: Shared-state router and lifecycle manager for queues.
+//! Each queue is an Arc<QueueShared> with a Mutex<QueueInner> for state
+//! and a Notify for long-polling wakeup.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::Notify;
+use tokio::time::{sleep_until, Instant};
+use tokio_util::sync::CancellationToken;
 use bytes::Bytes;
 use uuid::Uuid;
+use tracing::{error, info};
 
-use crate::brokers::queue::queue::{QueueConfig, Message, QueueMessageView};
-use crate::brokers::queue::actor::{QueueActor, QueueActorCommand};
+use crate::brokers::queue::queue::{QueueConfig, QueueState, Message, QueueMessageView, current_time_ms};
 use crate::brokers::queue::commands::QueueCreateOptions;
-use crate::dashboard::queue::QueueSummary;
-use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
+use crate::brokers::queue::persistence::{QueueStore, StorageOp};
+use crate::brokers::queue::config::SystemQueueConfig;
+use crate::dashboard::queue::QueueSummary;
 
 // ==========================================
-// QUEUE MANAGER (Router)
+// SHARED STATE
+// ==========================================
+
+struct QueueShared {
+    inner: Mutex<QueueInner>,
+    notify: Notify,
+    store: QueueStore,
+}
+
+struct QueueInner {
+    name: String,
+    state: QueueState,
+    dlq: DlqState,
+    config: QueueConfig,
+}
+
+// ==========================================
+// QUEUE MANAGER
 // ==========================================
 
 #[derive(Clone)]
 pub struct QueueManager {
-    queue_actors: Arc<DashMap<String, mpsc::Sender<QueueActorCommand>>>,
+    queues: Arc<DashMap<String, Arc<QueueShared>>>,
     config: Arc<SystemQueueConfig>,
+    cancel: CancellationToken,
 }
 
 impl QueueManager {
     pub fn new(system_config: Arc<SystemQueueConfig>) -> Self {
-        let queue_actors = Arc::new(DashMap::new());
-        let manager = Self { 
-            queue_actors: queue_actors.clone(),
+        let queues = Arc::new(DashMap::new());
+        let cancel = CancellationToken::new();
+
+        let manager = Self {
+            queues: queues.clone(),
             config: system_config.clone(),
+            cancel: cancel.clone(),
         };
 
         // WARM START: Discover and restore queues from filesystem
@@ -41,8 +69,7 @@ impl QueueManager {
                         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                             if filename.ends_with(".db") && !filename.ends_with(".db-wal") && !filename.ends_with(".db-shm") {
                                 let queue_name = filename.trim_end_matches(".db").to_string();
-                                
-                                // Load config if it exists
+
                                 let config_path = persistence_path.join(format!("{}.config.json", queue_name));
                                 let config = if let Ok(data) = std::fs::read_to_string(&config_path) {
                                     serde_json::from_str(&data).unwrap_or_else(|_| QueueConfig::from_options(QueueCreateOptions::default(), &system_config))
@@ -50,12 +77,9 @@ impl QueueManager {
                                     QueueConfig::from_options(QueueCreateOptions::default(), &system_config)
                                 };
 
-                                let actor_tx = manager.spawn_queue_actor(
-                                    queue_name.clone(),
-                                    config
-                                );
-                                queue_actors.insert(queue_name.clone(), actor_tx);
-                                tracing::info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
+                                let shared = Self::build_queue(queue_name.clone(), config, &system_config);
+                                queues.insert(queue_name.clone(), shared);
+                                info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
                             }
                         }
                     }
@@ -63,38 +87,162 @@ impl QueueManager {
             }
         }
 
+        manager.spawn_time_event_task();
         manager
     }
 
-    fn spawn_queue_actor(
-        &self,
-        name: String,
-        config: QueueConfig,
-    ) -> mpsc::Sender<QueueActorCommand> {
-        let (tx, rx) = mpsc::channel(self.config.actor_channel_capacity);
-        
-        // Spawn actor with path from system_config
-        let path = std::path::PathBuf::from(&self.config.persistence_path);
-        let actor = QueueActor::new(name, config.clone(), path, rx);
-        tokio::spawn(actor.run());
-        
-        tx
+    // ==========================================
+    // INTERNAL HELPERS
+    // ==========================================
+
+    fn build_queue(name: String, config: QueueConfig, system_config: &SystemQueueConfig) -> Arc<QueueShared> {
+        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
+        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
+            error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
+        }
+
+        let db_path = persistence_path.join(format!("{}.db", name));
+        let store = QueueStore::new(
+            db_path,
+            config.flush_ms,
+            config.writer_batch_size,
+        );
+
+        let mut main_state = QueueState::new();
+        let mut dlq_state = DlqState::new();
+
+        // Recovery
+        match store.recover() {
+            Ok((main_messages, dlq_messages)) => {
+                let main_count = main_messages.len();
+                let dlq_count = dlq_messages.len();
+
+                for msg in main_messages {
+                    main_state.push(msg);
+                }
+                for msg in dlq_messages {
+                    dlq_state.push(msg);
+                }
+
+                if main_count > 0 || dlq_count > 0 {
+                    info!("Queue '{}': Recovered {} main + {} DLQ messages from storage", name, main_count, dlq_count);
+                }
+            }
+            Err(e) => {
+                error!("Queue '{}': Persistence recovery failed: {}", name, e);
+            }
+        }
+
+        Arc::new(QueueShared {
+            inner: Mutex::new(QueueInner {
+                name,
+                state: main_state,
+                dlq: dlq_state,
+                config,
+            }),
+            notify: Notify::new(),
+            store,
+        })
     }
 
-    // --- Public API ---
+    fn spawn_time_event_task(&self) {
+        let queues = self.queues.clone();
+        let cancel = self.cancel.clone();
+
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_millis(50));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = timer.tick() => {}
+                }
+
+                for entry in queues.iter() {
+                    let shared = entry.value().clone();
+                    let now = current_time_ms();
+
+                    let should_process = {
+                        let inner = Self::lock(&shared.inner);
+                        inner.state.next_timeout().map(|ts| ts <= now).unwrap_or(false)
+                    };
+
+                    if !should_process {
+                        continue;
+                    }
+
+                    let (requeued, dlq_msgs) = {
+                        let mut inner = Self::lock(&shared.inner);
+                        let max_retries = inner.config.max_retries;
+                        let (requeued, dlq_msgs) = inner.state.process_expired(max_retries);
+
+                        for ref dlq_msg in &dlq_msgs {
+                            inner.dlq.push((*dlq_msg).clone());
+                        }
+
+                        (requeued, dlq_msgs)
+                    };
+
+                    for msg in &requeued {
+                        shared.store.execute(StorageOp::UpdateState {
+                            id: msg.id,
+                            visible_at: 0,
+                            attempts: msg.attempts,
+                        });
+                    }
+
+                    for dlq_msg in dlq_msgs {
+                        shared.store.execute(StorageOp::MoveToDLQ {
+                            id: dlq_msg.id,
+                            msg: dlq_msg,
+                        });
+                    }
+
+                    if !requeued.is_empty() {
+                        shared.notify.notify_waiters();
+                    }
+                }
+            }
+        });
+    }
+
+    #[inline]
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[inline]
+    fn get_queue(&self, name: &str) -> Option<Arc<QueueShared>> {
+        self.queues.get(name).map(|r| r.value().clone())
+    }
+
+    fn persist_batch_state(&self, shared: &Arc<QueueShared>, msgs: &[Message]) {
+        for msg in msgs {
+            shared.store.execute(StorageOp::UpdateState {
+                id: msg.id,
+                visible_at: msg.visible_at,
+                attempts: msg.attempts,
+            });
+        }
+    }
+
+    // ==========================================
+    // PUBLIC API
+    // ==========================================
 
     pub async fn create_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
         use dashmap::mapref::entry::Entry;
-        
-        match self.queue_actors.entry(name.clone()) {
-            Entry::Occupied(_) => Ok(()), // Already exists
+
+        match self.queues.entry(name.clone()) {
+            Entry::Occupied(_) => Ok(()),
             Entry::Vacant(v) => {
                 let config = QueueConfig::from_options(options, &self.config);
-                
+
                 // Persist config
                 let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
                 if let Err(e) = std::fs::create_dir_all(&persistence_path) {
-                    tracing::error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
+                    error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
                 } else {
                     let config_path = persistence_path.join(format!("{}.config.json", name));
                     if let Ok(data) = serde_json::to_string_pretty(&config) {
@@ -102,34 +250,25 @@ impl QueueManager {
                     }
                 }
 
-                let actor_tx = self.spawn_queue_actor(
-                    name.clone(), 
-                    config
-                );
-                v.insert(actor_tx);
+                let shared = Self::build_queue(name, config, &self.config);
+                v.insert(shared);
                 Ok(())
             }
         }
     }
 
     pub async fn delete_queue(&self, name: String) -> Result<(), String> {
-        if let Some((_, actor_tx)) = self.queue_actors.remove(&name) {
-            // 1. Stop Actor
-            let (stop_tx, stop_rx) = oneshot::channel();
-            if actor_tx.send(QueueActorCommand::Stop { reply: stop_tx }).await.is_ok() {
-                let _ = stop_rx.await;
-            }
+        if let Some((_, shared)) = self.queues.remove(&name) {
+            shared.store.shutdown().await;
         }
-        
-        // 2. Delete Persistence
-        // Use system_config path
+
+        // Delete Persistence (safe: writer has flushed and closed)
         let base_path = std::path::PathBuf::from(&self.config.persistence_path);
         let db_path = base_path.join(format!("{}.db", name));
         let wal_path = base_path.join(format!("{}.db-wal", name));
         let shm_path = base_path.join(format!("{}.db-shm", name));
         let config_path = base_path.join(format!("{}.config.json", name));
 
-        // Best effort cleanup
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(wal_path);
         let _ = std::fs::remove_file(shm_path);
@@ -139,91 +278,189 @@ impl QueueManager {
     }
 
     pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8, delay_ms: Option<u64>) -> Result<(), String> {
-        let actor = self.get_actor(&queue_name)
+        let shared = self.get_queue(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
-        
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::Push { payload, priority, delay_ms, reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())?;
+
+        let msg = Message::new(payload, priority, delay_ms);
+        {
+            let mut inner = Self::lock(&shared.inner);
+            inner.state.push(msg.clone());
+        }
+
+        shared.store.execute(StorageOp::Insert(msg));
+
+        if delay_ms.is_none() {
+            shared.notify.notify_waiters();
+        }
+
         Ok(())
     }
 
     pub async fn pop(&self, queue_name: &str) -> Option<Message> {
-        let actor = self.get_actor(queue_name)?;
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::Pop { reply: tx }).await.ok()?;
-        rx.await.ok()?
+        let shared = self.get_queue(queue_name)?;
+
+        let (msg_opt, _) = {
+            let mut inner = Self::lock(&shared.inner);
+            let vt = inner.config.visibility_timeout_ms;
+            inner.state.pop(vt)
+        };
+
+        if let Some(msg) = &msg_opt {
+            shared.store.execute(StorageOp::UpdateState {
+                id: msg.id,
+                visible_at: msg.visible_at,
+                attempts: msg.attempts,
+            });
+        }
+
+        msg_opt
     }
 
     pub async fn ack(&self, queue_name: &str, id: Uuid) -> bool {
-        if let Some(actor) = self.get_actor(queue_name) {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(QueueActorCommand::Ack { id, reply: tx }).await.is_ok() {
-                return rx.await.unwrap_or(false);
-            }
+        let shared = match self.get_queue(queue_name) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let result = {
+            let mut inner = Self::lock(&shared.inner);
+            inner.state.ack(id)
+        };
+
+        if result {
+            shared.store.execute(StorageOp::Delete(id));
         }
-        false
+
+        result
     }
 
     pub async fn nack(&self, queue_name: &str, id: Uuid, reason: String) -> bool {
-        if let Some(actor) = self.get_actor(queue_name) {
-            let (tx, rx) = oneshot::channel();
-            if actor.send(QueueActorCommand::Nack { id, reason, reply: tx }).await.is_ok() {
-                return rx.await.unwrap_or(false);
+        let shared = match self.get_queue(queue_name) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let (requeued, dlq_msg) = {
+            let mut inner = Self::lock(&shared.inner);
+            let max_retries = inner.config.max_retries;
+            let (requeued, dlq_msg) = inner.state.nack(id, reason, max_retries);
+
+            if let Some(ref dlq_message) = dlq_msg {
+                inner.dlq.push(dlq_message.clone());
             }
+
+            (requeued, dlq_msg)
+        };
+
+        if let Some(msg) = requeued {
+            shared.store.execute(StorageOp::UpdateState {
+                id: msg.id,
+                visible_at: msg.visible_at,
+                attempts: msg.attempts,
+            });
+            shared.notify.notify_waiters();
+            return true;
         }
+
+        if let Some(dlq_message) = dlq_msg {
+            shared.store.execute(StorageOp::MoveToDLQ {
+                id: dlq_message.id,
+                msg: dlq_message,
+            });
+            return true;
+        }
+
         false
     }
 
     pub async fn consume_batch(&self, queue_name: String, max: Option<usize>, wait_ms: Option<u64>) -> Result<Vec<Message>, String> {
-        let actor = self.get_actor(&queue_name)
+        let shared = self.get_queue(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
-        
+
         let max_val = max.unwrap_or(self.config.default_batch_size);
         let wait_val = wait_ms.unwrap_or(self.config.default_wait_ms);
 
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::ConsumeBatch { max: max_val, wait_ms: wait_val, reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())
+        // Try immediate fetch
+        let msgs = {
+            let mut inner = Self::lock(&shared.inner);
+            let vt = inner.config.visibility_timeout_ms;
+            let (msgs, _) = inner.state.take_batch(max_val, vt);
+            msgs
+        };
+        if !msgs.is_empty() {
+            self.persist_batch_state(&shared, &msgs);
+            return Ok(msgs);
+        }
+
+        // No messages and no wait -> return empty
+        if wait_val == 0 {
+            return Ok(vec![]);
+        }
+
+        // Long polling loop (like stream fetch)
+        let deadline = Instant::now() + Duration::from_millis(wait_val);
+
+        loop {
+            let notified = shared.notify.notified();
+
+            // Try fetch under lock
+            let msgs = {
+                let mut inner = Self::lock(&shared.inner);
+                let vt = inner.config.visibility_timeout_ms;
+                let (msgs, _) = inner.state.take_batch(max_val, vt);
+                msgs
+            };
+            if !msgs.is_empty() {
+                self.persist_batch_state(&shared, &msgs);
+                return Ok(msgs);
+            }
+
+            if Instant::now() >= deadline {
+                return Ok(vec![]);
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                _ = sleep_until(deadline) => return Ok(vec![]),
+            }
+        }
     }
 
     pub async fn get_snapshot(&self) -> Vec<QueueSummary> {
         let mut queues = Vec::new();
-        
-        for actor_tx in self.get_all_actors() {
-            let (tx, rx) = oneshot::channel();
-            if actor_tx.send(QueueActorCommand::GetSnapshot { reply: tx }).await.is_ok() {
-                if let Ok(summary) = rx.await {
-                    queues.push(summary);
-                }
-            }
+
+        for entry in self.queues.iter() {
+            let shared = entry.value().clone();
+            let inner = Self::lock(&shared.inner);
+            let (pending, inflight, scheduled) = inner.state.get_counters();
+            queues.push(QueueSummary {
+                name: inner.name.clone(),
+                pending,
+                inflight,
+                scheduled,
+                dlq: inner.dlq.len(),
+                config: inner.config.clone(),
+            });
         }
+
         queues
     }
 
     pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<QueueMessageView>)> {
-        if let Some(actor_tx) = self.get_actor(&queue_name) {
-            let (tx, rx) = oneshot::channel();
-            if actor_tx.send(QueueActorCommand::GetMessages { state_filter, offset, limit, search, reply: tx }).await.is_ok() {
-                return rx.await.ok();
-            }
-        }
-        None
+        let shared = self.get_queue(&queue_name)?;
+        let inner = Self::lock(&shared.inner);
+        Some(inner.state.get_messages(state_filter, offset, limit, search))
     }
 
     pub async fn exists(&self, name: &str) -> bool {
-        self.queue_actors.contains_key(name)
+        self.queues.contains_key(name)
     }
 
     // --- DLQ Operations ---
 
     pub async fn move_to_dlq(&self, queue_name: String, payload: Bytes, priority: u8) {
-        let actor_tx = if let Some(tx) = self.get_actor(&queue_name) {
-            tx
+        let shared = if let Some(s) = self.get_queue(&queue_name) {
+            s
         } else {
             let options = QueueCreateOptions {
                 visibility_timeout_ms: None,
@@ -231,80 +468,87 @@ impl QueueManager {
                 ttl_ms: None,
             };
             let config = QueueConfig::from_options(options, &self.config);
-            
-            let tx = self.spawn_queue_actor(
-                queue_name.clone(),
-                config
-            );
-            self.queue_actors.insert(queue_name, tx.clone());
-            tx
+            let s = Self::build_queue(queue_name.clone(), config, &self.config);
+            self.queues.insert(queue_name, s.clone());
+            s
         };
-        
-        let (reply_tx, _) = oneshot::channel();
-        let _ = actor_tx.send(QueueActorCommand::Push {
-            payload,
-            priority,
-            delay_ms: None,
-            reply: reply_tx,
-        }).await;
+
+        let msg = Message::new(payload, priority, None);
+        {
+            let mut inner = Self::lock(&shared.inner);
+            inner.state.push(msg.clone());
+        }
+        shared.store.execute(StorageOp::Insert(msg));
     }
 
     /// Peek messages from DLQ without consuming them
     pub async fn peek_dlq(&self, queue_name: &str, limit: usize, offset: usize) -> Result<(usize, Vec<DlqMessage>), String> {
-        let actor = self.get_actor(queue_name)
+        let shared = self.get_queue(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
-        
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::PeekDLQ { limit, offset, reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())
+
+        let inner = Self::lock(&shared.inner);
+        Ok(inner.dlq.peek(offset, limit))
     }
 
     /// Move a message from DLQ back to main queue (replay/retry)
     pub async fn move_to_queue(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
-        let actor = self.get_actor(queue_name)
+        let shared = self.get_queue(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
-        
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::MoveToQueue { message_id, reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())
+
+        let new_msg = {
+            let mut inner = Self::lock(&shared.inner);
+            if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
+                let new_msg = dlq_msg.clone().to_message();
+                inner.state.push(new_msg.clone());
+                Some(new_msg)
+            } else {
+                None
+            }
+        };
+
+        if let Some(msg) = new_msg {
+            shared.store.execute(StorageOp::MoveToMain {
+                id: message_id,
+                msg,
+            });
+            shared.notify.notify_waiters();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Delete a specific message from DLQ
     pub async fn delete_dlq(&self, queue_name: &str, message_id: Uuid) -> Result<bool, String> {
-        let actor = self.get_actor(queue_name)
+        let shared = self.get_queue(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
-        
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::DeleteDLQ { message_id, reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())
+
+        let removed = {
+            let mut inner = Self::lock(&shared.inner);
+            inner.dlq.remove(&message_id).is_some()
+        };
+
+        if removed {
+            shared.store.execute(StorageOp::DeleteDLQ(message_id));
+        }
+
+        Ok(removed)
     }
 
     /// Purge all messages from DLQ
     pub async fn purge_dlq(&self, queue_name: &str) -> Result<usize, String> {
-        let actor = self.get_actor(queue_name)
+        let shared = self.get_queue(queue_name)
             .ok_or_else(|| format!("Queue '{}' not found", queue_name))?;
-        
-        let (tx, rx) = oneshot::channel();
-        actor.send(QueueActorCommand::PurgeDLQ { reply: tx })
-            .await
-            .map_err(|_| "Actor closed".to_string())?;
-        rx.await.map_err(|_| "No reply".to_string())
-    }
 
-    #[inline]
-    fn get_actor(&self, name: &str) -> Option<mpsc::Sender<QueueActorCommand>> {
-        self.queue_actors.get(name).map(|r| r.value().clone())
-    }
+        let count = {
+            let mut inner = Self::lock(&shared.inner);
+            let count = inner.dlq.len();
+            inner.dlq.clear();
+            count
+        };
 
-    #[inline]
-    fn get_all_actors(&self) -> Vec<mpsc::Sender<QueueActorCommand>> {
-        self.queue_actors.iter().map(|entry| entry.value().clone()).collect()
+        shared.store.execute(StorageOp::PurgeDLQ);
+        Ok(count)
     }
 }
 

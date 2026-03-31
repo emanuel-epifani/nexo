@@ -1,7 +1,7 @@
-//! Queue State: Internal state management for queue actor
+//! Queue State: Internal state management for queue broker
 //! 
 //! This module contains the pure state logic without any concurrency primitives.
-//! The QueueActor owns this state and operates on it sequentially.
+//! The QueueManager wraps this state in a Mutex<QueueInner> per queue.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -93,9 +93,8 @@ impl Message {
         pub visibility_timeout_ms: u64,
         pub max_retries: u32,
         pub ttl_ms: u64,
-        pub flush_ms: u64,
         // Persistence Tuning
-        pub writer_channel_capacity: usize,
+        pub flush_ms: u64,
         pub writer_batch_size: usize,
     }
 
@@ -106,7 +105,6 @@ impl Message {
                 max_retries: opts.max_retries.unwrap_or(sys.max_retries),
                 ttl_ms: opts.ttl_ms.unwrap_or(sys.ttl_ms),
                 flush_ms: sys.default_flush_ms,
-                writer_channel_capacity: sys.writer_channel_capacity,
                 writer_batch_size: sys.writer_batch_size,
             }
         }

@@ -81,7 +81,7 @@ const engines = [
     icon: 'list-ordered',
     title: 'Queue',
     desc: 'Reliable job processing with priority, delayed jobs, retry and Dead Letter Queues.',
-    perf: '160k ops/sec',
+    perf: '400k ops/sec',
     link: '/guide/queue',
   },
   {
@@ -97,7 +97,7 @@ const benchmarks = [
   { engine: 'Store', throughput: '4.5M ops/sec', latency: '< 1 µs' },
   { engine: 'PubSub', throughput: '3.8M msg/sec', latency: '< 1 µs' },
   { engine: 'Stream', throughput: '1.1M ops/sec', latency: '< 1 µs' },
-  { engine: 'Queue', throughput: '160k ops/sec', latency: '3 µs' },
+  { engine: 'Queue', throughput: '400k ops/sec', latency: '2 µs' },
 ]
 
 const highlightedCode = computed(() => {

@@ -12,8 +12,6 @@ pub struct SystemQueueConfig {
     // PERSISTENCE config
     pub persistence_path: String,
     pub default_flush_ms: u64,
-    pub actor_channel_capacity: usize,
-    pub writer_channel_capacity: usize,
     pub writer_batch_size: usize,
 }
 
@@ -26,9 +24,7 @@ impl Default for SystemQueueConfig {
             default_batch_size: 10,
             default_wait_ms: 0,
             persistence_path: "./data/queues".to_string(),
-            default_flush_ms: 200,
-            actor_channel_capacity: 10000,
-            writer_channel_capacity: 10000,
+            default_flush_ms: 100,
             writer_batch_size: 50000,
         }
     }
@@ -45,8 +41,6 @@ impl SystemQueueConfig {
             default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
             persistence_path:      get_env_str("QUEUE_ROOT_PERSISTENCE_PATH", &default.persistence_path),
             default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", default.default_flush_ms),
-            actor_channel_capacity: get_env("QUEUE_ACTOR_CHAN_CAP", default.actor_channel_capacity),
-            writer_channel_capacity: get_env("QUEUE_WRITER_CHAN_CAP", default.writer_channel_capacity),
             writer_batch_size:     get_env("QUEUE_WRITER_BATCH_SIZE", default.writer_batch_size),
         }
     }
