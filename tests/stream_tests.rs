@@ -712,6 +712,7 @@ mod stream_tests {
 
         #[tokio::test]
         async fn bench_stream_publish() {
+            // cargo test --release bench_stream_publish -- --test-threads=1 --nocapture
             let temp_dir = tempfile::tempdir().unwrap();
 
             let mut config = Config::global().stream.clone();

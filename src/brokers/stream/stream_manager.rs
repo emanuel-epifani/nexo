@@ -45,7 +45,7 @@ enum FetchAttempt {
 pub struct StreamManager {
     topics: Arc<DashMap<String, Arc<TopicShared>>>,
     deleted_topics: Arc<DashMap<String, ()>>,
-    storage_tx: mpsc::Sender<StorageCommand>,
+    storage_tx: mpsc::UnboundedSender<StorageCommand>,
     config: Arc<SystemStreamConfig>,
     cancel: CancellationToken,
 }
@@ -54,7 +54,7 @@ impl StreamManager {
     pub fn new(config: Arc<SystemStreamConfig>) -> Self {
         let topics = Arc::new(DashMap::new());
         let deleted_topics = Arc::new(DashMap::new());
-        let (storage_tx, storage_rx) = mpsc::channel(50_000);
+        let (storage_tx, storage_rx) = mpsc::unbounded_channel();
 
         let storage_manager = StorageManager::new(
             config.persistence_path.clone(),
@@ -123,7 +123,7 @@ impl StreamManager {
             let _ = self.storage_tx.send(StorageCommand::DropTopic {
                 topic_name: name,
                 reply: del_tx,
-            }).await;
+            });
             let _ = del_rx.await;
         }
         Ok(())
@@ -146,7 +146,7 @@ impl StreamManager {
                 payload,
             }],
             persisted_seq,
-        }).await;
+        });
 
         topic_ref.notify.notify_waiters();
         Ok(seq)
@@ -176,7 +176,7 @@ impl StreamManager {
             from_seq,
             limit,
             reply: tx,
-        }).await;
+        });
         rx.await.unwrap_or_default()
     }
 
@@ -446,7 +446,7 @@ impl StreamManager {
                             let _ = storage_tx.send(StorageCommand::SaveGroups {
                                 topic_name,
                                 groups_data,
-                            }).await;
+                            });
                         }
                     }
                 }
@@ -476,7 +476,7 @@ impl StreamManager {
                             topic_name,
                             retention,
                             max_segment_size,
-                        }).await;
+                        });
                     }
                 }
             }
@@ -614,7 +614,7 @@ impl StreamManager {
             from_seq,
             limit,
             reply: tx,
-        }).await.is_err() {
+        }).is_err() {
             let mut inner = Self::lock_topic(&topic_ref.inner);
             if let Some(group_ref) = inner.groups.get_mut(group) {
                 group_ref.is_fetching_cold = false;

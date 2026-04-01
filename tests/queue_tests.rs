@@ -766,7 +766,7 @@ mod queue_tests {
 
         #[tokio::test]
         async fn bench_queue_throughput() {
-            // cargo test --release bench_queue_throughput -- --nocapture
+            // cargo test --release bench_queue_throughput -- --test-threads=1 --nocapture
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("bench_async_{}", Uuid::new_v4());
             let config = QueueCreateOptions {

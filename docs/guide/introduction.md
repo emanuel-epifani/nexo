@@ -27,7 +27,7 @@ Benchmarks run on MacBook Pro M4 (Single Node):
 |--------|--------------|---------------|
 | Store | 4.5M ops/sec | < 1 µs        |
 | PubSub | 3.8M msg/sec | < 1 µs        |
-| Stream | 1.1M ops/sec | 1 µs          |
+| Stream | 1.9M ops/sec | < 1 µs        |
 | Queue | 400k ops/sec | 2 µs          |
 
 ## Quick Example

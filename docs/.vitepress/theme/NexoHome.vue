@@ -88,7 +88,7 @@ const engines = [
     icon: 'activity',
     title: 'Stream',
     desc: 'Persistent event log with Consumer Groups, partitions and offset tracking.',
-    perf: '1.1M ops/sec',
+    perf: '1.9M ops/sec',
     link: '/guide/stream',
   },
 ]
@@ -96,7 +96,7 @@ const engines = [
 const benchmarks = [
   { engine: 'Store', throughput: '4.5M ops/sec', latency: '< 1 µs' },
   { engine: 'PubSub', throughput: '3.8M msg/sec', latency: '< 1 µs' },
-  { engine: 'Stream', throughput: '1.1M ops/sec', latency: '< 1 µs' },
+  { engine: 'Stream', throughput: '1.9M ops/sec', latency: '< 1 µs' },
   { engine: 'Queue', throughput: '400k ops/sec', latency: '2 µs' },
 ]
 

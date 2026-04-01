@@ -100,7 +100,7 @@ pub struct TopicContext {
 
 pub struct StorageManager {
     base_path: PathBuf,
-    rx: mpsc::Receiver<StorageCommand>,
+    rx: mpsc::UnboundedReceiver<StorageCommand>,
     open_files: LruCache<PathBuf, BufWriter<File>>,
     topics: HashMap<String, TopicContext>,
     flush_interval: Duration,
@@ -111,7 +111,7 @@ pub struct StorageManager {
 impl StorageManager {
     pub fn new(
         base_path: String,
-        rx: mpsc::Receiver<StorageCommand>,
+        rx: mpsc::UnboundedReceiver<StorageCommand>,
         max_open_files: usize,
         flush_interval_ms: u64,
         max_segment_size: u64,
