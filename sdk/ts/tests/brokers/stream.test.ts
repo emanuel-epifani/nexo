@@ -157,6 +157,19 @@ describe('STREAM', () => {
         await sub.stop();
     });
 
+    it('should stop subscription quickly (not wait for long-poll timeout)', async () => {
+        const topic = `stream-fast-stop-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const sub = await clientA.stream(topic).subscribe('fast-stop-group', () => {});
+
+        const start = Date.now();
+        await sub.stop();
+        const elapsed = Date.now() - start;
+
+        expect(elapsed).toBeLessThan(2000);
+    });
+
     it('should support Seek (Beginning/End)', async () => {
         const topic = `stream-seek-${randomUUID()}`;
         const group = 'seek-group';

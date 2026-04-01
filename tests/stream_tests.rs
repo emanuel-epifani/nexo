@@ -240,6 +240,88 @@ mod stream_tests {
         }
 
         #[tokio::test]
+        async fn test_seek_cancels_inflight_fetch() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = StreamManager::new(std::sync::Arc::new(config));
+            let topic = "seek-cancel-fetch";
+            let group = "g-seek-cancel";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            for i in 1..=5 {
+                manager.publish(topic, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            manager.join_group(group, topic, "client-A").await.unwrap();
+            let msgs = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
+            for msg in &msgs {
+                manager.ack(group, topic, msg.seq).await.unwrap();
+            }
+
+            // Spawn a long-poll fetch (5s wait, all consumed → would block without seek)
+            let fetch_manager = manager.clone();
+            let fetch_handle = tokio::spawn(async move {
+                let start = Instant::now();
+                let result = fetch_manager.fetch(group, "client-A", 10, topic, 5_000).await;
+                (start.elapsed(), result)
+            });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            use nexo::brokers::stream::commands::SeekTarget;
+            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+
+            let (elapsed, result) = fetch_handle.await.unwrap();
+
+            // The fetch must unblock fast (< 1s), not wait the full 5s
+            assert!(elapsed < Duration::from_millis(1_000), "Fetch should have been cancelled by seek, took {:?}", elapsed);
+
+            // Ack any messages the cancelled fetch may have picked up
+            if let Ok(fetched) = &result {
+                for msg in fetched {
+                    let _ = manager.ack(group, topic, msg.seq).await;
+                }
+            }
+
+            // After seek, new fetch should deliver from beginning
+            manager.join_group(group, topic, "client-A").await.unwrap();
+            let from_start = manager.fetch(group, "client-A", 10, topic, 0).await.unwrap();
+            assert!(!from_start.is_empty(), "Should have messages from beginning after seek");
+            assert_eq!(from_start[0].seq, 1);
+        }
+
+        #[tokio::test]
+        async fn test_leave_cancels_inflight_fetch() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = StreamManager::new(std::sync::Arc::new(config));
+            let topic = "leave-cancel-fetch";
+            let group = "g-leave-cancel";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.join_group(group, topic, "client-A").await.unwrap();
+
+            // Spawn a long-poll fetch (5s wait, empty topic → would block)
+            let fetch_manager = manager.clone();
+            let fetch_handle = tokio::spawn(async move {
+                let start = Instant::now();
+                let result = fetch_manager.fetch(group, "client-A", 10, topic, 5_000).await;
+                (start.elapsed(), result)
+            });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Leave the group — should cancel the in-flight fetch
+            manager.leave_group(group, topic, "client-A").await.unwrap();
+
+            let (elapsed, result) = fetch_handle.await.unwrap();
+
+            assert!(elapsed < Duration::from_millis(1_000), "Fetch should have been cancelled by leave, took {:?}", elapsed);
+            assert!(result.unwrap().is_empty(), "Cancelled fetch should return empty");
+        }
+
+        #[tokio::test]
         async fn test_multi_consumer_parallel_fetch() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));

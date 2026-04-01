@@ -250,6 +250,12 @@ impl<'a> RequestHandler<'a> {
                     Err(e) => Response::Error(e),
                 }
             }
+            StreamCommand::Leave { topic, group } => {
+                match stream.leave_group(&group, &topic, &client).await {
+                    Ok(_) => Response::Ok,
+                    Err(e) => Response::Error(e),
+                }
+            }
             StreamCommand::Exists { topic } => {
                 match stream.exists(&topic).await {
                     true => Response::Ok,

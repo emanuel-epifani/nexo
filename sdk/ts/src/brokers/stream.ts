@@ -13,6 +13,7 @@ enum StreamOpcode {
   S_DELETE = 0x36,
   S_NACK = 0x37,
   S_SEEK = 0x38,
+  S_LEAVE = 0x39,
 }
 
 export interface RetentionOptions {
@@ -118,6 +119,13 @@ const StreamCommands = {
       FrameCodec.string(group),
       FrameCodec.u8(target === 'beginning' ? 0 : 1)
     ),
+
+  leave: (conn: NexoConnection, stream: string, group: string) =>
+    conn.send(
+      StreamOpcode.S_LEAVE,
+      FrameCodec.string(stream),
+      FrameCodec.string(group)
+    ),
 };
 
 class StreamSubscription<T> {
@@ -147,6 +155,9 @@ class StreamSubscription<T> {
 
   async stop(): Promise<void> {
     this.active = false;
+    try {
+      await StreamCommands.leave(this.conn, this.streamName, this.group);
+    } catch { /* connection may already be closed */ }
     await this.loopDone;
   }
 

@@ -12,6 +12,7 @@ pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
 pub const OP_S_NACK: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
+pub const OP_S_LEAVE: u8 = 0x39;
 
 
 
@@ -85,6 +86,11 @@ pub enum StreamCommand {
     Delete {
         topic: String,
     },
+    /// LEAVE: [TopicLen:4][Topic][GroupLen:4][Group]
+    Leave {
+        topic: String,
+        group: String,
+    },
 }
 
 impl StreamCommand {
@@ -144,6 +150,11 @@ impl StreamCommand {
             OP_S_DELETE => {
                 let topic = cursor.read_string()?;
                 Ok(Self::Delete { topic })
+            }
+            OP_S_LEAVE => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                Ok(Self::Leave { topic, group })
             }
             _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
         }

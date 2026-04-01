@@ -8,6 +8,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::brokers::stream::message::Message;
 
 pub struct PendingMsg {
@@ -31,6 +33,7 @@ pub struct ConsumerGroup {
     pub members: HashSet<String>,
     // === Runtime State ===
     pub is_fetching_cold: bool,
+    pub cancel: CancellationToken,
 }
 
 impl ConsumerGroup {
@@ -38,13 +41,14 @@ impl ConsumerGroup {
         Self {
             id,
             ack_floor: 0,
-            next_deliver_seq: 1, // sequences start at 1
+            next_deliver_seq: 1,
             pending: HashMap::new(),
             redeliver: VecDeque::new(),
             max_ack_pending,
             ack_wait,
             members: HashSet::new(),
             is_fetching_cold: false,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -52,7 +56,6 @@ impl ConsumerGroup {
         self.pending.len() >= self.max_ack_pending
     }
 
-    /// Restore from persisted ack_floor (on warm start)
     pub fn restore(id: String, ack_floor: u64, max_ack_pending: usize, ack_wait: Duration) -> Self {
         Self {
             id,
@@ -64,6 +67,7 @@ impl ConsumerGroup {
             ack_wait,
             members: HashSet::new(),
             is_fetching_cold: false,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -156,12 +160,12 @@ impl ConsumerGroup {
         true
     }
 
-    /// Seek to a target position. Clears all pending/redeliver state.
     pub fn seek_beginning(&mut self) {
         self.ack_floor = 0;
         self.next_deliver_seq = 1;
         self.pending.clear();
         self.redeliver.clear();
+        self.invalidate_inflight();
     }
 
     pub fn seek_end(&mut self, last_seq: u64) {
@@ -169,6 +173,17 @@ impl ConsumerGroup {
         self.next_deliver_seq = last_seq + 1;
         self.pending.clear();
         self.redeliver.clear();
+        self.invalidate_inflight();
+    }
+
+    /// Cancel all in-flight fetches and issue a fresh token.
+    fn invalidate_inflight(&mut self) {
+        self.cancel.cancel();
+        self.cancel = CancellationToken::new();
+    }
+
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     // --- Members ---
@@ -179,7 +194,6 @@ impl ConsumerGroup {
 
     pub fn remove_member(&mut self, client_id: &str) -> bool {
         if self.members.remove(client_id) {
-            // Move any pending messages from this client back to redeliver
             let seqs: Vec<u64> = self.pending.iter()
                 .filter(|(_, msg)| msg.client_id == client_id)
                 .map(|(seq, _)| *seq)
@@ -188,6 +202,7 @@ impl ConsumerGroup {
                 self.pending.remove(&seq);
                 self.redeliver.push_back(seq);
             }
+            self.invalidate_inflight();
             return true;
         }
         false

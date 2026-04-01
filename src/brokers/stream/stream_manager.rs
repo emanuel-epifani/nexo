@@ -183,10 +183,18 @@ impl StreamManager {
     pub async fn fetch(&self, group: &str, client: &str, limit: usize, topic: &str, wait_ms: u64) -> Result<Vec<Message>, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
 
+        let group_cancel = {
+            let inner = Self::lock_topic(&topic_ref.inner);
+            match inner.groups.get(group) {
+                Some(g) => g.cancel_token(),
+                None => return Err("Group not found".to_string()),
+            }
+        };
+
         if wait_ms == 0 {
             return match self.try_fetch_once(&topic_ref, group, client, limit)? {
                 FetchAttempt::Ready(messages) => Ok(messages),
-                FetchAttempt::NeedColdRead { from_seq } => self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq).await,
+                FetchAttempt::NeedColdRead { from_seq } => self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq, &group_cancel).await,
                 FetchAttempt::Wait => Ok(Vec::new()),
             };
         }
@@ -196,12 +204,16 @@ impl StreamManager {
         loop {
             let notified = topic_ref.notify.notified();
 
-            match self.try_fetch_once(&topic_ref, group, client, limit)? {
-                FetchAttempt::Ready(messages) => return Ok(messages),
-                FetchAttempt::NeedColdRead { from_seq } => {
-                    return self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq).await;
+            match self.try_fetch_once(&topic_ref, group, client, limit) {
+                Ok(FetchAttempt::Ready(messages)) => return Ok(messages),
+                Ok(FetchAttempt::NeedColdRead { from_seq }) => {
+                    return self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq, &group_cancel).await;
                 }
-                FetchAttempt::Wait => {}
+                Ok(FetchAttempt::Wait) => {}
+                Err(e) if e == "NOT_MEMBER" && !self.is_active_member(&topic_ref, group, client) => {
+                    return Ok(Vec::new());
+                }
+                Err(e) => return Err(e),
             }
 
             if Instant::now() >= deadline {
@@ -211,8 +223,14 @@ impl StreamManager {
             tokio::select! {
                 _ = notified => {}
                 _ = sleep_until(deadline) => return Ok(Vec::new()),
+                _ = group_cancel.cancelled() => return Ok(Vec::new()),
             }
         }
+    }
+
+    fn is_active_member(&self, topic_ref: &Arc<TopicShared>, group: &str, client: &str) -> bool {
+        let inner = Self::lock_topic(&topic_ref.inner);
+        inner.groups.get(group).map_or(false, |g| g.is_member(client))
     }
 
     pub async fn ack(&self, group: &str, topic: &str, seq: u64) -> Result<(), String> {
@@ -256,6 +274,22 @@ impl StreamManager {
                 SeekTarget::End => group_ref.seek_end(last_seq),
             }
             inner.groups_dirty = true;
+        }
+        topic_ref.notify.notify_waiters();
+        Ok(())
+    }
+
+    pub async fn leave_group(&self, group: &str, topic: &str, client: &str) -> Result<(), String> {
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        {
+            let mut inner = Self::lock_topic(&topic_ref.inner);
+            if let Some(group_ref) = inner.groups.get_mut(group) {
+                group_ref.remove_member(client);
+            }
+
+            if let Some(group_ids) = inner.client_map.get_mut(client) {
+                group_ids.retain(|g| g != group);
+            }
         }
         topic_ref.notify.notify_waiters();
         Ok(())
@@ -607,7 +641,7 @@ impl StreamManager {
         Ok(FetchAttempt::Wait)
     }
 
-    async fn cold_fetch(&self, topic_ref: &Arc<TopicShared>, topic: &str, group: &str, client: &str, limit: usize, from_seq: u64) -> Result<Vec<Message>, String> {
+    async fn cold_fetch(&self, topic_ref: &Arc<TopicShared>, topic: &str, group: &str, client: &str, limit: usize, from_seq: u64, group_cancel: &CancellationToken) -> Result<Vec<Message>, String> {
         let (tx, rx) = oneshot::channel();
         if self.storage_tx.send(StorageCommand::ColdRead {
             topic_name: topic.to_string(),
@@ -636,6 +670,9 @@ impl StreamManager {
         let mut inner = Self::lock_topic(&topic_ref.inner);
         if let Some(group_ref) = inner.groups.get_mut(group) {
             group_ref.is_fetching_cold = false;
+            if group_cancel.is_cancelled() {
+                return Ok(Vec::new());
+            }
             Ok(group_ref.register_cold_messages(client, messages))
         } else {
             Err("Group disappeared during cold read".to_string())
