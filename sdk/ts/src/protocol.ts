@@ -2,12 +2,7 @@
 export enum FrameType {
   REQUEST = 0x01,
   RESPONSE = 0x02,
-  PUSH = 0x03,
-}
-
-/** @internal */
-export enum PushType {
-  PUBSUB = 0x01,
+  PUSH_PUBSUB = 0x03,
 }
 
 /** @internal */

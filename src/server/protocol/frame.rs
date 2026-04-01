@@ -23,12 +23,7 @@ use bytemuck::{Pod, Zeroable};
 // ========================================
 pub const TYPE_REQUEST: u8 = 0x01;
 pub const TYPE_RESPONSE: u8 = 0x02;
-pub const TYPE_PUSH: u8 = 0x03;
-
-// ========================================
-// PUSH TYPES (Meta byte for Push frames)
-// ========================================
-pub const PUSH_TYPE_PUBSUB: u8 = 0x01;
+pub const TYPE_PUSH_PUBSUB: u8 = 0x03;
 
 // ========================================
 // RESPONSE STATUS (Meta byte for Response frames)
@@ -98,7 +93,7 @@ pub struct InboundFrame {
 #[derive(Debug)]
 pub enum OutboundFrame {
     Response { id: u32, response: Response },
-    Push { id: u32, push_type: u8, payload: Bytes },
+    PushPubSub { id: u32, payload: Bytes },
 }
 
 /// Represents a response to be sent back

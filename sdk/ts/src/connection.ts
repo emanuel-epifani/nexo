@@ -1,7 +1,7 @@
 import * as net from 'net';
 import { EventEmitter } from 'events';
 import { Logger } from './utils/logger';
-import { FrameType, PushType, ResponseStatus } from './protocol';
+import { FrameType, ResponseStatus } from './protocol';
 import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
 import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
@@ -162,7 +162,7 @@ export class NexoConnection extends EventEmitter {
   private handleFrame(frame: Buffer) {
     const cursor = new Cursor(frame);
     const type = cursor.readU8();
-    const meta = cursor.readU8(); // Opcode for requests, Status for responses, PushType for pushes
+    const meta = cursor.readU8(); // Opcode for requests, Status for responses
     const id = cursor.readU32();
     cursor.readU32(); // Skip payloadLen
 
@@ -178,8 +178,8 @@ export class NexoConnection extends EventEmitter {
         }
         break;
       }
-      case FrameType.PUSH: {
-        if (meta === PushType.PUBSUB && this.onPush) {
+      case FrameType.PUSH_PUBSUB: {
+        if (this.onPush) {
           const pushCursor = new Cursor(payload);
           const topic = pushCursor.readString();
           const data = FrameCodec.decodeAny(pushCursor);

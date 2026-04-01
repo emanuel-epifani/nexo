@@ -5,7 +5,7 @@ use crate::config::Config;
 use super::errors::ParseError;
 use super::frame::{
     FrameHeader, InboundFrame, OutboundFrame, Response, STATUS_DATA, STATUS_ERR, STATUS_NULL,
-    STATUS_OK, TYPE_PUSH, TYPE_RESPONSE,
+    STATUS_OK, TYPE_PUSH_PUBSUB, TYPE_RESPONSE,
 };
 
 #[derive(Debug, Default)]
@@ -81,13 +81,12 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);
             }
-            OutboundFrame::Push {
+            OutboundFrame::PushPubSub {
                 id,
-                push_type,
                 payload,
             } => {
-                dst.put_u8(TYPE_PUSH);
-                dst.put_u8(push_type);
+                dst.put_u8(TYPE_PUSH_PUBSUB);
+                dst.put_u8(0); // meta byte unused for now
                 dst.put_u32(id);
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 use crate::config::Config;
 use crate::server::routing::RequestHandler;
-use crate::server::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, PUSH_TYPE_PUBSUB, NexoCodec};
+use crate::server::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
 use crate::NexoEngine;
 
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
@@ -43,7 +43,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let bridge_handle = tokio::spawn(async move {
         while let Some(msg_arc) = push_rx.recv().await {
             let payload = msg_arc.get_network_packet().clone();
-            let frame = OutboundFrame::Push { id: 0, push_type: PUSH_TYPE_PUBSUB, payload };
+            let frame = OutboundFrame::PushPubSub { id: 0, payload };
 
             if outbound_bridge.send(frame).await.is_err() {
                 break; // Socket closed, exit bridge
