@@ -2,6 +2,8 @@
 
 **Append-only immutable log with per-message acknowledgment.** The source of truth for your system's history — Event Sourcing, audit trails, replaying historical data.
 
+Stream consumers are **pull-based with long-polling**: the SDK polls the server in a loop, and when there are no new messages the server holds the connection open until a message arrives or the timeout expires. This means latency is near-zero when messages are available, with no tight busy-loop overhead when the stream is idle.
+
 ## Basic Usage
 
 ```typescript
@@ -126,6 +128,27 @@ await orders.subscribe('audit-service', (order) => saveToDb(order));
 await orders.subscribe('metrics-service', (order) => updateGrafana(order));
 ```
 
+
+## Consumer Tuning
+
+Stream consumers are **pull-based with long-polling**: the SDK polls the server in a loop and, when no messages are available, the server holds the connection open until a message arrives or the timeout expires — no busy-loop, no wasted round-trips.
+
+Two parameters control this behavior:
+
+### `batchSize` (default: 100)
+
+How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more memory per cycle. Messages within a batch are always processed **in order**, one at a time.
+
+### `waitMs` (default: 20000)
+
+When the stream is **caught up**, the server holds the connection open for up to `waitMs` milliseconds waiting for new messages. If a message arrives during the wait, the server responds immediately. Lowering this reduces max latency for new messages at the cost of more idle round-trips.
+
+```typescript
+await stream.subscribe('my-group', (event) => process(event), {
+  batchSize: 200,   // Fetch 200 messages per network request
+  waitMs: 5000,     // If empty, wait 5s (server-side) before responding
+});
+```
 
 ## Seek & Replay
 

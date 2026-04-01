@@ -6,7 +6,7 @@ Nexo is a Rust broker server shipped as a single binary with four data communica
 
 - `Store`: shared in-memory state
 - `Pub/Sub`: low-latency realtime broadcast
-- `Queue`: reliable durable job processing (ack/retry)
+- `Queue`: reliable durable job processing
 - `Stream`: append-only event log with offsets
 
 Practical goal: reduce operational complexity compared to multi-system stacks while keeping high performance for vertical deployments.
@@ -31,8 +31,8 @@ Typical runtime ports:
 - `src/server/`: protocol, connection handling, routing
 - `src/brokers/store/`: Store logic
 - `src/brokers/pub-sub/`: Pub/Sub logic
-- `src/brokers/queue/`: Queue logic (durability/retry/DLQ)
-- `src/brokers/stream/`: Stream logic (append/offsets/groups)
+- `src/brokers/queue/`: Queue logic 
+- `src/brokers/stream/`: Stream logic
 - `src/dashboard/`: server-side dashboard endpoints/integration
 - `dashboard/src/`: React dashboard frontend
 - `sdk/ts/src/`: TypeScript SDK implementation
@@ -43,22 +43,24 @@ Pragmatic rule: first identify the domain (`Store`, `Pub/Sub`, `Queue`, `Stream`
 
 ---
 
-## 4) Quick Run
-
-Run server via Docker:
+## 4) How to Run Tests
 
 ```bash
-docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo
+# All Rust integration tests
+cargo test
+
+# Single suite
+cargo test --test queue_tests
+cargo test --test store_tests
+cargo test --test pubsub_tests
+cargo test --test stream_tests
+
+# Benchmark/throughput tests (print output)
+cargo test --release bench_<name> -- --test-threads=1 --nocapture
+
+# TypeScript SDK tests
+cd sdk/ts && npm test   # uses vitest
 ```
-
-Install SDK:
-
-```bash
-npm install @emanuelepifani/nexo-client
-```
-
-Dashboard URL:
-- `http://localhost:8080`
 
 ---
 
@@ -85,7 +87,7 @@ Docs/code:
 ### Queue
 - Durable FIFO with acknowledgments
 - Delays, priority, retries, DLQ
-- Focus: reliable async processing
+- Focus: reliable async job processing
 
 Docs/code:
 - `docs/guide/queue.md`
@@ -105,10 +107,8 @@ Docs/code:
 ## 6) Engineering Rules (Pragmatic)
 
 ### Core rules
-- Keep changes small and scoped to the request.
 - Brokers must be self-contained by domain; internal implementations can differ.
 - Each broker should expose one clear public entrypoint (usually a manager), unless a different shape is explicitly justified.
-- Avoid unrelated refactors.
 - Remove dead code and stale comments during refactors.
 
 ### Alignment rule (server/sdk/docs/dashboard)
@@ -153,12 +153,53 @@ For every refactor, always provide this output before coding:
 
 ---
 
-## 8) Release Contract (Tag-Driven)
+## 8) Code Patterns (Must Know)
+
+### Rust edition and core stack
+- Edition `2021`; async runtime: `tokio` (features: `full`)
+- Shared state: `dashmap` (concurrent map), `parking_lot` (fast RwLock)
+- Persistence: `rusqlite` (bundled)
+- Serialization: `serde` + `serde_json`; binary frames: `bytes` + `bytemuck`
+- HTTP (dashboard): `axum` + `tower-http`
+- Logging: `tracing` + `tracing-subscriber`
+
+### Concurrency model
+Each broker manager is a cheap-clone struct wrapping `Arc` internals:
+
+| Layer | Primitive |
+|---|---|
+| Manager shared across connections | `Arc<Manager>` (via `NexoEngine`) |
+| Name → resource map | `Arc<DashMap<String, Arc<ResourceShared>>>` |
+| Per-resource mutable state | `std::sync::Mutex<Inner>` |
+| PubSub subscription tree | `parking_lot::RwLock<Node>` |
+| Async wake-up | `tokio::sync::Notify` |
+| Background I/O tasks | `mpsc` / `oneshot` channels |
+| Graceful shutdown | `CancellationToken` |
+| Atomic counters (stream offsets) | `AtomicU64` |
+
+### Error handling
+- No `thiserror` / `anyhow` in the codebase; errors are `Result<_, String>` or `Response::Error(String)` at the broker/wire level.
+- Codec errors use a local `ParseError(Invalid(String))`.
+- Use `tracing::error!` / `tracing::warn!` for non-fatal failures; never silently swallow errors.
+- **`unwrap()`/`expect()` are acceptable only in tests.** In `src/` hot paths use `?` or explicit error handling.
+
+### Protocol / server shape
+- Binary frames: fixed 10-byte header (`bytemuck` `Pod`), opcodes partitioned by broker range.
+- `handle_connection` splits TCP socket into read/write tasks with `mpsc` channels; `JoinSet` for per-request concurrency.
+- Routing: `RequestHandler::route(opcode, payload)` dispatches to `handle_store` / `handle_queue` / `handle_pubsub` / `handle_stream`.
+
+### TypeScript SDK shape
+- `NexoClient.connect()` → holds `NexoConnection` (TCP + EventEmitter) + lazy-cached broker handles.
+- Binary codec mirrors Rust (`FrameCodec` / `Cursor`).
+- Custom error classes in `errors.ts`; no `any`, no `@ts-ignore`.
+
+---
+
+## 9) Release Contract (Tag-Driven)
 
 Releases are triggered by pushing a tag matching `v*`.
 
-Pipeline contract:
-- Docker image is published (`emanuelepifani/nexo:<tag>` and `latest`).
-- TypeScript SDK is published to npm (`@emanuelepifani/nexo-client`).
-- Docs are deployed to Vercel.
-- GitHub Release is created after all previous jobs succeed.
+- Docker image → `emanuelepifani/nexo:<tag>` and `latest`
+- TypeScript SDK → npm `@emanuelepifani/nexo-client`
+- Docs → Vercel
+- GitHub Release → created after all previous jobs succeed

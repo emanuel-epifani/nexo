@@ -2,7 +2,7 @@
 
 **Transient message bus with Topic-based routing.** Designed for "fire-and-forget" scenarios where low latency is critical — live chat, stock tickers, multi-service notifications.
 
-Unlike [Queues](/guide/queue) (pull-based), Pub/Sub is **push-based**: the server delivers messages to subscribers immediately as they are published. Topics are **auto-created** on first publish or subscribe — no `.create()` needed.
+Unlike [Queues](/guide/queue) and [Streams](/guide/stream) (pull-based with long-polling), Pub/Sub is **push-based**: the server delivers messages to subscribers immediately as they are published, with no polling loop on the client side. This makes it the lowest-latency primitive in Nexo. Topics are **auto-created** on first publish or subscribe — no `.create()` needed.
 
 ## Basic Usage
 

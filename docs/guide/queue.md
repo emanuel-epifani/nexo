@@ -20,11 +20,9 @@ await mailQ.delete();
 
 ## Persistence
 
-All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. 
+All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite.  To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically.
 
-To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically. 
-
-By default, the server flushes data to disk every **200ms**. This interval is globally configurable when starting the Nexo server via the `NEXO_QUEUE_DEFAULT_FLUSH_MS` environment variable. 
+By default, the server flushes data to disk every **200ms**. This interval is globally configurable when starting the Nexo server via the `NEXO_QUEUE_DEFAULT_FLUSH_MS` environment variable.
 
 
 ## Advanced Creation
@@ -76,7 +74,7 @@ await criticalQueue.subscribe(
   {
     batchSize: 100,    // Fetch 100 messages per network request
     concurrency: 10,   // Process 10 messages concurrently (I/O-bound tasks)
-    waitMs: 5000       // If empty, wait 5s before retrying
+    waitMs: 5000       // If empty, wait 5s (server-side) before responding
   }
 );
 ```
