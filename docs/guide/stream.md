@@ -46,23 +46,23 @@ KAFKA (Static)                      NEXO (Dynamic)
 
 Nexo uses an **Asynchronous Draining Pattern** to balance high-speed ingestion and durability.
 
-*   **Optimized Batching**: Under load, Nexo automatically "drains" the message queue into optimized batches for maximum disk throughput.
-*   **Flush Interval**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) ensures data is synced even during low traffic, defining your maximum durability window.
+*   **Continuous Batching**: Messages are automatically accumulated in memory buffers and written to disk in optimized batches for maximum throughput.
+*   **Bounded Flush**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) defines your maximum durability window - data is synced to disk at least every 50ms, regardless of traffic.
 
 [//]: # ()
 ### High-Cardinality: Treat Streams like Keys
 
 In Nexo, creating a stream is as cheap and safe as writing a key in a database. You can generate thousands of streams dynamically at runtime (e.g., `ai_chat_{id}` or `sensor_{id}`) without worrying about server stability.
 
-*   **Safety via LRU**: Traditional brokers crash when topic counts grow (hitting "Too Many Open Files" limits). Nexo uses a **Global FD Cache** to rotate handles automatically.
-*   **Zero Overhead**: Only the most active streams stay open in memory, controlled by `STREAM_MAX_OPEN_FILES` (Default: 256).
-*   **Performance Tip**: 
+*   **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used file handles open, automatically flushing and closing the least-recently-used ones when the cap is reached.
+*   **Controlled by `STREAM_MAX_OPEN_FILES`** (Default: 256): only the most active streams hold an open handle at any given moment.
+
 ::: tip BEST PERFORMANCE
-Set `STREAM_MAX_OPEN_FILES` to match your average *concurrently active* topics to eliminate rotation overhead.
+Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active* topics to limit unnecessary rotation overhead.
 ::: 
 
 ```text
-    [ Topic A ] [ Topic B ] [ Topic C ] ... [ Topic ZZZZZ ]
+    [ Topic 1 ] [ Topic 2 ] [ Topic 3 ] ... [ Topic 999 ]
           \          |           /                /
            \         |          /                /
          ┌──────────────────────────────────────────┐
