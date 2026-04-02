@@ -1,8 +1,8 @@
 import * as net from 'net';
 import { EventEmitter } from 'events';
 import { Logger } from './utils/logger';
+import { NexoConnectionConfig } from './config';
 import { FrameType, ResponseStatus } from './protocol';
-import type { NexoOptions } from './client';
 import { Cursor, FrameCodec } from './codec';
 import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
 
@@ -16,7 +16,7 @@ export class NexoConnection extends EventEmitter {
     reject: (err: Error) => void,
     deadline: number
   }>();
-  private readonly requestTimeoutMs: number;
+  private readonly config: NexoConnectionConfig;
   private readonly logger: Logger;
   private sweepInterval: NodeJS.Timeout | null = null;
 
@@ -31,13 +31,13 @@ export class NexoConnection extends EventEmitter {
   private shouldReconnect = true;
   private isReconnecting = false;
 
-  constructor(options: NexoOptions, logger: Logger) {
+  constructor(config: NexoConnectionConfig, logger: Logger) {
     super();
-    this.host = options.host;
-    this.port = options.port;
+    this.config = config;
+    this.host = config.host;
+    this.port = config.port;
     this.logger = logger;
     this.socket = new net.Socket();
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 15000;
   }
 
   async connect(): Promise<void> {
@@ -53,10 +53,10 @@ export class NexoConnection extends EventEmitter {
       for (const [id, req] of this.pending) {
         if (now > req.deadline) {
           this.pending.delete(id);
-          req.reject(new RequestTimeoutError(this.requestTimeoutMs));
+          req.reject(new RequestTimeoutError(this.config.requestTimeoutMs));
         }
       }
-    }, 1000);
+    }, this.config.sweepIntervalMs);
     this.sweepInterval.unref();
   }
 
@@ -119,7 +119,7 @@ export class NexoConnection extends EventEmitter {
     this.logger.warn("⚠️ Connection lost. Attempting to reconnect...");
 
     while (this.shouldReconnect && !this.isConnected) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, this.config.reconnectDelayMs));
 
       try {
         await this.createSocketAndConnect();
@@ -218,7 +218,7 @@ export class NexoConnection extends EventEmitter {
           }
         },
         reject,
-        deadline: Date.now() + this.requestTimeoutMs
+        deadline: Date.now() + this.config.requestTimeoutMs
       });
 
       this.socket.write(packet);

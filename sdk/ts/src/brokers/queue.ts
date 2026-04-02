@@ -1,6 +1,7 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { Logger } from '../utils/logger';
+import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError } from '../errors';
 
 enum QueueOpcode {
@@ -171,11 +172,11 @@ export class NexoDLQ<T = any> {
 
   /**
    * Peek messages in the DLQ without consuming them.
-   * @param limit Maximum number of messages to return (default: 10)
+   * @param limit Maximum number of messages to return (default 10)
    * @param offset Pagination offset (default: 0)
    * @returns Object containing total count and array of messages
    */
-  async peek(limit: number = 10, offset: number = 0): Promise<{ total: number, items: { id: string; data: T; attempts: number; failureReason: string }[] }> {
+  async peek(limit: number = DEFAULT_CONFIG.queue.peek.limit, offset: number = DEFAULT_CONFIG.queue.peek.offset): Promise<{ total: number, items: { id: string; data: T; attempts: number; failureReason: string }[] }> {
     this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages at offset ${offset}`);
     return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit, offset);
   }
@@ -258,16 +259,16 @@ export class NexoQueue<T = any> {
 
     this.isSubscribed = true;
 
-    const batchSize = options.batchSize ?? 50;
-    const waitMs = options.waitMs ?? 20000;
-    const concurrency = options.concurrency ?? 5;
+    const batchSize = options.batchSize ?? DEFAULT_CONFIG.queue.batchSize;
+    const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
+    const concurrency = options.concurrency ?? DEFAULT_CONFIG.queue.concurrency;
 
     let active = true;
 
     const loop = async () => {
       while (active) {
         if (!this.conn.isConnected) {
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
           continue;
         }
 
@@ -301,11 +302,11 @@ export class NexoQueue<T = any> {
           if (!active) break;
           // Catch-all for connection issues to prevent Unhandled Rejection
           if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
             continue;
           }
           this.logger.error(`[QUEUE-LOOP:${this.name}] CRITICAL ERROR:`, e);
-          await new Promise(r => setTimeout(r, 1000));
+          await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.long));
         }
       }
       this.isSubscribed = false;

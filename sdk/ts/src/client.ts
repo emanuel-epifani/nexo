@@ -1,15 +1,14 @@
 import { Logger, LogHandler } from './utils/logger';
+import { DEFAULT_CONFIG } from './config';
 import { NexoConnection } from './connection';
 import { NexoStore } from './brokers/store';
-import { NexoQueue, QueueConfig } from './brokers/queue';
+import { NexoQueue } from './brokers/queue';
 import { NexoPubSub, NexoTopic } from './brokers/pubsub';
 import { NexoStream } from './brokers/stream';
-import { FrameCodec } from './codec';
 
 export interface NexoOptions {
   host: string;
   port: number;
-  requestTimeoutMs?: number;
   logger?: LogHandler;
   logLevel?: string;
 }
@@ -25,8 +24,17 @@ export class NexoClient {
   private readonly pubsubBroker: NexoPubSub;
 
   constructor(options: NexoOptions) {
-    this.logger = new Logger({ handler: options.logger, level: options.logLevel });
-    this.conn = new NexoConnection(options, this.logger);
+    this.logger = new Logger({ 
+      handler: options.logger, 
+      level: options.logLevel ?? DEFAULT_CONFIG.logger.level 
+    });
+
+    this.conn = new NexoConnection({
+      host: options.host,
+      port: options.port,
+      ...DEFAULT_CONFIG.connection,
+    }, this.logger);
+
     this.store = new NexoStore(this.conn);
     this.pubsubBroker = new NexoPubSub(this.conn, this.logger);
     this.setupGracefulShutdown();

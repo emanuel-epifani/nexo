@@ -1,3 +1,5 @@
+import { DEFAULT_CONFIG } from '../config';
+
 export type LogHandler = (level: string, message: string, ...args: any[]) => void;
 
 export enum LogLevel {
@@ -14,7 +16,7 @@ export class Logger {
     private readonly handler: LogHandler;
 
     constructor(options?: { handler?: LogHandler, level?: string }) {
-        const envLevel = options?.level || process.env.NEXO_LOG?.toUpperCase() || 'ERROR';
+        const envLevel = options?.level || process.env.NEXO_LOG?.toUpperCase() || DEFAULT_CONFIG.logger.level;
         this.level = this.parseLevel(envLevel);
         this.handler = options?.handler || this.defaultHandler;
     }

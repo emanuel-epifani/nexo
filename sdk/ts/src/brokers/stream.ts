@@ -1,6 +1,7 @@
 import { NexoConnection } from '../connection';
 import { FrameCodec, Cursor } from '../codec';
 import { Logger } from '../utils/logger';
+import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError } from '../errors';
 
 enum StreamOpcode {
@@ -144,8 +145,8 @@ class StreamSubscription<T> {
     options: StreamSubscribeOptions
   ): Promise<void> {
     this.active = true;
-    const batchSize = options.batchSize ?? 100;
-    const waitMs = options.waitMs ?? 20000;
+    const batchSize = options.batchSize ?? DEFAULT_CONFIG.stream.batchSize;
+    const waitMs = options.waitMs ?? DEFAULT_CONFIG.stream.waitMs;
 
     this.loopDone = this.runConsumerLoop(callback, batchSize, waitMs).catch(err => {
       this.logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
@@ -164,7 +165,7 @@ class StreamSubscription<T> {
   private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number, waitMs: number) {
     while (this.active) {
       if (!this.conn.isConnected) {
-        await this.backoff(500);
+        await this.backoff(DEFAULT_CONFIG.connection.backoff.short);
         continue;
       }
 
@@ -176,12 +177,12 @@ class StreamSubscription<T> {
         if (!this.active) break;
 
         if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
-          await this.backoff(500);
+          await this.backoff(DEFAULT_CONFIG.connection.backoff.short);
           continue;
         }
 
-        this.logger.error(`[${this.streamName}:${this.group}] Error. Retrying in 1s...`, e);
-        await this.backoff(1000);
+        this.logger.error(`[${this.streamName}:${this.group}] Error. Retrying in ${DEFAULT_CONFIG.connection.backoff.long}ms...`, e);
+        await this.backoff(DEFAULT_CONFIG.connection.backoff.long);
       }
     }
   }
