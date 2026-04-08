@@ -458,29 +458,6 @@ impl QueueManager {
 
     // --- DLQ Operations ---
 
-    pub async fn move_to_dlq(&self, queue_name: String, payload: Bytes, priority: u8) {
-        let shared = if let Some(s) = self.get_queue(&queue_name) {
-            s
-        } else {
-            let options = QueueCreateOptions {
-                visibility_timeout_ms: None,
-                max_retries: None,
-                ttl_ms: None,
-            };
-            let config = QueueConfig::from_options(options, &self.config);
-            let s = Self::build_queue(queue_name.clone(), config, &self.config);
-            self.queues.insert(queue_name, s.clone());
-            s
-        };
-
-        let msg = Message::new(payload, priority, None);
-        {
-            let mut inner = Self::lock(&shared.inner);
-            inner.state.push(msg.clone());
-        }
-        shared.store.execute(StorageOp::Insert(msg));
-    }
-
     /// Peek messages from DLQ without consuming them
     pub async fn peek_dlq(&self, queue_name: &str, limit: usize, offset: usize) -> Result<(usize, Vec<DlqMessage>), String> {
         let shared = self.get_queue(queue_name)
