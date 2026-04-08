@@ -133,7 +133,6 @@ const QueueCommands = {
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
   maxRetries?: number;
-  ttlMs?: number;
 }
 
 export interface QueueSubscribeOptions {

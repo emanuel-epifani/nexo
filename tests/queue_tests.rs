@@ -153,7 +153,6 @@ mod queue_tests {
                 // Pop 1 (att=1). Timeout. 1 < 3 -> Requeue.
                 // Pop 2 (att=2). Timeout. 2 < 3 -> Requeue.
                 // Pop 3 (att=3). Timeout. 3 >= 3 -> DLQ.
-                ttl_ms: Some(60000),
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 

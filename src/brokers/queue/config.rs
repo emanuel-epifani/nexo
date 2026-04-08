@@ -5,7 +5,6 @@ pub struct SystemQueueConfig {
     // CREATE config
     pub visibility_timeout_ms: u64,
     pub max_retries: u32,
-    pub ttl_ms: u64,
     // PUSH config
     pub default_batch_size: usize,
     pub default_wait_ms: u64,
@@ -20,7 +19,6 @@ impl Default for SystemQueueConfig {
         Self {
             visibility_timeout_ms: 30000,
             max_retries: 5,
-            ttl_ms: 604800000,
             default_batch_size: 10,
             default_wait_ms: 0,
             persistence_path: "./data/queues".to_string(),
@@ -36,7 +34,6 @@ impl SystemQueueConfig {
         Self {
             visibility_timeout_ms: get_env("QUEUE_VISIBILITY_MS", default.visibility_timeout_ms),
             max_retries:           get_env("QUEUE_MAX_RETRIES", default.max_retries),
-            ttl_ms:                get_env("QUEUE_TTL_MS", default.ttl_ms),
             default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", default.default_batch_size),
             default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
             persistence_path:      get_env_str("QUEUE_ROOT_PERSISTENCE_PATH", &default.persistence_path),

@@ -34,7 +34,6 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
   // RELIABILITY
   visibilityTimeoutMs: 10000,  // Retry if not ACKed within 10s (default: 30s)
   maxRetries: 5,               // Move to DLQ after 5 failures (default: 5)
-  ttlMs: 60000,                // Expires if not consumed in 60s (default: 7 days)
 });
 ```
 

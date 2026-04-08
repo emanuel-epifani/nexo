@@ -92,7 +92,6 @@ impl Message {
     pub struct QueueConfig {
         pub visibility_timeout_ms: u64,
         pub max_retries: u32,
-        pub ttl_ms: u64,
         // Persistence Tuning
         pub flush_ms: u64,
         pub writer_batch_size: usize,
@@ -103,7 +102,6 @@ impl Message {
             Self {
                 visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
                 max_retries: opts.max_retries.unwrap_or(sys.max_retries),
-                ttl_ms: opts.ttl_ms.unwrap_or(sys.ttl_ms),
                 flush_ms: sys.default_flush_ms,
                 writer_batch_size: sys.writer_batch_size,
             }
@@ -605,5 +603,4 @@ impl Message {
         let datetime = DateTime::<Utc>::from(d);
         datetime.to_rfc3339()
     }
-
 

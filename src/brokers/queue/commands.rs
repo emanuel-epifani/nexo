@@ -23,7 +23,6 @@ pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
-    pub ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
