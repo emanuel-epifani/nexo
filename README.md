@@ -35,7 +35,7 @@ Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale"
 
 Here's the reality: most scale-ups will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 99%—companies that need **high throughput without operational complexity**.
 
-## Architecture
+## 🏗️ Architecture
 
 Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in dashboard.
 
@@ -45,38 +45,31 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in 
 *   **Dev Dashboard:** The server expose built-in Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
 
 ```
-                            ┌──────────────────────────────────────┐
-                            │              NEXO SERVER             │
-                            │                                      │       ┌──────────────┐
-                            │   ┌──────────────────────────────┐   │──────▶│              │
-                            │   │            STORE             │   │       │     RAM      │
-                            │   │        (Shared State)        │   │       │              │
-     ┌─────────────┐        │   └──────────────────────────────┘   │       │  (Volatile)  │
-     │             │        │                                      │       │              │
-     │   Client    │───────▶│   ┌──────────────────────────────┐   │──────▶│              │
-     │  (SDK/API)  │        │   │            PUBSUB            │   │       └──────────────┘
-     │             │        │   │          (Realtime)          │   │
-     └─────────────┘        │   └──────────────────────────────┘   │
-                            │                                      │
-                            │   ┌──────────────────────────────┐   │       ┌──────────────┐
-                            │   │            QUEUE             │   │──────▶│              │
-                            │   │        (Job Processing)      │   │       │     DISK     │
-                            │   └──────────────────────────────┘   │       │              │
-                            │                                      │       │   (Durable)  │
-                            │   ┌──────────────────────────────┐   │──────▶│              │
-                            │   │           STREAM             │   │       └──────────────┘
-                            │   │          (Event Log)         │   │
-                            │   └──────────────────────────────┘   │
-                            └───────────────┬──────────────────────┘
-                                            │
-                                            ▼
-                                    ┌─────────────────┐
-                                    │    Dashboard    │
-                                    │     (Web UI)    │
-                                    └─────────────────┘
+                                          ┌──────────────────────────────────────┐
+                                          │              NEXO SERVER             │
+                                          │   ┌──────────────────────────────┐   │
+                                          │   │            STORE             │   │
+                                          │   │        (Shared State)        │   │
+                                          │   └──────────────────────────────┘   │
+     ┌─────────────┐                      │                                      │
+     │   Client    │                      │   ┌──────────────────────────────┐   │
+     │   (SDK)     │───── TCP Socket ────▶│   │            PUBSUB            │   │
+     └─────────────┘                      │   │          (Realtime)          │   │
+                                          │   └──────────────────────────────┘   │
+                                          │                                      │
+                                          │   ┌──────────────────────────────┐   │
+     ┌─────────────┐                      │   │            QUEUE             │   │
+     │  Dashboard  │───── HTTP Request ──▶│   │        (Job Processing)      │   │
+     │  (Web UI)   │                      │   └──────────────────────────────┘   │
+     └─────────────┘                      │                                      │
+                                          │   ┌──────────────────────────────┐   │
+                                          │   │           STREAM             │   │
+                                          │   │          (Event Log)         │   │
+                                          │   └──────────────────────────────┘   │
+                                          └──────────────────────────────────────┘
 ```
 
-## BROKERS
+## ⚙️ BROKERS
 
 Nexo is built on the four pillars of modern event-driven architecture. Instead of managing four separate clusters, you get four specialized engines in one API.
 
@@ -89,7 +82,7 @@ Each broker is purpose-built to solve a specific architectural pattern:
 
 Everything is available instantly via a unified Client.
 
-### 1. STORE (Shared State)
+### 1. 💾 STORE (Shared State)
 **In-memory concurrent data structures.**
 
 **Use Case:** Ideal for high-velocity data that needs to be instantly accessible across all your services, such as user sessions, API rate-limiting counters, and temporary caching.
@@ -105,7 +98,7 @@ Everything is available instantly via a unified Client.
 
 
 
-### 2. PUB/SUB (Real-Time Broadcast)
+### 2. 📡 PUB/SUB (Real-Time Broadcast)
 
 **Transient message bus with Topic-based routing.**
 
@@ -132,7 +125,7 @@ Everything is available instantly via a unified Client.
         *   *Example:* `logs/#` matches `logs/error`, `logs/app/backend`, etc.
 
 
-### 3. QUEUE (Job Processing)
+### 3. 📬 QUEUE (Job Processing)
 
 **Durable FIFO buffer with acknowledgments.**
 
@@ -153,7 +146,7 @@ Everything is available instantly via a unified Client.
 *   **Failure Recovery:** Automatically retries failed jobs and isolates permanent failures in **Dead Letter Queues (DLQ)**.
 *   **Disk Persistence:** Safely persists all jobs to a Write-Ahead Log (WAL) to ensure data survival across restarts.
 
-### 4. STREAM (Event Log)
+### 4. 📝 STREAM (Event Log)
 
 **Strictly ordered append-only log without partition complexity.**
 
@@ -176,14 +169,14 @@ Everything is available instantly via a unified Client.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
 
-##  Dashboard
+## 📊 Dashboard
 
 Nexo comes with a built-in, zero-config dashboard exposed to local development.
 Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
 
 ![Nexo Dashboard Screenshot](docs/public/dashboard-preview.png)
 
-## Getting Started
+## 🚀 Getting Started
 
 ### 1. Run the Server
 
