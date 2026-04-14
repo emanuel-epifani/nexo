@@ -53,6 +53,12 @@ impl QueueManager {
         let queues = Arc::new(DashMap::new());
         let cancel = CancellationToken::new();
 
+        // Ensure persistence directory exists (one-time setup)
+        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
+        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
+            error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
+        }
+
         let manager = Self {
             queues: queues.clone(),
             config: system_config.clone(),
@@ -97,15 +103,11 @@ impl QueueManager {
 
     fn build_queue(name: String, config: QueueConfig, system_config: &SystemQueueConfig) -> Arc<QueueShared> {
         let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
-        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
-            error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
-        }
-
         let db_path = persistence_path.join(format!("{}.db", name));
         let store = QueueStore::new(
             db_path,
-            config.flush_ms,
-            config.writer_batch_size,
+            system_config.default_flush_ms,
+            system_config.writer_batch_size,
         );
 
         let mut main_state = QueueState::new();
@@ -163,17 +165,15 @@ impl QueueManager {
                     let shared = entry.value().clone();
                     let now = current_time_ms();
 
-                    let should_process = {
-                        let inner = Self::lock(&shared.inner);
-                        inner.state.next_timeout().map(|ts| ts <= now).unwrap_or(false)
-                    };
-
-                    if !should_process {
-                        continue;
-                    }
-
                     let (requeued, dlq_msgs) = {
                         let mut inner = Self::lock(&shared.inner);
+                        
+                        // Check if processing is needed
+                        let should_process = inner.state.next_timeout().map(|ts| ts <= now).unwrap_or(false);
+                        if !should_process {
+                            continue;
+                        }
+
                         let max_retries = inner.config.max_retries;
                         let (requeued, dlq_msgs) = inner.state.process_expired(max_retries);
 
@@ -183,6 +183,10 @@ impl QueueManager {
 
                         (requeued, dlq_msgs)
                     };
+
+                    if requeued.is_empty() && dlq_msgs.is_empty() {
+                        continue;
+                    }
 
                     for msg in &requeued {
                         shared.store.execute(StorageOp::UpdateState {
@@ -241,13 +245,9 @@ impl QueueManager {
 
                 // Persist config
                 let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
-                if let Err(e) = std::fs::create_dir_all(&persistence_path) {
-                    error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
-                } else {
-                    let config_path = persistence_path.join(format!("{}.config.json", name));
-                    if let Ok(data) = serde_json::to_string_pretty(&config) {
-                        let _ = std::fs::write(&config_path, data);
-                    }
+                let config_path = persistence_path.join(format!("{}.config.json", name));
+                if let Ok(data) = serde_json::to_string_pretty(&config) {
+                    let _ = std::fs::write(&config_path, data);
                 }
 
                 let shared = Self::build_queue(name, config, &self.config);

@@ -140,6 +140,8 @@ async fn run_writer(
         }
     };
     if let Err(e) = conn.execute_batch(
+        // Writer connection pragmas for high-throughput batch operations
+        // synchronous=OFF for performance (data is flushed periodically via timer)
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = OFF;
          PRAGMA cache_size = -64000;
@@ -229,6 +231,8 @@ fn uuid_from_blob(id_blob: Vec<u8>) -> Result<Uuid> {
 }
 
 fn init_db(conn: &Connection) -> Result<()> {
+    // Set pragmas for schema initialization connection
+    // synchronous=NORMAL for safety during table creation
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;

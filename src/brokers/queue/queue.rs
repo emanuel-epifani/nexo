@@ -92,9 +92,6 @@ impl Message {
     pub struct QueueConfig {
         pub visibility_timeout_ms: u64,
         pub max_retries: u32,
-        // Persistence Tuning
-        pub flush_ms: u64,
-        pub writer_batch_size: usize,
     }
 
     impl QueueConfig {
@@ -102,8 +99,6 @@ impl Message {
             Self {
                 visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
                 max_retries: opts.max_retries.unwrap_or(sys.max_retries),
-                flush_ms: sys.default_flush_ms,
-                writer_batch_size: sys.writer_batch_size,
             }
         }
     }
@@ -145,67 +140,30 @@ impl Message {
             }
         }
 
-        /// Push a message. Returns true if pulse loop should wake (new earliest event).
-        pub fn push(&mut self, msg: Message) -> bool {
+        /// Push a message to the queue.
+        pub fn push(&mut self, msg: Message) {
             let id = msg.id;
             let initial_state = msg.state.clone();
             let priority = msg.priority;
-            let scheduled_ts = if let MessageState::Scheduled(ts) = initial_state { Some(ts) } else { None };
 
             self.registry.insert(id, msg);
 
             match initial_state {
                 MessageState::Ready => {
                     self.waiting_for_dispatch.entry(priority).or_default().insert(id);
-                    false // No time-based wake needed
                 }
                 MessageState::Scheduled(ts) => {
                     self.waiting_for_time.entry(ts).or_default().insert(id);
-                    // Check if this is the earliest scheduled
-                    self.waiting_for_time.keys().next().map(|&t| t == ts).unwrap_or(false)
                 }
                 MessageState::InFlight(ts) => {
                     self.waiting_for_ack.entry(ts).or_default().insert(id);
-                    // Check if this is the earliest timeout
-                    self.waiting_for_ack.keys().next().map(|&t| t == ts).unwrap_or(false)
                 }
             }
         }
 
         /// Pop the highest priority message. Returns (message, needs_pulse).
         pub fn pop(&mut self, visibility_timeout_ms: u64) -> (Option<Message>, bool) {
-            let now = current_time_ms();
-
-            // Find highest priority ready message
-            let next_id = self.waiting_for_dispatch
-                .iter()
-                .rev()
-                .find_map(|(_, queue)| queue.front().cloned());
-
-            let next_id = match next_id {
-                Some(id) => id,
-                None => return (None, false),
-            };
-
-            let timeout = now + visibility_timeout_ms;
-            self.transition_to(next_id, MessageState::InFlight(timeout));
-
-            // Update message fields
-            if let Some(msg) = self.registry.get_mut(&next_id) {
-                msg.visible_at = timeout;
-                msg.attempts += 1;
-
-                // Check if this is the earliest timeout
-                let is_earliest = self.waiting_for_ack
-                    .keys()
-                    .next()
-                    .map(|&t| t == timeout)
-                    .unwrap_or(false);
-
-                return (Some(msg.clone()), is_earliest);
-            }
-
-            (None, false)
+            self.pop_single(visibility_timeout_ms)
         }
 
         /// Acknowledge a message (remove from system).
@@ -216,35 +174,17 @@ impl Message {
         /// Take up to `max` messages for batch consumption.
         pub fn take_batch(&mut self, max: usize, visibility_timeout_ms: u64) -> (Vec<Message>, bool) {
             let mut result = Vec::with_capacity(max);
-            let now = current_time_ms();
             let mut any_earliest = false;
 
             while result.len() < max {
-                let next_id = match self.waiting_for_dispatch
-                    .iter()
-                    .rev()
-                    .find_map(|(_, queue)| queue.front().cloned())
-                {
-                    Some(id) => id,
-                    None => break,
-                };
-
-                let timeout = now + visibility_timeout_ms;
-                self.transition_to(next_id, MessageState::InFlight(timeout));
-
-                if let Some(msg) = self.registry.get_mut(&next_id) {
-                    msg.visible_at = timeout;
-                    msg.attempts += 1;
-                    result.push(msg.clone());
-
-                    let is_earliest = self.waiting_for_ack
-                        .keys()
-                        .next()
-                        .map(|&t| t == timeout)
-                        .unwrap_or(false);
-                    if is_earliest {
-                        any_earliest = true;
+                match self.pop_single(visibility_timeout_ms) {
+                    (Some(msg), is_earliest) => {
+                        if is_earliest {
+                            any_earliest = true;
+                        }
+                        result.push(msg);
                     }
+                    (None, _) => break,
                 }
             }
 
@@ -372,21 +312,19 @@ impl Message {
         }
 
         pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessageView>) {
-            let iter: Box<dyn Iterator<Item = &Uuid>> = match state_filter.to_lowercase().as_str() {
-                "pending" => Box::new(self.waiting_for_dispatch.values().flat_map(|q| q.iter())),
-                "inflight" => Box::new(self.waiting_for_ack.values().flat_map(|q| q.iter())),
-                "scheduled" => Box::new(self.waiting_for_time.values().flat_map(|q| q.iter())),
+            let mut all_filtered: Vec<&Message> = Vec::new();
+            // Collect IDs based on state filter (no dynamic dispatch)
+            let ids: Vec<&Uuid> = match state_filter.to_lowercase().as_str() {
+                "pending" => self.waiting_for_dispatch.values().flat_map(|q| q.iter()).collect(),
+                "inflight" => self.waiting_for_ack.values().flat_map(|q| q.iter()).collect(),
+                "scheduled" => self.waiting_for_time.values().flat_map(|q| q.iter()).collect(),
                 _ => return (0, vec![]),
             };
 
-            let mut all_filtered: Vec<&Message> = Vec::new();
-
-            for id in iter {
+            for id in ids {
                 if let Some(msg) = self.registry.get(id) {
                     let matches_search = match &search {
-                        Some(s) => {
-                            String::from_utf8_lossy(&msg.payload).contains(s)
-                        },
+                        Some(s) => String::from_utf8_lossy(&msg.payload).contains(s),
                         None => true,
                     };
 
@@ -488,61 +426,102 @@ impl Message {
 
         // --- Internal helpers ---
 
+        /// Pop a single message from the queue. Returns (message, is_earliest_timeout).
+        fn pop_single(&mut self, visibility_timeout_ms: u64) -> (Option<Message>, bool) {
+            let now = current_time_ms();
+
+            // Find highest priority ready message
+            let next_id = self.waiting_for_dispatch
+                .iter()
+                .rev()
+                .find_map(|(_, queue)| queue.front().cloned());
+
+            let next_id = match next_id {
+                Some(id) => id,
+                None => return (None, false),
+            };
+
+            let timeout = now + visibility_timeout_ms;
+            self.transition_to(next_id, MessageState::InFlight(timeout));
+
+            // Update message fields
+            if let Some(msg) = self.registry.get_mut(&next_id) {
+                msg.visible_at = timeout;
+                msg.attempts += 1;
+
+                // Check if this is the earliest timeout
+                let is_earliest = self.waiting_for_ack
+                    .keys()
+                    .next()
+                    .map(|&t| t == timeout)
+                    .unwrap_or(false);
+
+                return (Some(msg.clone()), is_earliest);
+            }
+
+            (None, false)
+        }
+
+        /// Remove a message ID from the appropriate index based on its state
+        fn remove_from_index(&mut self, state: &MessageState, id: Uuid, priority: u8) {
+            match state {
+                MessageState::Ready => {
+                    if let Some(queue) = self.waiting_for_dispatch.get_mut(&priority) {
+                        queue.remove(&id);
+                        if queue.is_empty() {
+                            self.waiting_for_dispatch.remove(&priority);
+                        }
+                    }
+                }
+                MessageState::Scheduled(ts) => {
+                    if let Some(queue) = self.waiting_for_time.get_mut(ts) {
+                        queue.remove(&id);
+                        if queue.is_empty() {
+                            self.waiting_for_time.remove(ts);
+                        }
+                    }
+                }
+                MessageState::InFlight(ts) => {
+                    if let Some(queue) = self.waiting_for_ack.get_mut(ts) {
+                        queue.remove(&id);
+                        if queue.is_empty() {
+                            self.waiting_for_ack.remove(ts);
+                        }
+                    }
+                }
+            }
+        }
+
         fn transition_to(&mut self, id: Uuid, new_state: MessageState) -> bool {
-            let msg = match self.registry.get_mut(&id) {
-                Some(m) => m,
+            let (old_state, priority) = match self.registry.get(&id) {
+                Some(m) => (m.state.clone(), m.priority),
                 None => return false,
             };
 
-            let old_state = msg.state.clone();
             if old_state == new_state {
                 return true;
             }
 
             // Remove from old index
-            match old_state {
-                MessageState::Ready => {
-                    if let Some(queue) = self.waiting_for_dispatch.get_mut(&msg.priority) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_dispatch.remove(&msg.priority);
-                        }
-                    }
-                }
-                MessageState::Scheduled(ts) => {
-                    if let Some(queue) = self.waiting_for_time.get_mut(&ts) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_time.remove(&ts);
-                        }
-                    }
-                }
-                MessageState::InFlight(ts) => {
-                    if let Some(queue) = self.waiting_for_ack.get_mut(&ts) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_ack.remove(&ts);
-                        }
-                    }
-                }
-            }
+            self.remove_from_index(&old_state, id, priority);
 
-            // Update state
-            msg.state = new_state.clone();
+            // Update state and add to new index
+            if let Some(msg) = self.registry.get_mut(&id) {
+                msg.state = new_state.clone();
 
-            // Add to new index
-            match new_state {
-                MessageState::Ready => {
-                    self.waiting_for_dispatch
-                        .entry(msg.priority)
-                        .or_default()
-                        .insert(id);
-                }
-                MessageState::Scheduled(ts) => {
-                    self.waiting_for_time.entry(ts).or_default().insert(id);
-                }
-                MessageState::InFlight(ts) => {
-                    self.waiting_for_ack.entry(ts).or_default().insert(id);
+                match new_state {
+                    MessageState::Ready => {
+                        self.waiting_for_dispatch
+                            .entry(msg.priority)
+                            .or_default()
+                            .insert(id);
+                    }
+                    MessageState::Scheduled(ts) => {
+                        self.waiting_for_time.entry(ts).or_default().insert(id);
+                    }
+                    MessageState::InFlight(ts) => {
+                        self.waiting_for_ack.entry(ts).or_default().insert(id);
+                    }
                 }
             }
 
@@ -556,32 +535,8 @@ impl Message {
         fn delete_message_and_return(&mut self, id: Uuid) -> Option<Message> {
             let msg = self.registry.remove(&id)?;
 
-            match msg.state {
-                MessageState::Ready => {
-                    if let Some(queue) = self.waiting_for_dispatch.get_mut(&msg.priority) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_dispatch.remove(&msg.priority);
-                        }
-                    }
-                }
-                MessageState::Scheduled(ts) => {
-                    if let Some(queue) = self.waiting_for_time.get_mut(&ts) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_time.remove(&ts);
-                        }
-                    }
-                }
-                MessageState::InFlight(ts) => {
-                    if let Some(queue) = self.waiting_for_ack.get_mut(&ts) {
-                        queue.remove(&id);
-                        if queue.is_empty() {
-                            self.waiting_for_ack.remove(&ts);
-                        }
-                    }
-                }
-            }
+            // Remove from index
+            self.remove_from_index(&msg.state, id, msg.priority);
 
             Some(msg)
         }
