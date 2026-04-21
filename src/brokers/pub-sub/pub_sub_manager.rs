@@ -9,9 +9,9 @@ use std::collections::HashSet;
 
 use crate::brokers::pub_sub::config::PubSubConfig;
 use crate::brokers::pub_sub::radix_tree::Node;
+use crate::brokers::pub_sub::snapshot::{PubSubSnapshot, WildcardSubscription, WildcardSubscriptions};
 use crate::brokers::pub_sub::types::{ClientId, ClientInfo, ClientRegistry, PubSubMessage};
 use crate::brokers::pub_sub::retained;
-use crate::dashboard::pubsub::{RawPubSubBrokerSnapshot, WildcardSubscription, WildcardSubscriptions};
 
 pub struct PubSubManager {
     tree: Arc<RwLock<Node>>,
@@ -196,7 +196,7 @@ impl PubSubManager {
         sent_count
     }
 
-    pub fn scan_topics(&self, limit: usize, offset: usize, search: Option<&str>) -> RawPubSubBrokerSnapshot {
+    pub fn scan_topics(&self, limit: usize, offset: usize, search: Option<&str>) -> PubSubSnapshot {
         let mut all_topics = Vec::new();
         {
             let root = self.tree.read();
@@ -239,7 +239,7 @@ impl PubSubManager {
             }
         }
 
-        RawPubSubBrokerSnapshot {
+        PubSubSnapshot {
             active_clients: self.clients.len(),
             total_topics,
             topics: paginated,

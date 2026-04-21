@@ -2,7 +2,7 @@
 //! Single append-only log per topic (no partitions).
 
 use crate::brokers::stream::message::Message;
-use crate::brokers::stream::commands::{StreamCreateOptions, RetentionOptions};
+use crate::brokers::stream::options::{StreamCreateOptions, RetentionOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, debug, warn};
 use crc32fast::Hasher;
 
-use crate::brokers::stream::commands::RetentionOptions;
+use crate::brokers::stream::options::RetentionOptions;
 use crate::brokers::stream::message::Message;
 
 // ==========================================

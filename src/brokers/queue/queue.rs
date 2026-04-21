@@ -3,18 +3,17 @@
 //! This module contains the pure state logic without any concurrency primitives.
 //! The QueueManager wraps this state in a Mutex<QueueInner> per queue.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::{BTreeMap, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use hashlink::LinkedHashSet;
-use chrono::{DateTime, Utc};
 
-use crate::dashboard::queue::QueueSummary;
-use crate::brokers::queue::commands::QueueCreateOptions;
+use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::dlq::DlqMessage;
+use crate::brokers::queue::snapshot::{MessageStateTag, QueueMessagePreview};
 
 // ==========================================
 // MESSAGE & CONFIG
@@ -38,16 +37,6 @@ pub struct Message {
     pub delayed_until: Option<u64>,
     pub failure_reason: Option<String>,
     pub state: MessageState,
-}
-
-#[derive(Debug, Clone)]
-pub struct QueueMessageView {
-    pub id: Uuid,
-    pub payload: Bytes,
-    pub state: String,
-    pub priority: u8,
-    pub attempts: u32,
-    pub next_delivery_at: Option<String>,
 }
 
 impl Message {
@@ -311,23 +300,27 @@ impl Message {
             (pending, inflight, scheduled)
         }
 
-        pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessageView>) {
-            let mut all_filtered: Vec<&Message> = Vec::new();
-            // Collect IDs based on state filter (no dynamic dispatch)
-            let ids: Vec<&Uuid> = match state_filter.to_lowercase().as_str() {
-                "pending" => self.waiting_for_dispatch.values().flat_map(|q| q.iter()).collect(),
-                "inflight" => self.waiting_for_ack.values().flat_map(|q| q.iter()).collect(),
-                "scheduled" => self.waiting_for_time.values().flat_map(|q| q.iter()).collect(),
+        pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessagePreview>) {
+            let filter_tag = match state_filter.to_lowercase().as_str() {
+                "pending" => MessageStateTag::Pending,
+                "inflight" => MessageStateTag::InFlight,
+                "scheduled" => MessageStateTag::Scheduled,
                 _ => return (0, vec![]),
             };
 
+            let ids: Vec<&Uuid> = match filter_tag {
+                MessageStateTag::Pending => self.waiting_for_dispatch.values().flat_map(|q| q.iter()).collect(),
+                MessageStateTag::InFlight => self.waiting_for_ack.values().flat_map(|q| q.iter()).collect(),
+                MessageStateTag::Scheduled => self.waiting_for_time.values().flat_map(|q| q.iter()).collect(),
+            };
+
+            let mut all_filtered: Vec<&Message> = Vec::new();
             for id in ids {
                 if let Some(msg) = self.registry.get(id) {
                     let matches_search = match &search {
                         Some(s) => String::from_utf8_lossy(&msg.payload).contains(s),
                         None => true,
                     };
-
                     if matches_search {
                         all_filtered.push(msg);
                     }
@@ -335,22 +328,23 @@ impl Message {
             }
 
             let total = all_filtered.len();
-            let paged: Vec<QueueMessageView> = all_filtered
+            let paged: Vec<QueueMessagePreview> = all_filtered
                 .into_iter()
                 .skip(offset)
                 .take(limit)
                 .map(|msg| {
-                    let next_delivery_at = match msg.state {
-                        MessageState::Scheduled(ts) => Some(format_time(ts)),
-                        _ => None,
+                    let (state, next_delivery_at_ms) = match msg.state {
+                        MessageState::Ready => (MessageStateTag::Pending, None),
+                        MessageState::InFlight(_) => (MessageStateTag::InFlight, None),
+                        MessageState::Scheduled(ts) => (MessageStateTag::Scheduled, Some(ts)),
                     };
-                    QueueMessageView {
+                    QueueMessagePreview {
                         id: msg.id,
                         payload: msg.payload.clone(),
-                        state: state_filter.clone(),
+                        state,
                         priority: msg.priority,
                         attempts: msg.attempts,
-                        next_delivery_at,
+                        next_delivery_at_ms,
                     }
                 })
                 .collect();
@@ -551,11 +545,5 @@ impl Message {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
-    }
-
-    fn format_time(ts: u64) -> String {
-        let d = UNIX_EPOCH + Duration::from_millis(ts);
-        let datetime = DateTime::<Utc>::from(d);
-        datetime.to_rfc3339()
     }
 

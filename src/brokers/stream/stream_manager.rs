@@ -11,13 +11,13 @@ use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::brokers::stream::commands::{SeekTarget, StreamCreateOptions};
+use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::group::ConsumerGroup;
 use crate::brokers::stream::message::Message;
+use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
 use crate::brokers::stream::storage::{recover_topic, MessageToAppend, StorageCommand, StorageManager};
 use crate::brokers::stream::topic::{TopicConfig, TopicState};
-use crate::dashboard::stream::StreamBrokerSnapshot;
 
 struct TopicShared {
     inner: Mutex<TopicInner>,
@@ -340,23 +340,21 @@ impl StreamManager {
         }
     }
 
-    pub async fn get_snapshot(&self) -> StreamBrokerSnapshot {
+    pub async fn get_snapshot(&self) -> StreamSnapshot {
         let mut topics = Vec::new();
 
         for (_, topic_ref) in Self::collect_topics(&self.topics) {
             let inner = Self::lock_topic(&topic_ref.inner);
-            let groups = inner.groups.values().map(|group| {
-                crate::dashboard::stream::ConsumerGroupSummary {
-                    id: group.id.clone(),
-                    ack_floor: group.ack_floor,
-                    pending_count: group.pending.len(),
-                }
+            let groups = inner.groups.values().map(|group| ConsumerGroupSnapshot {
+                id: group.id.clone(),
+                ack_floor: group.ack_floor,
+                pending_count: group.pending.len(),
             }).collect();
 
             let mut safe_config = inner.full_config.clone();
             safe_config.persistence_path = "".to_string();
 
-            topics.push(crate::dashboard::stream::TopicSummary {
+            topics.push(TopicSnapshot {
                 name: inner.state.name.clone(),
                 last_seq: inner.state.next_seq.saturating_sub(1),
                 groups,
@@ -364,7 +362,7 @@ impl StreamManager {
             });
         }
 
-        StreamBrokerSnapshot { topics }
+        StreamSnapshot { topics }
     }
 
     pub async fn exists(&self, name: &str) -> bool {

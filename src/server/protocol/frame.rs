@@ -41,18 +41,6 @@ pub const DATA_TYPE_STRING: u8 = 0x01;
 pub const DATA_TYPE_JSON: u8 = 0x02;
 
 // ========================================
-// OPCODES RANGES (Meta byte for Request frames)
-// ========================================
-pub const OPCODE_MIN_STORE: u8 = 0x02;
-pub const OPCODE_MAX_STORE: u8 = 0x0F;
-pub const OPCODE_MIN_QUEUE: u8 = 0x10;
-pub const OPCODE_MAX_QUEUE: u8 = 0x1F;
-pub const OPCODE_MIN_PUBSUB: u8 = 0x21;
-pub const OPCODE_MAX_PUBSUB: u8 = 0x2F;
-pub const OPCODE_MIN_STREAM: u8 = 0x30;
-pub const OPCODE_MAX_STREAM: u8 = 0x3F;
-
-// ========================================
 // FRAME HEADER
 // ========================================
 

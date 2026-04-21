@@ -13,12 +13,12 @@ use bytes::Bytes;
 use uuid::Uuid;
 use tracing::{error, info};
 
-use crate::brokers::queue::queue::{QueueConfig, QueueState, Message, QueueMessageView, current_time_ms};
-use crate::brokers::queue::commands::QueueCreateOptions;
+use crate::brokers::queue::queue::{QueueConfig, QueueState, Message, current_time_ms};
+use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::dlq::{DlqMessage, DlqState};
 use crate::brokers::queue::persistence::{QueueStore, StorageOp};
 use crate::brokers::queue::config::SystemQueueConfig;
-use crate::dashboard::queue::QueueSummary;
+use crate::brokers::queue::snapshot::{QueueMessagePreview, QueueSnapshot};
 
 // ==========================================
 // SHARED STATE
@@ -426,14 +426,14 @@ impl QueueManager {
         }
     }
 
-    pub async fn get_snapshot(&self) -> Vec<QueueSummary> {
+    pub async fn get_snapshot(&self) -> Vec<QueueSnapshot> {
         let mut queues = Vec::new();
 
         for entry in self.queues.iter() {
             let shared = entry.value().clone();
             let inner = Self::lock(&shared.inner);
             let (pending, inflight, scheduled) = inner.state.get_counters();
-            queues.push(QueueSummary {
+            queues.push(QueueSnapshot {
                 name: inner.name.clone(),
                 pending,
                 inflight,
@@ -446,7 +446,7 @@ impl QueueManager {
         queues
     }
 
-    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<QueueMessageView>)> {
+    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<QueueMessagePreview>)> {
         let shared = self.get_queue(&queue_name)?;
         let inner = Self::lock(&shared.inner);
         Some(inner.state.get_messages(state_filter, offset, limit, search))

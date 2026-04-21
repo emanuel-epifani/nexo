@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use bytes::Bytes;
 use crate::brokers::pub_sub::types::ClientId;
 use crate::brokers::pub_sub::retained::RetainedMessage;
-use crate::dashboard::pubsub::RawTopicSnapshot;
+use crate::brokers::pub_sub::snapshot::TopicSnapshot;
 
 pub(crate) struct Node {
     // Exact match children: "kitchen" -> Node
@@ -223,11 +223,11 @@ impl Node {
         cleaned
     }
 
-    pub(crate) fn collect_filtered_topics(&self, base_path: &str, search: Option<&str>, topics: &mut Vec<RawTopicSnapshot>) {
+    pub(crate) fn collect_filtered_topics(&self, base_path: &str, search: Option<&str>, topics: &mut Vec<TopicSnapshot>) {
         if !base_path.is_empty() {
             let matches = search.map_or(true, |s| base_path.contains(s));
             if matches && (!self.subscribers.is_empty() || self.retained.is_some()) {
-                topics.push(RawTopicSnapshot {
+                topics.push(TopicSnapshot {
                     full_path: base_path.to_string(),
                     subscribers: self.subscribers.len(),
                     retained_payload: self.retained.as_ref()

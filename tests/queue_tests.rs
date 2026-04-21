@@ -1,5 +1,5 @@
 use nexo::brokers::queue::{QueueManager};
-use nexo::brokers::queue::commands::QueueCreateOptions;
+use nexo::brokers::queue::options::QueueCreateOptions;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use uuid::Uuid;

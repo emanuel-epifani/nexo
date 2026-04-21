@@ -3,8 +3,10 @@ pub mod config;
 pub mod topic;
 pub mod group;
 pub mod message;
-pub mod commands;
-pub mod responses;
+pub mod options;
+pub mod snapshot;
+pub mod tcp;
+pub mod http;
 pub mod storage;
 
 pub use stream_manager::StreamManager;

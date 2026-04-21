@@ -1,4 +1,4 @@
-use nexo::brokers::stream::commands::StreamCreateOptions;
+use nexo::brokers::stream::options::StreamCreateOptions;
 use nexo::config::Config;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
@@ -220,7 +220,7 @@ mod stream_tests {
             assert!(empty.is_empty());
 
             // Seek to beginning
-            use nexo::brokers::stream::commands::SeekTarget;
+            use nexo::brokers::stream::options::SeekTarget;
             manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
 
             // Fetch should return messages from beginning
@@ -269,7 +269,7 @@ mod stream_tests {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            use nexo::brokers::stream::commands::SeekTarget;
+            use nexo::brokers::stream::options::SeekTarget;
             manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
 
             let (elapsed, result) = fetch_handle.await.unwrap();

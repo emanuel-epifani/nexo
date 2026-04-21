@@ -1,10 +1,10 @@
 //! Store Manager: In-memory data store orchestrator
 
-use crate::brokers::store::data_structures::map::{MapStore, MapValue, Entry};
-use std::time::Instant;
+use crate::brokers::store::data_structures::map::{MapStore, MapValue};
 use crate::brokers::store::config::StoreConfig;
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::brokers::store::snapshot::{KeyEntry, StoreSnapshot};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct StoreManager {
     pub map: MapStore,
@@ -16,18 +16,12 @@ impl StoreManager {
             map: MapStore::new(config),
         }
     }
-}
 
-pub struct ScanResult {
-    pub items: Vec<(String, MapValue, Option<Instant>)>,
-    pub total: usize,
-}
-
-impl StoreManager {
-    pub fn scan(&self, limit: usize, offset: usize, filter: Option<String>) -> ScanResult {
+    pub fn scan(&self, limit: usize, offset: usize, filter: Option<String>) -> StoreSnapshot {
         let total = self.map.len();
-        
-        let items = self.map.iter()
+        let now = Instant::now();
+
+        let entries = self.map.iter()
             .filter(|entry| {
                 if let Some(ref f) = filter {
                     entry.key().contains(f)
@@ -37,12 +31,22 @@ impl StoreManager {
             })
             .skip(offset)
             .take(limit)
-            .map(|entry| {
+            .filter_map(|entry| {
                 let val = entry.value();
-                (entry.key().clone(), val.value.clone(), val.expires_at)
+                if let Some(expiry) = val.expires_at {
+                    if expiry <= now {
+                        return None;
+                    }
+                }
+                let MapValue(payload) = val.value.clone();
+                Some(KeyEntry {
+                    key: entry.key().clone(),
+                    payload,
+                    expires_at: val.expires_at,
+                })
             })
             .collect();
 
-        ScanResult { items, total }
+        StoreSnapshot { entries, total }
     }
 }

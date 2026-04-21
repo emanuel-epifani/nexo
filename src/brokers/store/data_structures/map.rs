@@ -3,71 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
 use crate::brokers::store::config::StoreConfig;
-use crate::config::Config;
 use bytes::Bytes;
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::ParseError;
-use serde::Deserialize;
-
-pub const OP_MAP_SET: u8 = 0x02;
-pub const OP_MAP_GET: u8 = 0x03;
-pub const OP_MAP_DEL: u8 = 0x04;
 
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub value: MapValue,
     pub expires_at: Option<Instant>,
-}
-
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapSetOptions {
-    pub ttl: Option<u64>,
-}
-
-#[derive(Debug)]
-pub enum MapCommand {
-    /// SET: [KeyLen:4][Key][JSONLen:4][JSON][Val...]
-    Set {
-        key: String,
-        options: MapSetOptions,
-        value: Bytes,
-    },
-    /// GET: [KeyLen:4][Key]
-    Get {
-        key: String,
-    },
-    /// DEL: [KeyLen:4][Key]
-    Del {
-        key: String,
-    },
-}
-
-impl MapCommand {
-    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
-        match opcode {
-            OP_MAP_SET => {
-                let key = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-
-                let options: MapSetOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
-
-                let value = cursor.read_remaining();
-                Ok(Self::Set { key, options, value })
-            }
-            OP_MAP_GET => {
-                let key = cursor.read_string()?;
-                Ok(Self::Get { key })
-            }
-            OP_MAP_DEL => {
-                let key = cursor.read_string()?;
-                Ok(Self::Del { key })
-            }
-            _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -93,10 +34,8 @@ impl MapStore {
             loop {
                 interval.tick().await;
 
-                // Try to upgrade the weak pointer
                 match weak_inner.upgrade() {
                     Some(map) => {
-                        // Manager is alive, proceed with cleanup
                         let now = Instant::now();
                         map.retain(|_, entry: &mut Entry| {
                             if let Some(expiry) = entry.expires_at {
@@ -106,7 +45,6 @@ impl MapStore {
                         });
                     }
                     None => {
-                        // Manager has been dropped, stop the cleanup task
                         break;
                     }
                 }
@@ -119,7 +57,6 @@ impl MapStore {
     pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) {
         let expires_at = match ttl {
             Some(0) | None => {
-                // Use default TTL from config
                 Some(Instant::now() + Duration::from_secs(self.config.default_ttl_secs))
             }
             Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
@@ -135,7 +72,7 @@ impl MapStore {
         if let Some(entry) = self.inner.get(key) {
             if let Some(expiry) = entry.expires_at {
                 if Instant::now() > expiry {
-                    return None; // Lazy expiration could happen here (delete on read)
+                    return None;
                 }
             }
             let MapValue(val) = &entry.value;
@@ -148,7 +85,6 @@ impl MapStore {
         self.inner.remove(key).is_some()
     }
 
-    /// Used for snapshots and iterating
     pub fn iter(&self) -> dashmap::iter::Iter<'_, String, Entry> {
         self.inner.iter()
     }
