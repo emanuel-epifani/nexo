@@ -1,23 +1,17 @@
-// ========================================
-// DASHBOARD UTILS
-// ========================================
+use crate::transport::tcp::protocol::{DATA_TYPE_JSON, DATA_TYPE_RAW, DATA_TYPE_STRING};
 
-use crate::server::protocol::{DATA_TYPE_JSON, DATA_TYPE_RAW, DATA_TYPE_STRING};
-
-/// Converts a protocol-compliant data payload into a serde_json::Value for dashboard visualization.
+/// Converts a protocol-compliant data payload into a serde_json::Value for HTTP/JSON consumption.
 /// Format: [DataType: 1 byte][Data...]
-pub fn payload_to_dashboard_value(payload: &[u8]) -> serde_json::Value {
+pub fn payload_to_json_value(payload: &[u8]) -> serde_json::Value {
     if payload.is_empty() {
         return serde_json::Value::Null;
     }
 
-    // Se il primo byte è un DataType valido (0-2), usalo. Altrimenti tratta tutto come JSON.
     let (data_type, content) = if payload.len() >= 1 && payload[0] <= DATA_TYPE_JSON {
         let data_type = payload[0];
         let content = &payload[1..];
         (data_type, content)
     } else {
-        // Legacy: tratta tutto come JSON
         (DATA_TYPE_JSON, payload)
     };
 

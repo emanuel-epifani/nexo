@@ -100,7 +100,7 @@ impl Encoder<OutboundFrame> for NexoCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::protocol::frame::{STATUS_DATA, TYPE_RESPONSE};
+    use crate::transport::tcp::protocol::frame::{STATUS_DATA, TYPE_RESPONSE};
 
     const TEST_ID: u32 = 42;
     const TEST_PAYLOAD: &[u8] = b"nexo-test-payload";

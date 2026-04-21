@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use serde::Deserialize;
 
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::{ParseError, Response};
+use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================

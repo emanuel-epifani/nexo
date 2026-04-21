@@ -1,25 +1,25 @@
-//! Request Router: thin opcode dispatcher delegating to broker-specific TCP handlers.
+//! Thin opcode dispatcher delegating to broker-specific TCP handlers.
 
 use crate::brokers::pub_sub::ClientId;
 use crate::brokers::{pub_sub, queue, store, stream};
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::Response;
+use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::Response;
 use crate::NexoEngine;
 use bytes::Bytes;
 
 pub const OP_DEBUG_ECHO: u8 = 0x00;
 
-pub struct RequestHandler<'a> {
+pub struct Dispatcher<'a> {
     engine: &'a NexoEngine,
     client_id: &'a ClientId,
 }
 
-impl<'a> RequestHandler<'a> {
+impl<'a> Dispatcher<'a> {
     pub fn new(engine: &'a NexoEngine, client_id: &'a ClientId) -> Self {
         Self { engine, client_id }
     }
 
-    pub async fn route(&self, opcode: u8, payload: Bytes) -> Response {
+    pub async fn dispatch(&self, opcode: u8, payload: Bytes) -> Response {
         let mut cursor = PayloadCursor::new(payload);
 
         match opcode {

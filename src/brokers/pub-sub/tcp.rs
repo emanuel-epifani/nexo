@@ -5,8 +5,8 @@ use bytes::Bytes;
 use crate::brokers::pub_sub::options::{PubSubPublishConfig, PubSubPublishOptions};
 use crate::brokers::pub_sub::types::ClientId;
 use crate::config::Config;
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::{ParseError, Response};
+use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================

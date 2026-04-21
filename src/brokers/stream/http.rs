@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
 use crate::brokers::stream::topic::TopicConfig;
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;
 
 const STREAM_PAGE_SIZE: usize = 50;
@@ -118,7 +118,7 @@ async fn get_stream_messages(
             timestamp: chrono::DateTime::from_timestamp_millis(msg.timestamp as i64)
                 .unwrap_or_default()
                 .to_rfc3339(),
-            payload: payload_to_dashboard_value(&msg.payload),
+            payload: payload_to_json_value(&msg.payload),
         })
         .collect();
 

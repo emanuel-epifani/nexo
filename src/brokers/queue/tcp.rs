@@ -4,8 +4,8 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::{ParseError, Response, ToWire};
+use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
 
 use crate::brokers::queue::dlq::DlqMessage;

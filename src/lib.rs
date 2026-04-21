@@ -1,8 +1,7 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
-pub mod server;
+pub mod transport;
 pub mod brokers;
-pub mod dashboard;
 pub mod config;
 
 use std::sync::Arc;

@@ -6,8 +6,8 @@ use bytes::{Bytes, BufMut, BytesMut};
 use crate::brokers::pub_sub::ClientId;
 use crate::brokers::stream::message::Message;
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
-use crate::server::protocol::cursor::PayloadCursor;
-use crate::server::protocol::{ParseError, Response, ToWire};
+use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
 
 // ==========================================

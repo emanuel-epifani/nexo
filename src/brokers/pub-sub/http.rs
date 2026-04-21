@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::brokers::pub_sub::snapshot::{PubSubSnapshot, WildcardSubscription, WildcardSubscriptions};
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;
 
 const PUBSUB_PAGE_SIZE: usize = 50;
@@ -68,7 +68,7 @@ impl From<PubSubSnapshot> for PubSubBrokerSnapshot {
             topics: s.topics.into_iter().map(|topic| TopicSummary {
                 full_path: topic.full_path,
                 subscribers: topic.subscribers,
-                retained_value: topic.retained_payload.as_ref().map(|p| payload_to_dashboard_value(p)),
+                retained_value: topic.retained_payload.as_ref().map(|p| payload_to_json_value(p)),
             }).collect(),
             wildcards: s.wildcards.into(),
         }

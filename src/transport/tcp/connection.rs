@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 use crate::config::Config;
-use crate::server::routing::RequestHandler;
-use crate::server::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
+use crate::transport::tcp::dispatcher::Dispatcher;
+use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
 use crate::NexoEngine;
 
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
@@ -68,8 +68,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
                     let id = frame.header.id();
                     let response = match frame.header.frame_type {
                         TYPE_REQUEST => {
-                            let handler = RequestHandler::new(&engine_clone, &client_id_clone);
-                            handler.route(frame.header.meta, frame.payload).await
+                            let dispatcher = Dispatcher::new(&engine_clone, &client_id_clone);
+                            dispatcher.dispatch(frame.header.meta, frame.payload).await
                         }
                         _ => Response::Error("Unsupported frame type".into()),
                     };

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::brokers::store::snapshot::StoreSnapshot;
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;
 
 // ==========================================
@@ -66,7 +66,7 @@ async fn get_store(
             };
             KeyDetail {
                 key: entry.key,
-                value: payload_to_dashboard_value(&entry.payload),
+                value: payload_to_json_value(&entry.payload),
                 exp_at,
             }
         })

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::brokers::queue::dlq::DlqMessage;
 use crate::brokers::queue::queue::QueueConfig;
 use crate::brokers::queue::snapshot::{MessageStateTag, QueueMessagePreview, QueueSnapshot};
-use crate::dashboard::utils::payload_to_dashboard_value;
+use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;
 
 // ==========================================
@@ -63,7 +63,7 @@ impl From<QueueMessagePreview> for MessageSummary {
         };
         Self {
             id: m.id,
-            payload: payload_to_dashboard_value(&m.payload),
+            payload: payload_to_json_value(&m.payload),
             state,
             priority: m.priority,
             attempts: m.attempts,
@@ -85,7 +85,7 @@ impl From<DlqMessage> for DlqMessageSummary {
     fn from(m: DlqMessage) -> Self {
         Self {
             id: m.id,
-            payload: payload_to_dashboard_value(&m.payload),
+            payload: payload_to_json_value(&m.payload),
             attempts: m.attempts,
             failure_reason: Some(m.failure_reason),
             created_at: m.created_at,

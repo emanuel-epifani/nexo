@@ -2,8 +2,7 @@
 
 use nexo::config::Config;
 use nexo::NexoEngine;
-use nexo::server;
-use nexo::dashboard;
+use nexo::transport::{tcp, http};
 use tokio::net::TcpListener;
 
 // ========================================
@@ -35,7 +34,7 @@ async fn main() {
     if config.server.dashboard_enabled {
         tracing::info!(port = config.server.dashboard_port, "📊 Dashboard enabled");
         tokio::spawn(async move {
-            dashboard::server::start_dashboard_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
+            http::router::start_http_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
         });
     } else {
         tracing::info!("🚫 Dashboard disabled by config");
@@ -60,7 +59,7 @@ async fn main() {
         tracing::info!(client = %client_addr, "New connection accepted");
 
         tokio::spawn(async move {
-            if let Err(e) = server::connection::handle_connection(socket, engine_clone).await {
+            if let Err(e) = tcp::connection::handle_connection(socket, engine_clone).await {
                 tracing::error!(client = %client_addr, error = %e, "Connection error");
             }
             tracing::debug!(client = %client_addr, "Connection closed");
