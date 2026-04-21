@@ -1,205 +1,187 @@
-# NEXO - AI Project Overview (Pragmatic)
+# NEXO - AI Project Overview
 
-## 1) Project Purpose
+## 1) What is Nexo
 
-Nexo is a Rust broker server shipped as a single binary with four data communication models:
+Single-binary Rust broker server exposing **four data-communication models**:
 
-- `Store`: shared in-memory state
-- `Pub/Sub`: low-latency realtime broadcast
-- `Queue`: reliable durable job processing
-- `Stream`: append-only event log with offsets
+- **Store**: shared in-memory state (sessions, cache, counters)
+- **Pub/Sub**: transient topic broadcast, low-latency, wildcard matching (`+`, `#`)
+- **Queue**: durable FIFO with acks, delays, priority, retries, DLQ
+- **Stream**: append-only log with offsets and consumer groups
 
-Practical goal: reduce operational complexity compared to multi-system stacks while keeping high performance for vertical deployments.
+Goal: reduce operational complexity vs multi-system stacks (Redis + Kafka + RabbitMQ + ...) while keeping high performance for vertical deployments.
 
----
+Ships with:
+- **Rust server** (core runtime + binary TCP protocol)
+- **React dashboard** (local dev UI, read-only)
+- **TypeScript SDK** (`@emanuelepifani/nexo-client`)
 
-## 2) High-Level Architecture
-
-- Rust server: core runtime and protocol
-- React dashboard: local development UI (read-only)
-- TypeScript SDK: client API for server interaction
-
-Typical runtime ports:
-- TCP `7654` -> client/server protocol
-- HTTP `8080` -> local dashboard
+Default ports: TCP `7654` (SDK ↔ server), HTTP `8080` (dashboard).
 
 ---
 
-## 3) Repo Map (Where to Touch What)
+## 2) Architecture at a Glance
 
-- `src/main.rs`, `src/lib.rs`: server entrypoint and global wiring
-- `src/server/`: protocol, connection handling, routing
-- `src/brokers/store/`: Store logic
-- `src/brokers/pub-sub/`: Pub/Sub logic
-- `src/brokers/queue/`: Queue logic 
-- `src/brokers/stream/`: Stream logic
-- `src/dashboard/`: server-side dashboard endpoints/integration
-- `dashboard/src/`: React dashboard frontend
-- `sdk/ts/src/`: TypeScript SDK implementation
-- `tests/`: Rust integration tests
-- `docs/guide/`: functional technical docs
+```
+                    ┌─────────────────────┐
+  TS SDK  ──TCP──►  │   transport/tcp     │
+                    │ (binary protocol)   │──┐
+                    └─────────────────────┘  │
+                                             ▼
+                                       ┌──────────┐
+                                       │ brokers/ │ ← managers (pure domain)
+                                       └──────────┘
+                                             ▲
+                    ┌─────────────────────┐  │
+  Dashboard ──HTTP─►│   transport/http    │──┘
+                    │ (axum + JSON DTO)   │
+                    └─────────────────────┘
+```
 
-Pragmatic rule: first identify the domain (`Store`, `Pub/Sub`, `Queue`, `Stream`), then work inside that broker directory.
+**Design principle**: each broker owns its TCP and HTTP surface. `transport/` contains only broker-agnostic plumbing (framing, codec, axum root, static assets, opcode dispatcher).
 
 ---
 
-## 4) How to Run Tests
+## 3) Repo Map
 
-```bash
-# All Rust integration tests
-cargo test
+```
+src/
+  main.rs, lib.rs              # entrypoint, NexoEngine (holds 4 managers)
+  config.rs                    # config types
+  transport/
+    tcp/
+      connection.rs            # per-client TCP session lifecycle
+      dispatcher.rs            # opcode → brokers::<b>::tcp::handle
+      protocol/                # codec, frame, cursor, errors, ToWire trait
+    http/
+      router.rs                # axum root, merges broker routes
+      assets.rs                # embedded dashboard static files
+      payload.rs               # payload → JSON conversion helpers
+  brokers/
+    <broker>/                  # store, queue, pub-sub, stream
+      manager.rs               # public domain API, returns neutral types
+      snapshot.rs              # neutral introspection types (no serde)
+      options.rs               # shared option structs (manager + tcp)
+      tcp.rs                   # OPCODE_MIN/MAX, Command parse, Response, handle()
+      http.rs                  # DTOs (serde), axum handlers, routes()
+      ...                      # domain internals (storage, topic, radix_tree, ...)
 
-# Single suite
-cargo test --test queue_tests
-cargo test --test store_tests
-cargo test --test pubsub_tests
-cargo test --test stream_tests
+tests/                         # Rust integration tests, one file per broker
+dashboard/src/                 # React frontend
+sdk/ts/src/                    # TypeScript SDK
+docs/guide/                    # functional docs (store/queue/pubsub/stream)
+```
 
-# Benchmark/throughput tests (print output)
-cargo test --release bench_<name> -- --test-threads=1 --nocapture
+**Per-broker dependency rule**: `manager.rs` must NOT import from `tcp.rs`, `http.rs`, `transport/`, or `dashboard/`. Adapters depend on the manager, never the reverse.
 
-# TypeScript SDK tests
-cd sdk/ts && npm test   # uses vitest
+---
+
+## 4) Request Flow
+
+**TCP (SDK → server):**
+```
+socket bytes → connection → codec → frame (opcode+payload)
+  → dispatcher → brokers::<b>::tcp::handle
+  → Command::parse → manager.<op>() → Response
+  → ToWire::to_wire → socket
+```
+
+**HTTP (Dashboard → server):**
+```
+HTTP request → axum router → brokers::<b>::http::<handler>
+  → manager.<snapshot>() → Snapshot type
+  → From<Snapshot> for Dto → JSON response
 ```
 
 ---
 
-## 5) Broker Semantics (Must Know)
+## 5) How to Run Tests
 
-### Store
-- Shared in-memory state
-- Good for sessions, volatile cache, counters
-- Focus: concurrency and low-latency reads/writes
-
-Docs/code:
-- `docs/guide/store.md`
-- `src/brokers/store/store_manager.rs`
-
-### Pub/Sub
-- Transient topic-based messages (non-persistent)
-- Supports wildcard matching (`+`, `#`)
-- Focus: realtime fan-out and low latency
-
-Docs/code:
-- `docs/guide/pubsub.md`
-- `src/brokers/pub-sub/pub_sub_manager.rs`
-
-### Queue
-- Durable FIFO with acknowledgments
-- Delays, priority, retries, DLQ
-- Focus: reliable async job processing
-
-Docs/code:
-- `docs/guide/queue.md`
-- `src/brokers/queue/queue_manager.rs`
-
-### Stream
-- Immutable append-only log
-- Offset and consumer-group based reads
-- Focus: audit, replay, event history
-
-Docs/code:
-- `docs/guide/stream.md`
-- `src/brokers/stream/stream_manager.rs`
+```bash
+cargo test                         # all Rust suites
+cargo test --test queue_tests      # single suite (also: store_/pubsub_/stream_tests)
+cargo test --release bench_<name> -- --test-threads=1 --nocapture
+cd sdk/ts && npm test              # TS SDK (vitest)
+```
 
 ---
 
-## 6) Engineering Rules (Pragmatic)
+## 6) Tech Stack
 
-### Core rules
-- Brokers must be self-contained by domain; internal implementations can differ.
-- Each broker should expose one clear public entrypoint (usually a manager), unless a different shape is explicitly justified.
-- Remove dead code and stale comments during refactors.
-
-### Alignment rule (server/sdk/docs/dashboard)
-- For changes affecting protocol or behavior, always check alignment across:
-  - `src/` (server)
-  - `sdk/ts/` (SDK)
-  - `docs/` (documentation)
-  - `dashboard/` (dev UI, when relevant)
-- If no update is needed for one area, explicitly state it in the final summary.
-
-### Test alignment rule
-- Any behavior/protocol change must trigger:
-    - semantic review of existing Rust tests (`tests/`) and SDK TS tests (`sdk/ts/tests/`);
-    - update/addition of tests for new behavior and edge cases;
-    - execution of relevant test suites with explicit reporting.
-
-### Frontend rules (Dashboard, minimal)
-- Use the existing stack first (`React` + `TypeScript` + `shadcn/ui` + `Tailwind`); no new UI/state/data library without explicit justification.
-- Keep each feature self-contained (types, logic, UI in the same feature area).
-- Use `shadcn/ui` components by default; custom components only when no suitable primitive exists.
-- Use semantic styling only (no hardcoded/arbitrary color classes).
-- Avoid implicit fallback values; prefer explicit `loading` / `empty` / `error` states.
-- Do not use `||` for data defaults; use `??` only when nullable behavior is intentional.
-- Keep strict typing (`no any`, `no @ts-ignore` shortcuts).
-
----
-
-## 7) Refactor Playbook (Mandatory)
-
-For every refactor, always provide this output before coding:
-
-1. **Scope**: affected broker/module.
-2. **Change**: what changes + why.
-3. **Impact**: `server` / `sdk` / `dashboard` / `docs` -> `impacted` or `not impacted` (+ one-line reason).
-4. **Code complexity / performance trade-off**: acceptable or not, with quick estimate (`low`/`medium`/`high`).
-  - **Acceptable**: complexity is mostly local to one function/class/module/broker, with limited cross-layer touch and no long-term synchronization burden.
-  - **Not acceptable by default**: complexity is distributed across multiple files/layers/services, adds hidden coupling, or increases operational/debug risk.
-  - If complexity is `high` or distributed, propose a simpler alternative before implementation.
-5. **Tests**: semantic check on existing tests (`tests/`, `sdk/ts/tests/`), plus new tests needed (if any).
-6. **Alignment**: confirm final alignment across server/sdk/dashboard/docs.
-7. **Commit message**: recomend commit message aligned to "conventional commits" standard
-
----
-
-## 8) Code Patterns (Must Know)
-
-### Rust edition and core stack
-- Edition `2021`; async runtime: `tokio` (features: `full`)
-- Shared state: `dashmap` (concurrent map), `parking_lot` (fast RwLock)
+- Rust edition `2021`, async runtime `tokio` (full)
+- Concurrent state: `dashmap`, `parking_lot`
 - Persistence: `rusqlite` (bundled)
 - Serialization: `serde` + `serde_json`; binary frames: `bytes` + `bytemuck`
-- HTTP (dashboard): `axum` + `tower-http`
+- HTTP: `axum` + `tower-http`; embedded assets: `rust-embed`
 - Logging: `tracing` + `tracing-subscriber`
 
-### Concurrency model
-Each broker manager is a cheap-clone struct wrapping `Arc` internals:
+### Concurrency primitives
 
-| Layer | Primitive |
+| Use case | Primitive |
 |---|---|
-| Manager shared across connections | `Arc<Manager>` (via `NexoEngine`) |
-| Name → resource map | `Arc<DashMap<String, Arc<ResourceShared>>>` |
+| Managers shared across connections | `Arc<Manager>` inside `NexoEngine` |
+| Resource registry (name → resource) | `Arc<DashMap<String, Arc<Shared>>>` |
 | Per-resource mutable state | `std::sync::Mutex<Inner>` |
 | PubSub subscription tree | `parking_lot::RwLock<Node>` |
 | Async wake-up | `tokio::sync::Notify` |
-| Background I/O tasks | `mpsc` / `oneshot` channels |
+| Background I/O | `mpsc` / `oneshot` |
 | Graceful shutdown | `CancellationToken` |
-| Atomic counters (stream offsets) | `AtomicU64` |
+| Stream offsets | `AtomicU64` |
 
 ### Error handling
-- No `thiserror` / `anyhow` in the codebase; errors are `Result<_, String>` or `Response::Error(String)` at the broker/wire level.
-- Codec errors use a local `ParseError(Invalid(String))`.
-- Use `tracing::error!` / `tracing::warn!` for non-fatal failures; never silently swallow errors.
-- **`unwrap()`/`expect()` are acceptable only in tests.** In `src/` hot paths use `?` or explicit error handling.
 
-### Protocol / server shape
-- Binary frames: fixed 10-byte header (`bytemuck` `Pod`), opcodes partitioned by broker range.
-- `handle_connection` splits TCP socket into read/write tasks with `mpsc` channels; `JoinSet` for per-request concurrency.
-- Routing: `RequestHandler::route(opcode, payload)` dispatches to `handle_store` / `handle_queue` / `handle_pubsub` / `handle_stream`.
-
-### TypeScript SDK shape
-- `NexoClient.connect()` → holds `NexoConnection` (TCP + EventEmitter) + lazy-cached broker handles.
-- Binary codec mirrors Rust (`FrameCodec` / `Cursor`).
-- Custom error classes in `errors.ts`; no `any`, no `@ts-ignore`.
+- No `thiserror` / `anyhow`. Errors are `Result<_, String>` or `Response::Error(String)`.
+- Codec errors: local `ParseError`.
+- `unwrap()` / `expect()` only in tests; in `src/` use `?` or explicit handling.
 
 ---
 
-## 9) Release Contract (Tag-Driven)
+## 7) Engineering Rules
 
-Releases are triggered by pushing a tag matching `v*`.
+**Core**
+- Brokers are self-contained by domain; `manager.rs` is the only public entrypoint.
+- Managers return neutral types (`snapshot.rs`, raw primitives). Never import `transport/` or DTOs.
+- `tcp.rs` / `http.rs` are the adapters that translate to/from wire formats.
+- Remove dead code and stale comments during refactors.
 
-- Docker image → `emanuelepifani/nexo:<tag>` and `latest`
-- TypeScript SDK → npm `@emanuelepifani/nexo-client`
+**Alignment (always check)**
+For any change touching protocol or behavior, verify:
+- `src/` (server)
+- `sdk/ts/` (SDK)
+- `docs/` (user docs)
+- `dashboard/` (dev UI)
+
+If one area is not impacted, state it explicitly.
+
+**Tests**
+Any behavior/protocol change must update or add tests in `tests/` (Rust) and `sdk/ts/tests/` (TS), then run the relevant suite(s).
+
+**Frontend (dashboard)**
+- Stack: React + TypeScript + `shadcn/ui` + Tailwind. No new libs without justification.
+- Semantic styling only (no arbitrary color classes).
+- Explicit `loading` / `empty` / `error` states; no implicit fallbacks.
+- Use `??` (not `||`) only when nullable behavior is intentional.
+- Strict typing: no `any`, no `@ts-ignore`.
+
+---
+
+## 8) Refactor Checklist
+
+Before coding any non-trivial refactor, produce:
+
+1. **Scope**: broker / module touched.
+2. **Change**: what + why.
+3. **Impact**: server / sdk / dashboard / docs → impacted or not (one line each).
+4. **Complexity**: `low` / `medium` / `high`. If high or cross-layer, propose a simpler alternative first.
+5. **Tests**: existing to review + new to add.
+6. **Commit message**: conventional commits format.
+
+---
+
+## 9) Release
+
+Push a `v*` tag → CI builds:
+- Docker → `emanuelepifani/nexo:<tag>` + `latest`
+- SDK → npm `@emanuelepifani/nexo-client`
 - Docs → Vercel
-- GitHub Release → created after all previous jobs succeed
+- GitHub Release created after all jobs succeed
