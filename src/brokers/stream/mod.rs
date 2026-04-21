@@ -1,4 +1,4 @@
-pub mod stream_manager;
+pub mod manager;
 pub mod config;
 pub mod topic;
 pub mod group;
@@ -9,4 +9,4 @@ pub mod tcp;
 pub mod http;
 pub mod storage;
 
-pub use stream_manager::StreamManager;
+pub use manager::StreamManager;

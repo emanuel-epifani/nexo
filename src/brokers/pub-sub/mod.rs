@@ -1,5 +1,5 @@
 pub mod config;
-pub mod pub_sub_manager;
+pub mod manager;
 pub mod options;
 pub mod types;
 pub mod radix_tree;
@@ -8,5 +8,5 @@ pub mod snapshot;
 pub mod tcp;
 pub mod http;
 
-pub use pub_sub_manager::*;
+pub use manager::*;
 pub use types::*;
