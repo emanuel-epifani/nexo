@@ -13,11 +13,11 @@ use tracing::info;
 
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
-use crate::brokers::stream::group::ConsumerGroup;
-use crate::brokers::stream::message::Message;
+use crate::brokers::stream::domain::group::ConsumerGroup;
+use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
-use crate::brokers::stream::storage::{recover_topic, MessageToAppend, StorageCommand, StorageManager};
-use crate::brokers::stream::topic::{TopicConfig, TopicState};
+use crate::brokers::stream::domain::persistence::{recover_topic, MessageToAppend, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
 
 struct TopicShared {
     inner: Mutex<TopicInner>,

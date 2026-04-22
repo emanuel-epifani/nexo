@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
-use crate::brokers::stream::topic::TopicConfig;
+use crate::brokers::stream::domain::topic::TopicConfig;
 use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;
 

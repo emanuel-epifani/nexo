@@ -9,7 +9,7 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::brokers::queue::queue::QueueConfig;
+use crate::brokers::queue::domain::queue::QueueConfig;
 
 pub struct QueueSnapshot {
     pub name: String,

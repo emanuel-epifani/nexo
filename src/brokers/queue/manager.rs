@@ -13,10 +13,10 @@ use bytes::Bytes;
 use uuid::Uuid;
 use tracing::{error, info};
 
-use crate::brokers::queue::queue::{QueueConfig, QueueState, Message, current_time_ms};
+use crate::brokers::queue::domain::queue::{QueueConfig, QueueState, Message, current_time_ms};
 use crate::brokers::queue::options::QueueCreateOptions;
-use crate::brokers::queue::dlq::{DlqMessage, DlqState};
-use crate::brokers::queue::persistence::{QueueStore, StorageOp};
+use crate::brokers::queue::domain::dlq::{DlqMessage, DlqState};
+use crate::brokers::queue::domain::persistence::{QueueStore, StorageOp};
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::snapshot::{QueueMessagePreview, QueueSnapshot};
 

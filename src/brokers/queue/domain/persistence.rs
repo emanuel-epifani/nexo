@@ -7,8 +7,8 @@ use rusqlite::{params, types::Type, Connection, Result};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::brokers::queue::queue::{Message, MessageState, current_time_ms};
-use crate::brokers::queue::dlq::DlqMessage;
+use crate::brokers::queue::domain::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queue::domain::dlq::DlqMessage;
 
 // ==========================================
 // STORAGE OPERATIONS

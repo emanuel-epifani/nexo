@@ -8,10 +8,11 @@ use tokio::sync::mpsc;
 use std::collections::HashSet;
 
 use crate::brokers::pub_sub::config::PubSubConfig;
-use crate::brokers::pub_sub::radix_tree::Node;
+use crate::brokers::pub_sub::domain::persistence;
+use crate::brokers::pub_sub::domain::radix_tree::Node;
+use crate::brokers::pub_sub::domain::retained::RetainedMessage;
 use crate::brokers::pub_sub::snapshot::{PubSubSnapshot, WildcardSubscription, WildcardSubscriptions};
-use crate::brokers::pub_sub::types::{ClientId, ClientInfo, ClientRegistry, PubSubMessage};
-use crate::brokers::pub_sub::retained;
+use crate::brokers::pub_sub::{ClientId, ClientInfo, ClientRegistry, PubSubMessage};
 
 pub struct PubSubManager {
     tree: Arc<RwLock<Node>>,
@@ -28,8 +29,8 @@ impl PubSubManager {
         let persistence_path = format!("{}/retained.db", config.persistence_path);
 
         // Load retained from SQLite
-        if let Ok(conn) = retained::init_db(&persistence_path) {
-            if let Ok(loaded) = retained::load_all(&conn) {
+        if let Ok(conn) = persistence::init_db(&persistence_path) {
+            if let Ok(loaded) = persistence::load_all(&conn) {
                 let mut root = tree.write();
                 for (path, msg) in loaded {
                     let parts: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
@@ -49,7 +50,7 @@ impl PubSubManager {
         let flush_ms = config.retained_flush_ms;
         
         tokio::spawn(async move {
-            if let Ok(mut conn) = retained::init_db(&flush_path) {
+            if let Ok(mut conn) = persistence::init_db(&flush_path) {
                 let mut interval = tokio::time::interval(Duration::from_millis(flush_ms));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
@@ -65,7 +66,7 @@ impl PubSubManager {
                         results
                     };
 
-                    if let Err(e) = retained::flush(&mut conn, &entries) {
+                    if let Err(e) = persistence::flush(&mut conn, &entries) {
                         tracing::error!("Failed to flush retained messages to SQLite: {}", e);
                     }
                 }
@@ -159,7 +160,7 @@ impl PubSubManager {
                 root.set_retained(&parts, None);
             } else {
                 let effective_ttl = ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds);
-                root.set_retained(&parts, Some(retained::RetainedMessage::new(data.clone(), Some(effective_ttl))));
+                root.set_retained(&parts, Some(RetainedMessage::new(data.clone(), Some(effective_ttl))));
             }
             self.retained_dirty.store(true, Ordering::Relaxed);
         }

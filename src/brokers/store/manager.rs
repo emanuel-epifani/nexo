@@ -1,6 +1,6 @@
 //! Store Manager: In-memory data store orchestrator
 
-use crate::brokers::store::data_structures::map::{MapStore, MapValue};
+use crate::brokers::store::domain::map::{MapStore, MapValue};
 use crate::brokers::store::config::StoreConfig;
 use crate::brokers::store::snapshot::{KeyEntry, StoreSnapshot};
 use std::sync::Arc;

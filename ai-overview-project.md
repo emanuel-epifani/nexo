@@ -59,12 +59,18 @@ src/
       payload.rs               # payload → JSON conversion helpers
   brokers/
     <broker>/                  # store, queue, pub-sub, stream
-      manager.rs               # public domain API, returns neutral types
+      manager.rs               # public API + orchestration, returns neutral types
       snapshot.rs              # neutral introspection types (no serde)
-      options.rs               # shared option structs (manager + tcp)
+      options.rs               # shared option structs (manager + tcp), if present
       tcp.rs                   # OPCODE_MIN/MAX, Command parse, Response, handle()
       http.rs                  # DTOs (serde), axum handlers, routes()
-      ...                      # domain internals (storage, topic, radix_tree, ...)
+      config.rs                # broker-specific config, if present
+      domain/                  # business logic + durable I/O for that broker
+        mod.rs
+        persistence.rs         # optional: same filename everywhere durabilità esiste
+                                 # (Queue SQLite, Stream log/segmenti, Pub/Sub retained SQLite)
+                                 # Store: no persistence.rs (solo in-memory)
+        ...                    # queue/dlq/map/topic/group/message/types/radix_tree/retained, ecc.
 
 tests/                         # Rust integration tests, one file per broker
 dashboard/src/                 # React frontend

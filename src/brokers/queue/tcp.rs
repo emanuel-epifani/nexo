@@ -8,9 +8,9 @@ use crate::transport::tcp::protocol::cursor::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
 
-use crate::brokers::queue::dlq::DlqMessage;
+use crate::brokers::queue::domain::dlq::DlqMessage;
 use crate::brokers::queue::options::{QueueConsumeOptions, QueueCreateOptions, QueuePushOptions};
-use crate::brokers::queue::queue::Message;
+use crate::brokers::queue::domain::queue::Message;
 
 // ==========================================
 // OPCODES

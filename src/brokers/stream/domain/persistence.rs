@@ -22,7 +22,7 @@ use tracing::{error, info, debug, warn};
 use crc32fast::Hasher;
 
 use crate::brokers::stream::options::RetentionOptions;
-use crate::brokers::stream::message::Message;
+use crate::brokers::stream::domain::message::Message;
 
 // ==========================================
 // DATA STRUCTURES

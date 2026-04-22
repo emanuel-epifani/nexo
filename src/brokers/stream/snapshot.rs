@@ -1,7 +1,7 @@
 //! Stream introspection types: neutral snapshots consumed by any read-only
 //! adapter (dashboard HTTP, future CLI, metrics, ...).
 
-use crate::brokers::stream::topic::TopicConfig;
+use crate::brokers::stream::domain::topic::TopicConfig;
 
 pub struct StreamSnapshot {
     pub topics: Vec<TopicSnapshot>,

@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::brokers::queue::dlq::DlqMessage;
-use crate::brokers::queue::queue::QueueConfig;
+use crate::brokers::queue::domain::dlq::DlqMessage;
+use crate::brokers::queue::domain::queue::QueueConfig;
 use crate::brokers::queue::snapshot::{MessageStateTag, QueueMessagePreview, QueueSnapshot};
 use crate::transport::http::payload::payload_to_json_value;
 use crate::NexoEngine;

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::brokers::stream::message::Message;
+use crate::brokers::stream::domain::message::Message;
 
 pub struct PendingMsg {
     pub client_id: String,

@@ -25,7 +25,7 @@ impl MapStore {
         let inner = Arc::new(DashMap::new());
 
         // Weak reference for the cleanup thread
-        // This prevents the thread from keeping the data_structures alive if the StoreManager is dropped
+        // This prevents the thread from keeping the store domain alive if the StoreManager is dropped
         let weak_inner = Arc::downgrade(&inner);
         let cleanup_interval = config.cleanup_interval_secs;
 

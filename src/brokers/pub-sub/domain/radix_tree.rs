@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use bytes::Bytes;
-use crate::brokers::pub_sub::types::ClientId;
-use crate::brokers::pub_sub::retained::RetainedMessage;
 use crate::brokers::pub_sub::snapshot::TopicSnapshot;
+
+use super::retained::RetainedMessage;
+use super::types::ClientId;
 
 pub(crate) struct Node {
     // Exact match children: "kitchen" -> Node
