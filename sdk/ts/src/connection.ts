@@ -73,6 +73,16 @@ export class NexoConnection extends EventEmitter {
       this.socket = new net.Socket();
     }
 
+    // TCP tuning:
+    // - noDelay disables Nagle's algorithm. On real networks this prevents
+    //   Nagle/delayed-ACK interactions that can add up to 40ms to sporadic
+    //   small writes (industry standard for RPC clients). On loopback the
+    //   effect is neutral-to-slightly-negative on median but improves MAX.
+    // - keepAlive makes the kernel probe idle connections so dead sockets
+    //   (NAT/LB idle timeouts) are detected in seconds instead of minutes.
+    this.socket.setNoDelay(true);
+    this.socket.setKeepAlive(true, 30_000);
+
     this.setupListeners();
 
     return new Promise((res, rej) => {
