@@ -93,6 +93,12 @@ const engines = [
   },
 ]
 
+const environments = [
+  { icon: 'laptop', label: 'Local', runtime: 'docker compose up' },
+  { icon: 'flask', label: 'Staging', runtime: 'kubernetes' },
+  { icon: 'rocket', label: 'Production', runtime: 'kubernetes' },
+]
+
 const benchmarks = [
   { engine: 'Store', throughput: '4.5M ops/sec', latency: '< 1 µs' },
   { engine: 'PubSub', throughput: '3.8M msg/sec', latency: '< 1 µs' },
@@ -141,7 +147,7 @@ function handleCopy() {
           <strong>Cache</strong>, <strong>Pub/Sub</strong>, <strong>Streams</strong>, <strong>Queues</strong>, and a built-in dashboard for local debugging. Everything out of the box in a single high-performance <strong>Rust</strong> binary.
         </p>
         <p class="hero-desc">
-          No external dependencies, no complex setup. One SDK, one connection <br>
+          No external dependencies, no emulators, no cloud lock-in. The same container runs on your laptop and in production <br>
             just <code>docker run</code> and start coding.
         </p>
         <a href="/guide/quickstart" class="hero-cta">
@@ -210,6 +216,59 @@ function handleCopy() {
             </button>
             <div class="code-tabs-highlighted" v-html="highlightedCode"></div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dev/Prod Parity -->
+    <section class="landing-section">
+      <div class="section-inner">
+        <h2 class="section-title">Your Laptop Is Production.</h2>
+        <p class="section-desc">
+          When your broker is a managed cloud service, local development becomes a compromise:
+          you run a heavy emulator that only partially mirrors production, or you mock everything
+          and discover the real bugs after deploy. Either way, <strong>dev and prod drift apart</strong>.
+        </p>
+        <p class="section-desc">
+          With Nexo there is no emulator and no mock. The same container runs on your laptop,
+          in CI, in staging and in production — bit-for-bit identical. Same protocol, same
+          semantics, same performance profile.
+        </p>
+        <div class="env-grid">
+          <div
+            v-for="env in environments"
+            :key="env.label"
+            class="env-card"
+          >
+            <div class="env-card-header">
+              <div class="env-card-icon">
+                <!-- Laptop -->
+                <svg v-if="env.icon === 'laptop'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/></svg>
+                <!-- Flask -->
+                <svg v-else-if="env.icon === 'flask'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v7.31"/><path d="M14 9.3V1.99"/><path d="M8.5 2h7"/><path d="M14 9.3a6.5 6.5 0 1 1-4 0"/><path d="M5.52 16h12.96"/></svg>
+                <!-- Rocket -->
+                <svg v-else-if="env.icon === 'rocket'" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>
+              </div>
+              <span class="env-card-label">{{ env.label }}</span>
+            </div>
+            <div class="env-card-body">
+              <div class="env-card-row">
+                <span class="env-card-dot"></span>
+                <span class="env-card-image">nexo:{{ version }}</span>
+              </div>
+              <div class="env-card-meta">
+                <span>:7654</span>
+                <span class="env-card-sep">·</span>
+                <span>:8080</span>
+              </div>
+            </div>
+            <div class="env-card-footer">{{ env.runtime }}</div>
+          </div>
+        </div>
+        <div class="env-equals">
+          <span class="env-equals-line"></span>
+          <span class="env-equals-text">same image · same API · same behavior</span>
+          <span class="env-equals-line"></span>
         </div>
       </div>
     </section>

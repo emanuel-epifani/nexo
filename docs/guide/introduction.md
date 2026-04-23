@@ -7,7 +7,9 @@ It unifies **Caching**, **Pub/Sub**, **Queues**, and **Streams** into a single b
 
 Modern event-driven backends suffer from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized services — one for caching, one for job queues, one for event streams, one for real-time messaging — each with its own container, protocol, configuration, and SDK.
 
-The operational overhead is disproportionate to the actual problems being solved. Setting up a local environment that mirrors production becomes a project in itself, and keeping environments in sync is a constant source of friction.
+On top of that, many teams rely on **managed cloud services** like AWS SQS/SNS, Azure Service Bus, or GCP Pub/Sub. This means your **local development environment will never match production**: you either run heavy emulators (LocalStack, Azure Service Bus Emulator) with partial fidelity, or mock everything and discover bugs only after deploy.
+
+The operational overhead is disproportionate to the actual problems being solved. Keeping dev, staging and production in sync becomes a constant source of friction.
 
 ## The Solution
 
@@ -18,6 +20,20 @@ Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale"
 - **Fast:** Built in Rust on top of Tokio for extreme throughput and incredibly low latency.
 - **Observable:** Built-in Web UI for local development. Inspect all engines in real-time.
 - **Consistent:** Same setup locally and in production. One Docker container, one endpoint.
+
+## True Dev/Prod Parity
+
+With Nexo, the binary you run on your laptop is **the exact same binary** you run in production. No emulators, no mocks, no "it works on my machine".
+
+```yaml
+# docker-compose.yml (local dev)
+services:
+  nexo:
+    image: emanuelepifani/nexo:latest
+    ports: ["7654:7654", "8080:8080"]
+```
+
+Same image, same protocol, same guarantees — from your laptop to your Kubernetes cluster. The dev loop stays fast, the surprises stay out of production.
 
 ## Performance
 
