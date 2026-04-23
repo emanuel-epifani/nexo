@@ -35,15 +35,19 @@ export class NexoTopic<T = any> {
   async unsubscribe() { return this.broker.unsubscribe(this.name); }
 }
 
+type Handler = (data: any) => void;
+
 export class NexoPubSub {
-  private handlers = new Map<string, Array<(data: any) => void>>();
+  private exact = new Map<string, Handler[]>();
+  private wild = new Map<string, { parts: string[], cbs: Handler[] }>();
 
   constructor(private conn: NexoConnection, private logger: Logger) {
     conn.onPush = (topic, data) => this.dispatch(topic, data);
 
     conn.on('reconnect', async () => {
       this.logger.info("[PubSub] Restoring subscriptions...");
-      for (const topic of this.handlers.keys()) {
+      const topics = [...this.exact.keys(), ...this.wild.keys()];
+      for (const topic of topics) {
         try {
           await PubSubCommands.subscribe(this.conn, topic);
         } catch (e) {
@@ -57,35 +61,57 @@ export class NexoPubSub {
     await PubSubCommands.publish(this.conn, topic, data, options || {});
   }
 
-  async subscribe(topic: string, callback: (data: any) => void): Promise<void> {
-    if (!this.handlers.has(topic)) this.handlers.set(topic, []);
-    this.handlers.get(topic)!.push(callback);
-
-    if (this.handlers.get(topic)!.length === 1) {
-      await PubSubCommands.subscribe(this.conn, topic);
+  async subscribe(topic: string, callback: Handler): Promise<void> {
+    if (NexoPubSub.isWildcard(topic)) {
+      let entry = this.wild.get(topic);
+      if (!entry) {
+        entry = { parts: topic.split('/'), cbs: [] };
+        this.wild.set(topic, entry);
+        await PubSubCommands.subscribe(this.conn, topic);
+      }
+      entry.cbs.push(callback);
+    } else {
+      let cbs = this.exact.get(topic);
+      if (!cbs) {
+        cbs = [];
+        this.exact.set(topic, cbs);
+        await PubSubCommands.subscribe(this.conn, topic);
+      }
+      cbs.push(callback);
     }
   }
 
   async unsubscribe(topic: string): Promise<void> {
-    if (this.handlers.has(topic)) {
-      this.handlers.delete(topic);
+    if (this.exact.delete(topic) || this.wild.delete(topic)) {
       await PubSubCommands.unsubscribe(this.conn, topic);
     }
   }
 
   private dispatch(topic: string, data: any) {
-    this.handlers.get(topic)?.forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
-    for (const [pattern, cbs] of this.handlers) {
-      if (pattern === topic) continue;
-      if (this.matches(pattern, topic)) {
-        cbs.forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
+    const exactCbs = this.exact.get(topic);
+    if (exactCbs) {
+      for (const cb of exactCbs) {
+        try { cb(data); } catch (e) { this.logger.error('[PubSub] handler error', e); }
+      }
+    }
+
+    if (this.wild.size === 0) return;
+
+    const tParts = topic.split('/');
+    for (const { parts, cbs } of this.wild.values()) {
+      if (NexoPubSub.matchesParts(parts, tParts)) {
+        for (const cb of cbs) {
+          try { cb(data); } catch (e) { this.logger.error('[PubSub] handler error', e); }
+        }
       }
     }
   }
 
-  private matches(pattern: string, topic: string): boolean {
-    const pParts = pattern.split('/');
-    const tParts = topic.split('/');
+  private static isWildcard(topic: string): boolean {
+    return topic.includes('+') || topic.includes('#');
+  }
+
+  private static matchesParts(pParts: string[], tParts: string[]): boolean {
     for (let i = 0; i < pParts.length; i++) {
       if (pParts[i] === '#') return true;
       if (i >= tParts.length || (pParts[i] !== '+' && pParts[i] !== tParts[i])) return false;
