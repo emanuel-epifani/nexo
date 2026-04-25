@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import { Logger } from './utils/logger';
 import { NexoConnectionConfig } from './config';
 import { FrameType, ResponseStatus } from './protocol';
-import { Cursor, FrameCodec } from './codec';
+import { Cursor, FrameWriter } from './codec';
 import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
 
 /** @internal */
@@ -30,6 +30,10 @@ export class NexoConnection extends EventEmitter {
 
   private shouldReconnect = true;
   private isReconnecting = false;
+
+  // Reused across calls; the underlying byte buffer is allocated fresh on each
+  // begin() (see FrameWriter docs).
+  private readonly writer = new FrameWriter();
 
   constructor(config: NexoConnectionConfig, logger: Logger) {
     super();
@@ -192,7 +196,7 @@ export class NexoConnection extends EventEmitter {
         if (this.onPush) {
           const pushCursor = new Cursor(payload);
           const topic = pushCursor.readString();
-          const data = FrameCodec.decodeAny(pushCursor);
+          const data = pushCursor.decodeAny();
           this.onPush(topic, data);
         }
         break;
@@ -202,11 +206,13 @@ export class NexoConnection extends EventEmitter {
     }
   }
 
-  send(opcode: number, ...args: Buffer[]): Promise<{ status: ResponseStatus, cursor: Cursor }> {
+  send(opcode: number, build?: (w: FrameWriter) => void): Promise<{ status: ResponseStatus, cursor: Cursor }> {
     const id = this.nextId;
     this.nextId = (this.nextId + 1) & 0xFFFFFFFF || 1;
 
-    const packet = FrameCodec.packRequest(id, opcode, ...args);
+    this.writer.begin();
+    if (build) build(this.writer);
+    const packet = this.writer.finish(id, opcode);
 
     return new Promise((resolve, reject) => {
       if (!this.isConnected) {
@@ -241,13 +247,15 @@ export class NexoConnection extends EventEmitter {
    * (no pending handler registered, so handleFrame silently discards it).
    * Used for ack/nack where fire-and-forget is acceptable.
    */
-  sendFireAndForget(opcode: number, ...args: Buffer[]): void {
+  sendFireAndForget(opcode: number, build?: (w: FrameWriter) => void): void {
     if (!this.isConnected) return;
 
     const id = this.nextId;
     this.nextId = (this.nextId + 1) & 0xFFFFFFFF || 1;
 
-    const packet = FrameCodec.packRequest(id, opcode, ...args);
+    this.writer.begin();
+    if (build) build(this.writer);
+    const packet = this.writer.finish(id, opcode);
     this.socket.write(packet);
   }
 

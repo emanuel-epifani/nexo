@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { FrameCodec, Cursor } from '../codec';
+import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError } from '../errors';
@@ -20,15 +20,14 @@ enum QueueOpcode {
 
 const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) =>
-    conn.send(
-      QueueOpcode.Q_CREATE,
-      FrameCodec.string(name),
-      FrameCodec.string(JSON.stringify(config || {}))
+    conn.send(QueueOpcode.Q_CREATE, w => w
+      .string(name)
+      .string(JSON.stringify(config || {}))
     ),
 
   exists: async (conn: NexoConnection, name: string) => {
     try {
-      const res = await conn.send(QueueOpcode.Q_EXISTS, FrameCodec.string(name));
+      const res = await conn.send(QueueOpcode.Q_EXISTS, w => w.string(name));
       return res.status === 0x00;
     } catch {
       return false;
@@ -36,21 +35,19 @@ const QueueCommands = {
   },
 
   delete: (conn: NexoConnection, name: string) =>
-    conn.send(QueueOpcode.Q_DELETE, FrameCodec.string(name)),
+    conn.send(QueueOpcode.Q_DELETE, w => w.string(name)),
 
   push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) =>
-    conn.send(
-      QueueOpcode.Q_PUSH,
-      FrameCodec.string(name),
-      FrameCodec.string(JSON.stringify(options || {})),
-      FrameCodec.any(data)
+    conn.send(QueueOpcode.Q_PUSH, w => w
+      .string(name)
+      .string(JSON.stringify(options || {}))
+      .any(data)
     ),
 
   consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
-    const res = await conn.send(
-      QueueOpcode.Q_CONSUME,
-      FrameCodec.string(name),
-      FrameCodec.string(JSON.stringify({ batchSize, waitMs }))
+    const res = await conn.send(QueueOpcode.Q_CONSUME, w => w
+      .string(name)
+      .string(JSON.stringify({ batchSize, waitMs }))
     );
 
     const count = res.cursor.readU32();
@@ -61,41 +58,39 @@ const QueueCommands = {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      const data = new Cursor(payloadBuf).decodeAny();
       messages.push({ id: idHex, data });
     }
     return messages;
   },
 
   ack: (conn: NexoConnection, name: string, id: string) =>
-    conn.sendFireAndForget(QueueOpcode.Q_ACK, FrameCodec.uuid(id), FrameCodec.string(name)),
+    conn.sendFireAndForget(QueueOpcode.Q_ACK, w => w.uuid(id).string(name)),
 
   nack: (conn: NexoConnection, name: string, id: string, reason: string) =>
-    conn.sendFireAndForget(
-      QueueOpcode.Q_NACK,
-      FrameCodec.uuid(id),
-      FrameCodec.string(name),
-      FrameCodec.string(reason)
+    conn.sendFireAndForget(QueueOpcode.Q_NACK, w => w
+      .uuid(id)
+      .string(name)
+      .string(reason)
     ),
 
   // DLQ Commands
   peekDLQ: async <T>(conn: NexoConnection, name: string, limit: number, offset: number): Promise<{ total: number, items: { id: string, data: T, attempts: number, failureReason: string }[] }> => {
-    const res = await conn.send(
-      QueueOpcode.Q_PEEK_DLQ,
-      FrameCodec.string(name),
-      FrameCodec.u32(limit),
-      FrameCodec.u32(offset)
+    const res = await conn.send(QueueOpcode.Q_PEEK_DLQ, w => w
+      .string(name)
+      .u32(limit)
+      .u32(offset)
     );
 
     const total = res.cursor.readU32();
     const count = res.cursor.readU32();
-    
+
     const items: { id: string; data: T; attempts: number; failureReason: string }[] = [];
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      const data = new Cursor(payloadBuf).decodeAny();
       const attempts = res.cursor.readU32();
       const failureReason = res.cursor.readString();
       items.push({ id: idHex, data, attempts, failureReason });
@@ -104,28 +99,23 @@ const QueueCommands = {
   },
 
   moveToQueue: async (conn: NexoConnection, name: string, messageId: string): Promise<boolean> => {
-    const res = await conn.send(
-      QueueOpcode.Q_MOVE_TO_QUEUE,
-      FrameCodec.string(name),
-      FrameCodec.uuid(messageId)
+    const res = await conn.send(QueueOpcode.Q_MOVE_TO_QUEUE, w => w
+      .string(name)
+      .uuid(messageId)
     );
     return res.cursor.readU8() === 1;
   },
 
   deleteDLQ: async (conn: NexoConnection, name: string, messageId: string): Promise<boolean> => {
-    const res = await conn.send(
-      QueueOpcode.Q_DELETE_DLQ,
-      FrameCodec.string(name),
-      FrameCodec.uuid(messageId)
+    const res = await conn.send(QueueOpcode.Q_DELETE_DLQ, w => w
+      .string(name)
+      .uuid(messageId)
     );
     return res.cursor.readU8() === 1;
   },
 
   purgeDLQ: async (conn: NexoConnection, name: string): Promise<number> => {
-    const res = await conn.send(
-      QueueOpcode.Q_PURGE_DLQ,
-      FrameCodec.string(name)
-    );
+    const res = await conn.send(QueueOpcode.Q_PURGE_DLQ, w => w.string(name));
     return res.cursor.readU32();
   },
 };

@@ -7,7 +7,7 @@ export class Cursor {
   readU8(): number { return this.buf.readUInt8(this.offset++); }
   readU32(): number { const v = this.buf.readUInt32BE(this.offset); this.offset += 4; return v; }
   readU64(): bigint { const v = this.buf.readBigUInt64BE(this.offset); this.offset += 8; return v; }
-  
+
   readBuffer(len: number): Buffer {
     const v = this.buf.subarray(this.offset, this.offset + len);
     this.offset += len;
@@ -16,113 +16,163 @@ export class Cursor {
 
   readString(): string {
     const len = this.readU32();
-    return this.readBuffer(len).toString('utf8');
+    const s = this.buf.toString('utf8', this.offset, this.offset + len);
+    this.offset += len;
+    return s;
   }
 
   readUUID(): string {
-    return this.readBuffer(16).toString('hex');
+    const s = this.buf.toString('hex', this.offset, this.offset + 16);
+    this.offset += 16;
+    return s;
+  }
+
+  /**
+   * Decode a trailing `any` value (DataType-prefixed) from the current position
+   * to the end of the buffer.
+   */
+  decodeAny(): any {
+    const type = this.buf.readUInt8(this.offset++);
+    const start = this.offset;
+    const end = this.buf.length;
+    this.offset = end;
+    switch (type) {
+      case DataType.JSON:
+        return start === end ? null : JSON.parse(this.buf.toString('utf8', start, end));
+      case DataType.STRING:
+        return this.buf.toString('utf8', start, end);
+      case DataType.RAW:
+      default:
+        return this.buf.subarray(start, end);
+    }
   }
 }
 
-/** @internal */
-export class FrameCodec {
-  // --- ENCODERS (Data -> Buffer) ---
+/**
+ * Single-pass frame writer. Stages no per-arg `Buffer`s: each `u8/u32/u64/string/
+ * uuid/any` writes inline into a growable internal buffer that is then returned
+ * (zero-copy `subarray`) by `finish()`.
+ *
+ * One instance per connection is reused via `begin()` (which allocates a fresh
+ * internal buffer each call — required because `socket.write` retains a
+ * reference to the previously returned buffer until drained).
+ *
+ * @internal
+ */
+export class FrameWriter {
+  private buf!: Buffer;
+  private offset = 10;
 
-  static u8(v: number): Buffer {
-    const b = Buffer.allocUnsafe(1);
-    b.writeUInt8(v, 0);
-    return b;
+  /**
+   * Start a new frame. Allocates a fresh internal buffer; default initial size
+   * covers ~99% of broker commands without a grow.
+   */
+  begin(initialSize = 256): this {
+    this.buf = Buffer.allocUnsafe(initialSize);
+    this.offset = 10;
+    return this;
   }
 
-  static u32(v: number): Buffer {
-    const b = Buffer.allocUnsafe(4);
-    b.writeUInt32BE(v, 0);
-    return b;
+  private ensure(extra: number): void {
+    const need = this.offset + extra;
+    if (need <= this.buf.length) return;
+    let next = this.buf.length * 2;
+    while (next < need) next *= 2;
+    const grown = Buffer.allocUnsafe(next);
+    this.buf.copy(grown, 0, 0, this.offset);
+    this.buf = grown;
   }
 
-  static u64(v: number | bigint): Buffer {
-    const b = Buffer.allocUnsafe(8);
-    b.writeBigUInt64BE(BigInt(v), 0);
-    return b;
+  u8(v: number): this {
+    this.ensure(1);
+    this.buf.writeUInt8(v, this.offset);
+    this.offset += 1;
+    return this;
   }
 
-  static string(s: string): Buffer {
-    const strBuf = Buffer.from(s, 'utf8');
-    const result = Buffer.allocUnsafe(4 + strBuf.length);
-    result.writeUInt32BE(strBuf.length, 0);
-    strBuf.copy(result, 4);
-    return result;
+  u32(v: number): this {
+    this.ensure(4);
+    this.buf.writeUInt32BE(v, this.offset);
+    this.offset += 4;
+    return this;
   }
 
-  static uuid(hex: string): Buffer {
-    // Remove dashes from UUID format (e.g., "550e8400-e29b-41d4-a716-446655440000")
-    // This handles both formats: with dashes (from crypto.randomUUID()) and without (from server)
-    const cleanHex = hex.replace(/-/g, '');
-    return Buffer.from(cleanHex, 'hex');
+  u64(v: bigint | number): this {
+    this.ensure(8);
+    this.buf.writeBigUInt64BE(typeof v === 'bigint' ? v : BigInt(v), this.offset);
+    this.offset += 8;
+    return this;
   }
 
-  static any(data: any): Buffer {
-    let type = DataType.RAW;
-    let payload: Buffer;
+  string(s: string): this {
+    const len = Buffer.byteLength(s, 'utf8');
+    this.ensure(4 + len);
+    this.buf.writeUInt32BE(len, this.offset);
+    this.offset += 4;
+    if (len > 0) this.buf.write(s, this.offset, len, 'utf8');
+    this.offset += len;
+    return this;
+  }
 
+  /**
+   * Write a 16-byte UUID parsing hex inline. Accepts both canonical (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+   * and dashless 32-char hex. No regex, no intermediate Buffer.
+   */
+  uuid(hex: string): this {
+    this.ensure(16);
+    const buf = this.buf;
+    let off = this.offset;
+    let high = 0;
+    let highSet = false;
+    for (let i = 0; i < hex.length; i++) {
+      const c = hex.charCodeAt(i);
+      if (c === 0x2D /* '-' */) continue;
+      let nib: number;
+      if (c >= 0x30 && c <= 0x39) nib = c - 0x30;
+      else if (c >= 0x61 && c <= 0x66) nib = c - 0x57;
+      else if (c >= 0x41 && c <= 0x46) nib = c - 0x37;
+      else throw new Error(`Invalid UUID hex char at ${i}: ${hex[i]}`);
+      if (!highSet) { high = nib << 4; highSet = true; }
+      else { buf[off++] = high | nib; highSet = false; }
+    }
+    this.offset = off;
+    return this;
+  }
+
+  any(data: unknown): this {
     if (Buffer.isBuffer(data)) {
-      type = DataType.RAW;
-      payload = data;
+      this.ensure(1 + data.length);
+      this.buf.writeUInt8(DataType.RAW, this.offset++);
+      data.copy(this.buf, this.offset);
+      this.offset += data.length;
     } else if (typeof data === 'string') {
-      type = DataType.STRING;
-      payload = Buffer.from(data, 'utf8');
+      const len = Buffer.byteLength(data, 'utf8');
+      this.ensure(1 + len);
+      this.buf.writeUInt8(DataType.STRING, this.offset++);
+      if (len > 0) this.buf.write(data, this.offset, len, 'utf8');
+      this.offset += len;
     } else {
-      type = DataType.JSON;
-      payload = Buffer.from(JSON.stringify(data ?? null), 'utf8');
+      const json = JSON.stringify(data ?? null);
+      const len = Buffer.byteLength(json, 'utf8');
+      this.ensure(1 + len);
+      this.buf.writeUInt8(DataType.JSON, this.offset++);
+      this.buf.write(json, this.offset, len, 'utf8');
+      this.offset += len;
     }
-
-    const result = Buffer.allocUnsafe(1 + payload.length);
-    result.writeUInt8(type, 0);
-    payload.copy(result, 1);
-    return result;
+    return this;
   }
 
-  static packRequest(id: number, opcode: number, ...parts: Buffer[]): Buffer {
-    // 1. Calcolo dimensione PAYLOAD
-    let payloadSize = 0;
-    for (const part of parts) payloadSize += part.length;
-
-    // 2. Allocazione buffer TOTALE (Header [10 bytes] + Payload)
-    // Header: [Type:1][Opcode:1][ID:4][Len:4]
-    const result = Buffer.allocUnsafe(10 + payloadSize);
-
-    // --- SCRITTURA HEADER (Bytes 0-9) ---
-    // Byte 0: Tipo di Frame (REQUEST = 0x01)
-    result.writeUInt8(FrameType.REQUEST, 0);
-    // Byte 1: Opcode
-    result.writeUInt8(opcode, 1);
-    // Bytes 2-5: ID della richiesta (UInt32 Big Endian)
-    result.writeUInt32BE(id, 2);
-    // Bytes 6-9: Lunghezza del Payload (UInt32 Big Endian)
-    result.writeUInt32BE(payloadSize, 6);
-
-    // --- SCRITTURA PAYLOAD (Bytes 10+) ---
-    // Copia degli argomenti (dati effettivi)
-    let offset = 10;
-    for (const part of parts) {
-      part.copy(result, offset);
-      offset += part.length;
-    }
-
-    return result;
-  }
-
-  // --- DECODERS (Buffer -> Data) ---
-
-  static decodeAny(cursor: Cursor): any {
-    const type = cursor.readU8();
-    const content = cursor.buf.subarray(cursor.offset); // Read until end
-    // Note: In strict framing, we might want to pass length, but here 'Any' is usually trailing
-
-    switch (type) {
-      case DataType.JSON: return content.length ? JSON.parse(content.toString('utf8')) : null;
-      case DataType.STRING: return content.toString('utf8');
-      case DataType.RAW: default: return content;
-    }
+  /**
+   * Finalize the frame: writes the 10-byte header in-place and returns a
+   * zero-copy view of the populated bytes. After calling this, the writer must
+   * be re-`begin()`ed before reuse.
+   */
+  finish(id: number, opcode: number): Buffer {
+    const total = this.offset;
+    this.buf.writeUInt8(FrameType.REQUEST, 0);
+    this.buf.writeUInt8(opcode, 1);
+    this.buf.writeUInt32BE(id, 2);
+    this.buf.writeUInt32BE(total - 10, 6);
+    return this.buf.subarray(0, total);
   }
 }

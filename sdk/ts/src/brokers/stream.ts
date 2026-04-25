@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { FrameCodec, Cursor } from '../codec';
+import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError } from '../errors';
@@ -38,15 +38,14 @@ export interface StreamMessage<T> {
 
 const StreamCommands = {
   create: (conn: NexoConnection, name: string, options: StreamCreateOptions) =>
-    conn.send(
-      StreamOpcode.S_CREATE,
-      FrameCodec.string(name),
-      FrameCodec.string(JSON.stringify(options || {}))
+    conn.send(StreamOpcode.S_CREATE, w => w
+      .string(name)
+      .string(JSON.stringify(options || {}))
     ),
 
   exists: async (conn: NexoConnection, name: string) => {
     try {
-      const res = await conn.send(StreamOpcode.S_EXISTS, FrameCodec.string(name));
+      const res = await conn.send(StreamOpcode.S_EXISTS, w => w.string(name));
       return res.status === 0x00;
     } catch {
       return false;
@@ -54,17 +53,19 @@ const StreamCommands = {
   },
 
   delete: (conn: NexoConnection, name: string) =>
-    conn.send(StreamOpcode.S_DELETE, FrameCodec.string(name)),
+    conn.send(StreamOpcode.S_DELETE, w => w.string(name)),
 
   publish: (conn: NexoConnection, name: string, data: any) =>
-    conn.send(
-      StreamOpcode.S_PUB,
-      FrameCodec.string(name),
-      FrameCodec.any(data)
+    conn.send(StreamOpcode.S_PUB, w => w
+      .string(name)
+      .any(data)
     ),
 
   join: async (conn: NexoConnection, stream: string, group: string) => {
-    const res = await conn.send(StreamOpcode.S_JOIN, FrameCodec.string(group), FrameCodec.string(stream));
+    const res = await conn.send(StreamOpcode.S_JOIN, w => w
+      .string(group)
+      .string(stream)
+    );
     const ackFloor = res.cursor.readU64();
     return { ackFloor };
   },
@@ -76,12 +77,11 @@ const StreamCommands = {
     batchSize: number,
     waitMs: number
   ): Promise<StreamMessage<T>[]> => {
-    const res = await conn.send(
-      StreamOpcode.S_FETCH,
-      FrameCodec.string(stream),
-      FrameCodec.string(group),
-      FrameCodec.u32(batchSize),
-      FrameCodec.u32(waitMs)
+    const res = await conn.send(StreamOpcode.S_FETCH, w => w
+      .string(stream)
+      .string(group)
+      .u32(batchSize)
+      .u32(waitMs)
     );
 
     const count = res.cursor.readU32();
@@ -91,41 +91,37 @@ const StreamCommands = {
       res.cursor.readU64(); // skip timestamp
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = FrameCodec.decodeAny(new Cursor(payloadBuf));
+      const data = new Cursor(payloadBuf).decodeAny();
       messages.push({ seq, data });
     }
     return messages;
   },
 
   ack: (conn: NexoConnection, stream: string, group: string, seq: bigint) =>
-    conn.sendFireAndForget(
-      StreamOpcode.S_ACK,
-      FrameCodec.string(stream),
-      FrameCodec.string(group),
-      FrameCodec.u64(seq)
+    conn.sendFireAndForget(StreamOpcode.S_ACK, w => w
+      .string(stream)
+      .string(group)
+      .u64(seq)
     ),
 
   nack: (conn: NexoConnection, stream: string, group: string, seq: bigint) =>
-    conn.sendFireAndForget(
-      StreamOpcode.S_NACK,
-      FrameCodec.string(stream),
-      FrameCodec.string(group),
-      FrameCodec.u64(seq)
+    conn.sendFireAndForget(StreamOpcode.S_NACK, w => w
+      .string(stream)
+      .string(group)
+      .u64(seq)
     ),
 
   seek: (conn: NexoConnection, stream: string, group: string, target: 'beginning' | 'end') =>
-    conn.send(
-      StreamOpcode.S_SEEK,
-      FrameCodec.string(stream),
-      FrameCodec.string(group),
-      FrameCodec.u8(target === 'beginning' ? 0 : 1)
+    conn.send(StreamOpcode.S_SEEK, w => w
+      .string(stream)
+      .string(group)
+      .u8(target === 'beginning' ? 0 : 1)
     ),
 
   leave: (conn: NexoConnection, stream: string, group: string) =>
-    conn.send(
-      StreamOpcode.S_LEAVE,
-      FrameCodec.string(stream),
-      FrameCodec.string(group)
+    conn.send(StreamOpcode.S_LEAVE, w => w
+      .string(stream)
+      .string(group)
     ),
 };
 

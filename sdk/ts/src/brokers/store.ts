@@ -1,6 +1,5 @@
 import { NexoConnection } from '../connection';
 import { ResponseStatus } from '../protocol';
-import { FrameCodec } from '../codec';
 
 enum StoreOpcode {
   MAP_SET = 0x02,
@@ -10,21 +9,20 @@ enum StoreOpcode {
 
 const StoreCommands = {
   mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) =>
-    conn.send(
-      StoreOpcode.MAP_SET,
-      FrameCodec.string(key),
-      FrameCodec.string(JSON.stringify(options || {})),
-      FrameCodec.any(value)
+    conn.send(StoreOpcode.MAP_SET, w => w
+      .string(key)
+      .string(JSON.stringify(options || {}))
+      .any(value)
     ),
 
   mapGet: async (conn: NexoConnection, key: string) => {
-    const res = await conn.send(StoreOpcode.MAP_GET, FrameCodec.string(key));
+    const res = await conn.send(StoreOpcode.MAP_GET, w => w.string(key));
     if (res.status === ResponseStatus.NULL) return null;
-    return FrameCodec.decodeAny(res.cursor);
+    return res.cursor.decodeAny();
   },
 
   mapDel: (conn: NexoConnection, key: string) =>
-    conn.send(StoreOpcode.MAP_DEL, FrameCodec.string(key)),
+    conn.send(StoreOpcode.MAP_DEL, w => w.string(key)),
 };
 
 export interface MapSetOptions {

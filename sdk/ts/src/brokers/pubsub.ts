@@ -1,5 +1,4 @@
 import { NexoConnection } from '../connection';
-import { FrameCodec } from '../codec';
 import { Logger } from '../utils/logger';
 
 enum PubSubOpcode {
@@ -10,18 +9,17 @@ enum PubSubOpcode {
 
 const PubSubCommands = {
   publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) =>
-    conn.send(
-      PubSubOpcode.PUB,
-      FrameCodec.string(topic),
-      FrameCodec.string(JSON.stringify(options || {})),
-      FrameCodec.any(data)
+    conn.send(PubSubOpcode.PUB, w => w
+      .string(topic)
+      .string(JSON.stringify(options || {}))
+      .any(data)
     ),
 
   subscribe: (conn: NexoConnection, topic: string) =>
-    conn.send(PubSubOpcode.SUB, FrameCodec.string(topic)),
+    conn.send(PubSubOpcode.SUB, w => w.string(topic)),
 
   unsubscribe: (conn: NexoConnection, topic: string) =>
-    conn.send(PubSubOpcode.UNSUB, FrameCodec.string(topic)),
+    conn.send(PubSubOpcode.UNSUB, w => w.string(topic)),
 };
 
 export interface PublishOptions {
