@@ -21,6 +21,7 @@ pub struct TopicConfig {
     pub eviction_interval_ms: u64,
     pub max_ack_pending: usize,
     pub ack_wait_ms: u64,
+    pub max_deliveries: u32,
 }
 
 impl TopicConfig {
@@ -53,6 +54,7 @@ impl TopicConfig {
             eviction_interval_ms: sys.eviction_interval_ms,
             max_ack_pending: sys.max_ack_pending,
             ack_wait_ms: sys.ack_wait_ms,
+            max_deliveries: sys.max_deliveries,
         }
     }
 }
@@ -62,7 +64,7 @@ pub struct TopicState {
     // Single log
     pub log: VecDeque<Message>,
     pub next_seq: u64,
-    pub start_seq: u64,       // first seq available (after retention)
+    pub head_seq: u64,
     pub ram_start_seq: u64,   // first seq in RAM window
     // Config
     pub ram_soft_limit: usize,
@@ -74,22 +76,21 @@ impl TopicState {
             name,
             log: VecDeque::new(),
             next_seq: 1, // sequences start at 1 (0 = "nothing processed")
-            start_seq: 1,
+            head_seq: 1,
             ram_start_seq: 1,
             ram_soft_limit,
         }
     }
 
-    pub fn restore(name: String, ram_soft_limit: usize, messages: VecDeque<Message>) -> Self {
-        let next_seq = messages.back().map(|m| m.seq + 1).unwrap_or(1);
-        let ram_start_seq = messages.front().map(|m| m.seq).unwrap_or(next_seq);
-        let start_seq = ram_start_seq; // will be refined with segment index
+    pub fn restore(name: String, ram_soft_limit: usize, head_seq: u64, messages: VecDeque<Message>) -> Self {
+        let next_seq = messages.back().map(|m| m.seq + 1).unwrap_or(head_seq.max(1));
+        let ram_start_seq = messages.front().map(|m| m.seq).unwrap_or(next_seq.max(head_seq));
 
         Self {
             name,
             log: messages,
             next_seq,
-            start_seq,
+            head_seq,
             ram_start_seq,
             ram_soft_limit,
         }
@@ -117,7 +118,7 @@ impl TopicState {
     }
 
     pub fn read(&self, from_seq: u64, limit: usize) -> Vec<Message> {
-        let from_seq = from_seq.max(1); // sequences start at 1
+        let from_seq = from_seq.max(self.head_seq).max(1);
         // Hot read: from RAM
         if from_seq >= self.ram_start_seq && !self.log.is_empty() {
             let idx = (from_seq - self.ram_start_seq) as usize;
@@ -135,7 +136,7 @@ impl TopicState {
             if let Some(front) = self.log.front() {
                 if front.seq <= persisted_seq {
                     if let Some(removed) = self.log.pop_front() {
-                        self.ram_start_seq = removed.seq + 1;
+                        self.ram_start_seq = (removed.seq + 1).max(self.head_seq);
                     }
                 } else {
                     break; // don't evict unpersisted data
@@ -143,6 +144,22 @@ impl TopicState {
             } else {
                 break;
             }
+        }
+    }
+
+    pub fn apply_head(&mut self, head_seq: u64) {
+        self.head_seq = head_seq.max(1);
+        while let Some(front) = self.log.front() {
+            if front.seq < self.head_seq {
+                self.log.pop_front();
+            } else {
+                break;
+            }
+        }
+        if let Some(front) = self.log.front() {
+            self.ram_start_seq = front.seq;
+        } else {
+            self.ram_start_seq = self.next_seq.max(self.head_seq);
         }
     }
 }

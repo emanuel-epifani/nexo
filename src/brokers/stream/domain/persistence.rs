@@ -36,6 +36,8 @@ pub struct RecoveredState {
     pub segments: Vec<Segment>,
     /// Group ID -> ack_floor
     pub groups_data: HashMap<String, u64>,
+    /// First retained sequence on disk
+    pub head_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,11 @@ pub struct MessageToAppend {
     pub seq: u64,
     pub timestamp: u64,
     pub payload: Bytes,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionOutcome {
+    pub head_seq: u64,
 }
 
 // ==========================================
@@ -79,6 +86,7 @@ pub enum StorageCommand {
         topic_name: String,
         retention: RetentionOptions,
         max_segment_size: u64,
+        reply: oneshot::Sender<RetentionOutcome>,
     },
 
     DropTopic {
@@ -170,9 +178,10 @@ impl StorageManager {
                     error!("Failed to save groups for {}: {}", topic_name, e);
                 }
             }
-            StorageCommand::ApplyRetention { topic_name, retention, max_segment_size: _ } => {
+            StorageCommand::ApplyRetention { topic_name, retention, max_segment_size: _, reply } => {
                 let base_path = self.base_path.join(&topic_name);
-                self.apply_retention(&topic_name, &base_path, &retention).await;
+                let outcome = self.apply_retention(&topic_name, &base_path, &retention).await;
+                let _ = reply.send(outcome);
             }
             StorageCommand::DropTopic { topic_name, reply } => {
                 if let Some(ctx) = self.topics.remove(&topic_name) {
@@ -294,10 +303,14 @@ impl StorageManager {
         let base_path = self.base_path.join(topic_name);
         let segments = find_segments(&base_path).await.unwrap_or_default();
         let mut all_msgs = Vec::new();
-        let mut current_from_seq = from_seq;
+        let Some(first_segment) = segments.first() else {
+            return all_msgs;
+        };
+
+        let mut current_from_seq = from_seq.max(first_segment.start_seq);
         let mut remaining_limit = limit;
 
-        if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= from_seq) {
+        if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= current_from_seq) {
             for segment in segments.iter().skip(idx) {
                 if remaining_limit == 0 { break; }
                 let msgs = read_log_segment(&segment.path, current_from_seq, remaining_limit).await;
@@ -311,22 +324,33 @@ impl StorageManager {
         all_msgs
     }
 
-    async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) {
-        if retention.max_age_ms.is_none() && retention.max_bytes.is_none() { return; }
+    async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> RetentionOutcome {
+        if retention.max_age_ms.is_none() && retention.max_bytes.is_none() {
+            return RetentionOutcome {
+                head_seq: find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1),
+            };
+        }
         let mut segments = find_segments(base_path).await.unwrap_or_default();
-        if segments.len() <= 1 { return; }
+        if segments.len() <= 1 {
+            return RetentionOutcome {
+                head_seq: segments.first().map(|s| s.start_seq).unwrap_or(1),
+            };
+        }
 
         if let Some(max_age) = retention.max_age_ms {
             let limit = std::time::SystemTime::now() - Duration::from_millis(max_age);
             let mut survivors = Vec::new();
+            let last_start_seq = segments.last().map(|seg| seg.start_seq);
             for seg in segments {
                 let mut deleted = false;
-                if let Ok(metadata) = tokio::fs::metadata(&seg.path).await {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified < limit {
-                            self.open_files.pop(&seg.path);
-                            let _ = tokio::fs::remove_file(&seg.path).await;
-                            deleted = true;
+                if Some(seg.start_seq) != last_start_seq {
+                    if let Ok(metadata) = tokio::fs::metadata(&seg.path).await {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified < limit {
+                                self.open_files.pop(&seg.path);
+                                let _ = tokio::fs::remove_file(&seg.path).await;
+                                deleted = true;
+                            }
                         }
                     }
                 }
@@ -350,6 +374,9 @@ impl StorageManager {
                 i += 1;
             }
         }
+
+        let head_seq = find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
+        RetentionOutcome { head_seq }
     }
 }
 
@@ -423,6 +450,7 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
     if !base_path.exists() { return state; }
 
     if let Ok(segments) = find_segments(&base_path).await {
+        state.head_seq = segments.first().map(|seg| seg.start_seq).unwrap_or(1);
         if let Some(last_segment) = segments.last() {
             state.messages = load_segment_file(&last_segment.path).await;
         }

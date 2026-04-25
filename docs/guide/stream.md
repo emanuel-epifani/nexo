@@ -89,13 +89,16 @@ When your stream reaches its limits, old data is automatically purged.
 Nexo guarantees that every message is processed.
 
 *   **Ack**: Successful processing. Move forward.
-*   **Nack**: Explicit failure. Redeliver immediately.
-*   **Timeout**: If a worker crashes, the message is automatically redelivered after 30s.
+*   **Timeout**: If a worker crashes or does not respond, the message is automatically redelivered after `ack_wait` (default 30s).
+*   **Max Deliveries**: After exceeding the configured retry limit, the message is moved to a **parked** state and requires manual intervention.
 
 ```text
 Published ──▶ Delivered ──▶ [ Processing ] ──┬──▶ Ack (Done)
                                ▲             │
-                               └─────────────┴──▶ Nack/Timeout (Retry)
+                               └─────────────┴──▶ Timeout (Retry)
+                                                     │
+                                                     ▼ (after max retries)
+                                                  Parked (Manual)
 ```
 
 ## Consumer Groups

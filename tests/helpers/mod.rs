@@ -40,7 +40,7 @@ pub async fn setup_stream_manager() -> (StreamManager, TempDir) {
     let mut config = Config::global().stream.clone();
     config.persistence_path = path;
 
-    let manager = StreamManager::new(Arc::new(config));
+    let manager = StreamManager::new(Arc::new(config)).await;
     (manager, temp_dir)
 }
 

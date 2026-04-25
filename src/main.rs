@@ -25,7 +25,7 @@ async fn main() {
     tracing::debug!("{:#?}", config);
     tracing::debug!("----------------------------");
 
-    let engine = NexoEngine::new(&config);
+    let engine = NexoEngine::new(&config).await;
     
     let addr = format!("{}:{}", config.server.host, config.server.port);
 

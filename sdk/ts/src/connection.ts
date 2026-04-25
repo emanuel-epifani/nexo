@@ -225,13 +225,13 @@ export class NexoConnection extends EventEmitter {
             const errCursor = new Cursor(res.data);
             const errMsg = errCursor.readString();
             // Silence common expected errors
-            if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('not found')) {
+            if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('NOT_MEMBER') && !errMsg.includes('not found')) {
               this.logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);
             }
             reject(new Error(errMsg));
-          } else {
-            resolve({ status: res.status, cursor: new Cursor(res.data) });
+            return;
           }
+          resolve({ status: res.status, cursor: new Cursor(res.data) });
         },
         reject,
         deadline: Date.now() + this.config.requestTimeoutMs

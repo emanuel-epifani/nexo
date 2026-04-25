@@ -2,7 +2,7 @@ import { NexoConnection } from '../connection';
 import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
-import { ConnectionClosedError } from '../errors';
+import { ConnectionClosedError, NotConnectedError } from '../errors';
 
 enum StreamOpcode {
   S_CREATE = 0x30,
@@ -12,7 +12,6 @@ enum StreamOpcode {
   S_ACK = 0x34,
   S_EXISTS = 0x35,
   S_DELETE = 0x36,
-  S_NACK = 0x37,
   S_SEEK = 0x38,
   S_LEAVE = 0x39,
 }
@@ -34,6 +33,11 @@ export interface StreamSubscribeOptions {
 export interface StreamMessage<T> {
   seq: bigint;
   data: T;
+}
+
+interface StreamConsumerSession {
+  consumerId: string;
+  generation: bigint;
 }
 
 const StreamCommands = {
@@ -67,19 +71,25 @@ const StreamCommands = {
       .string(stream)
     );
     const ackFloor = res.cursor.readU64();
-    return { ackFloor };
+    const generation = res.cursor.readU64();
+    const consumerId = res.cursor.readString();
+    return { ackFloor, generation, consumerId };
   },
 
   fetch: async <T>(
     conn: NexoConnection,
     stream: string,
     group: string,
+    consumerId: string,
+    generation: bigint,
     batchSize: number,
     waitMs: number
   ): Promise<StreamMessage<T>[]> => {
     const res = await conn.send(StreamOpcode.S_FETCH, w => w
       .string(stream)
       .string(group)
+      .string(consumerId)
+      .u64(generation)
       .u32(batchSize)
       .u32(waitMs)
     );
@@ -97,17 +107,12 @@ const StreamCommands = {
     return messages;
   },
 
-  ack: (conn: NexoConnection, stream: string, group: string, seq: bigint) =>
+  ack: (conn: NexoConnection, stream: string, group: string, consumerId: string, generation: bigint, seq: bigint) =>
     conn.sendFireAndForget(StreamOpcode.S_ACK, w => w
       .string(stream)
       .string(group)
-      .u64(seq)
-    ),
-
-  nack: (conn: NexoConnection, stream: string, group: string, seq: bigint) =>
-    conn.sendFireAndForget(StreamOpcode.S_NACK, w => w
-      .string(stream)
-      .string(group)
+      .string(consumerId)
+      .u64(generation)
       .u64(seq)
     ),
 
@@ -118,16 +123,19 @@ const StreamCommands = {
       .u8(target === 'beginning' ? 0 : 1)
     ),
 
-  leave: (conn: NexoConnection, stream: string, group: string) =>
+  leave: (conn: NexoConnection, stream: string, group: string, consumerId: string, generation: bigint) =>
     conn.send(StreamOpcode.S_LEAVE, w => w
       .string(stream)
       .string(group)
+      .string(consumerId)
+      .u64(generation)
     ),
 };
 
 class StreamSubscription<T> {
   private active = false;
   private loopDone: Promise<void> = Promise.resolve();
+  private consumer: StreamConsumerSession | null = null;
 
   constructor(
     private conn: NexoConnection,
@@ -144,16 +152,32 @@ class StreamSubscription<T> {
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.stream.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.stream.waitMs;
 
+    // First join is synchronous: fail fast on permanent server errors (e.g. topic not found)
+    await this.ensureJoined();
+
     this.loopDone = this.runConsumerLoop(callback, batchSize, waitMs).catch(err => {
       this.logger.error(`[${this.streamName}:${this.group}] Consumer crashed`, err);
       this.active = false;
     });
   }
 
+  private async ensureJoined(): Promise<void> {
+    if (!this.conn.isConnected) {
+      throw new NotConnectedError();
+    }
+    const joined = await StreamCommands.join(this.conn, this.streamName, this.group);
+    this.consumer = {
+      consumerId: joined.consumerId,
+      generation: joined.generation,
+    };
+  }
+
   async stop(): Promise<void> {
     this.active = false;
     try {
-      await StreamCommands.leave(this.conn, this.streamName, this.group);
+      if (this.consumer) {
+        await StreamCommands.leave(this.conn, this.streamName, this.group, this.consumer.consumerId, this.consumer.generation);
+      }
     } catch { /* connection may already be closed */ }
     await this.loopDone;
   }
@@ -161,19 +185,28 @@ class StreamSubscription<T> {
   private async runConsumerLoop(callback: (data: T) => Promise<any> | any, batchSize: number, waitMs: number) {
     while (this.active) {
       if (!this.conn.isConnected) {
+        this.consumer = null;
         await this.backoff(DEFAULT_CONFIG.connection.backoff.short);
         continue;
       }
 
       try {
-        // Join the group (idempotent — re-joining just returns ack_floor)
-        await StreamCommands.join(this.conn, this.streamName, this.group);
+        if (!this.consumer) {
+          await this.ensureJoined();
+        }
+
         await this.pollLoop(callback, batchSize, waitMs);
       } catch (e: any) {
         if (!this.active) break;
 
         if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
+          this.consumer = null;
           await this.backoff(DEFAULT_CONFIG.connection.backoff.short);
+          continue;
+        }
+
+        if (this.isRecoverableMembershipError(e)) {
+          this.consumer = null;
           continue;
         }
 
@@ -184,11 +217,18 @@ class StreamSubscription<T> {
   }
 
   private async pollLoop(callback: (data: T) => Promise<any> | any, batchSize: number, waitMs: number): Promise<void> {
+    const consumer = this.consumer;
+    if (!consumer) {
+      throw new Error('Missing consumer session');
+    }
+
     while (this.active && this.conn.isConnected) {
       const messages = await StreamCommands.fetch<T>(
         this.conn,
         this.streamName,
         this.group,
+        consumer.consumerId,
+        consumer.generation,
         batchSize,
         waitMs
       );
@@ -200,21 +240,22 @@ class StreamSubscription<T> {
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
         if (!this.active) {
-          for (let j = i; j < messages.length; j++) {
-            StreamCommands.nack(this.conn, this.streamName, this.group, messages[j].seq);
-          }
           return;
         }
 
         try {
           await callback(msg.data);
-          StreamCommands.ack(this.conn, this.streamName, this.group, msg.seq);
+          StreamCommands.ack(this.conn, this.streamName, this.group, consumer.consumerId, consumer.generation, msg.seq);
         } catch (e: any) {
-          this.logger.error(`[${this.streamName}:${this.group}] Processing error at seq=${msg.seq}. Nacking.`);
-          StreamCommands.nack(this.conn, this.streamName, this.group, msg.seq);
+          this.logger.error(`[${this.streamName}:${this.group}] Processing error at seq=${msg.seq}. Waiting for timeout-based retry.`, e);
         }
       }
     }
+  }
+
+  private isRecoverableMembershipError(error: any): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes('FENCED') || message.includes('NOT_MEMBER');
   }
 
   private backoff(ms: number): Promise<void> {
@@ -252,11 +293,6 @@ export class NexoStream<T = any> {
     options: StreamSubscribeOptions = {}
   ): Promise<{ stop: () => Promise<void> }> {
     if (!group) throw new Error("Consumer Group is required for subscription");
-
-    // Fail Fast: Check existence first
-    if (!(await this.exists())) {
-      throw new Error(`Stream '${this.name}' not found`);
-    }
 
     const subscription = new StreamSubscription<T>(this.conn, this.name, group, this.logger);
 

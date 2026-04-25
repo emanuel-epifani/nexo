@@ -36,6 +36,14 @@ describe('STREAM', () => {
         await sub.stop();
     });
 
+    it('should fail subscribe when stream does not exist', async () => {
+        const topic = `stream-missing-${randomUUID()}`;
+        expect(
+            clientA.stream(topic).subscribe('missing-group', () => {
+            })
+        ).rejects.toThrow();
+    });
+
     it('Independent CONSUMER GROUPS => should deliver all messages to each group', async () => {
         const topic = `stream-groups-${randomUUID()}`;
         await nexo.stream(topic).create();

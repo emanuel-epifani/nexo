@@ -25,13 +25,17 @@ struct TopicShared {
     persisted_seq: Arc<AtomicU64>,
 }
 
+#[derive(Clone)]
+struct ConsumerBinding {
+    group_id: String,
+    consumer_id: String,
+}
+
 struct TopicInner {
     state: TopicState,
     groups: HashMap<String, ConsumerGroup>,
-    client_map: HashMap<String, Vec<String>>,
+    client_map: HashMap<String, Vec<ConsumerBinding>>,
     groups_dirty: bool,
-    max_ack_pending: usize,
-    ack_wait: Duration,
     full_config: TopicConfig,
 }
 
@@ -39,6 +43,12 @@ enum FetchAttempt {
     Ready(Vec<Message>),
     NeedColdRead { from_seq: u64 },
     Wait,
+}
+
+pub struct JoinGroupResult {
+    pub ack_floor: u64,
+    pub consumer_id: String,
+    pub generation: u64,
 }
 
 #[derive(Clone)]
@@ -51,7 +61,7 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    pub fn new(config: Arc<SystemStreamConfig>) -> Self {
+    pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
         let topics = Arc::new(DashMap::new());
         let deleted_topics = Arc::new(DashMap::new());
         let (storage_tx, storage_rx) = mpsc::unbounded_channel();
@@ -73,8 +83,8 @@ impl StreamManager {
             cancel: CancellationToken::new(),
         };
 
+        manager.bootstrap_from_disk().await;
         manager.spawn_background_tasks();
-        manager.spawn_warm_start();
         manager
     }
 
@@ -90,16 +100,26 @@ impl StreamManager {
         }
 
         let base_path = PathBuf::from(&self.config.persistence_path).join(&name);
+        let existed_on_disk = tokio::fs::metadata(&base_path).await.map(|meta| meta.is_dir()).unwrap_or(false);
         let topic_config = Self::load_topic_config(&base_path, options, &self.config).await;
 
         info!("[StreamManager] Creating topic '{}'", name);
 
-        if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-            tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
+        if !existed_on_disk {
+            if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
+                tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
+            } else {
+                let config_path = base_path.join("config.json");
+                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                    let _ = tokio::fs::write(&config_path, data).await;
+                }
+            }
         } else {
             let config_path = base_path.join("config.json");
-            if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
-                let _ = tokio::fs::write(&config_path, data).await;
+            if !config_path.exists() {
+                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                    let _ = tokio::fs::write(&config_path, data).await;
+                }
             }
         }
 
@@ -118,7 +138,8 @@ impl StreamManager {
     pub async fn delete_topic(&self, name: String) -> Result<(), String> {
         self.deleted_topics.insert(name.clone(), ());
 
-        if self.topics.remove(&name).is_some() {
+        let topic_path = PathBuf::from(&self.config.persistence_path).join(&name);
+        if self.topics.remove(&name).is_some() || tokio::fs::metadata(&topic_path).await.map(|meta| meta.is_dir()).unwrap_or(false) {
             let (del_tx, del_rx) = oneshot::channel();
             let _ = self.storage_tx.send(StorageCommand::DropTopic {
                 topic_name: name,
@@ -157,13 +178,14 @@ impl StreamManager {
             return Vec::new();
         };
 
-        let (messages, need_cold) = {
+        let (effective_from_seq, messages, need_cold) = {
             let inner = Self::lock_topic(&topic_ref.inner);
-            let messages = inner.state.read(from_seq, limit);
+            let effective_from_seq = from_seq.max(inner.state.head_seq);
+            let messages = inner.state.read(effective_from_seq, limit);
             let need_cold = messages.is_empty()
-                && from_seq < inner.state.ram_start_seq
-                && from_seq < inner.state.next_seq;
-            (messages, need_cold)
+                && effective_from_seq < inner.state.ram_start_seq
+                && effective_from_seq < inner.state.next_seq;
+            (effective_from_seq, messages, need_cold)
         };
 
         if !messages.is_empty() || !need_cold {
@@ -173,14 +195,14 @@ impl StreamManager {
         let (tx, rx) = oneshot::channel();
         let _ = self.storage_tx.send(StorageCommand::ColdRead {
             topic_name: topic.to_string(),
-            from_seq,
+            from_seq: effective_from_seq,
             limit,
             reply: tx,
         });
         rx.await.unwrap_or_default()
     }
 
-    pub async fn fetch(&self, group: &str, client: &str, limit: usize, topic: &str, wait_ms: u64) -> Result<Vec<Message>, String> {
+    pub async fn fetch(&self, group: &str, consumer_id: &str, generation: u64, limit: usize, topic: &str, wait_ms: u64) -> Result<Vec<Message>, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
 
         let group_cancel = {
@@ -192,9 +214,9 @@ impl StreamManager {
         };
 
         if wait_ms == 0 {
-            return match self.try_fetch_once(&topic_ref, group, client, limit)? {
+            return match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit)? {
                 FetchAttempt::Ready(messages) => Ok(messages),
-                FetchAttempt::NeedColdRead { from_seq } => self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq, &group_cancel).await,
+                FetchAttempt::NeedColdRead { from_seq } => self.cold_fetch(&topic_ref, topic, group, consumer_id, generation, limit, from_seq, &group_cancel).await,
                 FetchAttempt::Wait => Ok(Vec::new()),
             };
         }
@@ -204,13 +226,13 @@ impl StreamManager {
         loop {
             let notified = topic_ref.notify.notified();
 
-            match self.try_fetch_once(&topic_ref, group, client, limit) {
+            match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit) {
                 Ok(FetchAttempt::Ready(messages)) => return Ok(messages),
                 Ok(FetchAttempt::NeedColdRead { from_seq }) => {
-                    return self.cold_fetch(&topic_ref, topic, group, client, limit, from_seq, &group_cancel).await;
+                    return self.cold_fetch(&topic_ref, topic, group, consumer_id, generation, limit, from_seq, &group_cancel).await;
                 }
                 Ok(FetchAttempt::Wait) => {}
-                Err(e) if e == "NOT_MEMBER" && !self.is_active_member(&topic_ref, group, client) => {
+                Err(e) if e == "NOT_MEMBER" && !self.is_active_member(&topic_ref, group, consumer_id) => {
                     return Ok(Vec::new());
                 }
                 Err(e) => return Err(e),
@@ -228,34 +250,25 @@ impl StreamManager {
         }
     }
 
-    fn is_active_member(&self, topic_ref: &Arc<TopicShared>, group: &str, client: &str) -> bool {
+    fn is_active_member(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str) -> bool {
         let inner = Self::lock_topic(&topic_ref.inner);
-        inner.groups.get(group).map_or(false, |g| g.is_member(client))
+        inner.groups.get(group).map_or(false, |g| g.is_member(consumer_id))
     }
 
-    pub async fn ack(&self, group: &str, topic: &str, seq: u64) -> Result<(), String> {
+    pub async fn ack(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let mut inner = Self::lock_topic(&topic_ref.inner);
-        if let Some(group_ref) = inner.groups.get_mut(group) {
-            group_ref.ack(seq)?;
-            inner.groups_dirty = true;
-            Ok(())
-        } else {
-            Err("Group not found".to_string())
-        }
-    }
+        let head_seq = inner.state.head_seq;
+        let Some(group_ref) = inner.groups.get_mut(group) else {
+            return Err("Group not found".to_string());
+        };
 
-    pub async fn nack(&self, group: &str, topic: &str, seq: u64) -> Result<(), String> {
-        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
-            if let Some(group_ref) = inner.groups.get_mut(group) {
-                group_ref.nack(seq)?;
-            } else {
-                return Err("Group not found".to_string());
-            }
+        let was_clamped = group_ref.clamp_head(head_seq);
+        group_ref.ack(consumer_id, generation, seq)?;
+        if was_clamped {
+            inner.groups_dirty = true;
         }
-        topic_ref.notify.notify_waiters();
+        inner.groups_dirty = true;
         Ok(())
     }
 
@@ -264,13 +277,15 @@ impl StreamManager {
         {
             let mut inner = Self::lock_topic(&topic_ref.inner);
             let last_seq = inner.state.next_seq.saturating_sub(1);
-            let max_ack_pending = inner.max_ack_pending;
-            let ack_wait = inner.ack_wait;
+            let head_seq = inner.state.head_seq;
+            let max_ack_pending = inner.full_config.max_ack_pending;
+            let ack_wait = Duration::from_millis(inner.full_config.ack_wait_ms);
+            let max_deliveries = inner.full_config.max_deliveries;
             let group_ref = inner.groups.entry(group.to_string())
-                .or_insert_with(|| ConsumerGroup::new(group.to_string(), max_ack_pending, ack_wait));
+                .or_insert_with(|| ConsumerGroup::new(group.to_string(), head_seq, max_ack_pending, ack_wait, max_deliveries));
 
             match target {
-                SeekTarget::Beginning => group_ref.seek_beginning(),
+                SeekTarget::Beginning => group_ref.seek_beginning(head_seq),
                 SeekTarget::End => group_ref.seek_end(last_seq),
             }
             inner.groups_dirty = true;
@@ -279,43 +294,73 @@ impl StreamManager {
         Ok(())
     }
 
-    pub async fn leave_group(&self, group: &str, topic: &str, client: &str) -> Result<(), String> {
+    pub async fn leave_group(&self, group: &str, topic: &str, consumer_id: &str, generation: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        {
+        let should_notify = {
             let mut inner = Self::lock_topic(&topic_ref.inner);
-            if let Some(group_ref) = inner.groups.get_mut(group) {
-                group_ref.remove_member(client);
+            let Some(group_ref) = inner.groups.get_mut(group) else {
+                return Err("Group not found".to_string());
+            };
+
+            if group_ref.generation() != generation {
+                return Err("FENCED".to_string());
             }
 
-            if let Some(group_ids) = inner.client_map.get_mut(client) {
-                group_ids.retain(|g| g != group);
+            let Some(connection_client_id) = group_ref.remove_member(consumer_id) else {
+                return Err("NOT_MEMBER".to_string());
+            };
+
+            let mut remove_client_key = false;
+            if let Some(bindings) = inner.client_map.get_mut(&connection_client_id) {
+                bindings.retain(|binding| !(binding.group_id == group && binding.consumer_id == consumer_id));
+                remove_client_key = bindings.is_empty();
             }
+            if remove_client_key {
+                inner.client_map.remove(&connection_client_id);
+            }
+
+            inner.groups_dirty = true;
+            true
+        };
+        if should_notify {
+            topic_ref.notify.notify_waiters();
         }
-        topic_ref.notify.notify_waiters();
         Ok(())
     }
 
-    pub async fn join_group(&self, group: &str, topic: &str, client: &str) -> Result<u64, String> {
+    pub async fn join_group(&self, group: &str, topic: &str, connection_client_id: &str) -> Result<JoinGroupResult, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let mut inner = Self::lock_topic(&topic_ref.inner);
-        let max_ack_pending = inner.max_ack_pending;
-        let ack_wait = inner.ack_wait;
-        let client_id = client.to_string();
+        let head_seq = inner.state.head_seq;
+        let max_ack_pending = inner.full_config.max_ack_pending;
+        let ack_wait = Duration::from_millis(inner.full_config.ack_wait_ms);
+        let max_deliveries = inner.full_config.max_deliveries;
+        let client_id = connection_client_id.to_string();
         let group_id = group.to_string();
+        let group_exists = inner.groups.contains_key(&group_id);
 
-        let ack_floor = {
+        let (ack_floor, consumer_id, generation, was_clamped) = {
             let group_ref = inner.groups.entry(group_id.clone())
-                .or_insert_with(|| ConsumerGroup::new(group_id.clone(), max_ack_pending, ack_wait));
-            group_ref.add_member(client_id.clone());
-            group_ref.ack_floor
+                .or_insert_with(|| ConsumerGroup::new(group_id.clone(), head_seq, max_ack_pending, ack_wait, max_deliveries));
+            let was_clamped = group_ref.clamp_head(head_seq);
+            let consumer_id = group_ref.add_member(client_id.clone());
+            (group_ref.ack_floor, consumer_id, group_ref.generation(), was_clamped)
         };
 
-        let group_ids = inner.client_map.entry(client_id).or_default();
-        if !group_ids.contains(&group_id) {
-            group_ids.push(group_id);
+        inner.client_map.entry(client_id).or_default().push(ConsumerBinding {
+            group_id: group_id.clone(),
+            consumer_id: consumer_id.clone(),
+        });
+
+        if !group_exists || was_clamped {
+            inner.groups_dirty = true;
         }
 
-        Ok(ack_floor)
+        Ok(JoinGroupResult {
+            ack_floor,
+            consumer_id,
+            generation,
+        })
     }
 
     pub async fn disconnect(&self, client_id: String) {
@@ -324,11 +369,12 @@ impl StreamManager {
             let mut should_notify = false;
             {
                 let mut inner = Self::lock_topic(&topic_ref.inner);
-                if let Some(group_ids) = inner.client_map.remove(&client_id) {
-                    for group_id in group_ids {
-                        if let Some(group_ref) = inner.groups.get_mut(&group_id) {
-                            if group_ref.remove_member(&client_id) {
+                if let Some(bindings) = inner.client_map.remove(&client_id) {
+                    for binding in bindings {
+                        if let Some(group_ref) = inner.groups.get_mut(&binding.group_id) {
+                            if group_ref.remove_member(&binding.consumer_id).is_some() {
                                 should_notify = true;
+                                inner.groups_dirty = true;
                             }
                         }
                     }
@@ -366,7 +412,12 @@ impl StreamManager {
     }
 
     pub async fn exists(&self, name: &str) -> bool {
-        self.topics.contains_key(name)
+        if self.topics.contains_key(name) {
+            return true;
+        }
+
+        let path = PathBuf::from(&self.config.persistence_path).join(name);
+        tokio::fs::metadata(path).await.map(|meta| meta.is_dir()).unwrap_or(false)
     }
 
     fn get_topic(&self, topic: &str) -> Option<Arc<TopicShared>> {
@@ -390,6 +441,46 @@ impl StreamManager {
         }
     }
 
+    async fn bootstrap_from_disk(&self) {
+        let persistence_path = PathBuf::from(&self.config.persistence_path);
+        if !persistence_path.exists() {
+            return;
+        }
+
+        let mut entries = match tokio::fs::read_dir(&persistence_path).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let Some(topic_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            let name = topic_name.to_string();
+            if self.deleted_topics.contains_key(&name) {
+                continue;
+            }
+
+            let topic_config = Self::load_topic_config(&path, StreamCreateOptions::default(), &self.config).await;
+            let topic_ref = Self::build_topic_shared(name.clone(), topic_config).await;
+
+            use dashmap::mapref::entry::Entry;
+            match self.topics.entry(name.clone()) {
+                Entry::Occupied(_) => {}
+                Entry::Vacant(v) => {
+                    v.insert(topic_ref);
+                    info!("[StreamManager] Restored topic '{}'", name);
+                }
+            }
+        }
+    }
+
     async fn build_topic_shared(name: String, config: TopicConfig) -> Arc<TopicShared> {
         let base_path = PathBuf::from(&config.persistence_path).join(&name);
         if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
@@ -397,10 +488,7 @@ impl StreamManager {
         }
 
         let recovered = recover_topic(&name, PathBuf::from(config.persistence_path.clone())).await;
-        let mut state = TopicState::restore(name.clone(), config.ram_soft_limit, recovered.messages);
-        if let Some(first) = recovered.segments.first() {
-            state.start_seq = first.start_seq;
-        }
+        let state = TopicState::restore(name.clone(), config.ram_soft_limit, recovered.head_seq.max(1), recovered.messages);
 
         let ack_wait = Duration::from_millis(config.ack_wait_ms);
         let persisted_seq = Arc::new(AtomicU64::new(state.next_seq.saturating_sub(1)));
@@ -408,7 +496,7 @@ impl StreamManager {
         for (group_id, ack_floor) in recovered.groups_data {
             groups.insert(
                 group_id.clone(),
-                ConsumerGroup::restore(group_id, ack_floor, config.max_ack_pending, ack_wait),
+                ConsumerGroup::restore(group_id, ack_floor, state.head_seq, config.max_ack_pending, ack_wait, config.max_deliveries),
             );
         }
 
@@ -418,8 +506,6 @@ impl StreamManager {
                 groups,
                 client_map: HashMap::new(),
                 groups_dirty: false,
-                max_ack_pending: config.max_ack_pending,
-                ack_wait,
                 full_config: config,
             }),
             notify: Notify::new(),
@@ -504,11 +590,40 @@ impl StreamManager {
                             (inner.full_config.retention.clone(), inner.full_config.max_segment_size)
                         };
 
-                        let _ = storage_tx.send(StorageCommand::ApplyRetention {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        if storage_tx.send(StorageCommand::ApplyRetention {
                             topic_name,
                             retention,
                             max_segment_size,
-                        });
+                            reply: reply_tx,
+                        }).is_err() {
+                            continue;
+                        }
+
+                        let Ok(outcome) = reply_rx.await else {
+                            continue;
+                        };
+
+                        let mut should_notify = false;
+                        {
+                            let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let mut groups_changed = false;
+                            if outcome.head_seq != inner.state.head_seq {
+                                inner.state.apply_head(outcome.head_seq);
+                                for group in inner.groups.values_mut() {
+                                    if group.clamp_head(outcome.head_seq) {
+                                        groups_changed = true;
+                                    }
+                                }
+                                if groups_changed {
+                                    inner.groups_dirty = true;
+                                }
+                                should_notify = true;
+                            }
+                        }
+                        if should_notify {
+                            topic_ref.notify.notify_waiters();
+                        }
                     }
                 }
             }
@@ -518,7 +633,7 @@ impl StreamManager {
         tokio::spawn({
             let cancel = cancel.clone();
             async move {
-                let mut timer = tokio::time::interval(Duration::from_secs(5));
+                let mut timer = tokio::time::interval(Duration::from_millis(100));
                 timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
@@ -529,10 +644,15 @@ impl StreamManager {
                         let mut should_notify = false;
                         {
                             let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let mut groups_changed = false;
                             for group in inner.groups.values_mut() {
                                 if group.check_redelivery() {
+                                    groups_changed = true;
                                     should_notify = true;
                                 }
+                            }
+                            if groups_changed {
+                                inner.groups_dirty = true;
                             }
                         }
                         if should_notify {
@@ -543,95 +663,54 @@ impl StreamManager {
             }
         });
     }
-
-    fn spawn_warm_start(&self) {
-        let topics = self.topics.clone();
-        let deleted_topics = self.deleted_topics.clone();
-        let config = self.config.clone();
-        tokio::spawn(async move {
-            let persistence_path = PathBuf::from(&config.persistence_path);
-            if !persistence_path.exists() {
-                return;
-            }
-
-            let mut entries = match tokio::fs::read_dir(&persistence_path).await {
-                Ok(entries) => entries,
-                Err(_) => return,
-            };
-
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-
-                let Some(topic_name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-
-                let name = topic_name.to_string();
-                if deleted_topics.contains_key(&name) {
-                    continue;
-                }
-
-                let topic_config = StreamManager::load_topic_config(&path, StreamCreateOptions::default(), &config).await;
-                let topic_ref = StreamManager::build_topic_shared(name.clone(), topic_config).await;
-
-                if !path.exists() || deleted_topics.contains_key(&name) {
-                    continue;
-                }
-
-                use dashmap::mapref::entry::Entry;
-                match topics.entry(name.clone()) {
-                    Entry::Occupied(_) => {}
-                    Entry::Vacant(v) => {
-                        v.insert(topic_ref);
-                        info!("[StreamManager] Warm start: Restored topic '{}'", name);
-                    }
-                }
-            }
-        });
-    }
-
-    fn try_fetch_once(&self, topic_ref: &Arc<TopicShared>, group: &str, client: &str, limit: usize) -> Result<FetchAttempt, String> {
+    fn try_fetch_once(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str, generation: u64, limit: usize) -> Result<FetchAttempt, String> {
         let mut inner = Self::lock_topic(&topic_ref.inner);
         let TopicInner {
             state,
             groups,
+            groups_dirty,
             ..
         } = &mut *inner;
 
-        let group_ref = match groups.get_mut(group) {
-            Some(g) => g,
-            None => return Err("Group not found".to_string()),
+        let head_seq = state.head_seq;
+        let next_seq = state.next_seq;
+        let ram_start_seq = state.ram_start_seq;
+
+        let (was_clamped, messages, is_fetching_cold, from_seq) = {
+            let group_ref = match groups.get_mut(group) {
+                Some(g) => g,
+                None => return Err("Group not found".to_string()),
+            };
+
+            let was_clamped = group_ref.clamp_head(head_seq);
+
+            if group_ref.is_backpressured() {
+                return Ok(FetchAttempt::Ready(Vec::new()));
+            }
+
+            let messages = group_ref.fetch(consumer_id, generation, limit, &state.log, ram_start_seq, head_seq)?;
+            let is_fetching_cold = group_ref.is_fetching_cold;
+            let from_seq = group_ref.next_fetch_seq(head_seq);
+            (was_clamped, messages, is_fetching_cold, from_seq)
         };
 
-        if !group_ref.is_member(client) {
-            return Err("NOT_MEMBER".to_string());
+        if was_clamped {
+            *groups_dirty = true;
         }
 
-        if group_ref.is_backpressured() {
-            return Ok(FetchAttempt::Ready(Vec::new()));
-        }
-
-        let messages = group_ref.fetch(client, limit, &state.log, state.ram_start_seq);
         if !messages.is_empty() {
             return Ok(FetchAttempt::Ready(messages));
         }
 
-        if group_ref.is_fetching_cold {
+        if is_fetching_cold {
             return Ok(FetchAttempt::Ready(Vec::new()));
         }
 
-        if group_ref.next_deliver_seq < state.next_seq {
-            let from_seq = if let Some(seq) = group_ref.redeliver.front() {
-                *seq
-            } else {
-                group_ref.next_deliver_seq
-            };
-
-            if from_seq < state.ram_start_seq {
-                group_ref.is_fetching_cold = true;
+        if from_seq < next_seq {
+            if from_seq < ram_start_seq {
+                if let Some(group_ref) = groups.get_mut(group) {
+                    group_ref.is_fetching_cold = true;
+                }
                 return Ok(FetchAttempt::NeedColdRead { from_seq });
             }
         }
@@ -639,7 +718,7 @@ impl StreamManager {
         Ok(FetchAttempt::Wait)
     }
 
-    async fn cold_fetch(&self, topic_ref: &Arc<TopicShared>, topic: &str, group: &str, client: &str, limit: usize, from_seq: u64, group_cancel: &CancellationToken) -> Result<Vec<Message>, String> {
+    async fn cold_fetch(&self, topic_ref: &Arc<TopicShared>, topic: &str, group: &str, consumer_id: &str, generation: u64, limit: usize, from_seq: u64, group_cancel: &CancellationToken) -> Result<Vec<Message>, String> {
         let (tx, rx) = oneshot::channel();
         if self.storage_tx.send(StorageCommand::ColdRead {
             topic_name: topic.to_string(),
@@ -666,12 +745,18 @@ impl StreamManager {
         };
 
         let mut inner = Self::lock_topic(&topic_ref.inner);
+        let head_seq = inner.state.head_seq;
         if let Some(group_ref) = inner.groups.get_mut(group) {
             group_ref.is_fetching_cold = false;
             if group_cancel.is_cancelled() {
                 return Ok(Vec::new());
             }
-            Ok(group_ref.register_cold_messages(client, messages))
+            let was_clamped = group_ref.clamp_head(head_seq);
+            let registered = group_ref.register_cold_messages(consumer_id, generation, messages, head_seq)?;
+            if was_clamped {
+                inner.groups_dirty = true;
+            }
+            Ok(registered)
         } else {
             Err("Group disappeared during cold read".to_string())
         }

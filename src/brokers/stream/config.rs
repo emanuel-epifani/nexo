@@ -14,6 +14,7 @@ pub struct SystemStreamConfig {
     pub max_ack_pending: usize,
     pub max_open_files: usize,
     pub ack_wait_ms: u64,
+    pub max_deliveries: u32,
 }
 
 impl Default for SystemStreamConfig {
@@ -31,6 +32,7 @@ impl Default for SystemStreamConfig {
             max_ack_pending: 10000,
             max_open_files: 256,
             ack_wait_ms: 30000, // 30 seconds
+            max_deliveries: 5,
         }
     }
 }
@@ -51,6 +53,7 @@ impl SystemStreamConfig {
             max_ack_pending:             get_env("STREAM_MAX_ACK_PENDING", default.max_ack_pending),
             max_open_files:              get_env("STREAM_MAX_OPEN_FILES", default.max_open_files),
             ack_wait_ms:                 get_env("STREAM_ACK_WAIT_MS", default.ack_wait_ms),
+            max_deliveries:              get_env("STREAM_MAX_DELIVERIES", default.max_deliveries),
         }
     }
 }

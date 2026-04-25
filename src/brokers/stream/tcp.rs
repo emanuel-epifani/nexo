@@ -24,7 +24,6 @@ pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_ACK: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
-pub const OP_S_NACK: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
 pub const OP_S_LEAVE: u8 = 0x39;
 
@@ -36,14 +35,13 @@ pub const OP_S_LEAVE: u8 = 0x39;
 enum StreamCommand {
     Create { topic: String, options: StreamCreateOptions },
     Publish { topic: String, payload: Bytes },
-    Fetch { topic: String, group: String, limit: u32, wait_ms: u32 },
+    Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
     Join { group: String, topic: String },
-    Ack { topic: String, group: String, seq: u64 },
-    Nack { topic: String, group: String, seq: u64 },
+    Ack { topic: String, group: String, consumer_id: String, generation: u64, seq: u64 },
     Seek { topic: String, group: String, target: SeekTarget },
     Exists { topic: String },
     Delete { topic: String },
-    Leave { topic: String, group: String },
+    Leave { topic: String, group: String, consumer_id: String, generation: u64 },
 }
 
 impl StreamCommand {
@@ -64,9 +62,11 @@ impl StreamCommand {
             OP_S_FETCH => {
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
+                let consumer_id = cursor.read_string()?;
+                let generation = cursor.read_u64()?;
                 let limit = cursor.read_u32()?;
                 let wait_ms = cursor.read_u32()?;
-                Ok(Self::Fetch { topic, group, limit, wait_ms })
+                Ok(Self::Fetch { topic, group, consumer_id, generation, limit, wait_ms })
             }
             OP_S_JOIN => {
                 let group = cursor.read_string()?;
@@ -76,14 +76,10 @@ impl StreamCommand {
             OP_S_ACK => {
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
+                let consumer_id = cursor.read_string()?;
+                let generation = cursor.read_u64()?;
                 let seq = cursor.read_u64()?;
-                Ok(Self::Ack { topic, group, seq })
-            }
-            OP_S_NACK => {
-                let topic = cursor.read_string()?;
-                let group = cursor.read_string()?;
-                let seq = cursor.read_u64()?;
-                Ok(Self::Nack { topic, group, seq })
+                Ok(Self::Ack { topic, group, consumer_id, generation, seq })
             }
             OP_S_SEEK => {
                 let topic = cursor.read_string()?;
@@ -107,7 +103,9 @@ impl StreamCommand {
             OP_S_LEAVE => {
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
-                Ok(Self::Leave { topic, group })
+                let consumer_id = cursor.read_string()?;
+                let generation = cursor.read_u64()?;
+                Ok(Self::Leave { topic, group, consumer_id, generation })
             }
             _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
         }
@@ -144,12 +142,19 @@ impl ToWire for FetchResponse {
     }
 }
 
-struct JoinGroupResponse { ack_floor: u64 }
+struct JoinGroupResponse {
+    ack_floor: u64,
+    generation: u64,
+    consumer_id: String,
+}
 
 impl ToWire for JoinGroupResponse {
     fn to_wire(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(8);
+        let mut buf = BytesMut::with_capacity(16 + 4 + self.consumer_id.len());
         buf.put_u64(self.ack_floor);
+        buf.put_u64(self.generation);
+        buf.put_u32(self.consumer_id.len() as u32);
+        buf.put_slice(self.consumer_id.as_bytes());
         buf.freeze()
     }
 }
@@ -181,21 +186,21 @@ pub async fn handle(
             Ok(seq) => Response::Data(PublishResponse { seq }.to_wire()),
             Err(e) => Response::Error(e),
         },
-        StreamCommand::Fetch { topic, group, limit, wait_ms } => {
-            match stream.fetch(&group, &client, limit as usize, &topic, wait_ms as u64).await {
+        StreamCommand::Fetch { topic, group, consumer_id, generation, limit, wait_ms } => {
+            match stream.fetch(&group, &consumer_id, generation, limit as usize, &topic, wait_ms as u64).await {
                 Ok(messages) => Response::Data(FetchResponse { messages }.to_wire()),
                 Err(e) => Response::Error(e),
             }
         }
         StreamCommand::Join { group, topic } => match stream.join_group(&group, &topic, &client).await {
-            Ok(ack_floor) => Response::Data(JoinGroupResponse { ack_floor }.to_wire()),
+            Ok(result) => Response::Data(JoinGroupResponse {
+                ack_floor: result.ack_floor,
+                generation: result.generation,
+                consumer_id: result.consumer_id,
+            }.to_wire()),
             Err(e) => Response::Error(e),
         },
-        StreamCommand::Ack { topic, group, seq } => match stream.ack(&group, &topic, seq).await {
-            Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
-        },
-        StreamCommand::Nack { topic, group, seq } => match stream.nack(&group, &topic, seq).await {
+        StreamCommand::Ack { topic, group, consumer_id, generation, seq } => match stream.ack(&group, &topic, &consumer_id, generation, seq).await {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
@@ -203,7 +208,7 @@ pub async fn handle(
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
-        StreamCommand::Leave { topic, group } => match stream.leave_group(&group, &topic, &client).await {
+        StreamCommand::Leave { topic, group, consumer_id, generation } => match stream.leave_group(&group, &topic, &consumer_id, generation).await {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },

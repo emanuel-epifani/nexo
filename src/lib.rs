@@ -26,14 +26,14 @@ pub struct NexoEngine {
 }
 
 impl NexoEngine {
-    pub fn new(config: &Config) -> Self {
+    pub async fn new(config: &Config) -> Self {
         let pubsub = Arc::new(PubSubManager::new(Arc::new(config.pubsub.clone())));
         
         Self {
             store: Arc::new(StoreManager::new(Arc::new(config.store.clone()))),
             queue: Arc::new(QueueManager::new(Arc::new(config.queue.clone()))),
             pubsub,
-            stream: Arc::new(StreamManager::new(Arc::new(config.stream.clone()))),
+            stream: Arc::new(StreamManager::new(Arc::new(config.stream.clone())).await),
             start_time: Instant::now(),
         }
     }
