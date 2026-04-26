@@ -178,6 +178,67 @@ describe('STREAM', () => {
         expect(elapsed).toBeLessThan(2000);
     });
 
+    it('should preserve ordering with default concurrency=1', async () => {
+        const topic = `stream-order-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: number[] = [];
+        const sub = await clientA.stream(topic).subscribe('order-group', async (d: any) => {
+            // Variable delay to expose any out-of-order processing
+            await new Promise(r => setTimeout(r, Math.random() * 10));
+            received.push(d.i);
+        });
+
+        for (let i = 0; i < 30; i++) await nexo.stream(topic).publish({ i });
+
+        await waitFor(() => expect(received.length).toBe(30));
+
+        for (let i = 0; i < 30; i++) {
+            expect(received[i]).toBe(i);
+        }
+
+        await sub.stop();
+    });
+
+    it('should process messages in parallel with concurrency > 1', async () => {
+        const topic = `stream-concurrent-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const CALLBACK_DELAY = 100;
+        const COUNT = 20;
+        const CONCURRENCY = 10;
+
+        const received: number[] = [];
+        let inFlight = 0;
+        let maxInFlight = 0;
+
+        const sub = await clientA.stream(topic).subscribe('concurrent-group', async (d: any) => {
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            await new Promise(r => setTimeout(r, CALLBACK_DELAY));
+            received.push(d.i);
+            inFlight--;
+        }, { batchSize: COUNT, concurrency: CONCURRENCY });
+
+        for (let i = 0; i < COUNT; i++) await nexo.stream(topic).publish({ i });
+
+        const start = Date.now();
+        await waitFor(() => expect(received.length).toBe(COUNT), { timeout: 10000 });
+        const elapsed = Date.now() - start;
+
+        // All ids delivered (no loss/duplicates)
+        const ids = new Set(received);
+        expect(ids.size).toBe(COUNT);
+
+        // Parallelism observed
+        expect(maxInFlight).toBeGreaterThan(1);
+
+        // Total time should be much less than fully sequential (COUNT * CALLBACK_DELAY = 2000ms)
+        expect(elapsed).toBeLessThan(COUNT * CALLBACK_DELAY * 0.6);
+
+        await sub.stop();
+    });
+
     it('should support Seek (Beginning/End)', async () => {
         const topic = `stream-seek-${randomUUID()}`;
         const group = 'seek-group';

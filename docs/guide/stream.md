@@ -140,7 +140,7 @@ Two parameters control this behavior:
 
 ### `batchSize` (default: 100)
 
-How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more memory per cycle. Messages within a batch are always processed **in order**, one at a time.
+How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more memory per cycle. By default, messages within a batch are processed **in order**, one at a time (see [Concurrency](#concurrency-default-1) below).
 
 ### `waitMs` (default: 20000)
 
@@ -152,6 +152,31 @@ await stream.subscribe('my-group', (event) => process(event), {
   waitMs: 5000,     // If empty, wait 5s (server-side) before responding
 });
 ```
+
+### `concurrency` (default: 1)
+
+Streams are an **ordered, append-only history**. The server delivers messages in sequence and the SDK, by default, invokes your callback **one message at a time** to preserve that ordering — this is the right default for event sourcing, audit logs, and any logic where the order of events matters.
+
+For workloads where the order **does not matter** at the consumer (independent events, idempotent handlers, I/O-bound processing where most time is spent waiting), the SDK lets you process messages of the same batch in parallel via the `concurrency` option:
+
+```typescript
+await stream.subscribe('webhooks', (event) => callExternalApi(event), {
+  batchSize: 100,
+  concurrency: 10,  // Up to 10 callbacks in flight at the same time
+});
+```
+
+**How it works**
+
+*   The SDK fetches a batch of `batchSize` messages.
+*   Up to `concurrency` callbacks run in parallel within that batch.
+*   The next fetch is issued only when the entire batch has been processed.
+*   `ack` is sent per-message as soon as that message's callback resolves; the server natively handles out-of-order acks.
+
+**Trade-offs**
+
+*   With `concurrency > 1`, callback invocations within the same batch are **not ordered**. Use this only when your handler is order-independent.
+*   For ordered scaling, run **multiple consumers in the same group** instead — Nexo distributes messages dynamically across them while preserving per-message at-least-once semantics.
 
 ## Seek & Replay
 

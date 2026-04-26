@@ -146,6 +146,67 @@ describe('QUEUE', () => {
         await q.delete();
     });
 
+    it('should serialize callbacks with concurrency=1', async () => {
+        const qName = `queue-conc1-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        const COUNT = 10;
+        const CALLBACK_DELAY = 50;
+
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const received: number[] = [];
+
+        const sub = await q.subscribe(async (msg: any) => {
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            await new Promise(r => setTimeout(r, CALLBACK_DELAY));
+            received.push(msg.i);
+            inFlight--;
+        }, { batchSize: COUNT, concurrency: 1 });
+
+        for (let i = 0; i < COUNT; i++) await q.push({ i });
+
+        await waitFor(() => expect(received.length).toBe(COUNT));
+        sub.stop();
+
+        expect(maxInFlight).toBe(1);
+        expect(new Set(received).size).toBe(COUNT);
+    });
+
+    it('should process messages in parallel with concurrency > 1', async () => {
+        const qName = `queue-conc-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        const COUNT = 20;
+        const CALLBACK_DELAY = 100;
+        const CONCURRENCY = 10;
+
+        let inFlight = 0;
+        let maxInFlight = 0;
+        const received: number[] = [];
+
+        const sub = await q.subscribe(async (msg: any) => {
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            await new Promise(r => setTimeout(r, CALLBACK_DELAY));
+            received.push(msg.i);
+            inFlight--;
+        }, { batchSize: COUNT, concurrency: CONCURRENCY });
+
+        for (let i = 0; i < COUNT; i++) await q.push({ i });
+
+        const start = Date.now();
+        await waitFor(() => expect(received.length).toBe(COUNT), { timeout: 10000 });
+        const elapsed = Date.now() - start;
+
+        sub.stop();
+
+        expect(new Set(received).size).toBe(COUNT);
+        expect(maxInFlight).toBeGreaterThan(1);
+        expect(elapsed).toBeLessThan(COUNT * CALLBACK_DELAY * 0.6);
+    });
+
     it('Should handle explicit NACK and persist failure reason in DLQ', async () => {
         const qName = `nack-reason-${randomUUID()}`;
         const q = await nexo.queue(qName).create({

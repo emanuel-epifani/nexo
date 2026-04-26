@@ -23,6 +23,7 @@ export interface NexoQueueConfig {
 export interface NexoStreamConfig {
   batchSize: number;
   waitMs: number;
+  concurrency: number;
 }
 
 export const DEFAULT_CONFIG = {
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG = {
   stream: {
     batchSize: 100,
     waitMs: 20000,
+    concurrency: 1,
   },
   logger: {
     level: 'ERROR',

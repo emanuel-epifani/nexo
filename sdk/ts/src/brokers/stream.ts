@@ -3,6 +3,7 @@ import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
+import { runConcurrent } from '../utils/concurrent';
 
 const FETCH_TIMEOUT_MARGIN_MS = 5000;
 
@@ -30,6 +31,7 @@ export interface StreamCreateOptions {
 export interface StreamSubscribeOptions {
   batchSize?: number;
   waitMs?: number;
+  concurrency?: number;
 }
 
 export interface StreamMessage<T> {
@@ -60,6 +62,7 @@ class StreamSubscription<T> {
     private readonly callback: (data: T) => Promise<any> | any,
     private readonly batchSize: number,
     private readonly waitMs: number,
+    private readonly concurrency: number,
   ) { }
 
   async start(): Promise<void> {
@@ -100,26 +103,17 @@ class StreamSubscription<T> {
 
   private async loop(): Promise<void> {
     while (this.active) {
-      if (!this.conn.isConnected) {
-        this.consumerId = null;
-        await sleep(DEFAULT_CONFIG.connection.backoff.short);
-        continue;
-      }
-
       try {
         if (this.consumerId === null) await this.join();
         await this.pollOnce();
       } catch (e: any) {
         if (!this.active) break;
+        this.consumerId = null;
+
+        if (isRecoverableMembershipError(e)) continue;
 
         if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
-          this.consumerId = null;
           await sleep(DEFAULT_CONFIG.connection.backoff.short);
-          continue;
-        }
-
-        if (isRecoverableMembershipError(e)) {
-          this.consumerId = null;
           continue;
         }
 
@@ -145,15 +139,17 @@ class StreamSubscription<T> {
     const count = res.cursor.readU32();
     if (count === 0) return;
 
+    const batch: { seq: bigint; data: T }[] = [];
     for (let i = 0; i < count; i++) {
       const seq = res.cursor.readU64();
       res.cursor.readU64(); // skip timestamp
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = new Cursor(payloadBuf).decodeAny() as T;
+      batch.push({ seq, data: new Cursor(payloadBuf).decodeAny() as T });
+    }
 
+    await runConcurrent(batch, this.concurrency, async ({ seq, data }) => {
       if (!this.active) return;
-
       try {
         await this.callback(data);
         this.conn.sendFireAndForget(StreamOpcode.S_ACK, w => w
@@ -166,7 +162,7 @@ class StreamSubscription<T> {
       } catch (err) {
         this.logger.error(`[${this.streamName}:${this.group}] Processing error at seq=${seq}. Waiting for timeout-based retry.`, err);
       }
-    }
+    });
   }
 }
 
@@ -214,8 +210,9 @@ export class NexoStream<T = any> {
 
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.stream.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.stream.waitMs;
+    const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONFIG.stream.concurrency);
 
-    const sub = new StreamSubscription<T>(this.conn, this.name, group, this.logger, callback, batchSize, waitMs);
+    const sub = new StreamSubscription<T>(this.conn, this.name, group, this.logger, callback, batchSize, waitMs, concurrency);
     await sub.start();
 
     return { stop: () => sub.stop() };

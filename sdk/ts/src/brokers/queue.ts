@@ -3,6 +3,7 @@ import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError } from '../errors';
+import { runConcurrent } from '../utils/concurrent';
 
 enum QueueOpcode {
   Q_CREATE = 0x10,
@@ -134,18 +135,6 @@ export interface QueueSubscribeOptions {
 export interface QueuePushOptions {
   priority?: number;
   delayMs?: number;
-}
-
-async function runConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>) {
-  if (concurrency === 1) {
-    for (const item of items) await fn(item);
-    return;
-  }
-  const queue = [...items];
-  const workers = Array(Math.min(concurrency, items.length)).fill(null).map(async () => {
-    while (queue.length) await fn(queue.shift()!);
-  });
-  await Promise.all(workers);
 }
 
 /**
