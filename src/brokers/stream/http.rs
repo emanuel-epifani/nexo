@@ -108,7 +108,9 @@ async fn get_stream_messages(
         None => return (StatusCode::NOT_FOUND, "Topic not found").into_response(),
     };
 
-    let from_seq = query.from.unwrap_or_else(|| last_seq.saturating_sub(limit as u64).max(1));
+    let from_seq = query
+        .from
+        .unwrap_or_else(|| last_seq.saturating_sub(limit.saturating_sub(1) as u64).max(1));
 
     let messages = engine.stream.read(&topic, from_seq, limit).await
         .into_iter()

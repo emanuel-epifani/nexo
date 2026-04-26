@@ -14,7 +14,8 @@ export class NexoConnection extends EventEmitter {
   private pending = new Map<number, {
     resolve: (res: { status: number, data: Buffer }) => void,
     reject: (err: Error) => void,
-    deadline: number
+    deadline: number,
+    timeoutMs: number
   }>();
   private readonly config: NexoConnectionConfig;
   private readonly logger: Logger;
@@ -57,7 +58,7 @@ export class NexoConnection extends EventEmitter {
       for (const [id, req] of this.pending) {
         if (now > req.deadline) {
           this.pending.delete(id);
-          req.reject(new RequestTimeoutError(this.config.requestTimeoutMs));
+          req.reject(new RequestTimeoutError(req.timeoutMs));
         }
       }
     }, this.config.sweepIntervalMs);
@@ -206,13 +207,19 @@ export class NexoConnection extends EventEmitter {
     }
   }
 
-  send(opcode: number, build?: (w: FrameWriter) => void): Promise<{ status: ResponseStatus, cursor: Cursor }> {
+  send(
+    opcode: number,
+    build?: (w: FrameWriter) => void,
+    options?: { timeoutMs?: number }
+  ): Promise<{ status: ResponseStatus, cursor: Cursor }> {
     const id = this.nextId;
     this.nextId = (this.nextId + 1) & 0xFFFFFFFF || 1;
 
     this.writer.begin();
     if (build) build(this.writer);
     const packet = this.writer.finish(id, opcode);
+
+    const timeoutMs = options?.timeoutMs ?? this.config.requestTimeoutMs;
 
     return new Promise((resolve, reject) => {
       if (!this.isConnected) {
@@ -234,7 +241,8 @@ export class NexoConnection extends EventEmitter {
           resolve({ status: res.status, cursor: new Cursor(res.data) });
         },
         reject,
-        deadline: Date.now() + this.config.requestTimeoutMs
+        deadline: Date.now() + timeoutMs,
+        timeoutMs
       });
 
       this.socket.write(packet);

@@ -38,7 +38,7 @@ describe('STREAM', () => {
 
     it('should fail subscribe when stream does not exist', async () => {
         const topic = `stream-missing-${randomUUID()}`;
-        expect(
+        await expect(
             clientA.stream(topic).subscribe('missing-group', () => {
             })
         ).rejects.toThrow();
