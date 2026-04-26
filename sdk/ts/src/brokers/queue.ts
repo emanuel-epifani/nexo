@@ -19,6 +19,8 @@ enum QueueOpcode {
   Q_NACK = 0x1A,
 }
 
+const CONSUME_TIMEOUT_MARGIN_MS = 5000;
+
 const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) =>
     conn.send(QueueOpcode.Q_CREATE, w => w
@@ -49,7 +51,7 @@ const QueueCommands = {
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => w
       .string(name)
       .string(JSON.stringify({ batchSize, waitMs }))
-    );
+    , { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
 
     const count = res.cursor.readU32();
     if (count === 0) return [];
@@ -290,14 +292,15 @@ export class NexoQueue<T = any> {
       this.isSubscribed = false;
     };
 
-    loop().catch(err => {
+    const loopDone = loop().catch(err => {
+      this.isSubscribed = false;
       this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 
     return { 
-      stop: () => { 
+      stop: async () => {
         active = false;
-        this.isSubscribed = false;
+        await loopDone;
       } 
     };
   }

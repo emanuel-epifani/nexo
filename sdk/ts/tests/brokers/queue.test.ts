@@ -124,7 +124,7 @@ describe('QUEUE', () => {
 
         // 4. Verify it's received
         await waitFor(() => expect(replayed.length).toBe(1));
-        expect(replayed[0].order).toBe('order3'); 
+        expect(replayed[0].order).toBe('order3');
         sub2.stop();
 
         // 3. Delete one specific message from DLQ

@@ -187,7 +187,6 @@ impl QueueState {
         // 1. Check existence and update fields
         let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
             msg.failure_reason = Some(reason.clone());
-            msg.attempts += 1;
             (msg.attempts >= max_retries, msg.priority)
         } else {
             return (None, None);
