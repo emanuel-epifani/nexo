@@ -285,29 +285,26 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let visible_at = row.get::<_, i64>(3)? as u64;
         let attempts: u32 = row.get(4)?;
         let created_at = row.get::<_, i64>(5)? as u64;
+ 
+         let now = current_time_ms();
+         
+         // Reconstruct State
+         let state = if visible_at > now && attempts > 0 {
+             MessageState::InFlight(visible_at)
+         } else {
+             MessageState::Ready
+         };
 
-        let now = current_time_ms();
-        
-        // Reconstruct State
-        let state = if visible_at <= now {
-            MessageState::Ready
-        } else if attempts > 0 {
-            MessageState::InFlight(visible_at)
-        } else {
-            MessageState::Scheduled(visible_at)
-        };
-
-        Ok(Message {
-            id,
-            payload: bytes::Bytes::from(payload),
-            priority,
-            attempts,
-            created_at,
-            visible_at,
-            delayed_until: None, // Lost persistence of original delay, but functional equivalent
-            failure_reason: None, // Not persisted in main queue yet
-            state,
-        })
+         Ok(Message {
+             id,
+             payload: bytes::Bytes::from(payload),
+             priority,
+             attempts,
+             created_at,
+             visible_at,
+             failure_reason: None, // Not persisted in main queue yet
+             state,
+         })
     })?;
 
     let mut messages = Vec::new();

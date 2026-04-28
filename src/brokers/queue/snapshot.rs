@@ -15,7 +15,6 @@ pub struct QueueSnapshot {
     pub name: String,
     pub pending: usize,
     pub inflight: usize,
-    pub scheduled: usize,
     pub dlq: usize,
     pub config: QueueConfig,
 }
@@ -23,7 +22,6 @@ pub struct QueueSnapshot {
 pub enum MessageStateTag {
     Pending,
     InFlight,
-    Scheduled,
 }
 
 pub struct QueueMessagePreview {
@@ -32,5 +30,4 @@ pub struct QueueMessagePreview {
     pub state: MessageStateTag,
     pub priority: u8,
     pub attempts: u32,
-    pub next_delivery_at_ms: Option<u64>,
 }

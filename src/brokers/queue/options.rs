@@ -12,10 +12,9 @@ pub struct QueueCreateOptions {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueuePushOptions {
     pub priority: Option<u8>,
-    pub delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

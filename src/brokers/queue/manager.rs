@@ -93,7 +93,7 @@ impl QueueManager {
             }
         }
 
-        manager.spawn_time_event_task();
+        manager.spawn_timeout_task();
         manager
     }
 
@@ -147,7 +147,7 @@ impl QueueManager {
         })
     }
 
-    fn spawn_time_event_task(&self) {
+    fn spawn_timeout_task(&self) {
         let queues = self.queues.clone();
         let cancel = self.cancel.clone();
 
@@ -169,7 +169,7 @@ impl QueueManager {
                         let mut inner = Self::lock(&shared.inner);
                         
                         // Check if processing is needed
-                        let should_process = inner.state.next_timeout().map(|ts| ts <= now).unwrap_or(false);
+                        let should_process = inner.state.next_inflight_timeout().map(|ts| ts <= now).unwrap_or(false);
                         if !should_process {
                             continue;
                         }
@@ -277,21 +277,18 @@ impl QueueManager {
         Ok(())
     }
 
-    pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8, delay_ms: Option<u64>) -> Result<(), String> {
+    pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8) -> Result<(), String> {
         let shared = self.get_queue(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
 
-        let msg = Message::new(payload, priority, delay_ms);
+        let msg = Message::new(payload, priority);
         {
             let mut inner = Self::lock(&shared.inner);
             inner.state.push(msg.clone());
         }
 
         shared.store.execute(StorageOp::Insert(msg));
-
-        if delay_ms.is_none() {
-            shared.notify.notify_waiters();
-        }
+        shared.notify.notify_waiters();
 
         Ok(())
     }
@@ -432,12 +429,11 @@ impl QueueManager {
         for entry in self.queues.iter() {
             let shared = entry.value().clone();
             let inner = Self::lock(&shared.inner);
-            let (pending, inflight, scheduled) = inner.state.get_counters();
+            let (pending, inflight) = inner.state.get_counters();
             queues.push(QueueSnapshot {
                 name: inner.name.clone(),
                 pending,
                 inflight,
-                scheduled,
                 dlq: inner.dlq.len(),
                 config: inner.config.clone(),
             });

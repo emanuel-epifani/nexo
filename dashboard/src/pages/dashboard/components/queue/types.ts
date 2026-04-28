@@ -4,7 +4,6 @@ export interface QueueSummary {
     name: string;
     pending: number;
     inflight: number;
-    scheduled: number;
     dlq: number;
 }
 
@@ -21,13 +20,9 @@ export interface PaginatedDlqMessages {
 export interface MessageSummary {
     id: string; // UUID
     payload: any;
-    state: string; // "Pending", "InFlight", "Scheduled"
+    state: string; // "Pending", "InFlight"
     priority: number; // u8
     attempts: number; // u32
-}
-
-export interface ScheduledMessageSummary extends MessageSummary {
-    next_delivery_at: string;
 }
 
 export interface DlqMessageSummary {
@@ -36,11 +31,4 @@ export interface DlqMessageSummary {
     attempts: number; // u32
     failure_reason: string;
     created_at: number;
-}
-
-export interface FilterButtonProps {
-    label: string
-    count: number
-    active: boolean
-    onClick: () => void
 }

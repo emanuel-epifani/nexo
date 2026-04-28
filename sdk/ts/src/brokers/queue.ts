@@ -51,7 +51,7 @@ const QueueCommands = {
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => w
       .string(name)
       .string(JSON.stringify({ batchSize, waitMs }))
-    , { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
+      , { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
 
     const count = res.cursor.readU32();
     if (count === 0) return [];
@@ -136,7 +136,6 @@ export interface QueueSubscribeOptions {
 
 export interface QueuePushOptions {
   priority?: number;
-  delayMs?: number;
 }
 
 /**
@@ -148,7 +147,7 @@ export class NexoDLQ<T = any> {
     private conn: NexoConnection,
     private queueName: string,
     private logger: Logger
-  ) {}
+  ) { }
 
   /**
    * Peek messages in the DLQ without consuming them.
@@ -297,11 +296,11 @@ export class NexoQueue<T = any> {
       this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 
-    return { 
+    return {
       stop: async () => {
         active = false;
         await loopDone;
-      } 
+      }
     };
   }
 

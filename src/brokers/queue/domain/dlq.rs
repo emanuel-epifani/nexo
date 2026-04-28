@@ -43,7 +43,6 @@ impl DlqMessage {
             attempts: 0, // Reset attempts on replay
             created_at: self.created_at,
             visible_at: 0, // Ready immediately
-            delayed_until: None,
             failure_reason: None, // Clear reason
             state: MessageState::Ready,
         }

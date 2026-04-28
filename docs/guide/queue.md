@@ -37,14 +37,11 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
 });
 ```
 
-## Priority & Scheduling
+## Priority
 
 ```typescript
 // PRIORITY: Higher value = delivered first (0-255)
 await criticalQueue.push({ type: 'urgent' }, { priority: 255 });
-
-// SCHEDULING: Delay visibility by 1 hour
-await criticalQueue.push({ type: 'scheduled' }, { delayMs: 3600000 });
 ```
 
 ## Consumer Tuning

@@ -80,7 +80,7 @@ const engines = [
   {
     icon: 'list-ordered',
     title: 'Queue',
-    desc: 'Reliable job processing with priority, delayed jobs, retry and Dead Letter Queues.',
+    desc: 'Reliable job processing with priority, retry and Dead Letter Queues.',
     perf: '400k ops/sec',
     link: '/guide/queue',
   },

@@ -205,7 +205,7 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
         },
         QueueCommand::Push { q_name, options, payload } => {
             let priority = options.priority.unwrap_or(0);
-            match queue.push(q_name, payload, priority, options.delay_ms).await {
+            match queue.push(q_name, payload, priority).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

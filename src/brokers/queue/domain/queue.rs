@@ -22,7 +22,6 @@ use crate::brokers::queue::snapshot::{MessageStateTag, QueueMessagePreview};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MessageState {
     Ready,                  // In waiting_for_dispatch
-    Scheduled(u64),         // In waiting_for_time (timestamp)
     InFlight(u64),          // In waiting_for_ack (timestamp scadenza)
 }
 
@@ -34,21 +33,13 @@ pub struct Message {
     pub attempts: u32,
     pub created_at: u64,
     pub visible_at: u64,
-    pub delayed_until: Option<u64>,
     pub failure_reason: Option<String>,
     pub state: MessageState,
 }
 
 impl Message {
-    pub fn new(payload: Bytes, priority: u8, delay_ms: Option<u64>) -> Self {
+    pub fn new(payload: Bytes, priority: u8) -> Self {
         let now = current_time_ms();
-
-        let (state, visible_at) = if let Some(delay) = delay_ms {
-            let ts = now + delay;
-            (MessageState::Scheduled(ts), ts)
-        } else {
-            (MessageState::Ready, 0)
-        };
 
         Self {
             id: Uuid::new_v4(),
@@ -56,10 +47,9 @@ impl Message {
             priority,
             attempts: 0,
             created_at: now,
-            visible_at,
-            delayed_until: delay_ms.map(|d| now + d),
+            visible_at: 0,
             failure_reason: None,
-            state,
+            state: MessageState::Ready,
         }
     }
 
@@ -71,7 +61,6 @@ impl Message {
             attempts: 0,
             created_at: dlq_msg.created_at,
             visible_at: 0,
-            delayed_until: None,
             failure_reason: None,
             state: MessageState::Ready,
         }
@@ -102,30 +91,20 @@ pub struct QueueState {
     registry: HashMap<Uuid, Message>,
     /// Ready messages by priority (high priority first)
     waiting_for_dispatch: BTreeMap<u8, LinkedHashSet<Uuid>>,
-    /// Scheduled messages by activation time
-    waiting_for_time: BTreeMap<u64, LinkedHashSet<Uuid>>,
     /// In-flight messages by timeout time
     waiting_for_ack: BTreeMap<u64, LinkedHashSet<Uuid>>,
-
 }
-impl QueueState {
-    /// Returns the earliest timestamp (ms) of the next scheduled event (Scheduled or Retry).
-    pub fn next_timeout(&self) -> Option<u64> {
-        let next_scheduled = self.waiting_for_time.keys().next().cloned();
-        let next_retry = self.waiting_for_ack.keys().next().cloned();
 
-        match (next_scheduled, next_retry) {
-            (Some(ts1), Some(ts2)) => Some(ts1.min(ts2)),
-            (Some(ts), None) => Some(ts),
-            (None, Some(ts)) => Some(ts),
-            (None, None) => None,
-        }
+impl QueueState {
+    /// Returns the earliest visibility timeout (ms) for in-flight messages.
+    pub fn next_inflight_timeout(&self) -> Option<u64> {
+        self.waiting_for_ack.keys().next().cloned()
     }
+
     pub fn new() -> Self {
         Self {
             registry: HashMap::new(),
             waiting_for_dispatch: BTreeMap::new(),
-            waiting_for_time: BTreeMap::new(),
             waiting_for_ack: BTreeMap::new(),
         }
     }
@@ -141,9 +120,6 @@ impl QueueState {
         match initial_state {
             MessageState::Ready => {
                 self.waiting_for_dispatch.entry(priority).or_default().insert(id);
-            }
-            MessageState::Scheduled(ts) => {
-                self.waiting_for_time.entry(ts).or_default().insert(id);
             }
             MessageState::InFlight(ts) => {
                 self.waiting_for_ack.entry(ts).or_default().insert(id);
@@ -212,7 +188,7 @@ impl QueueState {
         }
     }
 
-    /// Process expired events (scheduled -> ready, timeout -> retry/DLQ).
+    /// Process expired in-flight timeouts.
     /// Returns (requeued_messages, dlq_messages).
     /// requeued_messages: messages that transitioned to Ready (need UpdateState in DB)
     /// dlq_messages: messages moved to DLQ (need MoveToDlq in DB)
@@ -220,15 +196,6 @@ impl QueueState {
         let now = current_time_ms();
         let mut ids_to_ready = Vec::new();
         let mut ids_to_dlq = Vec::new();
-
-        // Scheduled messages that are now ready
-        for (&ts, ids) in &self.waiting_for_time {
-            if ts <= now {
-                ids_to_ready.extend(ids.iter().cloned());
-            } else {
-                break;
-            }
-        }
 
         // Timed out in-flight messages
         for (&ts, ids) in &self.waiting_for_ack {
@@ -280,10 +247,9 @@ impl QueueState {
         (requeued_msgs, dlq_msgs)
     }
 
-    pub fn get_counters(&self) -> (usize, usize, usize) {
+    pub fn get_counters(&self) -> (usize, usize) {
         let mut pending = 0;
         let mut inflight = 0;
-        let mut scheduled = 0;
 
         for (_, queue) in &self.waiting_for_dispatch {
             pending += queue.len();
@@ -293,25 +259,19 @@ impl QueueState {
             inflight += list.len();
         }
 
-        for (_, list) in &self.waiting_for_time {
-            scheduled += list.len();
-        }
-
-        (pending, inflight, scheduled)
+        (pending, inflight)
     }
 
     pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessagePreview>) {
         let filter_tag = match state_filter.to_lowercase().as_str() {
             "pending" => MessageStateTag::Pending,
             "inflight" => MessageStateTag::InFlight,
-            "scheduled" => MessageStateTag::Scheduled,
             _ => return (0, vec![]),
         };
 
         let ids: Vec<&Uuid> = match filter_tag {
             MessageStateTag::Pending => self.waiting_for_dispatch.values().flat_map(|q| q.iter()).collect(),
             MessageStateTag::InFlight => self.waiting_for_ack.values().flat_map(|q| q.iter()).collect(),
-            MessageStateTag::Scheduled => self.waiting_for_time.values().flat_map(|q| q.iter()).collect(),
         };
 
         let mut all_filtered: Vec<&Message> = Vec::new();
@@ -333,10 +293,9 @@ impl QueueState {
             .skip(offset)
             .take(limit)
             .map(|msg| {
-                let (state, next_delivery_at_ms) = match msg.state {
-                    MessageState::Ready => (MessageStateTag::Pending, None),
-                    MessageState::InFlight(_) => (MessageStateTag::InFlight, None),
-                    MessageState::Scheduled(ts) => (MessageStateTag::Scheduled, Some(ts)),
+                let state = match msg.state {
+                    MessageState::Ready => MessageStateTag::Pending,
+                    MessageState::InFlight(_) => MessageStateTag::InFlight,
                 };
                 QueueMessagePreview {
                     id: msg.id,
@@ -344,7 +303,6 @@ impl QueueState {
                     state,
                     priority: msg.priority,
                     attempts: msg.attempts,
-                    next_delivery_at_ms,
                 }
             })
             .collect();
@@ -414,7 +372,6 @@ impl QueueState {
     pub fn clear(&mut self) {
         self.registry.clear();
         self.waiting_for_dispatch.clear();
-        self.waiting_for_time.clear();
         self.waiting_for_ack.clear();
     }
 
@@ -462,25 +419,13 @@ impl QueueState {
             MessageState::Ready => {
                 if let Some(queue) = self.waiting_for_dispatch.get_mut(&priority) {
                     queue.remove(&id);
-                    if queue.is_empty() {
-                        self.waiting_for_dispatch.remove(&priority);
-                    }
-                }
-            }
-            MessageState::Scheduled(ts) => {
-                if let Some(queue) = self.waiting_for_time.get_mut(ts) {
-                    queue.remove(&id);
-                    if queue.is_empty() {
-                        self.waiting_for_time.remove(ts);
-                    }
+                    if queue.is_empty() { self.waiting_for_dispatch.remove(&priority); }
                 }
             }
             MessageState::InFlight(ts) => {
                 if let Some(queue) = self.waiting_for_ack.get_mut(ts) {
                     queue.remove(&id);
-                    if queue.is_empty() {
-                        self.waiting_for_ack.remove(ts);
-                    }
+                    if queue.is_empty() { self.waiting_for_ack.remove(ts); }
                 }
             }
         }
@@ -509,9 +454,6 @@ impl QueueState {
                         .entry(msg.priority)
                         .or_default()
                         .insert(id);
-                }
-                MessageState::Scheduled(ts) => {
-                    self.waiting_for_time.entry(ts).or_default().insert(id);
                 }
                 MessageState::InFlight(ts) => {
                     self.waiting_for_ack.entry(ts).or_default().insert(id);

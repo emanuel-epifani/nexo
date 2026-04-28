@@ -25,7 +25,6 @@ pub struct QueueSummary {
     pub name: String,
     pub pending: usize,
     pub inflight: usize,
-    pub scheduled: usize,
     pub dlq: usize,
     pub config: QueueConfig,
 }
@@ -36,7 +35,6 @@ impl From<QueueSnapshot> for QueueSummary {
             name: s.name,
             pending: s.pending,
             inflight: s.inflight,
-            scheduled: s.scheduled,
             dlq: s.dlq,
             config: s.config,
         }
@@ -50,8 +48,6 @@ pub struct MessageSummary {
     pub state: String,
     pub priority: u8,
     pub attempts: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_delivery_at: Option<String>,
 }
 
 impl From<QueueMessagePreview> for MessageSummary {
@@ -59,7 +55,6 @@ impl From<QueueMessagePreview> for MessageSummary {
         let state = match m.state {
             MessageStateTag::Pending => "pending".to_string(),
             MessageStateTag::InFlight => "inflight".to_string(),
-            MessageStateTag::Scheduled => "scheduled".to_string(),
         };
         Self {
             id: m.id,
@@ -67,7 +62,6 @@ impl From<QueueMessagePreview> for MessageSummary {
             state,
             priority: m.priority,
             attempts: m.attempts,
-            next_delivery_at: m.next_delivery_at_ms.map(format_rfc3339),
         }
     }
 }
@@ -162,13 +156,4 @@ pub fn routes() -> Router<NexoEngine> {
         .route("/api/queue/{name}/messages", get(get_queue_messages))
 }
 
-// ==========================================
-// HELPERS
-// ==========================================
 
-fn format_rfc3339(ts_ms: u64) -> String {
-    use chrono::{DateTime, Utc};
-    use std::time::{Duration, UNIX_EPOCH};
-    let d = UNIX_EPOCH + Duration::from_millis(ts_ms);
-    DateTime::<Utc>::from(d).to_rfc3339()
-}

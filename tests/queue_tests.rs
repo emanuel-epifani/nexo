@@ -28,7 +28,7 @@ mod queue_tests {
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             // Push
-            manager.push(q.clone(), Bytes::from("payload"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("payload"), 0).await.unwrap();
 
             // Pop
             let msg = manager.pop(&q).await.expect("Should pop message");
@@ -47,9 +47,9 @@ mod queue_tests {
             let q = format!("feature_fifo_{}", Uuid::new_v4());
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
-            manager.push(q.clone(), Bytes::from("msg1"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg2"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg3"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 0).await.unwrap();
 
             let m1 = manager.pop(&q).await.unwrap();
             assert_eq!(m1.payload, Bytes::from("msg1"));
@@ -67,9 +67,9 @@ mod queue_tests {
             let q = format!("feature_priority_{}", Uuid::new_v4());
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
-            manager.push(q.clone(), Bytes::from("low"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("high"), 10, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("mid"), 5, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("low"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("high"), 10).await.unwrap();
+            manager.push(q.clone(), Bytes::from("mid"), 5).await.unwrap();
 
             let m1 = manager.pop(&q).await.unwrap();
             assert_eq!(m1.payload, Bytes::from("high"));
@@ -88,13 +88,13 @@ mod queue_tests {
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
             //test PRIORITY
-            manager.push(q.clone(), Bytes::from("low"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("high"), 10, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("mid"), 7, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("low"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("high"), 10).await.unwrap();
+            manager.push(q.clone(), Bytes::from("mid"), 7).await.unwrap();
             //normal, test FIFO
-            manager.push(q.clone(), Bytes::from("msg1"), 4, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg2"), 4, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg3"), 4, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg1"), 4).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 4).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 4).await.unwrap();
 
             let m1 = manager.pop(&q).await.unwrap();
             assert_eq!(m1.payload, Bytes::from("high"));
@@ -114,32 +114,6 @@ mod queue_tests {
 
 
         #[tokio::test]
-        async fn test_scheduled_delivery() {
-            let (manager, _tmp) = setup_queue_manager().await;
-            let q = format!("feature_scheduled_{}", Uuid::new_v4());
-            // Configure short visibility to ensure pulse loop runs frequently (min 50ms)
-            let config = QueueCreateOptions {
-                visibility_timeout_ms: Some(200),
-                ..Default::default()
-            };
-            manager.create_queue(q.clone(), config).await.unwrap();
-
-            let delay_ms = 200;
-            // Push with delay
-            manager.push(q.clone(), Bytes::from("future"), 0, Some(delay_ms)).await.unwrap();
-
-            // Immediate Pop -> None
-            assert!(manager.pop(&q).await.is_none());
-
-            // Wait (Delay + Buffer)
-            tokio::time::sleep(Duration::from_millis(delay_ms + 150)).await;
-
-            // Pop -> Some
-            let msg = manager.pop(&q).await.expect("Should appear after delay");
-            assert_eq!(msg.payload, Bytes::from("future"));
-        }
-
-        #[tokio::test]
         async fn test_retry_and_dlq() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("feature_dlq_{}", Uuid::new_v4());
@@ -156,7 +130,7 @@ mod queue_tests {
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
-            manager.push(q.clone(), Bytes::from("fail_me"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("fail_me"), 0).await.unwrap();
 
             // Attempt 1
             let m1 = manager.pop(&q).await.unwrap();
@@ -209,7 +183,7 @@ mod queue_tests {
             let q = format!("adv_del_{}", Uuid::new_v4());
             manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
 
-            manager.push(q.clone(), Bytes::from("msg"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg"), 0).await.unwrap();
             assert!(manager.exists(&q).await);
 
             manager.delete_queue(q.clone()).await.unwrap();
@@ -247,7 +221,7 @@ mod queue_tests {
 
             // Push 10 messages
             for i in 0..10 {
-                manager.push(q.clone(), Bytes::from(format!("msg_{}", i)), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from(format!("msg_{}", i)), 0).await.unwrap();
             }
 
             // Consume 4
@@ -287,7 +261,7 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
 
             // Push message
-            manager.push(q.clone(), Bytes::from("wake_up"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("wake_up"), 0).await.unwrap();
 
             // Join consumer
             let batch = handle.await.unwrap();
@@ -380,8 +354,8 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // Push two messages — both waiters should each get one
-            manager.push(q.clone(), Bytes::from("msg_x"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg_y"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg_x"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg_y"), 0).await.unwrap();
 
             let batch_a = tokio::time::timeout(Duration::from_millis(500), handle_a)
                 .await
@@ -429,7 +403,7 @@ mod queue_tests {
                 };
                 manager1.create_queue(q.clone(), config).await.unwrap();
 
-                manager1.push(q.clone(), Bytes::from("survivor"), 0, None).await.unwrap();
+                manager1.push(q.clone(), Bytes::from("survivor"), 0).await.unwrap();
 
                 // Wait for async flush before dropping manager
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -451,51 +425,6 @@ mod queue_tests {
         }
 
         #[tokio::test]
-        async fn test_scheduled_persistence() {
-            let q = format!("persist_scheduled_{}", Uuid::new_v4());
-            let temp_dir = tempfile::tempdir().unwrap();
-            let path = temp_dir.path().to_str().unwrap().to_string();
-            let mut sys_config = nexo::config::Config::global().queue.clone();
-            sys_config.persistence_path = path.clone();
-
-            {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
-                let config = QueueCreateOptions {
-                    ..Default::default()
-                };
-                manager.create_queue(q.clone(), config).await.unwrap();
-
-                // Push with delay 500ms
-                manager.push(q.clone(), Bytes::from("future_job"), 0, Some(500)).await.unwrap();
-
-                // Wait for async flush before dropping manager
-                tokio::time::sleep(Duration::from_millis(150)).await;
-
-                // Immediate check (should be empty)
-                assert!(manager.pop(&q).await.is_none());
-            }
-
-            // Restart immediately
-            {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
-                let config = QueueCreateOptions {
-                    ..Default::default()
-                };
-                manager2.create_queue(q.clone(), config).await.unwrap();
-
-                // Should still be invisible (assuming less than 500ms passed)
-                assert!(manager2.pop(&q).await.is_none());
-
-                // Wait for delay expiration
-                tokio::time::sleep(Duration::from_millis(600)).await;
-
-                // Now it should be visible
-                let msg = manager2.pop(&q).await.expect("Scheduled message should appear after delay");
-                assert_eq!(msg.payload, Bytes::from("future_job"));
-            }
-        }
-
-        #[tokio::test]
         async fn test_acked_persistence() {
             let q = format!("persist_acked_{}", Uuid::new_v4());
             let temp_dir = tempfile::tempdir().unwrap();
@@ -510,7 +439,7 @@ mod queue_tests {
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
 
-                manager.push(q.clone(), Bytes::from("job_done"), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from("job_done"), 0).await.unwrap();
 
                 let msg = manager.pop(&q).await.unwrap();
 
@@ -550,7 +479,7 @@ mod queue_tests {
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
 
-                manager.push(q.clone(), Bytes::from("job"), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from("job"), 0).await.unwrap();
 
                 // Take it (make it InFlight)
                 let _ = manager.pop(&q).await.unwrap();
@@ -599,9 +528,9 @@ mod queue_tests {
                 manager.create_queue(q1.clone(), config.clone()).await.unwrap();
                 manager.create_queue(q2.clone(), config.clone()).await.unwrap();
 
-                manager.push(q1.clone(), Bytes::from("msg1_q1"), 0, None).await.unwrap();
-                manager.push(q1.clone(), Bytes::from("msg2_q1"), 0, None).await.unwrap();
-                manager.push(q2.clone(), Bytes::from("msg1_q2"), 0, None).await.unwrap();
+                manager.push(q1.clone(), Bytes::from("msg1_q1"), 0).await.unwrap();
+                manager.push(q1.clone(), Bytes::from("msg2_q1"), 0).await.unwrap();
+                manager.push(q2.clone(), Bytes::from("msg1_q2"), 0).await.unwrap();
 
                 // Wait for async flush before dropping manager
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -653,9 +582,9 @@ mod queue_tests {
             manager.create_queue(q.clone(), config).await.unwrap();
 
             // Push 3 messages that will fail
-            manager.push(q.clone(), Bytes::from("msg1"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg2"), 0, None).await.unwrap();
-            manager.push(q.clone(), Bytes::from("msg3"), 0, None).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg2"), 0).await.unwrap();
+            manager.push(q.clone(), Bytes::from("msg3"), 0).await.unwrap();
 
             // Pop all 3 and let them timeout
             let m1 = manager.pop(&q).await.unwrap();
@@ -711,7 +640,7 @@ mod queue_tests {
                 manager.create_queue(q.clone(), config).await.unwrap();
 
                 // Push message destined to fail
-                manager.push(q.clone(), Bytes::from("stay_in_dlq"), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from("stay_in_dlq"), 0).await.unwrap();
 
                 // Attempt 1 (and only attempt allowed)
                 let _ = manager.pop(&q).await.unwrap();
@@ -776,7 +705,7 @@ mod queue_tests {
             let mut bench = Benchmark::start("PUSH - Queue Throughput (Sequential)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
-                manager.push(q.clone(), Bytes::from("data"), 0, None).await.unwrap();
+                manager.push(q.clone(), Bytes::from("data"), 0).await.unwrap();
                 bench.record(start.elapsed());
             }
             // Wait for flush to happen in background (optional, just to be fair to disk)

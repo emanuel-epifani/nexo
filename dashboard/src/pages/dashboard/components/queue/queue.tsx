@@ -15,11 +15,11 @@ import {
 
 import { QueryError } from "@/components/ui/query-error"
 import {
-    DlqMessageSummary, FilterButtonProps, MessageSummary,
+    DlqMessageSummary, MessageSummary,
     PaginatedDlqMessages,
     PaginatedMessages,
     QueueBrokerSnapshot,
-    QueueSummary, ScheduledMessageSummary
+    QueueSummary
 } from "@/pages/dashboard/components/queue/types.ts";
 
 
@@ -46,7 +46,7 @@ export function QueueView() {
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null)
 
   // Message State Filter (for Traffic view)
-  const [messageState, setMessageState] = useState<'Pending' | 'InFlight' | 'Scheduled'>('Pending')
+  const [messageState, setMessageState] = useState<'Pending' | 'InFlight'>('Pending')
   
   // Pagination State
   const [offset, setOffset] = useState(0)
@@ -180,7 +180,6 @@ export function QueueView() {
                              <div className="flex gap-1">
                                  <FilterButton label="Pending" count={selectedQueue.pending} active={messageState === 'Pending'} onClick={() => setMessageState('Pending')} />
                                  <FilterButton label="InFlight" count={selectedQueue.inflight} active={messageState === 'InFlight'} onClick={() => setMessageState('InFlight')} />
-                                 <FilterButton label="Scheduled" count={selectedQueue.scheduled} active={messageState === 'Scheduled'} onClick={() => setMessageState('Scheduled')} />
                              </div>
                          )}
                      </div>
@@ -325,16 +324,6 @@ export function QueueView() {
                           </div>
                       )}
 
-                      {/* Delivery Time - Only for Scheduled */}
-                      {viewMode === 'traffic' && messageState === 'Scheduled' && 'next_delivery_at' in selectedMessage && (
-                          <div className="p-3 border-b border-border bg-card">
-                              <h3 className="text-xs font-bold uppercase text-muted-foreground mb-2">DELIVERY AT</h3>
-                              <div className="bg-panel p-2 rounded border border-border">
-                                  <span className="font-mono text-xs text-foreground">{(selectedMessage as ScheduledMessageSummary).next_delivery_at}</span>
-                              </div>
-                          </div>
-                      )}
-
                       {/* Payload Inspector */}
                       <div className="flex-1 flex flex-col min-h-0">
                           <div className="px-5 py-3 border-b border-border bg-section-header flex items-center justify-between shrink-0">
@@ -368,6 +357,12 @@ export function QueueView() {
   )
 }
 
+export interface FilterButtonProps {
+    label: string
+    count: number
+    active: boolean
+    onClick: () => void
+}
 
 function FilterButton({ label, count, active, onClick }: FilterButtonProps) {
     return (

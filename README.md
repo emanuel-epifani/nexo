@@ -142,7 +142,7 @@ Everything is available instantly via a unified Client.
                                         │     Consumer     │◀──┘
                                         └──────────────────┘
 ```
-*   **Smart Scheduling:** Supports **Delayed Jobs** (process in the future) and **Priority Queues** (urgent jobs first).
+*   **Priority Queues:** Supports **Priority** (urgent jobs first).
 *   **Failure Recovery:** Automatically retries failed jobs and isolates permanent failures in **Dead Letter Queues (DLQ)**.
 *   **Disk Persistence:** Safely persists all jobs to a Write-Ahead Log (WAL) to ensure data survival across restarts.
 
