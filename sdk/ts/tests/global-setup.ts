@@ -1,6 +1,7 @@
 import { execSync, spawn, ChildProcess } from 'node:child_process';
 import { Socket } from 'node:net';
 import path from 'node:path';
+import { DEFAULT_HOST, DEFAULT_PORT } from '../src/config';
 
 // ============================================================
 // Single source of truth: change here to switch debug/release.
@@ -36,10 +37,10 @@ async function waitForPort(host: string, port: number, retries = 20): Promise<vo
 
 async function runNexoServer(host: string, port: number): Promise<void> {
   console.log(`[TestSetup] Spawning Nexo server from: ${BINARY_PATH}`);
+  // Server defaults match SDK defaults (127.0.0.1:7654) — no env override needed.
   serverProcess = spawn(BINARY_PATH, [], {
     stdio: 'inherit',
     cwd: ROOT_DIR,
-    env: { ...process.env, SERVER_HOST: host, SERVER_SOCKET_TCP_PORT: port.toString() },
   });
   await waitForPort(host, port);
   console.log('[TestSetup] Server is ready.');
@@ -56,8 +57,8 @@ function killServer(): void {
 // Vitest globalSetup entry point
 // ============================================================
 export default async function setup() {
-  const host = process.env.SERVER_HOST!;
-  const port = parseInt(process.env.SERVER_SOCKET_TCP_PORT!, 10);
+  const host = DEFAULT_HOST;
+  const port = DEFAULT_PORT;
 
   // If Nexo is already running (e.g. Debugging in IDE), skip build and spawn
   if (await isServerRunning(host, port)) {

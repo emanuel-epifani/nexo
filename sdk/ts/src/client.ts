@@ -1,5 +1,5 @@
 import { Logger, LogHandler } from './utils/logger';
-import { DEFAULT_CONFIG } from './config';
+import { DEFAULT_CONFIG, DEFAULT_HOST, DEFAULT_PORT } from './config';
 import { NexoConnection } from './connection';
 import { NexoStore } from './brokers/store';
 import { NexoQueue } from './brokers/queue';
@@ -7,8 +7,8 @@ import { NexoPubSub, NexoTopic } from './brokers/pubsub';
 import { NexoStream } from './brokers/stream';
 
 export interface NexoOptions {
-  host: string;
-  port: number;
+  host?: string;
+  port?: number;
   logger?: LogHandler;
   logLevel?: string;
 }
@@ -20,15 +20,15 @@ export class NexoClient {
   public readonly store: NexoStore;
   private readonly pubsubBroker: NexoPubSub;
 
-  constructor(options: NexoOptions) {
+  constructor(options: NexoOptions = {}) {
     this.logger = new Logger({ 
       handler: options.logger, 
       level: options.logLevel ?? DEFAULT_CONFIG.logger.level 
     });
 
     this.conn = new NexoConnection({
-      host: options.host,
-      port: options.port,
+      host: options.host ?? DEFAULT_HOST,
+      port: options.port ?? DEFAULT_PORT,
       ...DEFAULT_CONFIG.connection,
     }, this.logger);
 
@@ -37,7 +37,7 @@ export class NexoClient {
     this.setupGracefulShutdown();
   }
 
-  static async connect(options: NexoOptions): Promise<NexoClient> {
+  static async connect(options: NexoOptions = {}): Promise<NexoClient> {
     const client = new NexoClient(options);
     await client.conn.connect();
     return client;

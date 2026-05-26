@@ -76,7 +76,7 @@ docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
 | Variable | Default | Description |
 |:---|:---|:---|
 | `NEXO_ENV` | `dev` | Set to `prod` to disable dashboard |
-| `SERVER_HOST` | `0.0.0.0` | Bind address |
+| `SERVER_HOST` | `127.0.0.1` | Bind address (set to `0.0.0.0` to expose on all interfaces, e.g. in Docker) |
 | `SERVER_SOCKET_TCP_PORT` | `7654` | Client TCP socket port |
 | `SERVER_DASHBOARD_HTTP_PORT` | `8080` | Dashboard HTTP port |
 | `NEXO_LOG` | `error` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |

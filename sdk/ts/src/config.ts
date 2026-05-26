@@ -1,3 +1,9 @@
+// Protocol defaults — must match server config and other SDKs.
+// See README for canonical values.
+export const DEFAULT_HOST = '127.0.0.1';
+export const DEFAULT_PORT = 7654;
+
+// Connection contract used by NexoConnection.
 export interface NexoConnectionConfig {
   host: string;
   port: number;
@@ -10,22 +16,7 @@ export interface NexoConnectionConfig {
   };
 }
 
-export interface NexoQueueConfig {
-  batchSize: number;
-  waitMs: number;
-  concurrency: number;
-  peek: {
-    limit: number;
-    offset: number;
-  };
-}
-
-export interface NexoStreamConfig {
-  batchSize: number;
-  waitMs: number;
-  concurrency: number;
-}
-
+// SDK runtime tuning — client-side behavior only.
 export const DEFAULT_CONFIG = {
   connection: {
     requestTimeoutMs: 15000,

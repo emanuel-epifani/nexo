@@ -54,7 +54,7 @@ impl ServerConfig {
         let env_mode = get_env::<String>("NEXO_ENV", "dev");
 
         Self {
-            host:           get_env("SERVER_HOST", "0.0.0.0"),
+            host:           get_env("SERVER_HOST", "127.0.0.1"),
             port:           get_env("SERVER_SOCKET_TCP_PORT", "7654"),
             dashboard_port: get_env("SERVER_DASHBOARD_HTTP_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "error"),
