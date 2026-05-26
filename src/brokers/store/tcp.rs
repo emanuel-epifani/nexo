@@ -1,7 +1,6 @@
 //! Store broker TCP surface: opcodes, command parsing, dispatch entry point.
 
 use bytes::Bytes;
-use serde::Deserialize;
 
 use crate::transport::tcp::protocol::cursor::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
@@ -22,15 +21,9 @@ pub const OP_MAP_DEL: u8 = 0x04;
 // COMMANDS
 // ==========================================
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MapSetOptions {
-    pub ttl: Option<u64>,
-}
-
 #[derive(Debug)]
 enum StoreCommand {
-    MapSet { key: String, options: MapSetOptions, value: Bytes },
+    MapSet { key: String, ttl: Option<u64>, value: Bytes },
     MapGet { key: String },
     MapDel { key: String },
 }
@@ -40,11 +33,10 @@ impl StoreCommand {
         match opcode {
             OP_MAP_SET => {
                 let key = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: MapSetOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
+                let flags = cursor.read_u8()?;
+                let ttl = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
                 let value = cursor.read_remaining();
-                Ok(Self::MapSet { key, options, value })
+                Ok(Self::MapSet { key, ttl, value })
             }
             OP_MAP_GET => {
                 let key = cursor.read_string()?;
@@ -70,8 +62,8 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
     };
 
     match cmd {
-        StoreCommand::MapSet { key, options, value } => {
-            engine.store.map.set(key, value, options.ttl);
+        StoreCommand::MapSet { key, ttl, value } => {
+            engine.store.map.set(key, value, ttl);
             Response::Ok
         }
         StoreCommand::MapGet { key } => engine

@@ -40,12 +40,15 @@ const QueueCommands = {
   delete: (conn: NexoConnection, name: string) =>
     conn.send(QueueOpcode.Q_DELETE, w => w.string(name)),
 
-  push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) =>
-    conn.send(QueueOpcode.Q_PUSH, w => w
-      .string(name)
-      .string(JSON.stringify(options || {}))
-      .any(data)
-    ),
+  push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) => {
+    const hasPriority = options?.priority !== undefined;
+    const flags = hasPriority ? 0x01 : 0x00;
+    return conn.send(QueueOpcode.Q_PUSH, w => {
+      w.string(name).u8(flags);
+      if (hasPriority) w.u8(options!.priority!);
+      w.any(data);
+    });
+  },
 
   consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => w

@@ -8,12 +8,15 @@ enum StoreOpcode {
 }
 
 const StoreCommands = {
-  mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) =>
-    conn.send(StoreOpcode.MAP_SET, w => w
-      .string(key)
-      .string(JSON.stringify(options || {}))
-      .any(value)
-    ),
+  mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) => {
+    const hasTtl = options?.ttl !== undefined;
+    const flags = hasTtl ? 0x01 : 0x00;
+    return conn.send(StoreOpcode.MAP_SET, w => {
+      w.string(key).u8(flags);
+      if (hasTtl) w.u64(options!.ttl!);
+      w.any(value);
+    });
+  },
 
   mapGet: async (conn: NexoConnection, key: string) => {
     const res = await conn.send(StoreOpcode.MAP_GET, w => w.string(key));

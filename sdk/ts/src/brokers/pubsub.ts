@@ -8,12 +8,16 @@ enum PubSubOpcode {
 }
 
 const PubSubCommands = {
-  publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) =>
-    conn.send(PubSubOpcode.PUB, w => w
-      .string(topic)
-      .string(JSON.stringify(options || {}))
-      .any(data)
-    ),
+  publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) => {
+    const retain = options?.retain === true;
+    const hasTtl = options?.ttl !== undefined;
+    const flags = (retain ? 0x01 : 0x00) | (hasTtl ? 0x02 : 0x00);
+    return conn.send(PubSubOpcode.PUB, w => {
+      w.string(topic).u8(flags);
+      if (hasTtl) w.u64(options!.ttl!);
+      w.any(data);
+    });
+  },
 
   subscribe: (conn: NexoConnection, topic: string) =>
     conn.send(PubSubOpcode.SUB, w => w.string(topic)),
@@ -24,6 +28,7 @@ const PubSubCommands = {
 
 export interface PublishOptions {
   retain?: boolean;
+  ttl?: number;
 }
 
 export class NexoTopic<T = any> {

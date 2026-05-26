@@ -26,7 +26,7 @@ describe('Stress test', () => {
             const stats = probe.printResult();
             expect(stats.throughput).toBeGreaterThan(30_000);
         });
-        it('STORE - PUSH - concurrent workers', async () => {
+        it('QUEUE - PUSH - concurrent workers', async () => {
             const q = nexo.queue('bench-queue-throughput');
             await q.create();
 

@@ -1,11 +1,8 @@
 //! PubSub option types shared between the manager and the TCP adapter.
 
-use serde::Deserialize;
-
 use crate::brokers::pub_sub::config::PubSubConfig;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct PubSubPublishOptions {
     pub retain: Option<bool>,
     pub ttl: Option<u64>,

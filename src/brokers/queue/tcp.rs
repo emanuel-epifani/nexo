@@ -64,11 +64,10 @@ impl QueueCommand {
             }
             OP_Q_PUSH => {
                 let q_name = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: QueuePushOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
+                let flags = cursor.read_u8()?;
+                let priority = if flags & 0x01 != 0 { Some(cursor.read_u8()?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Push { q_name, options, payload })
+                Ok(Self::Push { q_name, options: QueuePushOptions { priority }, payload })
             }
             OP_Q_CONSUME => {
                 let q_name = cursor.read_string()?;

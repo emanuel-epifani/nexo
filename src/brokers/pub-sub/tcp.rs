@@ -36,11 +36,11 @@ impl PubSubCommand {
         match opcode {
             OP_PUB => {
                 let topic = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: PubSubPublishOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
+                let flags = cursor.read_u8()?;
+                let retain = if flags & 0x01 != 0 { Some(true) } else { None };
+                let ttl = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, options, payload })
+                Ok(Self::Publish { topic, options: PubSubPublishOptions { retain, ttl }, payload })
             }
             OP_SUB => {
                 let topic = cursor.read_string()?;

@@ -11,8 +11,7 @@ pub struct QueueCreateOptions {
     pub max_retries: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug)]
 pub struct QueuePushOptions {
     pub priority: Option<u8>,
 }
