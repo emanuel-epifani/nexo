@@ -8,7 +8,7 @@ Get Nexo running in under 30 seconds with Docker and the TypeScript SDK.
 The Docker image is available on [Docker Hub](https://hub.docker.com/r/emanuelepifani/nexo).
 
 ```bash
-docker run -d -p 7654:7654 -p 8080:8080 emanuelepifani/nexo
+docker run -d -p 7654:7654 -p 8080:8080 emanuelepifani/nexo dev
 ```
 
 This exposes:
@@ -16,8 +16,7 @@ This exposes:
 - **Port 7654 (TCP):** Client TCP socket for SDK connections.
 - **Port 8080 (HTTP):** Built-in Web Dashboard — open `http://localhost:8080` to inspect all brokers in real-time. No extra tools needed.
 
-
-> Port 8080 is intentionally omitted — the Dashboard is disabled in production mode.
+> The `dev` subcommand starts the dashboard. In production use `nexo serve` (the default `CMD` of the Docker image) which runs TCP only.
 
 ## 2. Install the SDK
 

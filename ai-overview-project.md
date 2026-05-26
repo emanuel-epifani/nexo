@@ -18,6 +18,12 @@ Ships with:
 
 Default ports: TCP `7654` (SDK ↔ server), HTTP `8080` (dashboard).
 
+**Run modes (subcommands):**
+- `nexo serve` — TCP only, dashboard OFF. Production default (also default with no args).
+- `nexo dev` — TCP + dashboard. Local development only.
+
+The dashboard cannot be enabled by env var; the subcommand is the only gate.
+
 ---
 
 ## 2) Architecture at a Glance

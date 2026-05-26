@@ -14,7 +14,6 @@ pub async fn start_http_server(engine: NexoEngine, port: u16) {
         .with_state(engine);
 
     let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("🌐 Dashboard available at http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind dashboard port");
 

@@ -47,18 +47,21 @@ For most deployments, a single volume is sufficient.
 
 ## Dashboard
 
-Nexo includes a built-in debug dashboard accessible on port `8080`. It is **automatically disabled** when `NEXO_ENV=prod`.
+Nexo ships with a built-in debug dashboard, but it only starts when the server is launched in **dev mode**.
+
+- `nexo serve` — TCP only, dashboard **OFF**. This is the production default.
+- `nexo dev` — TCP + dashboard on port `8080`.
 
 ```bash
-# Development (dashboard enabled by default)
-docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo
+# Development (dashboard ON, port 8080 exposed)
+docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo dev
 
-# Production (dashboard disabled)
-docker run -p 7654:7654 -e NEXO_ENV=prod emanuelepifani/nexo
+# Production (dashboard OFF, default — no subcommand needed)
+docker run -p 7654:7654 emanuelepifani/nexo
 ```
 
 ::: warning
-The dashboard exposes internal state (messages, queues, topics) and is intended for debugging only. Do not expose port `8080` publicly in production.
+The dashboard exposes internal state (messages, queues, topics) and is intended for local development and debugging only. Never run `nexo dev` in production.
 :::
 
 ## Max Payload Size
@@ -75,7 +78,6 @@ docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
 
 | Variable | Default | Description |
 |:---|:---|:---|
-| `NEXO_ENV` | `dev` | Set to `prod` to disable dashboard |
 | `SERVER_HOST` | `127.0.0.1` | Bind address (set to `0.0.0.0` to expose on all interfaces, e.g. in Docker) |
 | `SERVER_SOCKET_TCP_PORT` | `7654` | Client TCP socket port |
 | `SERVER_DASHBOARD_HTTP_PORT` | `8080` | Dashboard HTTP port |

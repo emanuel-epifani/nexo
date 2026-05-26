@@ -171,8 +171,10 @@ Everything is available instantly via a unified Client.
 
 ## 📊 Dashboard
 
-Nexo comes with a built-in, zero-config dashboard exposed to local development.
+Nexo comes with a built-in, zero-config dashboard for local development.
 Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
+
+The dashboard only starts when the server is launched in dev mode (`nexo dev`). The default command (`nexo serve`) runs TCP only and is the production-safe default.
 
 ![Nexo Dashboard Screenshot](docs/public/dashboard-preview.png)
 
@@ -181,11 +183,15 @@ Instantly verify if your microservices are communicating correctly by inspecting
 ### 1. Run the Server
 
 ```bash
-docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo
+# Local development (dashboard ON)
+docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo dev
+
+# Production (dashboard OFF, default)
+docker run -d -p 7654:7654 nexobroker/nexo
 ```
 This exposes:
 - Port 7654 (TCP): Main server socket for SDK clients.
-- Port 8080 (HTTP): Web Dashboard with status of all brokers.
+- Port 8080 (HTTP): Web Dashboard, available only when running `nexo dev`.
 
 
 ### 2. Install the SDK

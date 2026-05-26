@@ -30,6 +30,7 @@ With Nexo, the binary you run on your laptop is **the exact same binary** you ru
 services:
   nexo:
     image: emanuelepifani/nexo:latest
+    command: ["nexo", "dev"]   # enables the built-in dashboard (omit in production)
     ports: ["7654:7654", "8080:8080"]
 ```
 
