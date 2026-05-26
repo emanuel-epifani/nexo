@@ -15,9 +15,6 @@ export interface NexoOptions {
 
 export class NexoClient {
   private conn: NexoConnection;
-  private queues = new Map<string, NexoQueue<any>>();
-  private streams = new Map<string, NexoStream<any>>();
-  private topics = new Map<string, NexoTopic<any>>();
   private logger: Logger;
 
   public readonly store: NexoStore;
@@ -49,30 +46,15 @@ export class NexoClient {
   disconnect() { this.conn.disconnect(); }
 
   queue<T = any>(name: string): NexoQueue<T> {
-    let q = this.queues.get(name);
-    if (!q) {
-      q = new NexoQueue<T>(this.conn, name, this.logger);
-      this.queues.set(name, q);
-    }
-    return q;
+    return new NexoQueue<T>(this.conn, name, this.logger);
   }
 
   stream<T = any>(name: string): NexoStream<T> {
-    let s = this.streams.get(name);
-    if (!s) {
-      s = new NexoStream<T>(this.conn, name, this.logger);
-      this.streams.set(name, s);
-    }
-    return s;
+    return new NexoStream<T>(this.conn, name, this.logger);
   }
 
   pubsub<T = any>(name: string): NexoTopic<T> {
-    let t = this.topics.get(name);
-    if (!t) {
-      t = new NexoTopic<T>(this.pubsubBroker, name);
-      this.topics.set(name, t);
-    }
-    return t;
+    return new NexoTopic<T>(this.pubsubBroker, name);
   }
 
   private setupGracefulShutdown() {

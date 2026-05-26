@@ -192,7 +192,6 @@ export class NexoDLQ<T = any> {
 }
 
 export class NexoQueue<T = any> {
-  private isSubscribed = false;
   private _dlq: NexoDLQ<T>;
 
   constructor(
@@ -228,15 +227,16 @@ export class NexoQueue<T = any> {
     await QueueCommands.push(this.conn, this.name, data, options);
   }
 
+  /**
+   * Start a consume loop for this queue. Each call spawns an independent loop;
+   * calling subscribe() N times produces N parallel consumers sharing the queue,
+   * with messages split between them by the server.
+   */
   async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
-    if (this.isSubscribed) throw new Error(`Queue '${this.name}' already subscribed.`);
-
     // Fail Fast: Check existence first
     if (!(await this.exists())) {
       throw new Error(`Queue '${this.name}' not found`);
     }
-
-    this.isSubscribed = true;
 
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.queue.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
@@ -288,11 +288,9 @@ export class NexoQueue<T = any> {
           await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.long));
         }
       }
-      this.isSubscribed = false;
     };
 
     const loopDone = loop().catch(err => {
-      this.isSubscribed = false;
       this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 

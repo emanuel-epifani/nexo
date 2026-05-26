@@ -207,6 +207,30 @@ describe('QUEUE', () => {
         expect(elapsed).toBeLessThan(COUNT * CALLBACK_DELAY * 0.6);
     });
 
+    it('should allow multiple parallel subscribers on the same queue (in-process scaling)', async () => {
+        const qName = `queue-multi-sub-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        const COUNT = 20;
+        const received: number[] = [];
+
+        // Two independent consume loops on the same queue handle.
+        // The server reserves each msg via visibility timeout so it can never be delivered twice.
+        // batchSize=1 forces per-message reservation so either loop can pick up any message.
+        const subA = await q.subscribe(async (msg: any) => { received.push(msg.i); }, { batchSize: 1, waitMs: 200, concurrency: 1 });
+        const subB = await q.subscribe(async (msg: any) => { received.push(msg.i); }, { batchSize: 1, waitMs: 200, concurrency: 1 });
+
+        for (let i = 0; i < COUNT; i++) await q.push({ i });
+
+        await waitFor(() => expect(received.length).toBe(COUNT));
+        subA.stop();
+        subB.stop();
+
+        // Every message processed exactly once across both subscribers (no duplication).
+        const sorted = [...received].sort((a, b) => a - b);
+        expect(sorted).toEqual(Array.from({ length: COUNT }, (_, i) => i));
+    });
+
     it('Should handle explicit NACK and persist failure reason in DLQ', async () => {
         const qName = `nack-reason-${randomUUID()}`;
         const q = await nexo.queue(qName).create({
