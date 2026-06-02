@@ -2,7 +2,7 @@
 //!
 //! Request Frame (Total Header: 10 bytes):
 //! [FrameType: 1 byte] [Meta/Opcode: 1 byte] [CorrelationID: 4 bytes (BE)] [PayloadLen: 4 bytes (BE)]
-//! Payload: [...args (JSON strings)] [Data (if applicable)]
+//! Payload: [binary typed fields per broker] [Data (if applicable)]
 //!
 //! Response Frame (Total Header: 10 bytes):
 //! [FrameType: 1 byte] [Meta/Status: 1 byte] [CorrelationID: 4 bytes (BE)] [PayloadLen: 4 bytes (BE)]

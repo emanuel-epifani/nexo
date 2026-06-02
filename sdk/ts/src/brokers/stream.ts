@@ -134,7 +134,7 @@ class StreamSubscription<T> {
       .u64(generation)
       .u32(this.batchSize)
       .u32(this.waitMs)
-    , { timeoutMs: this.waitMs + FETCH_TIMEOUT_MARGIN_MS });
+      , { timeoutMs: this.waitMs + FETCH_TIMEOUT_MARGIN_MS });
 
     const count = res.cursor.readU32();
     if (count === 0) return;
@@ -174,10 +174,15 @@ export class NexoStream<T = any> {
   ) { }
 
   async create(options: StreamCreateOptions = {}): Promise<this> {
-    await this.conn.send(StreamOpcode.S_CREATE, w => w
-      .string(this.name)
-      .string(JSON.stringify(options))
-    );
+    const retention = options.retention;
+    const hasMaxAge = retention?.maxAgeMs !== undefined;
+    const hasMaxBytes = retention?.maxBytes !== undefined;
+    const flags = (hasMaxAge ? 0x01 : 0x00) | (hasMaxBytes ? 0x02 : 0x00);
+    await this.conn.send(StreamOpcode.S_CREATE, w => {
+      w.string(this.name).u8(flags);
+      if (hasMaxAge) w.u64(retention!.maxAgeMs!);
+      if (hasMaxBytes) w.u64(retention!.maxBytes!);
+    });
     return this;
   }
 

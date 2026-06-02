@@ -10,8 +10,7 @@ pub struct RetentionOptions {
     pub max_bytes: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default, Clone)]
 pub struct StreamCreateOptions {
     pub retention: Option<RetentionOptions>,
 }

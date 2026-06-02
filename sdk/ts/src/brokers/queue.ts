@@ -22,11 +22,16 @@ enum QueueOpcode {
 const CONSUME_TIMEOUT_MARGIN_MS = 5000;
 
 const QueueCommands = {
-  create: (conn: NexoConnection, name: string, config: QueueConfig) =>
-    conn.send(QueueOpcode.Q_CREATE, w => w
-      .string(name)
-      .string(JSON.stringify(config || {}))
-    ),
+  create: (conn: NexoConnection, name: string, config: QueueConfig) => {
+    const hasVto = config?.visibilityTimeoutMs !== undefined;
+    const hasRetries = config?.maxRetries !== undefined;
+    const flags = (hasVto ? 0x01 : 0x00) | (hasRetries ? 0x02 : 0x00);
+    return conn.send(QueueOpcode.Q_CREATE, w => {
+      w.string(name).u8(flags);
+      if (hasVto) w.u64(config!.visibilityTimeoutMs!);
+      if (hasRetries) w.u32(config!.maxRetries!);
+    });
+  },
 
   exists: async (conn: NexoConnection, name: string) => {
     try {
@@ -51,10 +56,14 @@ const QueueCommands = {
   },
 
   consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
-    const res = await conn.send(QueueOpcode.Q_CONSUME, w => w
-      .string(name)
-      .string(JSON.stringify({ batchSize, waitMs }))
-      , { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
+    const hasBatch = batchSize !== undefined;
+    const hasWait = waitMs !== undefined;
+    const flags = (hasBatch ? 0x01 : 0x00) | (hasWait ? 0x02 : 0x00);
+    const res = await conn.send(QueueOpcode.Q_CONSUME, w => {
+      w.string(name).u8(flags);
+      if (hasBatch) w.u32(batchSize);
+      if (hasWait) w.u32(waitMs);
+    }, { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
 
     const count = res.cursor.readU32();
     if (count === 0) return [];

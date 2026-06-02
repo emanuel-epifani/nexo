@@ -5,7 +5,7 @@ use bytes::{Bytes, BufMut, BytesMut};
 
 use crate::brokers::pub_sub::ClientId;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
+use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
 use crate::transport::tcp::protocol::cursor::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
@@ -49,10 +49,15 @@ impl StreamCommand {
         match opcode {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: StreamCreateOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON config: {}", e)))?;
-                Ok(Self::Create { topic, options })
+                let flags = cursor.read_u8()?;
+                let max_age_ms = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
+                let max_bytes = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
+                let retention = if max_age_ms.is_some() || max_bytes.is_some() {
+                    Some(RetentionOptions { max_age_ms, max_bytes })
+                } else {
+                    None
+                };
+                Ok(Self::Create { topic, options: StreamCreateOptions { retention } })
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;

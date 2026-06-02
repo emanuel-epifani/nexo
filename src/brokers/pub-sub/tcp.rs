@@ -2,9 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::brokers::pub_sub::options::{PubSubPublishConfig, PubSubPublishOptions};
 use crate::brokers::pub_sub::ClientId;
-use crate::config::Config;
 use crate::transport::tcp::protocol::cursor::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
@@ -26,7 +24,7 @@ pub const OP_UNSUB: u8 = 0x23;
 
 #[derive(Debug)]
 enum PubSubCommand {
-    Publish { topic: String, options: PubSubPublishOptions, payload: Bytes },
+    Publish { topic: String, retain: Option<bool>, ttl: Option<u64>, payload: Bytes },
     Subscribe { topic: String },
     Unsubscribe { topic: String },
 }
@@ -37,10 +35,10 @@ impl PubSubCommand {
             OP_PUB => {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let retain = if flags & 0x01 != 0 { Some(true) } else { None };
+                let retain: Option<bool> = if flags & 0x01 != 0 { Some(true) } else { None };
                 let ttl = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, options: PubSubPublishOptions { retain, ttl }, payload })
+                Ok(Self::Publish { topic, retain, ttl, payload })
             }
             OP_SUB => {
                 let topic = cursor.read_string()?;
@@ -73,9 +71,8 @@ pub async fn handle(
     let pubsub = &engine.pubsub;
 
     match cmd {
-        PubSubCommand::Publish { options, topic, payload } => {
-            let config = PubSubPublishConfig::from_options(options, &Config::global().pubsub);
-            let _count = pubsub.publish(&topic, payload, config.retain, Some(config.ttl_seconds));
+        PubSubCommand::Publish { topic, retain, ttl, payload } => {
+            let _count = pubsub.publish(&topic, payload, retain.unwrap_or(false), ttl);
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {

@@ -9,7 +9,7 @@ use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
 
 use crate::brokers::queue::domain::dlq::DlqMessage;
-use crate::brokers::queue::options::{QueueConsumeOptions, QueueCreateOptions, QueuePushOptions};
+use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::domain::queue::Message;
 
 // ==========================================
@@ -40,8 +40,8 @@ pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 #[derive(Debug)]
 enum QueueCommand {
     Create { q_name: String, options: QueueCreateOptions },
-    Push { q_name: String, options: QueuePushOptions, payload: Bytes },
-    Consume { q_name: String, options: QueueConsumeOptions },
+    Push { q_name: String, priority: Option<u8>, payload: Bytes },
+    Consume { q_name: String, batch_size: Option<usize>, wait_ms: Option<u64> },
     Delete { q_name: String },
     Ack { id: Uuid, q_name: String },
     Nack { id: Uuid, q_name: String, reason: String },
@@ -57,24 +57,24 @@ impl QueueCommand {
         match opcode {
             OP_Q_CREATE => {
                 let q_name = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: QueueCreateOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON config: {}", e)))?;
-                Ok(Self::Create { q_name, options })
+                let flags = cursor.read_u8()?;
+                let visibility_timeout_ms = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
+                let max_retries = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
+                Ok(Self::Create { q_name, options: QueueCreateOptions { visibility_timeout_ms, max_retries } })
             }
             OP_Q_PUSH => {
                 let q_name = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
                 let priority = if flags & 0x01 != 0 { Some(cursor.read_u8()?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Push { q_name, options: QueuePushOptions { priority }, payload })
+                Ok(Self::Push { q_name, priority, payload })
             }
             OP_Q_CONSUME => {
                 let q_name = cursor.read_string()?;
-                let json_str = cursor.read_string()?;
-                let options: QueueConsumeOptions = serde_json::from_str(&json_str)
-                    .map_err(|e| ParseError::Invalid(format!("Invalid JSON options: {}", e)))?;
-                Ok(Self::Consume { q_name, options })
+                let flags = cursor.read_u8()?;
+                let batch_size = if flags & 0x01 != 0 { Some(cursor.read_u32()? as usize) } else { None };
+                let wait_ms = if flags & 0x02 != 0 { Some(cursor.read_u32()? as u64) } else { None };
+                Ok(Self::Consume { q_name, batch_size, wait_ms })
             }
             OP_Q_ACK => {
                 let id = Uuid::from_bytes(cursor.read_uuid_bytes()?);
@@ -202,15 +202,15 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
-        QueueCommand::Push { q_name, options, payload } => {
-            let priority = options.priority.unwrap_or(0);
+        QueueCommand::Push { q_name, priority, payload } => {
+            let priority = priority.unwrap_or(0);
             match queue.push(q_name, payload, priority).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::Consume { q_name, options } => {
-            match queue.consume_batch(q_name, options.batch_size, options.wait_ms).await {
+        QueueCommand::Consume { q_name, batch_size, wait_ms } => {
+            match queue.consume_batch(q_name, batch_size, wait_ms).await {
                 Ok(messages) => Response::Data(ConsumeBatchResponse { messages }.to_wire()),
                 Err(e) => Response::Error(e),
             }
