@@ -34,7 +34,12 @@ pub const STATUS_NULL: u8 = 0x02;
 pub const STATUS_DATA: u8 = 0x03;
 
 // ========================================
-// DATA TYPE FLAGS (First byte of data payload)
+// DATA TYPE FLAGS (First byte of a user data payload)
+//
+// NOTE: this prefix is an SDK-owned convention, NOT part of the framing the
+// server enforces. The server treats user payloads as opaque bytes and never
+// reads or writes this byte on the TCP data-plane. It is only interpreted by
+// `transport/http/payload.rs` to render payloads as JSON in the dashboard.
 // ========================================
 pub const DATA_TYPE_RAW: u8 = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;

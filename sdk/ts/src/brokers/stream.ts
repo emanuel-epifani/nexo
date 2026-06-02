@@ -93,8 +93,8 @@ class StreamSubscription<T> {
   private async join(): Promise<void> {
     if (!this.conn.isConnected) throw new NotConnectedError();
     const res = await this.conn.send(StreamOpcode.S_JOIN, w => w
-      .string(this.group)
       .string(this.streamName)
+      .string(this.group)
     );
     res.cursor.readU64(); // ack_floor (unused client-side)
     this.generation = res.cursor.readU64();
@@ -189,7 +189,7 @@ export class NexoStream<T = any> {
   async exists(): Promise<boolean> {
     try {
       const res = await this.conn.send(StreamOpcode.S_EXISTS, w => w.string(this.name));
-      return res.status === 0x00;
+      return res.cursor.readU8() === 1;
     } catch {
       return false;
     }

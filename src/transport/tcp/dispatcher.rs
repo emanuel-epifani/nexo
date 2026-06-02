@@ -1,6 +1,6 @@
 //! Thin opcode dispatcher delegating to broker-specific TCP handlers.
 
-use crate::brokers::pub_sub::ClientId;
+use crate::brokers::ClientId;
 use crate::brokers::{pub_sub, queue, store, stream};
 use crate::transport::tcp::protocol::cursor::PayloadCursor;
 use crate::transport::tcp::protocol::Response;

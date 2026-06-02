@@ -6,8 +6,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use tokio::sync::mpsc;
 use dashmap::DashMap;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ClientId(pub String);
+use crate::brokers::ClientId;
 
 pub struct ClientInfo {
     pub sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,

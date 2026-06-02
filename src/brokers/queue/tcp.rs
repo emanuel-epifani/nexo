@@ -5,6 +5,7 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::writer::PayloadWriter;
 use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
 use crate::NexoEngine;
 
@@ -41,7 +42,7 @@ pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 enum QueueCommand {
     Create { q_name: String, options: QueueCreateOptions },
     Push { q_name: String, priority: Option<u8>, payload: Bytes },
-    Consume { q_name: String, batch_size: Option<usize>, wait_ms: Option<u64> },
+    Consume { q_name: String, batch_size: usize, wait_ms: u64 },
     Delete { q_name: String },
     Ack { id: Uuid, q_name: String },
     Nack { id: Uuid, q_name: String, reason: String },
@@ -71,9 +72,8 @@ impl QueueCommand {
             }
             OP_Q_CONSUME => {
                 let q_name = cursor.read_string()?;
-                let flags = cursor.read_u8()?;
-                let batch_size = if flags & 0x01 != 0 { Some(cursor.read_u32()? as usize) } else { None };
-                let wait_ms = if flags & 0x02 != 0 { Some(cursor.read_u32()? as u64) } else { None };
+                let batch_size = cursor.read_u32()? as usize;
+                let wait_ms = cursor.read_u32()? as u64;
                 Ok(Self::Consume { q_name, batch_size, wait_ms })
             }
             OP_Q_ACK => {
@@ -130,14 +130,13 @@ struct ConsumeBatchResponse {
 
 impl ToWire for ConsumeBatchResponse {
     fn to_wire(&self) -> Bytes {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(self.messages.len() as u32).to_be_bytes());
+        let mut w = PayloadWriter::new();
+        w.put_u32(self.messages.len() as u32);
         for msg in &self.messages {
-            buf.extend_from_slice(msg.id.as_bytes());
-            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&msg.payload);
+            w.put_uuid(msg.id.as_bytes());
+            w.put_bytes(&msg.payload);
         }
-        Bytes::from(buf)
+        w.into_bytes()
     }
 }
 
@@ -148,20 +147,16 @@ struct PeekDlqResponse {
 
 impl ToWire for PeekDlqResponse {
     fn to_wire(&self) -> Bytes {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(self.total as u32).to_be_bytes());
-        buf.extend_from_slice(&(self.messages.len() as u32).to_be_bytes());
+        let mut w = PayloadWriter::new();
+        w.put_u32(self.total as u32);
+        w.put_u32(self.messages.len() as u32);
         for msg in &self.messages {
-            buf.extend_from_slice(msg.id.as_bytes());
-            buf.extend_from_slice(&(msg.payload.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&msg.payload);
-            buf.extend_from_slice(&msg.attempts.to_be_bytes());
-
-            let reason_bytes = msg.failure_reason.as_bytes();
-            buf.extend_from_slice(&(reason_bytes.len() as u32).to_be_bytes());
-            buf.extend_from_slice(reason_bytes);
+            w.put_uuid(msg.id.as_bytes());
+            w.put_bytes(&msg.payload);
+            w.put_u32(msg.attempts);
+            w.put_str(&msg.failure_reason);
         }
-        Bytes::from(buf)
+        w.into_bytes()
     }
 }
 
@@ -171,7 +166,9 @@ struct BoolResponse {
 
 impl ToWire for BoolResponse {
     fn to_wire(&self) -> Bytes {
-        Bytes::from(vec![if self.value { 1u8 } else { 0u8 }])
+        let mut w = PayloadWriter::with_capacity(1);
+        w.put_bool(self.value);
+        w.into_bytes()
     }
 }
 
@@ -181,7 +178,9 @@ struct CountResponse {
 
 impl ToWire for CountResponse {
     fn to_wire(&self) -> Bytes {
-        Bytes::from(Vec::from((self.count as u32).to_be_bytes()))
+        let mut w = PayloadWriter::with_capacity(4);
+        w.put_u32(self.count as u32);
+        w.into_bytes()
     }
 }
 
@@ -210,23 +209,23 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
             }
         }
         QueueCommand::Consume { q_name, batch_size, wait_ms } => {
-            match queue.consume_batch(q_name, batch_size, wait_ms).await {
+            match queue.consume_batch(q_name, Some(batch_size), Some(wait_ms)).await {
                 Ok(messages) => Response::Data(ConsumeBatchResponse { messages }.to_wire()),
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::Ack { id, q_name } => match queue.ack(&q_name, id).await {
-            true => Response::Ok,
-            false => Response::Error("ACK failed".to_string()),
-        },
-        QueueCommand::Nack { id, q_name, reason } => match queue.nack(&q_name, id, reason).await {
-            true => Response::Ok,
-            false => Response::Error("NACK failed".to_string()),
-        },
-        QueueCommand::Exists { q_name } => match queue.exists(&q_name).await {
-            true => Response::Ok,
-            false => Response::Error("Queue not found".to_string()),
-        },
+        QueueCommand::Ack { id, q_name } => {
+            let found = queue.ack(&q_name, id).await;
+            Response::Data(BoolResponse { value: found }.to_wire())
+        }
+        QueueCommand::Nack { id, q_name, reason } => {
+            let found = queue.nack(&q_name, id, reason).await;
+            Response::Data(BoolResponse { value: found }.to_wire())
+        }
+        QueueCommand::Exists { q_name } => {
+            let found = queue.exists(&q_name).await;
+            Response::Data(BoolResponse { value: found }.to_wire())
+        }
         QueueCommand::Delete { q_name } => match queue.delete_queue(q_name).await {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),

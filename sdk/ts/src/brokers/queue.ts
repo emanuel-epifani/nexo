@@ -36,7 +36,7 @@ const QueueCommands = {
   exists: async (conn: NexoConnection, name: string) => {
     try {
       const res = await conn.send(QueueOpcode.Q_EXISTS, w => w.string(name));
-      return res.status === 0x00;
+      return res.cursor.readU8() === 1;
     } catch {
       return false;
     }
@@ -56,13 +56,8 @@ const QueueCommands = {
   },
 
   consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
-    const hasBatch = batchSize !== undefined;
-    const hasWait = waitMs !== undefined;
-    const flags = (hasBatch ? 0x01 : 0x00) | (hasWait ? 0x02 : 0x00);
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => {
-      w.string(name).u8(flags);
-      if (hasBatch) w.u32(batchSize);
-      if (hasWait) w.u32(waitMs);
+      w.string(name).u32(batchSize).u32(waitMs);
     }, { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
 
     const count = res.cursor.readU32();

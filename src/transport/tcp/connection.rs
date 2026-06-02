@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
-use crate::brokers::pub_sub::{ClientId, PubSubMessage};
+use crate::brokers::ClientId;
+use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::Config;
 use crate::transport::tcp::dispatcher::Dispatcher;
 use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};

@@ -7,3 +7,4 @@ pub mod http;
 
 pub use manager::*;
 pub use domain::types::*;
+pub use crate::brokers::ClientId;
