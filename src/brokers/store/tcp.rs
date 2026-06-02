@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::wire::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 

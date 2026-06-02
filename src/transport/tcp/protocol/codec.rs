@@ -4,8 +4,8 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::config::Config;
 use super::errors::ParseError;
 use super::frame::{
-    FrameHeader, InboundFrame, OutboundFrame, Response, STATUS_DATA, STATUS_ERR, STATUS_NULL,
-    STATUS_OK, TYPE_PUSH_PUBSUB, TYPE_RESPONSE,
+    FrameHeader, InboundFrame, OutboundFrame, Response, PROTOCOL_VERSION, STATUS_DATA, STATUS_ERR,
+    STATUS_NULL, STATUS_OK, TYPE_PUSH_PUBSUB, TYPE_RESPONSE,
 };
 
 #[derive(Debug, Default)]
@@ -34,6 +34,13 @@ impl Decoder for NexoCodec {
                 ))
             }
         };
+
+        if header_ref.version != PROTOCOL_VERSION {
+            return Err(ParseError::Invalid(format!(
+                "Unsupported protocol version: 0x{:02X} (expected 0x{:02X})",
+                header_ref.version, PROTOCOL_VERSION
+            )));
+        }
 
         let payload_len = header_ref.payload_len() as usize;
         let max_payload_size = Config::global().server.max_payload_size;
@@ -66,15 +73,13 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 let (status, payload) = match response {
                     Response::Ok => (STATUS_OK, Bytes::new()),
                     Response::Null => (STATUS_NULL, Bytes::new()),
-                    Response::Error(msg) => {
-                        let mut buf = BytesMut::with_capacity(4 + msg.len());
-                        buf.put_u32(msg.len() as u32);
-                        buf.put_slice(msg.as_bytes());
-                        (STATUS_ERR, buf.freeze())
-                    }
+                    // Error message is the whole payload (read to end), mirroring
+                    // STATUS_DATA — the length is already in the header.
+                    Response::Error(msg) => (STATUS_ERR, Bytes::from(msg.into_bytes())),
                     Response::Data(data) => (STATUS_DATA, data),
                 };
 
+                dst.put_u8(PROTOCOL_VERSION);
                 dst.put_u8(TYPE_RESPONSE);
                 dst.put_u8(status);
                 dst.put_u32(id);
@@ -85,9 +90,10 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 id,
                 payload,
             } => {
+                dst.put_u8(PROTOCOL_VERSION);
                 dst.put_u8(TYPE_PUSH_PUBSUB);
-                dst.put_u8(0); // meta byte unused for now
-                dst.put_u32(id);
+                dst.put_u8(0); // meta byte unused for pushes
+                dst.put_u32(id); // unused for pushes (always 0)
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);
             }

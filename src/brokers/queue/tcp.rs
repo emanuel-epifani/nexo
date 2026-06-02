@@ -4,9 +4,8 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::transport::tcp::protocol::cursor::PayloadCursor;
-use crate::transport::tcp::protocol::writer::PayloadWriter;
-use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
+use crate::transport::tcp::protocol::wire::{PayloadCursor, PayloadWriter};
+use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 
 use crate::brokers::queue::domain::dlq::DlqMessage;
@@ -124,64 +123,39 @@ impl QueueCommand {
 // WIRE RESPONSES
 // ==========================================
 
-struct ConsumeBatchResponse {
-    messages: Vec<Message>,
-}
-
-impl ToWire for ConsumeBatchResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::new();
-        w.put_u32(self.messages.len() as u32);
-        for msg in &self.messages {
-            w.put_uuid(msg.id.as_bytes());
-            w.put_bytes(&msg.payload);
-        }
-        w.into_bytes()
+fn encode_consume_batch(messages: &[Message]) -> Bytes {
+    let mut w = PayloadWriter::new();
+    w.put_u32(messages.len() as u32);
+    for msg in messages {
+        w.put_uuid(msg.id.as_bytes());
+        w.put_bytes(&msg.payload);
     }
+    w.into_bytes()
 }
 
-struct PeekDlqResponse {
-    total: usize,
-    messages: Vec<DlqMessage>,
-}
-
-impl ToWire for PeekDlqResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::new();
-        w.put_u32(self.total as u32);
-        w.put_u32(self.messages.len() as u32);
-        for msg in &self.messages {
-            w.put_uuid(msg.id.as_bytes());
-            w.put_bytes(&msg.payload);
-            w.put_u32(msg.attempts);
-            w.put_str(&msg.failure_reason);
-        }
-        w.into_bytes()
+fn encode_peek_dlq(total: usize, messages: &[DlqMessage]) -> Bytes {
+    let mut w = PayloadWriter::new();
+    w.put_u32(total as u32);
+    w.put_u32(messages.len() as u32);
+    for msg in messages {
+        w.put_uuid(msg.id.as_bytes());
+        w.put_bytes(&msg.payload);
+        w.put_u32(msg.attempts);
+        w.put_str(&msg.failure_reason);
     }
+    w.into_bytes()
 }
 
-struct BoolResponse {
-    value: bool,
+fn encode_bool(value: bool) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(1);
+    w.put_bool(value);
+    w.into_bytes()
 }
 
-impl ToWire for BoolResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::with_capacity(1);
-        w.put_bool(self.value);
-        w.into_bytes()
-    }
-}
-
-struct CountResponse {
-    count: usize,
-}
-
-impl ToWire for CountResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::with_capacity(4);
-        w.put_u32(self.count as u32);
-        w.into_bytes()
-    }
+fn encode_count(count: usize) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(4);
+    w.put_u32(count as u32);
+    w.into_bytes()
 }
 
 // ==========================================
@@ -210,21 +184,21 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
         }
         QueueCommand::Consume { q_name, batch_size, wait_ms } => {
             match queue.consume_batch(q_name, Some(batch_size), Some(wait_ms)).await {
-                Ok(messages) => Response::Data(ConsumeBatchResponse { messages }.to_wire()),
+                Ok(messages) => Response::Data(encode_consume_batch(&messages)),
                 Err(e) => Response::Error(e),
             }
         }
         QueueCommand::Ack { id, q_name } => {
             let found = queue.ack(&q_name, id).await;
-            Response::Data(BoolResponse { value: found }.to_wire())
+            Response::Data(encode_bool(found))
         }
         QueueCommand::Nack { id, q_name, reason } => {
             let found = queue.nack(&q_name, id, reason).await;
-            Response::Data(BoolResponse { value: found }.to_wire())
+            Response::Data(encode_bool(found))
         }
         QueueCommand::Exists { q_name } => {
             let found = queue.exists(&q_name).await;
-            Response::Data(BoolResponse { value: found }.to_wire())
+            Response::Data(encode_bool(found))
         }
         QueueCommand::Delete { q_name } => match queue.delete_queue(q_name).await {
             Ok(_) => Response::Ok,
@@ -232,24 +206,24 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
         },
         QueueCommand::PeekDLQ { q_name, limit, offset } => {
             match queue.peek_dlq(&q_name, limit, offset).await {
-                Ok((total, messages)) => Response::Data(PeekDlqResponse { total, messages }.to_wire()),
+                Ok((total, messages)) => Response::Data(encode_peek_dlq(total, &messages)),
                 Err(e) => Response::Error(e),
             }
         }
         QueueCommand::MoveToQueue { q_name, message_id } => {
             match queue.move_to_queue(&q_name, message_id).await {
-                Ok(found) => Response::Data(BoolResponse { value: found }.to_wire()),
+                Ok(found) => Response::Data(encode_bool(found)),
                 Err(e) => Response::Error(e),
             }
         }
         QueueCommand::DeleteDLQ { q_name, message_id } => {
             match queue.delete_dlq(&q_name, message_id).await {
-                Ok(found) => Response::Data(BoolResponse { value: found }.to_wire()),
+                Ok(found) => Response::Data(encode_bool(found)),
                 Err(e) => Response::Error(e),
             }
         }
         QueueCommand::PurgeDLQ { q_name } => match queue.purge_dlq(&q_name).await {
-            Ok(count) => Response::Data(CountResponse { count }.to_wire()),
+            Ok(count) => Response::Data(encode_count(count)),
             Err(e) => Response::Error(e),
         },
     }

@@ -1,4 +1,4 @@
-import { DataType, FrameType } from './protocol';
+import { DataType, FrameType, PROTOCOL_VERSION } from './protocol';
 
 /** @internal */
 export class Cursor {
@@ -61,7 +61,7 @@ export class Cursor {
  */
 export class FrameWriter {
   private buf!: Buffer;
-  private offset = 10;
+  private offset = 11;
 
   /**
    * Start a new frame. Allocates a fresh internal buffer; default initial size
@@ -69,7 +69,7 @@ export class FrameWriter {
    */
   begin(initialSize = 256): this {
     this.buf = Buffer.allocUnsafe(initialSize);
-    this.offset = 10;
+    this.offset = 11;
     return this;
   }
 
@@ -163,16 +163,18 @@ export class FrameWriter {
   }
 
   /**
-   * Finalize the frame: writes the 10-byte header in-place and returns a
+   * Finalize the frame: writes the 11-byte header in-place and returns a
    * zero-copy view of the populated bytes. After calling this, the writer must
    * be re-`begin()`ed before reuse.
+   * Header: [Version:1][FrameType:1][Opcode:1][CorrelationID:4][PayloadLen:4]
    */
   finish(id: number, opcode: number): Buffer {
     const total = this.offset;
-    this.buf.writeUInt8(FrameType.REQUEST, 0);
-    this.buf.writeUInt8(opcode, 1);
-    this.buf.writeUInt32BE(id, 2);
-    this.buf.writeUInt32BE(total - 10, 6);
+    this.buf.writeUInt8(PROTOCOL_VERSION, 0);
+    this.buf.writeUInt8(FrameType.REQUEST, 1);
+    this.buf.writeUInt8(opcode, 2);
+    this.buf.writeUInt32BE(id, 3);
+    this.buf.writeUInt32BE(total - 11, 7);
     return this.buf.subarray(0, total);
   }
 }

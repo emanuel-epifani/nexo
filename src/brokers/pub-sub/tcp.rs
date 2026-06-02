@@ -3,7 +3,7 @@
 use bytes::Bytes;
 
 use crate::brokers::pub_sub::ClientId;
-use crate::transport::tcp::protocol::cursor::PayloadCursor;
+use crate::transport::tcp::protocol::wire::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 
@@ -61,7 +61,7 @@ pub async fn handle(
     opcode: u8,
     cursor: &mut PayloadCursor,
     engine: &NexoEngine,
-    client_id: &ClientId,
+    session_id: &str,
 ) -> Response {
     let cmd = match PubSubCommand::parse(opcode, cursor) {
         Ok(c) => c,
@@ -69,6 +69,7 @@ pub async fn handle(
     };
 
     let pubsub = &engine.pubsub;
+    let client_id = ClientId(session_id.to_owned());
 
     match cmd {
         PubSubCommand::Publish { topic, retain, ttl, payload } => {
@@ -76,11 +77,11 @@ pub async fn handle(
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {
-            pubsub.subscribe(client_id, &topic);
+            pubsub.subscribe(&client_id, &topic);
             Response::Ok
         }
         PubSubCommand::Unsubscribe { topic } => {
-            pubsub.unsubscribe(client_id, &topic);
+            pubsub.unsubscribe(&client_id, &topic);
             Response::Ok
         }
     }

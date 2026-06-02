@@ -2,7 +2,7 @@ import * as net from 'net';
 import { EventEmitter } from 'events';
 import { Logger } from './utils/logger';
 import { NexoConnectionConfig } from './config';
-import { FrameType, ResponseStatus } from './protocol';
+import { FrameType, ResponseStatus, PROTOCOL_VERSION } from './protocol';
 import { Cursor, FrameWriter } from './codec';
 import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
 
@@ -158,11 +158,11 @@ export class NexoConnection extends EventEmitter {
     }
 
     while (true) {
-      // Need at least header (10 bytes): [Type:1][Opcode:1][ID:4][Len:4]
-      if (this.buffer.length < 10) break;
+      // Need at least header (11 bytes): [Version:1][Type:1][Meta:1][ID:4][Len:4]
+      if (this.buffer.length < 11) break;
 
-      const payloadLen = this.buffer.readUInt32BE(6);
-      const totalFrameLen = 10 + payloadLen;
+      const payloadLen = this.buffer.readUInt32BE(7);
+      const totalFrameLen = 11 + payloadLen;
 
       if (this.buffer.length < totalFrameLen) break;
 
@@ -176,6 +176,11 @@ export class NexoConnection extends EventEmitter {
 
   private handleFrame(frame: Buffer) {
     const cursor = new Cursor(frame);
+    const version = cursor.readU8();
+    if (version !== PROTOCOL_VERSION) {
+      this.logger.error(`Unsupported protocol version: 0x${version.toString(16).padStart(2, '0')} (expected 0x${PROTOCOL_VERSION.toString(16).padStart(2, '0')})`);
+      return;
+    }
     const type = cursor.readU8();
     const meta = cursor.readU8(); // Opcode for requests, Status for responses
     const id = cursor.readU32();
@@ -229,8 +234,8 @@ export class NexoConnection extends EventEmitter {
       this.pending.set(id, {
         resolve: (res) => {
           if (res.status === ResponseStatus.ERR) {
-            const errCursor = new Cursor(res.data);
-            const errMsg = errCursor.readString();
+            // Error payload is the raw utf8 message (read to end of frame).
+            const errMsg = res.data.toString('utf8');
             // Silence common expected errors
             if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('NOT_MEMBER') && !errMsg.includes('not found')) {
               this.logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);

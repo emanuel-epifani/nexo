@@ -1,22 +1,31 @@
 //! Nexo Binary Protocol: Frame Types and Constants
 //!
-//! Request Frame (Total Header: 10 bytes):
-//! [FrameType: 1 byte] [Meta/Opcode: 1 byte] [CorrelationID: 4 bytes (BE)] [PayloadLen: 4 bytes (BE)]
-//! Payload: [binary typed fields per broker] [Data (if applicable)]
+//! Every frame starts with a fixed 11-byte header. The first byte is the
+//! protocol version, so the framing is fully self-describing and stateless:
+//! a peer can reject an incompatible version per-frame, with no handshake.
 //!
-//! Response Frame (Total Header: 10 bytes):
-//! [FrameType: 1 byte] [Meta/Status: 1 byte] [CorrelationID: 4 bytes (BE)] [PayloadLen: 4 bytes (BE)]
-//! Payload: [Data...]
+//! Header (11 bytes):
+//! [Version: 1] [FrameType: 1] [Meta: 1] [CorrelationID: 4 (BE)] [PayloadLen: 4 (BE)]
+//!   - Version : PROTOCOL_VERSION; mismatched frames are rejected.
+//!   - Meta    : opcode (Request) / status (Response) / push-type (Push).
 //!
-//! Push Frame (Total Header: 10 bytes):
-//! [FrameType: 1 byte] [Meta/PushType: 1 byte] [CorrelationID: 4 bytes (BE)] [PayloadLen: 4 bytes (BE)]
-//! Payload: [Data...]
+//! Request payload : [binary typed fields per broker] [Data (if applicable)]
+//! Response payload: STATUS_DATA -> [Data...]; STATUS_ERR -> [utf8 message...]
+//!                   (both read to end of payload; OK/NULL carry no payload).
+//! Push payload    : [Data...]  (CorrelationID is unused for pushes -> 0).
 //!
 //! Data Structure (auto-contained):
 //! [DataType: 1 byte] [Data...]
 
 use bytes::Bytes;
 use bytemuck::{Pod, Zeroable};
+
+// ========================================
+// PROTOCOL VERSION
+// ========================================
+/// Bumped on any breaking change to the framing or payload layout. Peers must
+/// reject frames whose first byte does not match.
+pub const PROTOCOL_VERSION: u8 = 0x01;
 
 // ========================================
 // FRAME TYPES
@@ -36,10 +45,12 @@ pub const STATUS_DATA: u8 = 0x03;
 // ========================================
 // DATA TYPE FLAGS (First byte of a user data payload)
 //
-// NOTE: this prefix is an SDK-owned convention, NOT part of the framing the
-// server enforces. The server treats user payloads as opaque bytes and never
-// reads or writes this byte on the TCP data-plane. It is only interpreted by
-// `transport/http/payload.rs` to render payloads as JSON in the dashboard.
+// This prefix is a CLIENT-SIDE payload-encoding contract: SDKs write it when
+// serializing a value and read it when deserializing, so all SDKs must agree
+// on these values. The server is agnostic — it stores/forwards the payload
+// (prefix included) as opaque bytes and never relies on it on the data-plane.
+// The only server code that interprets it is `transport/http/payload.rs`, to
+// render payloads as JSON in the dashboard.
 // ========================================
 pub const DATA_TYPE_RAW: u8 = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;
@@ -49,10 +60,11 @@ pub const DATA_TYPE_JSON: u8 = 0x02;
 // FRAME HEADER
 // ========================================
 
-/// Fixed-size Header: [FrameType: 1] [Meta: 1] [CorrelationID: 4] [PayloadLen: 4]
+/// Fixed-size Header: [Version: 1] [FrameType: 1] [Meta: 1] [CorrelationID: 4] [PayloadLen: 4]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct FrameHeader {
+    pub version: u8,
     pub frame_type: u8,
     pub meta: u8,
     pub id: [u8; 4],

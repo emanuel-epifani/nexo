@@ -6,7 +6,12 @@ use bytes::{Bytes, BytesMut, BufMut};
 use tokio::sync::mpsc;
 use dashmap::DashMap;
 
-use crate::brokers::ClientId;
+/// Subscriber identity, used as the key of the PubSub client registry and of
+/// the radix-tree subscriber sets. This is a PubSub-internal concept: other
+/// brokers and the transport layer deal in a plain session string and never
+/// need this type.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientId(pub String);
 
 pub struct ClientInfo {
     pub sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,

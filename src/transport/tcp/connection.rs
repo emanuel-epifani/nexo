@@ -8,8 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
-use crate::brokers::ClientId;
-use crate::brokers::pub_sub::PubSubMessage;
+use crate::brokers::pub_sub::{ClientId, PubSubMessage};
 use crate::config::Config;
 use crate::transport::tcp::dispatcher::Dispatcher;
 use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
@@ -22,7 +21,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // ==========================================
     // ACT 1: SESSION SETUP & SOCKET CHANNELS
     // ==========================================
-    let client_id = ClientId(Uuid::new_v4().to_string());
+    let session_id = Uuid::new_v4().to_string();
 
     // Channels to communicate with the raw TCP socket
     let (inbound_tx, mut inbound_rx) = mpsc::channel(config.server.channel_capacity_socket_write);
@@ -37,7 +36,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // ==========================================
     // Channel to receive push notifications from the PubSub Engine
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
-    engine.pubsub.connect(client_id.clone(), push_tx);
+    engine.pubsub.connect(ClientId(session_id.clone()), push_tx);
 
     // Background task: forwards PubSub pushes to the socket's outbound channel
     let outbound_bridge = outbound_tx.clone();
@@ -63,13 +62,13 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
             Some(frame) = inbound_rx.recv() => {
                 let tx_clone = outbound_tx.clone();
                 let engine_clone = Arc::clone(&engine);
-                let client_id_clone = client_id.clone();
+                let session_id_clone = session_id.clone();
 
                 request_set.spawn(async move {
                     let id = frame.header.id();
                     let response = match frame.header.frame_type {
                         TYPE_REQUEST => {
-                            let dispatcher = Dispatcher::new(&engine_clone, &client_id_clone);
+                            let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
                             dispatcher.dispatch(frame.header.meta, frame.payload).await
                         }
                         _ => Response::Error("Unsupported frame type".into()),
@@ -95,12 +94,12 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // ==========================================
     // ACT 4: CLEANUP & DISCONNECT
     // ==========================================
-    tracing::debug!("Client {:?} disconnected", client_id);
+    tracing::debug!("Client {:?} disconnected", session_id);
 
     request_set.abort_all();
     bridge_handle.abort();
-    engine.pubsub.disconnect(&client_id);
-    engine.stream.disconnect(client_id.0.clone()).await;
+    engine.pubsub.disconnect(&ClientId(session_id.clone()));
+    engine.stream.disconnect(session_id).await;
 
     Ok(())
 }

@@ -58,7 +58,7 @@ src/
     tcp/
       connection.rs            # per-client TCP session lifecycle
       dispatcher.rs            # opcode → brokers::<b>::tcp::handle
-      protocol/                # codec, frame, cursor, errors, ToWire trait
+      protocol/                # codec, frame, wire (read+write), errors
     http/
       router.rs                # axum root, merges broker routes
       assets.rs                # embedded dashboard static files
@@ -95,7 +95,7 @@ docs/guide/                    # functional docs (store/queue/pubsub/stream)
 socket bytes → connection → codec → frame (opcode+payload)
   → dispatcher → brokers::<b>::tcp::handle
   → Command::parse → manager.<op>() → Response
-  → ToWire::to_wire → socket
+  → encode_* free fn (PayloadWriter) → socket
 ```
 
 **HTTP (Dashboard → server):**
@@ -104,6 +104,38 @@ HTTP request → axum router → brokers::<b>::http::<handler>
   → manager.<snapshot>() → Snapshot type
   → From<Snapshot> for Dto → JSON response
 ```
+
+### Binary protocol conventions
+
+When touching the wire, keep it uniform and unambiguous:
+
+- **Header (11 bytes, versioned, zero-copy `bytemuck` Pod):**
+  `[Version:1][FrameType:1][Meta:1][CorrelationID:4 BE][PayloadLen:4 BE]`.
+  First byte is `PROTOCOL_VERSION`; mismatched frames are rejected on both ends
+  (stateless, no handshake). `Meta` is opcode (Request) / status (Response) /
+  push-type (Push).
+- **Response payload rules (one read rule each):** `OK`/`NULL` → empty;
+  `DATA` → bytes read to end; `ERR` → utf8 message read to end (no inner length).
+  Booleans (`exists`/`ack`/`nack`) are `DATA` with a single `0/1` byte — a
+  negative outcome is data, not an error.
+- **Serialization:** broker `tcp.rs` uses named `encode_*` functions and
+  `PayloadWriter`/`PayloadCursor` from `wire.rs` — the single file where the on-wire
+  conventions live (big-endian, u32 length-prefix, UUID 16B raw). Keep `put_*`/`read_*`
+  pairs aligned; never hand-roll length prefixes / endianness.
+- **Command fields:** consistent order across opcodes (e.g. stream `topic` then
+  `group`); per-request tuning (batch size, wait ms) is sent explicitly by the
+  SDK rather than relying on server-side defaults.
+- **`DataType` prefix** (`raw/string/json`) is a client-side payload contract
+  shared by all SDKs; the server treats payloads as opaque (only the dashboard
+  decodes it).
+- **Session identity:** the transport generates an opaque session id and passes
+  it to brokers as a plain `&str`. `ClientId` is a PubSub-internal key type, not
+  a shared cross-broker model.
+- **Pushes** are not correlated to a request → `CorrelationID = 0`.
+
+Any wire change must stay symmetric across `src/` (codec + broker `tcp.rs`) and
+`sdk/ts/` (`codec.ts`, `connection.ts`, broker files), and bump
+`PROTOCOL_VERSION` if it breaks the layout.
 
 ---
 

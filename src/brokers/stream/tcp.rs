@@ -3,12 +3,10 @@
 
 use bytes::Bytes;
 
-use crate::brokers::ClientId;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
-use crate::transport::tcp::protocol::cursor::PayloadCursor;
-use crate::transport::tcp::protocol::writer::PayloadWriter;
-use crate::transport::tcp::protocol::{ParseError, Response, ToWire};
+use crate::transport::tcp::protocol::wire::{PayloadCursor, PayloadWriter};
+use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================
@@ -122,55 +120,35 @@ impl StreamCommand {
 // WIRE RESPONSES
 // ==========================================
 
-struct PublishResponse { seq: u64 }
-
-impl ToWire for PublishResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::with_capacity(8);
-        w.put_u64(self.seq);
-        w.into_bytes()
-    }
+fn encode_publish(seq: u64) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(8);
+    w.put_u64(seq);
+    w.into_bytes()
 }
 
-struct FetchResponse { messages: Vec<Message> }
-
-impl ToWire for FetchResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::new();
-        w.put_u32(self.messages.len() as u32);
-        for msg in &self.messages {
-            w.put_u64(msg.seq);
-            w.put_u64(msg.timestamp);
-            w.put_bytes(&msg.payload);
-        }
-        w.into_bytes()
+fn encode_fetch(messages: &[Message]) -> Bytes {
+    let mut w = PayloadWriter::new();
+    w.put_u32(messages.len() as u32);
+    for msg in messages {
+        w.put_u64(msg.seq);
+        w.put_u64(msg.timestamp);
+        w.put_bytes(&msg.payload);
     }
+    w.into_bytes()
 }
 
-struct JoinGroupResponse {
-    ack_floor: u64,
-    generation: u64,
-    consumer_id: String,
+fn encode_join_group(ack_floor: u64, generation: u64, consumer_id: &str) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(16 + 4 + consumer_id.len());
+    w.put_u64(ack_floor);
+    w.put_u64(generation);
+    w.put_str(consumer_id);
+    w.into_bytes()
 }
 
-impl ToWire for JoinGroupResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::with_capacity(16 + 4 + self.consumer_id.len());
-        w.put_u64(self.ack_floor);
-        w.put_u64(self.generation);
-        w.put_str(&self.consumer_id);
-        w.into_bytes()
-    }
-}
-
-struct BoolResponse { value: bool }
-
-impl ToWire for BoolResponse {
-    fn to_wire(&self) -> Bytes {
-        let mut w = PayloadWriter::with_capacity(1);
-        w.put_bool(self.value);
-        w.into_bytes()
-    }
+fn encode_bool(value: bool) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(1);
+    w.put_bool(value);
+    w.into_bytes()
 }
 
 // ==========================================
@@ -181,7 +159,7 @@ pub async fn handle(
     opcode: u8,
     cursor: &mut PayloadCursor,
     engine: &NexoEngine,
-    client_id: &ClientId,
+    session_id: &str,
 ) -> Response {
     let cmd = match StreamCommand::parse(opcode, cursor) {
         Ok(c) => c,
@@ -189,7 +167,7 @@ pub async fn handle(
     };
 
     let stream = &engine.stream;
-    let client = client_id.0.clone();
+    let client = session_id.to_owned();
 
     match cmd {
         StreamCommand::Create { topic, options } => match stream.create_topic(topic, options).await {
@@ -197,21 +175,21 @@ pub async fn handle(
             Err(e) => Response::Error(e),
         },
         StreamCommand::Publish { topic, payload } => match stream.publish(&topic, payload).await {
-            Ok(seq) => Response::Data(PublishResponse { seq }.to_wire()),
+            Ok(seq) => Response::Data(encode_publish(seq)),
             Err(e) => Response::Error(e),
         },
         StreamCommand::Fetch { topic, group, consumer_id, generation, limit, wait_ms } => {
             match stream.fetch(&group, &consumer_id, generation, limit as usize, &topic, wait_ms as u64).await {
-                Ok(messages) => Response::Data(FetchResponse { messages }.to_wire()),
+                Ok(messages) => Response::Data(encode_fetch(&messages)),
                 Err(e) => Response::Error(e),
             }
         }
         StreamCommand::Join { topic, group } => match stream.join_group(&group, &topic, &client).await {
-            Ok(result) => Response::Data(JoinGroupResponse {
-                ack_floor: result.ack_floor,
-                generation: result.generation,
-                consumer_id: result.consumer_id,
-            }.to_wire()),
+            Ok(result) => Response::Data(encode_join_group(
+                result.ack_floor,
+                result.generation,
+                &result.consumer_id,
+            )),
             Err(e) => Response::Error(e),
         },
         StreamCommand::Ack { topic, group, consumer_id, generation, seq } => match stream.ack(&group, &topic, &consumer_id, generation, seq).await {
@@ -228,7 +206,7 @@ pub async fn handle(
         },
         StreamCommand::Exists { topic } => {
             let found = stream.exists(&topic).await;
-            Response::Data(BoolResponse { value: found }.to_wire())
+            Response::Data(encode_bool(found))
         }
         StreamCommand::Delete { topic } => match stream.delete_topic(topic).await {
             Ok(_) => Response::Ok,

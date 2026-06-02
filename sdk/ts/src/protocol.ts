@@ -1,3 +1,10 @@
+/**
+ * Protocol version: first byte of every frame header. Must match the server's
+ * PROTOCOL_VERSION; mismatched frames are rejected on both ends.
+ * @internal
+ */
+export const PROTOCOL_VERSION = 0x01;
+
 /** @internal */
 export enum FrameType {
   REQUEST = 0x01,
