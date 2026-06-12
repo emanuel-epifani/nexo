@@ -144,7 +144,7 @@ function handleCopy() {
           <span class="hero-subtitle-gradient">in a Single Binary</span>
         </p>
         <p class="hero-desc">
-          <strong>Cache</strong>, <strong>Pub/Sub</strong>, <strong>Streams</strong>, <strong>Queues</strong>, and a built-in dashboard for local debugging. Everything out of the box in a single high-performance <strong>Rust</strong> binary.
+          <strong>Cache</strong>, <strong>Pub/Sub</strong>, <strong>Streams</strong>, <strong>Queues</strong>. Everything out of the box in a single high-performance <strong>Rust</strong> binary.
         </p>
         <p class="hero-desc">
           No external dependencies, no emulators, no cloud lock-in. The same container runs on your laptop and in production <br>
@@ -258,8 +258,6 @@ function handleCopy() {
               </div>
               <div class="env-card-meta">
                 <span>:7654</span>
-                <span class="env-card-sep">·</span>
-                <span>:8080</span>
               </div>
             </div>
             <div class="env-card-footer">{{ env.runtime }}</div>
@@ -269,19 +267,6 @@ function handleCopy() {
           <span class="env-equals-line"></span>
           <span class="env-equals-text">same image · same API · same behavior</span>
           <span class="env-equals-line"></span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Dashboard -->
-    <section class="landing-section">
-      <div class="section-inner">
-        <h2 class="section-title">Built-in Web Dashboard</h2>
-        <p class="section-desc">
-          Run the container, open <code>localhost:8080</code> — a full real-time dashboard to inspect every engine, debug messages, and monitor queues and streams. No extra tools. Zero config.
-        </p>
-        <div class="dashboard-img-container">
-          <img src="/dashboard-preview.png" alt="Nexo built-in web dashboard" />
         </div>
       </div>
     </section>

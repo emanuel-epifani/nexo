@@ -49,8 +49,6 @@ pub const STATUS_DATA: u8 = 0x03;
 // serializing a value and read it when deserializing, so all SDKs must agree
 // on these values. The server is agnostic — it stores/forwards the payload
 // (prefix included) as opaque bytes and never relies on it on the data-plane.
-// The only server code that interprets it is `transport/http/payload.rs`, to
-// render payloads as JSON in the dashboard.
 // ========================================
 pub const DATA_TYPE_RAW: u8 = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;

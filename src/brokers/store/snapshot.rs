@@ -1,5 +1,5 @@
 //! Store introspection types: neutral snapshot consumed by any read-only
-//! adapter (dashboard HTTP, future CLI, metrics, ...).
+//! adapter (future CLI, metrics, ...).
 
 use bytes::Bytes;
 use std::time::Instant;

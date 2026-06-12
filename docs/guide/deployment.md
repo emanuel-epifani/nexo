@@ -45,25 +45,6 @@ docker run -d \
 
 For most deployments, a single volume is sufficient.
 
-## Dashboard
-
-Nexo ships with a built-in debug dashboard, but it only starts when the server is launched in **dev mode**.
-
-- `nexo serve` — TCP only, dashboard **OFF**. This is the production default.
-- `nexo dev` — TCP + dashboard on port `8080`.
-
-```bash
-# Development (dashboard ON, port 8080 exposed)
-docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo dev
-
-# Production (dashboard OFF, default — no subcommand needed)
-docker run -p 7654:7654 emanuelepifani/nexo
-```
-
-::: warning
-The dashboard exposes internal state (messages, queues, topics) and is intended for local development and debugging only. Never run `nexo dev` in production.
-:::
-
 ## Max Payload Size
 
 Nexo enforces a maximum payload size per frame to prevent memory exhaustion from oversized or malicious requests. Any frame exceeding this limit is rejected at the protocol level before allocating memory.
@@ -80,7 +61,6 @@ docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
 |:---|:---|:---|
 | `SERVER_HOST` | `127.0.0.1` | Bind address (set to `0.0.0.0` to expose on all interfaces, e.g. in Docker) |
 | `SERVER_SOCKET_TCP_PORT` | `7654` | Client TCP socket port |
-| `SERVER_DASHBOARD_HTTP_PORT` | `8080` | Dashboard HTTP port |
 | `NEXO_LOG` | `error` | Log level (`error`, `warn`, `info`, `debug`, `trace`) |
 | `MAX_PAYLOAD_SIZE` | `10485760` | Max frame payload in bytes (10 MB) |
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Queue data directory |

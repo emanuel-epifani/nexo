@@ -9,10 +9,6 @@ target/
 # Environment & Secrets
 .env
 
-# Frontend dev files
-dashboard/node_modules
-dashboard/dist
-
 # Docker & Docs
 Dockerfile
 README.md

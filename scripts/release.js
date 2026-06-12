@@ -16,10 +16,6 @@ const FILES = [
         type: 'json' 
     },
     { 
-        path: 'dashboard/package.json', 
-        type: 'json' 
-    },
-    { 
         path: 'docs/package.json',
         type: 'json' 
     }

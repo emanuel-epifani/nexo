@@ -352,18 +352,6 @@
   font-family: var(--vp-font-family-mono);
 }
 
-/* ─── Dashboard Image ─── */
-.dashboard-img-container {
-  border-radius: 0.75rem;
-  overflow: hidden;
-  border: 1px solid var(--nexo-border);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
-}
-
-.dashboard-img-container img {
-  width: 100%;
-  display: block;
-}
 
 /* ─── Performance Table ─── */
 .perf-card {

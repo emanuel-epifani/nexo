@@ -1,37 +1,19 @@
 # Architecture
 
-Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in dashboard.
+Nexo runs as a **single binary** that exposes 4 distinct brokers.
 
 - **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
 - **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the Queue won't block Pub/Sub latency.
 - **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
-- **Embedded Observability:** The server hosts its own Web UI for instant visibility into every broker's state.
 
-## System Diagram
+### Persistence Model
 
-```
-                         ┌──────────────────────────────────────┐
-                         │              NEXO SERVER             │
-                         │                                      │       ┌──────────────┐
-                         │   ┌──────────────────────────────┐   │──────▶│     RAM      │
-                         │   │            STORE             │   │       │  (Volatile)  │
-   ┌─────────────┐       │   └──────────────────────────────┘   │       └──────────────┘
-   │   Client    │──────▶│   ┌──────────────────────────────┐   │
-   │  (SDK/API)  │       │   │            PUBSUB            │   │
-   └─────────────┘       │   └──────────────────────────────┘   │
-                         │   ┌──────────────────────────────┐   │       ┌──────────────┐
-                         │   │            QUEUE             │   │──────▶│     DISK     │
-                         │   └──────────────────────────────┘   │       │  (Durable)   │
-                         │   ┌──────────────────────────────┐   │──────▶└──────────────┘
-                         │   │           STREAM             │   │
-                         │   └──────────────────────────────┘   │
-                         └───────────────┬──────────────────────┘
-                                         │
-                                         ▼
-                                 ┌─────────────────┐
-                                 │    Dashboard    │
-                                 └─────────────────┘
-```
+| Broker | Storage | On Restart |
+|:---|:---|:---|
+| **Store** | RAM | ❌ Lost. Ephemeral cache / shared state. |
+| **Pub/Sub** | RAM + SQLite (retained) | ⚠️ Messages lost; retained topics restored. |
+| **Queue** | SQLite | ✅ Survives. Jobs, state, and DLQ restored. |
+| **Stream** | Binary log files | ✅ Survives. Full history with retention. |
 
 ## The Four Brokers
 

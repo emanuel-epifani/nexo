@@ -22,7 +22,6 @@ One Binary. Four Brokers. Zero Operational Headaches.
   - [PUB/SUB (Real-Time Broadcast)](#2-pubsub-real-time-broadcast)
   - [QUEUE (Job Processing)](#3-queue-job-processing)
   - [STREAM (Event Log)](#4-stream-event-log)
-- [Dashboard](#dashboard)
 - [Getting Started](#getting-started)
 
 ---
@@ -37,12 +36,11 @@ Here's the reality: most scale-ups will **never** reach the scale where horizont
 
 ## 🏗️ Architecture
 
-Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in dashboard.
+Nexo runs as a **single binary** that exposes 4 distinct brokers.
 
 *   **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
 *   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
 *   **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
-*   **Dev Dashboard:** The server expose built-in Web UI, giving you instant visibility into every broker's internal state without setting up external monitoring tools.
 
 ```
                                           ┌──────────────────────────────────────┐
@@ -59,8 +57,6 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers and a built-in 
                                           │                                      │
                                           │   ┌──────────────────────────────┐   │
      ┌─────────────┐                      │   │            QUEUE             │   │
-     │  Dashboard  │───── HTTP Request ──▶│   │        (Job Processing)      │   │
-     │  (Web UI)   │                      │   └──────────────────────────────┘   │
      └─────────────┘                      │                                      │
                                           │   ┌──────────────────────────────┐   │
                                           │   │           STREAM             │   │
@@ -169,29 +165,15 @@ Everything is available instantly via a unified Client.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
 
-## 📊 Dashboard
-
-Nexo comes with a built-in, zero-config dashboard for local development.
-Instantly verify if your microservices are communicating correctly by inspecting the actual contents of your Stores, Queues, and Streams in real-time.
-
-The dashboard only starts when the server is launched in dev mode (`nexo dev`). The default command (`nexo serve`) runs TCP only and is the production-safe default.
-
-![Nexo Dashboard Screenshot](docs/public/dashboard-preview.png)
-
 ## 🚀 Getting Started
 
 ### 1. Run the Server
 
 ```bash
-# Local development (dashboard ON)
-docker run -d -p 7654:7654 -p 8080:8080 nexobroker/nexo dev
-
-# Production (dashboard OFF, default)
 docker run -d -p 7654:7654 nexobroker/nexo
 ```
 This exposes:
 - Port 7654 (TCP): Main server socket for SDK clients.
-- Port 8080 (HTTP): Web Dashboard, available only when running `nexo dev`.
 
 
 ### 2. Install the SDK
@@ -201,7 +183,7 @@ npm install @emanuelepifani/nexo-client
 ```
 
 ### 3. Usage Example
-Connect, execute operations, inspect data via the dashboard at `http://localhost:8080`.
+Connect and execute operations.
 
 ```typescript
 import { NexoClient } from '@emanuelepifani/nexo-client';

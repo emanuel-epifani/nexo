@@ -2,32 +2,15 @@
 
 use nexo::config::Config;
 use nexo::NexoEngine;
-use nexo::transport::{tcp, http};
+use nexo::transport::tcp;
 use tokio::net::TcpListener;
 
 // ========================================
 // MAIN ENTRY POINT
 // ========================================
 
-fn parse_mode() -> bool {
-    // Returns true when the dashboard should be started (i.e. `nexo dev`).
-    // No-arg or `serve` -> false. Anything else -> usage + exit.
-    match std::env::args().nth(1).as_deref() {
-        None | Some("serve") => false,
-        Some("dev") => true,
-        Some(other) => {
-            eprintln!("nexo: unknown subcommand '{}'", other);
-            eprintln!("usage:");
-            eprintln!("  nexo serve   start server (dashboard OFF) — default");
-            eprintln!("  nexo dev     start server with dashboard (development)");
-            std::process::exit(1);
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
-    let dashboard_enabled = parse_mode();
     let config = Config::global();
 
     // Init Tracing (logging)
@@ -44,25 +27,14 @@ async fn main() {
     let engine = NexoEngine::new(&config).await;
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
-    let engine_clone_for_dashboard = engine.clone();
-
-    if dashboard_enabled {
-        tokio::spawn(async move {
-            http::router::start_http_server(engine_clone_for_dashboard, config.server.dashboard_port).await;
-        });
-    }
 
     let listener = TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
 
-    let dashboard_url = dashboard_enabled
-        .then(|| format!("http://{}:{}", config.server.host, config.server.dashboard_port));
-
     tracing::info!(
         host = %config.server.host,
         tcp_port = config.server.port,
-        dashboard = dashboard_url.as_deref().unwrap_or("off"),
         "Nexo ready"
     );
 

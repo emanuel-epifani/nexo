@@ -13,16 +13,9 @@ Goal: reduce operational complexity vs multi-system stacks (Redis + Kafka + Rabb
 
 Ships with:
 - **Rust server** (core runtime + binary TCP protocol)
-- **React dashboard** (local dev UI, read-only)
 - **TypeScript SDK** (`@emanuelepifani/nexo-client`)
 
-Default ports: TCP `7654` (SDK ↔ server), HTTP `8080` (dashboard).
-
-**Run modes (subcommands):**
-- `nexo serve` — TCP only, dashboard OFF. Production default (also default with no args).
-- `nexo dev` — TCP + dashboard. Local development only.
-
-The dashboard cannot be enabled by env var; the subcommand is the only gate.
+Default port: TCP `7654` (SDK ↔ server).
 
 ---
 
@@ -38,13 +31,9 @@ The dashboard cannot be enabled by env var; the subcommand is the only gate.
                                        │ brokers/ │ ← managers (pure domain)
                                        └──────────┘
                                              ▲
-                    ┌─────────────────────┐  │
-  Dashboard ──HTTP─►│   transport/http    │──┘
-                    │ (axum + JSON DTO)   │
-                    └─────────────────────┘
 ```
 
-**Design principle**: each broker owns its TCP and HTTP surface. `transport/` contains only broker-agnostic plumbing (framing, codec, axum root, static assets, opcode dispatcher).
+**Design principle**: each broker owns its TCP surface. `transport/` contains only broker-agnostic plumbing (framing, codec, opcode dispatcher).
 
 ---
 
@@ -59,17 +48,12 @@ src/
       connection.rs            # per-client TCP session lifecycle
       dispatcher.rs            # opcode → brokers::<b>::tcp::handle
       protocol/                # codec, frame, wire (read+write), errors
-    http/
-      router.rs                # axum root, merges broker routes
-      assets.rs                # embedded dashboard static files
-      payload.rs               # payload → JSON conversion helpers
   brokers/
     <broker>/                  # store, queue, pub-sub, stream
       manager.rs               # public API + orchestration, returns neutral types
       snapshot.rs              # neutral introspection types (no serde)
       options.rs               # shared option structs (manager + tcp), if present
       tcp.rs                   # OPCODE_MIN/MAX, Command parse, Response, handle()
-      http.rs                  # DTOs (serde), axum handlers, routes()
       config.rs                # broker-specific config, if present
       domain/                  # business logic + durable I/O for that broker
         mod.rs
@@ -79,12 +63,11 @@ src/
         ...                    # queue/dlq/map/topic/group/message/types/radix_tree/retained, ecc.
 
 tests/                         # Rust integration tests, one file per broker
-dashboard/src/                 # React frontend
 sdk/ts/src/                    # TypeScript SDK
 docs/guide/                    # functional docs (store/queue/pubsub/stream)
 ```
 
-**Per-broker dependency rule**: `manager.rs` must NOT import from `tcp.rs`, `http.rs`, `transport/`, or `dashboard/`. Adapters depend on the manager, never the reverse.
+**Per-broker dependency rule**: `manager.rs` must NOT import from `tcp.rs`, `transport/`, or any adapter layer. Adapters depend on the manager, never the reverse.
 
 ---
 
@@ -96,13 +79,6 @@ socket bytes → connection → codec → frame (opcode+payload)
   → dispatcher → brokers::<b>::tcp::handle
   → Command::parse → manager.<op>() → Response
   → encode_* free fn (PayloadWriter) → socket
-```
-
-**HTTP (Dashboard → server):**
-```
-HTTP request → axum router → brokers::<b>::http::<handler>
-  → manager.<snapshot>() → Snapshot type
-  → From<Snapshot> for Dto → JSON response
 ```
 
 ### Binary protocol conventions
@@ -126,8 +102,7 @@ When touching the wire, keep it uniform and unambiguous:
   `group`); per-request tuning (batch size, wait ms) is sent explicitly by the
   SDK rather than relying on server-side defaults.
 - **`DataType` prefix** (`raw/string/json`) is a client-side payload contract
-  shared by all SDKs; the server treats payloads as opaque (only the dashboard
-  decodes it).
+  shared by all SDKs; the server treats payloads as opaque.
 - **Session identity:** the transport generates an opaque session id and passes
   it to brokers as a plain `&str`. `ClientId` is a PubSub-internal key type, not
   a shared cross-broker model.
@@ -156,7 +131,6 @@ cd sdk/ts && npm test              # TS SDK (vitest)
 - Concurrent state: `dashmap`, `parking_lot`
 - Persistence: `rusqlite` (bundled)
 - Serialization: `serde` + `serde_json`; binary frames: `bytes` + `bytemuck`
-- HTTP: `axum` + `tower-http`; embedded assets: `rust-embed`
 - Logging: `tracing` + `tracing-subscriber`
 
 ### Concurrency primitives
@@ -193,19 +167,11 @@ For any change touching protocol or behavior, verify:
 - `src/` (server)
 - `sdk/ts/` (SDK)
 - `docs/` (user docs)
-- `dashboard/` (dev UI)
 
 If one area is not impacted, state it explicitly.
 
 **Tests**
 Any behavior/protocol change must update or add tests in `tests/` (Rust) and `sdk/ts/tests/` (TS), then run the relevant suite(s).
-
-**Frontend (dashboard)**
-- Stack: React + TypeScript + `shadcn/ui` + Tailwind. No new libs without justification.
-- Semantic styling only (no arbitrary color classes).
-- Explicit `loading` / `empty` / `error` states; no implicit fallbacks.
-- Use `??` (not `||`) only when nullable behavior is intentional.
-- Strict typing: no `any`, no `@ts-ignore`.
 
 ---
 
@@ -215,7 +181,7 @@ Before coding any non-trivial refactor, produce:
 
 1. **Scope**: broker / module touched.
 2. **Change**: what + why.
-3. **Impact**: server / sdk / dashboard / docs → impacted or not (one line each).
+3. **Impact**: server / sdk / docs → impacted or not (one line each).
 4. **Complexity**: `low` / `medium` / `high`. If high or cross-layer, propose a simpler alternative first.
 5. **Tests**: existing to review + new to add.
 6. **Commit message**: conventional commits format.

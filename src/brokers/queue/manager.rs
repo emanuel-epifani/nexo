@@ -442,12 +442,6 @@ impl QueueManager {
         queues
     }
 
-    pub async fn get_messages(&self, queue_name: String, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> Option<(usize, Vec<QueueMessagePreview>)> {
-        let shared = self.get_queue(&queue_name)?;
-        let inner = Self::lock(&shared.inner);
-        Some(inner.state.get_messages(state_filter, offset, limit, search))
-    }
-
     pub async fn exists(&self, name: &str) -> bool {
         self.queues.contains_key(name)
     }

@@ -1,5 +1,5 @@
 //! Queue introspection types: neutral domain snapshots consumed by any
-//! read-only adapter (dashboard HTTP, future CLI, metrics, ...).
+//! read-only adapter (future CLI, metrics, ...).
 //!
 //! Rules:
 //! - No `Serialize`/`Deserialize`.

@@ -9,11 +9,10 @@ High-performance TypeScript client for [Nexo](https://nexo-docs-hub.vercel.app/)
 
 ### Run server
 ```bash
-docker run -p 7654:7654 -p 8080:8080 emanuelepifani/nexo:latest
+docker run -p 7654:7654 emanuelepifani/nexo:latest
 ```
 This exposes:
 - Port 7654 (TCP): Main server socket for SDK clients.
-- Port 8080 (HTTP): Web Dashboard with status of all brokers.
 
 ### Install SDK
 

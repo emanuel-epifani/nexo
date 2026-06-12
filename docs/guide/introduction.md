@@ -18,7 +18,6 @@ Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale"
 - **Unified:** One TCP connection for Caching, Pub/Sub, Queues, and Streams.
 - **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
 - **Fast:** Built in Rust on top of Tokio for extreme throughput and incredibly low latency.
-- **Observable:** Built-in Web UI for local development. Inspect all engines in real-time.
 - **Consistent:** Same setup locally and in production. One Docker container, one endpoint.
 
 ## True Dev/Prod Parity
@@ -30,8 +29,7 @@ With Nexo, the binary you run on your laptop is **the exact same binary** you ru
 services:
   nexo:
     image: emanuelepifani/nexo:latest
-    command: ["nexo", "dev"]   # enables the built-in dashboard (omit in production)
-    ports: ["7654:7654", "8080:8080"]
+    ports: ["7654:7654"]
 ```
 
 Same image, same protocol, same guarantees — from your laptop to your Kubernetes cluster. The dev loop stays fast, the surprises stay out of production.

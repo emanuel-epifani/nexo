@@ -1,5 +1,5 @@
 //! Stream introspection types: neutral snapshots consumed by any read-only
-//! adapter (dashboard HTTP, future CLI, metrics, ...).
+//! adapter (future CLI, metrics, ...).
 
 use crate::brokers::stream::domain::topic::TopicConfig;
 

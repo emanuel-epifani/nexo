@@ -262,53 +262,6 @@ impl QueueState {
         (pending, inflight)
     }
 
-    pub fn get_messages(&self, state_filter: String, offset: usize, limit: usize, search: Option<String>) -> (usize, Vec<QueueMessagePreview>) {
-        let filter_tag = match state_filter.to_lowercase().as_str() {
-            "pending" => MessageStateTag::Pending,
-            "inflight" => MessageStateTag::InFlight,
-            _ => return (0, vec![]),
-        };
-
-        let ids: Vec<&Uuid> = match filter_tag {
-            MessageStateTag::Pending => self.waiting_for_dispatch.values().flat_map(|q| q.iter()).collect(),
-            MessageStateTag::InFlight => self.waiting_for_ack.values().flat_map(|q| q.iter()).collect(),
-        };
-
-        let mut all_filtered: Vec<&Message> = Vec::new();
-        for id in ids {
-            if let Some(msg) = self.registry.get(id) {
-                let matches_search = match &search {
-                    Some(s) => String::from_utf8_lossy(&msg.payload).contains(s),
-                    None => true,
-                };
-                if matches_search {
-                    all_filtered.push(msg);
-                }
-            }
-        }
-
-        let total = all_filtered.len();
-        let paged: Vec<QueueMessagePreview> = all_filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|msg| {
-                let state = match msg.state {
-                    MessageState::Ready => MessageStateTag::Pending,
-                    MessageState::InFlight(_) => MessageStateTag::InFlight,
-                };
-                QueueMessagePreview {
-                    id: msg.id,
-                    payload: msg.payload.clone(),
-                    state,
-                    priority: msg.priority,
-                    attempts: msg.attempts,
-                }
-            })
-            .collect();
-
-        (total, paged)
-    }
 
     pub fn has_ready_messages(&self) -> bool {
         !self.waiting_for_dispatch.is_empty()

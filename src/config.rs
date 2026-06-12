@@ -42,7 +42,6 @@ impl Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    pub dashboard_port: u16,
     pub log_level: String,
     pub max_payload_size: usize,
     pub channel_capacity_socket_write: usize,
@@ -53,7 +52,6 @@ impl ServerConfig {
         Self {
             host:           get_env("SERVER_HOST", "127.0.0.1"),
             port:           get_env("SERVER_SOCKET_TCP_PORT", "7654"),
-            dashboard_port: get_env("SERVER_DASHBOARD_HTTP_PORT", "8080"),
             log_level:      get_env("NEXO_LOG", "info"),
             max_payload_size: get_env("MAX_PAYLOAD_SIZE", "10485760"), // 10MB
             channel_capacity_socket_write: get_env("CHANNEL_CAPACITY_SOCKET_WRITE", "1024"),
