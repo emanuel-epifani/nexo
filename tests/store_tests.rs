@@ -1,5 +1,5 @@
-mod helpers;
-use helpers::{setup_store_manager, Benchmark};
+mod common;
+use common::{setup_store_manager, Benchmark};
 use bytes::Bytes;
 use std::time::Duration;
 use uuid::Uuid;

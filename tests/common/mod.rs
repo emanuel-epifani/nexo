@@ -1,6 +1,7 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use nexo::brokers::queue::QueueManager;
-use nexo::brokers::stream::StreamManager;
 use nexo::brokers::store::StoreManager;
 use nexo::brokers::pub_sub::PubSubManager;
 use nexo::config::Config;
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 // SETUP HELPERS
 // ==========================================
 
-pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
+pub(crate) async fn setup_queue_manager() -> (QueueManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
@@ -22,7 +23,7 @@ pub async fn setup_queue_manager() -> (QueueManager, TempDir) {
     (manager, temp_dir)
 }
 
-pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
+pub(crate) async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
@@ -33,18 +34,7 @@ pub async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     (manager, temp_dir)
 }
 
-pub async fn setup_stream_manager() -> (StreamManager, TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let path = temp_dir.path().to_str().unwrap().to_string();
-
-    let mut config = Config::global().stream.clone();
-    config.persistence_path = path;
-
-    let manager = StreamManager::new(Arc::new(config)).await;
-    (manager, temp_dir)
-}
-
-pub async fn setup_store_manager() -> (StoreManager, TempDir) {
+pub(crate) async fn setup_store_manager() -> (StoreManager, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = Config::global().store.clone();
     let manager = StoreManager::new(Arc::new(config));
@@ -55,15 +45,15 @@ pub async fn setup_store_manager() -> (StoreManager, TempDir) {
 // BENCHMARK UTILITY
 // ==========================================
 
-pub struct Benchmark {
-    pub name: String,
-    pub start: Instant,
-    pub count: usize,
-    pub samples: Vec<Duration>,
+pub(crate) struct Benchmark {
+    pub(crate) name: String,
+    pub(crate) start: Instant,
+    pub(crate) count: usize,
+    pub(crate) samples: Vec<Duration>,
 }
 
 impl Benchmark {
-    pub fn start(name: &str, count: usize) -> Self {
+    pub(crate) fn start(name: &str, count: usize) -> Self {
         Self {
             name: name.to_string(),
             start: Instant::now(),
@@ -72,11 +62,11 @@ impl Benchmark {
         }
     }
 
-    pub fn record(&mut self, duration: Duration) {
+    pub(crate) fn record(&mut self, duration: Duration) {
         self.samples.push(duration);
     }
 
-    pub fn stop(mut self) {
+    pub(crate) fn stop(mut self) {
         let total_duration = self.start.elapsed();
         let secs = total_duration.as_secs_f64();
         let ops_sec = self.count as f64 / secs;

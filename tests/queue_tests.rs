@@ -4,8 +4,8 @@ use bytes::Bytes;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-mod helpers;
-use helpers::{setup_queue_manager, Benchmark};
+mod common;
+use common::{setup_queue_manager, Benchmark};
 
 
 

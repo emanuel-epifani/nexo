@@ -2,8 +2,8 @@ use nexo::brokers::stream::options::StreamCreateOptions;
 use nexo::config::Config;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
-mod helpers;
-use helpers::Benchmark;
+mod common;
+use common::Benchmark;
 
 #[cfg(test)]
 mod stream_tests {

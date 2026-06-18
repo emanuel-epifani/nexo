@@ -4,8 +4,8 @@ use tokio::sync::mpsc;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 
-mod helpers;
-use helpers::{setup_pubsub_manager, Benchmark};
+mod common;
+use common::{setup_pubsub_manager, Benchmark};
 
 
 
