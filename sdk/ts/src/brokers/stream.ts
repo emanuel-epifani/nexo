@@ -17,6 +17,10 @@ enum StreamOpcode {
   S_DELETE = 0x36,
   S_SEEK = 0x38,
   S_LEAVE = 0x39,
+  S_PEEK_DLT = 0x3A,
+  S_MOVE_TO_STREAM = 0x3B,
+  S_DELETE_DLT = 0x3C,
+  S_PURGE_DLT = 0x3D,
 }
 
 export interface RetentionOptions {
@@ -38,6 +42,13 @@ export interface StreamMessage<T> {
   seq: bigint;
   key?: Uint8Array;
   data: T;
+}
+
+export interface DltEntry {
+  seq: bigint;
+  reason: string;
+  attempts: number;
+  key?: Uint8Array;
 }
 
 function isRecoverableMembershipError(e: any): boolean {
@@ -242,5 +253,53 @@ export class NexoStream<T = any> {
       .string(group)
       .u8(target === 'beginning' ? 0 : 1)
     );
+  }
+
+  /** Peek at Dead Letter Topic entries for a consumer group. */
+  async peekDlt(group: string, limit: number = 100, offset: number = 0): Promise<DltEntry[]> {
+    const res = await this.conn.send(StreamOpcode.S_PEEK_DLT, w => w
+      .string(this.name)
+      .string(group)
+      .u32(limit)
+      .u32(offset)
+    );
+    const count = res.cursor.readU32();
+    const entries: DltEntry[] = [];
+    for (let i = 0; i < count; i++) {
+      const seq = res.cursor.readU64();
+      const reason = res.cursor.readString();
+      const attempts = res.cursor.readU32();
+      const keyLen = res.cursor.readU16();
+      const key = keyLen > 0 ? res.cursor.readBuffer(keyLen) : undefined;
+      entries.push({ seq, reason, attempts, key });
+    }
+    return entries;
+  }
+
+  /** Move a message from DLT back to the stream for redelivery. */
+  async moveToStream(group: string, seq: bigint): Promise<void> {
+    await this.conn.send(StreamOpcode.S_MOVE_TO_STREAM, w => w
+      .string(this.name)
+      .string(group)
+      .u64(seq)
+    );
+  }
+
+  /** Delete a message from the DLT permanently. */
+  async deleteDlt(group: string, seq: bigint): Promise<void> {
+    await this.conn.send(StreamOpcode.S_DELETE_DLT, w => w
+      .string(this.name)
+      .string(group)
+      .u64(seq)
+    );
+  }
+
+  /** Purge all messages from the DLT. Returns the count of removed entries. */
+  async purgeDlt(group: string): Promise<number> {
+    const res = await this.conn.send(StreamOpcode.S_PURGE_DLT, w => w
+      .string(this.name)
+      .string(group)
+    );
+    return res.cursor.readU32();
   }
 }

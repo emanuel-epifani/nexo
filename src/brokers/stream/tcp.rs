@@ -25,6 +25,10 @@ pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
 pub const OP_S_SEEK: u8 = 0x38;
 pub const OP_S_LEAVE: u8 = 0x39;
+pub const OP_S_PEEK_DLT: u8 = 0x3A;
+pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
+pub const OP_S_DELETE_DLT: u8 = 0x3C;
+pub const OP_S_PURGE_DLT: u8 = 0x3D;
 
 // ==========================================
 // COMMANDS
@@ -41,6 +45,10 @@ enum StreamCommand {
     Exists { topic: String },
     Delete { topic: String },
     Leave { topic: String, group: String, consumer_id: String, generation: u64 },
+    PeekDlt { topic: String, group: String, limit: u32, offset: u32 },
+    MoveToStream { topic: String, group: String, seq: u64 },
+    DeleteDlt { topic: String, group: String, seq: u64 },
+    PurgeDlt { topic: String, group: String },
 }
 
 impl StreamCommand {
@@ -113,6 +121,30 @@ impl StreamCommand {
                 let generation = cursor.read_u64()?;
                 Ok(Self::Leave { topic, group, consumer_id, generation })
             }
+            OP_S_PEEK_DLT => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let limit = cursor.read_u32()?;
+                let offset = cursor.read_u32()?;
+                Ok(Self::PeekDlt { topic, group, limit, offset })
+            }
+            OP_S_MOVE_TO_STREAM => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let seq = cursor.read_u64()?;
+                Ok(Self::MoveToStream { topic, group, seq })
+            }
+            OP_S_DELETE_DLT => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let seq = cursor.read_u64()?;
+                Ok(Self::DeleteDlt { topic, group, seq })
+            }
+            OP_S_PURGE_DLT => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                Ok(Self::PurgeDlt { topic, group })
+            }
             _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
         }
     }
@@ -153,6 +185,26 @@ fn encode_join_group(ack_floor: u64, generation: u64, consumer_id: &str) -> Byte
 fn encode_bool(value: bool) -> Bytes {
     let mut w = PayloadWriter::with_capacity(1);
     w.put_bool(value);
+    w.into_bytes()
+}
+
+fn encode_peek_dlt(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
+    let mut w = PayloadWriter::new();
+    w.put_u32(entries.len() as u32);
+    for (seq, reason, attempts, key) in entries {
+        w.put_u64(*seq);
+        w.put_str(reason);
+        w.put_u32(*attempts);
+        let key_len = key.as_ref().map_or(0, |k| k.len());
+        w.put_u16(key_len as u16);
+        if let Some(k) = key { w.put_raw(k); }
+    }
+    w.into_bytes()
+}
+
+fn encode_purge_dlt(count: usize) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(4);
+    w.put_u32(count as u32);
     w.into_bytes()
 }
 
@@ -215,6 +267,22 @@ pub async fn handle(
         }
         StreamCommand::Delete { topic } => match stream.delete_topic(topic).await {
             Ok(_) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+        StreamCommand::PeekDlt { topic, group, limit, offset } => match stream.peek_dlt(&topic, &group, limit as usize, offset as usize).await {
+            Ok(entries) => Response::Data(encode_peek_dlt(&entries)),
+            Err(e) => Response::Error(e),
+        },
+        StreamCommand::MoveToStream { topic, group, seq } => match stream.move_to_stream(&topic, &group, seq).await {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+        StreamCommand::DeleteDlt { topic, group, seq } => match stream.delete_dlt(&topic, &group, seq).await {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+        StreamCommand::PurgeDlt { topic, group } => match stream.purge_dlt(&topic, &group).await {
+            Ok(count) => Response::Data(encode_purge_dlt(count)),
             Err(e) => Response::Error(e),
         },
     }

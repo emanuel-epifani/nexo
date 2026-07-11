@@ -22,6 +22,13 @@ pub struct PendingMsg {
     pub key: Option<Bytes>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DltEntry {
+    pub reason: String,
+    pub attempts: u32,
+    pub key: Option<Bytes>,
+}
+
 struct GroupMember {
     connection_client_id: String,
 }
@@ -34,7 +41,7 @@ pub struct ConsumerGroup {
     pub next_deliver_seq: u64,
     pub pending: HashMap<u64, PendingMsg>,
     pub redeliver: VecDeque<u64>,
-    pub parked: HashSet<u64>,
+    pub dlt: HashMap<u64, DltEntry>,
     pub parked_keys: HashSet<Bytes>,
     pub delivery_attempts: HashMap<u64, u32>,
     pub keys_in_flight: HashMap<Bytes, u64>,
@@ -60,7 +67,7 @@ impl ConsumerGroup {
             next_deliver_seq: head_seq,
             pending: HashMap::new(),
             redeliver: VecDeque::new(),
-            parked: HashSet::new(),
+            dlt: HashMap::new(),
             parked_keys: HashSet::new(),
             delivery_attempts: HashMap::new(),
             keys_in_flight: HashMap::new(),
@@ -79,7 +86,7 @@ impl ConsumerGroup {
         self.pending.len() >= self.max_ack_pending
     }
 
-    pub fn restore(id: String, ack_floor: u64, head_seq: u64, max_ack_pending: usize, ack_wait: Duration, max_deliveries: u32) -> Self {
+    pub fn restore(id: String, ack_floor: u64, head_seq: u64, max_ack_pending: usize, ack_wait: Duration, max_deliveries: u32, dlt_entries: HashMap<u64, DltEntry>, parked_keys: HashSet<Bytes>) -> Self {
         let normalized_floor = ack_floor.max(head_seq.saturating_sub(1));
         Self {
             id,
@@ -87,8 +94,8 @@ impl ConsumerGroup {
             next_deliver_seq: normalized_floor.saturating_add(1).max(head_seq.max(1)),
             pending: HashMap::new(),
             redeliver: VecDeque::new(),
-            parked: HashSet::new(),
-            parked_keys: HashSet::new(),
+            dlt: dlt_entries,
+            parked_keys,
             delivery_attempts: HashMap::new(),
             keys_in_flight: HashMap::new(),
             blocked_by_key: HashMap::new(),
@@ -119,7 +126,7 @@ impl ConsumerGroup {
             if let Some(seq) = self.redeliver.pop_front() {
                 if seq < head_seq {
                     self.delivery_attempts.remove(&seq);
-                    self.parked.remove(&seq);
+                    self.dlt.remove(&seq);
                     continue;
                 }
 
@@ -170,7 +177,6 @@ impl ConsumerGroup {
 
         self.pending.remove(&seq);
         self.delivery_attempts.remove(&seq);
-        self.parked.remove(&seq);
 
         let mut key_unblocked = false;
         if let Some(key) = &pending_msg.key {
@@ -254,11 +260,19 @@ impl ConsumerGroup {
             changed = true;
         }
 
-        let before_parked = self.parked.len();
-        self.parked.retain(|seq| *seq >= head_seq);
-        if self.parked.len() != before_parked {
+        let before_dlt = self.dlt.len();
+        let stale_dlt_keys: Vec<u64> = self.dlt.keys().copied().filter(|seq| *seq < head_seq).collect();
+        for seq in &stale_dlt_keys {
+            self.dlt.remove(seq);
+        }
+        if self.dlt.len() != before_dlt {
             changed = true;
         }
+
+        // Clean up parked_keys that no longer have any DLT entries
+        self.parked_keys.retain(|key| {
+            self.dlt.values().any(|e| e.key.as_ref() == Some(key))
+        });
 
         let before_attempts = self.delivery_attempts.len();
         self.delivery_attempts.retain(|seq, _| *seq >= head_seq);
@@ -282,11 +296,6 @@ impl ConsumerGroup {
             changed = true;
         }
 
-        // Clean up parked_keys when no parked messages remain
-        if self.parked.is_empty() {
-            self.parked_keys.clear();
-        }
-
         if changed {
             self.is_fetching_cold = false;
             self.try_advance_floor();
@@ -303,7 +312,7 @@ impl ConsumerGroup {
     fn reset_runtime(&mut self) {
         self.pending.clear();
         self.redeliver.clear();
-        self.parked.clear();
+        self.dlt.clear();
         self.parked_keys.clear();
         self.delivery_attempts.clear();
         self.keys_in_flight.clear();
@@ -402,7 +411,6 @@ impl ConsumerGroup {
         while self.ack_floor + 1 < self.next_deliver_seq
             && !self.pending.contains_key(&(self.ack_floor + 1))
             && !self.redeliver.iter().any(|seq| *seq == self.ack_floor + 1)
-            && !self.parked.contains(&(self.ack_floor + 1))
         {
             self.ack_floor += 1;
         }
@@ -427,11 +435,10 @@ impl ConsumerGroup {
     }
 
     fn issue_delivery(&mut self, consumer_id: &str, msg: Message) -> Option<Message> {
-        // If this key is poisoned (a previous message with same key was parked), park immediately
+        // If this key is poisoned (a previous message with same key was moved to DLT), move to DLT immediately
         if let Some(key) = &msg.key {
             if self.parked_keys.contains(key) {
-                self.parked.insert(msg.seq);
-                self.delivery_attempts.remove(&msg.seq);
+                self.move_to_dlt(msg.seq, "auto-parked (poisoned key)".to_string(), 0, msg.key.clone());
                 self.try_advance_floor();
                 return None;
             }
@@ -462,35 +469,33 @@ impl ConsumerGroup {
         Some(msg)
     }
 
-    fn park_msg(&mut self, msg: &Message) {
-        self.parked.insert(msg.seq);
-        self.delivery_attempts.remove(&msg.seq);
-        if let Some(key) = &msg.key {
-            self.keys_in_flight.remove(key);
-            self.parked_keys.insert(key.clone());
-            if let Some(blocked) = self.blocked_by_key.remove(key) {
+    fn move_to_dlt(&mut self, seq: u64, reason: String, attempts: u32, key: Option<Bytes>) {
+        self.dlt.insert(seq, DltEntry { reason, attempts, key: key.clone() });
+        self.delivery_attempts.remove(&seq);
+        if let Some(k) = &key {
+            self.keys_in_flight.remove(k);
+            self.parked_keys.insert(k.clone());
+            if let Some(blocked) = self.blocked_by_key.remove(k) {
                 for blocked_seq in blocked {
-                    self.parked.insert(blocked_seq);
+                    self.dlt.insert(blocked_seq, DltEntry {
+                        reason: "auto-parked (poisoned key)".to_string(),
+                        attempts: 0,
+                        key: key.clone(),
+                    });
                     self.delivery_attempts.remove(&blocked_seq);
                 }
             }
         }
     }
 
+    fn park_msg(&mut self, msg: &Message) {
+        let attempts = self.delivery_attempts.get(&msg.seq).copied().unwrap_or(0);
+        self.move_to_dlt(msg.seq, format!("max_deliveries exceeded ({})", self.max_deliveries), attempts, msg.key.clone());
+    }
+
     fn release_seq(&mut self, seq: u64, delivery_count: u32, key: Option<Bytes>) {
         if delivery_count >= self.max_deliveries {
-            self.parked.insert(seq);
-            self.delivery_attempts.remove(&seq);
-            if let Some(k) = &key {
-                self.keys_in_flight.remove(k);
-                self.parked_keys.insert(k.clone());
-                if let Some(blocked) = self.blocked_by_key.remove(k) {
-                    for blocked_seq in blocked {
-                        self.parked.insert(blocked_seq);
-                        self.delivery_attempts.remove(&blocked_seq);
-                    }
-                }
-            }
+            self.move_to_dlt(seq, format!("max_deliveries exceeded ({})", self.max_deliveries), delivery_count, key);
         } else {
             if let Some(k) = &key {
                 self.keys_in_flight.remove(k);
@@ -513,5 +518,51 @@ impl ConsumerGroup {
         }
 
         self.try_advance_floor();
+    }
+
+    // --- DLT Operations ---
+
+    pub fn peek_dlt(&self, limit: usize, offset: usize) -> Vec<(u64, DltEntry)> {
+        let mut entries: Vec<(u64, DltEntry)> = self.dlt.iter().map(|(seq, e)| (*seq, e.clone())).collect();
+        entries.sort_by_key(|(seq, _)| *seq);
+        entries.into_iter().skip(offset).take(limit).collect()
+    }
+
+    /// Move a message from DLT back to redeliver queue. Returns true if a key was unblocked.
+    pub fn move_to_stream(&mut self, seq: u64) -> Result<bool, String> {
+        let entry = self.remove_dlt_entry(seq).ok_or("seq not in DLT")?;
+        self.delivery_attempts.remove(&seq);
+        if !self.redeliver.iter().any(|&s| s == seq) {
+            let pos = self.redeliver.iter().position(|&s| s > seq).unwrap_or(self.redeliver.len());
+            self.redeliver.insert(pos, seq);
+        }
+        let key_unblocked = entry.key.as_ref().map_or(false, |k| !self.parked_keys.contains(k));
+        Ok(key_unblocked)
+    }
+
+    /// Remove a message from DLT permanently. Returns true if a key was unblocked.
+    pub fn delete_dlt(&mut self, seq: u64) -> Result<bool, String> {
+        let entry = self.remove_dlt_entry(seq).ok_or("seq not in DLT")?;
+        let key_unblocked = entry.key.as_ref().map_or(false, |k| !self.parked_keys.contains(k));
+        Ok(key_unblocked)
+    }
+
+    /// Clear all DLT entries and parked keys. Returns count of removed entries.
+    pub fn purge_dlt(&mut self) -> usize {
+        let count = self.dlt.len();
+        self.dlt.clear();
+        self.parked_keys.clear();
+        count
+    }
+
+    fn remove_dlt_entry(&mut self, seq: u64) -> Option<DltEntry> {
+        let entry = self.dlt.remove(&seq)?;
+        let key_still_in_dlt = self.dlt.values().any(|e| e.key == entry.key);
+        if !key_still_in_dlt {
+            if let Some(key) = &entry.key {
+                self.parked_keys.remove(key);
+            }
+        }
+        Some(entry)
     }
 }

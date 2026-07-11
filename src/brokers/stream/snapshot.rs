@@ -18,4 +18,5 @@ pub struct ConsumerGroupSnapshot {
     pub id: String,
     pub ack_floor: u64,
     pub pending_count: usize,
+    pub dlt_count: usize,
 }

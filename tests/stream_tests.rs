@@ -166,7 +166,12 @@ mod stream_tests {
             ack_message(&manager, group, topic, &consumer, 2).await;
 
             let probe = join_session(&manager, group, topic, "client-B").await;
-            assert_eq!(probe.ack_floor, 0, "ack_floor must not advance over parked msg-1");
+            assert_eq!(probe.ack_floor, 2, "ack_floor must advance over DLT entries (msg-1 parked, msg-2 acked)");
+
+            // Verify msg-1 is in DLT
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 1);
+            assert_eq!(dlt[0].0, 1, "msg-1 should be in DLT");
         }
 
         #[tokio::test]
@@ -511,7 +516,7 @@ mod stream_tests {
             let mut files: Vec<String> = std::fs::read_dir(&topic_path)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-                .filter(|name| name.ends_with(".log") && name != "groups.log")
+                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
                 .collect();
             files.sort();
 
@@ -569,7 +574,7 @@ mod stream_tests {
             let mut files: Vec<String> = std::fs::read_dir(&topic_path)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-                .filter(|name| name.ends_with(".log") && name != "groups.log")
+                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
                 .collect();
             files.sort();
 
@@ -956,11 +961,298 @@ mod stream_tests {
             let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
             assert_eq!(batch3.len(), 0, "All same-key messages should be parked when one is parked");
 
-            // Verify ack_floor stayed at 0 (parked messages block floor advancement)
+            // Verify ack_floor advanced (DLT entries don't block floor)
             let snapshot = manager.get_snapshot().await;
             let topic_snap = snapshot.topics.iter().find(|t| t.name == topic).unwrap();
             let group_snap = topic_snap.groups.iter().find(|g| g.id == group).unwrap();
-            assert_eq!(group_snap.ack_floor, 0, "ack_floor must not advance over parked messages");
+            assert_eq!(group_snap.ack_floor, 3, "ack_floor must advance over DLT entries");
+            assert_eq!(group_snap.dlt_count, 3, "all 3 same-key messages should be in DLT");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_peek_after_park() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-peek";
+            let group = "g-dlt-peek";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            let batch = fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            assert_eq!(batch.len(), 1);
+
+            // Let it timeout twice → parked in DLT
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 1);
+            assert_eq!(dlt[0].0, 1, "seq 1 should be in DLT");
+            assert!(dlt[0].1.contains("max_deliveries"), "reason should mention max_deliveries");
+            assert_eq!(dlt[0].2, 2, "attempts should be 2");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_move_to_stream_redelivers() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-move";
+            let group = "g-dlt-move";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Verify in DLT
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 1);
+
+            // Move back to stream
+            manager.move_to_stream(topic, group, 1).await.unwrap();
+
+            // DLT should be empty
+            let dlt_after = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt_after.len(), 0, "DLT should be empty after moveToStream");
+
+            // Should be redelivered
+            let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch.len(), 1);
+            assert_eq!(batch[0].seq, 1, "msg should be redelivered after moveToStream");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_move_to_stream_preserves_order() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-order";
+            let group = "g-dlt-order";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            // Publish 3 messages with same key
+            let key = Bytes::from("order-key");
+            for i in 1..=3 {
+                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            // Fetch msg-1, let it timeout twice → parked, all same-key auto-parked
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Trigger fetch to auto-park msg-2 and msg-3
+            fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+
+            // All 3 in DLT
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 3);
+
+            // Move back in REVERSE order: seq-3, then seq-2, then seq-1
+            manager.move_to_stream(topic, group, 3).await.unwrap();
+            manager.move_to_stream(topic, group, 2).await.unwrap();
+            manager.move_to_stream(topic, group, 1).await.unwrap();
+
+            // Fetch — per-key ordering delivers one at a time, must ack each
+            let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch1.len(), 1);
+            assert_eq!(batch1[0].seq, 1, "seq-1 must be first despite moveToStream(3) called first");
+            ack_message(&manager, group, topic, &consumer, batch1[0].seq).await;
+
+            let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch2.len(), 1);
+            assert_eq!(batch2[0].seq, 2, "seq-2 must be second");
+            ack_message(&manager, group, topic, &consumer, batch2[0].seq).await;
+
+            let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch3.len(), 1);
+            assert_eq!(batch3[0].seq, 3, "seq-3 must be third");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_delete_removes_entry() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-delete";
+            let group = "g-dlt-delete";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Delete from DLT
+            manager.delete_dlt(topic, group, 1).await.unwrap();
+
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 0, "DLT should be empty after delete");
+
+            // Should NOT be redelivered
+            let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch.len(), 0, "Deleted message should not be redelivered");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_purge_clears_all() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-purge";
+            let group = "g-dlt-purge";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            for i in 1..=3 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            // Fetch all 3, let them all timeout and park
+            fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert!(dlt.len() >= 1, "Should have entries in DLT");
+
+            let count = manager.purge_dlt(topic, group).await.unwrap();
+            assert!(count >= 1, "Purge should return count of removed entries");
+
+            let dlt_after = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt_after.len(), 0, "DLT should be empty after purge");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_auto_unblock_on_last_entry() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "dlt-autounblock";
+            let group = "g-dlt-autounblock";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let key = Bytes::from("block-key");
+            for i in 1..=3 {
+                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            // Fetch msg-1, let it timeout twice → parked, all same-key messages auto-parked
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Trigger fetch to auto-park msg-2 and msg-3 (same key is parked)
+            let batch_park = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch_park.len(), 0, "All same-key messages should be auto-parked");
+
+            // All 3 should be in DLT
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 3, "All 3 same-key messages should be in DLT");
+
+            // Delete one — key should still be parked (other entries remain)
+            manager.delete_dlt(topic, group, 1).await.unwrap();
+            // Publish a new message with same key — should be auto-parked
+            manager.publish(topic, Some(key.clone()), Bytes::from("msg-4")).await.unwrap();
+            let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch.len(), 0, "Key should still be parked with remaining DLT entries");
+
+            // Delete all remaining original entries — but msg-4 is now in DLT too
+            manager.delete_dlt(topic, group, 2).await.unwrap();
+            manager.delete_dlt(topic, group, 3).await.unwrap();
+            // msg-4 is also in DLT (auto-parked), key still parked
+            let batch_still = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch_still.len(), 0, "Key still parked because msg-4 is in DLT");
+
+            // Delete msg-4 from DLT — now key is fully unblocked
+            manager.delete_dlt(topic, group, 4).await.unwrap();
+
+            // Publish msg-5 with same key — should be delivered now
+            manager.publish(topic, Some(key.clone()), Bytes::from("msg-5")).await.unwrap();
+            let batch_final = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch_final.len(), 1);
+            assert_eq!(batch_final[0].seq, 5, "msg-5 should be delivered after all DLT entries cleared");
+        }
+
+        #[tokio::test]
+        async fn test_dlt_persistence_across_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path_str = temp_dir.path().to_str().unwrap().to_string();
+
+            let mut config = Config::global().stream.clone();
+            config.persistence_path = path_str.clone();
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+
+            let topic = "dlt-persist";
+            let group = "g-dlt-persist";
+            let key = Bytes::from("persist-key");
+
+            {
+                let manager = build_manager(config.clone()).await;
+                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+                for i in 1..=2 {
+                    manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                }
+
+                let consumer = join_session(&manager, group, topic, "client-A").await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                // Verify DLT has entries
+                let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert!(dlt.len() >= 1, "Should have DLT entries before restart");
+
+                // Wait for state to be saved
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+
+            {
+                let manager2 = build_manager(config.clone()).await;
+
+                // DLT entries should survive restart
+                let dlt = manager2.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert!(dlt.len() >= 1, "DLT entries should persist across restart");
+
+                // Parked key should survive — new message with same key should be auto-parked
+                manager2.publish(topic, Some(key.clone()), Bytes::from("msg-3")).await.unwrap();
+                let consumer = join_session(&manager2, group, topic, "client-A").await;
+                let batch = fetch_messages(&manager2, group, topic, &consumer, 10, 0).await;
+                assert_eq!(batch.len(), 0, "Parked key should survive restart — msg-3 auto-parked");
+            }
         }
 
         #[tokio::test]

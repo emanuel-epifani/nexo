@@ -16,7 +16,7 @@ use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
-use crate::brokers::stream::domain::persistence::{recover_topic, MessageToAppend, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::persistence::{recover_topic, GroupPersistentState, MessageToAppend, StorageCommand, StorageManager};
 use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
 
 struct TopicShared {
@@ -172,6 +172,53 @@ impl StreamManager {
 
         topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(seq)
+    }
+
+    pub async fn peek_dlt(&self, topic: &str, group: &str, limit: usize, offset: usize) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, String> {
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        let inner = Self::lock_topic(&topic_ref.inner);
+        let group_ref = inner.groups.get(group).ok_or("Group not found")?;
+        let entries = group_ref.peek_dlt(limit, offset);
+        Ok(entries.into_iter().map(|(seq, e)| (seq, e.reason, e.attempts, e.key)).collect())
+    }
+
+    pub async fn move_to_stream(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        let key_unblocked = {
+            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let key_unblocked = group_ref.move_to_stream(seq)?;
+            inner.groups_dirty = true;
+            key_unblocked
+        };
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        Ok(key_unblocked)
+    }
+
+    pub async fn delete_dlt(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        let key_unblocked = {
+            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let key_unblocked = group_ref.delete_dlt(seq)?;
+            inner.groups_dirty = true;
+            key_unblocked
+        };
+        if key_unblocked {
+            topic_ref.wake_tx.send_modify(|v| *v += 1);
+        }
+        Ok(key_unblocked)
+    }
+
+    pub async fn purge_dlt(&self, topic: &str, group: &str) -> Result<usize, String> {
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        {
+            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let count = group_ref.purge_dlt();
+            inner.groups_dirty = true;
+            Ok(count)
+        }
     }
 
     pub async fn read(&self, topic: &str, from_seq: u64, limit: usize) -> Vec<Message> {
@@ -408,6 +455,7 @@ impl StreamManager {
                 id: group.id.clone(),
                 ack_floor: group.ack_floor,
                 pending_count: group.pending.len(),
+                dlt_count: group.dlt.len(),
             }).collect();
 
             let mut safe_config = inner.full_config.clone();
@@ -506,10 +554,10 @@ impl StreamManager {
         let ack_wait = Duration::from_millis(config.ack_wait_ms);
         let persisted_seq = Arc::new(AtomicU64::new(state.next_seq.saturating_sub(1)));
         let mut groups = HashMap::new();
-        for (group_id, ack_floor) in recovered.groups_data {
+        for (group_id, group_state) in recovered.groups_data {
             groups.insert(
                 group_id.clone(),
-                ConsumerGroup::restore(group_id, ack_floor, state.head_seq, config.max_ack_pending, ack_wait, config.max_deliveries),
+                ConsumerGroup::restore(group_id, group_state.ack_floor, state.head_seq, config.max_ack_pending, ack_wait, config.max_deliveries, group_state.dlt_entries, group_state.parked_keys),
             );
         }
 
@@ -569,14 +617,20 @@ impl StreamManager {
                                 None
                             } else {
                                 inner.groups_dirty = false;
-                                Some(inner.groups.iter().map(|(id, group)| (id.clone(), group.ack_floor)).collect::<HashMap<_, _>>())
+                                Some(inner.groups.iter().map(|(id, group)| {
+                                    (id.clone(), GroupPersistentState {
+                                        ack_floor: group.ack_floor,
+                                        dlt_entries: group.dlt.clone(),
+                                        parked_keys: group.parked_keys.clone(),
+                                    })
+                                }).collect::<HashMap<_, _>>())
                             }
                         };
 
                         if let Some(groups_data) = groups_data {
-                            let _ = storage_tx.send(StorageCommand::SaveGroups {
+                            let _ = storage_tx.send(StorageCommand::SaveState {
                                 topic_name,
-                                groups_data,
+                                groups: groups_data,
                             });
                         }
                     }

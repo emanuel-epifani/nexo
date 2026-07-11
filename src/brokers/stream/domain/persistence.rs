@@ -23,10 +23,19 @@ use crc32fast::Hasher;
 
 use crate::brokers::stream::options::RetentionOptions;
 use crate::brokers::stream::domain::message::Message;
+use crate::brokers::stream::domain::group::DltEntry;
 
 // ==========================================
 // DATA STRUCTURES
 // ==========================================
+
+/// Per-group persistent state (ack_floor + DLT entries + parked_keys)
+#[derive(Default, Clone)]
+pub struct GroupPersistentState {
+    pub ack_floor: u64,
+    pub dlt_entries: HashMap<u64, DltEntry>,
+    pub parked_keys: HashSet<Bytes>,
+}
 
 #[derive(Default)]
 pub struct RecoveredState {
@@ -34,8 +43,8 @@ pub struct RecoveredState {
     pub messages: VecDeque<Message>,
     /// All segment paths in order
     pub segments: Vec<Segment>,
-    /// Group ID -> ack_floor
-    pub groups_data: HashMap<String, u64>,
+    /// Group ID -> GroupPersistentState
+    pub groups_data: HashMap<String, GroupPersistentState>,
     /// First retained sequence on disk
     pub head_seq: u64,
 }
@@ -78,9 +87,9 @@ pub enum StorageCommand {
         reply: oneshot::Sender<Vec<Message>>,
     },
 
-    SaveGroups {
+    SaveState {
         topic_name: String,
-        groups_data: HashMap<String, u64>,
+        groups: HashMap<String, GroupPersistentState>,
     },
 
     ApplyRetention {
@@ -173,10 +182,10 @@ impl StorageManager {
                 let msgs = self.cold_read(&topic_name, from_seq, limit).await;
                 let _ = reply.send(msgs);
             }
-            StorageCommand::SaveGroups { topic_name, groups_data } => {
+            StorageCommand::SaveState { topic_name, groups } => {
                 let base_path = self.base_path.join(&topic_name);
-                if let Err(e) = save_groups_file(&base_path, &groups_data).await {
-                    error!("Failed to save groups for {}: {}", topic_name, e);
+                if let Err(e) = save_state_file(&base_path, &groups).await {
+                    error!("Failed to save state for {}: {}", topic_name, e);
                 }
             }
             StorageCommand::ApplyRetention { topic_name, retention, max_segment_size: _, reply } => {
@@ -470,10 +479,20 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
         state.segments = segments;
     }
 
-    let groups_path = base_path.join("groups.log");
-    if groups_path.exists() {
-        if let Ok(groups) = load_groups_file(&groups_path).await {
+    let state_path = base_path.join("state.log");
+    if state_path.exists() {
+        if let Ok(groups) = load_state_file(&state_path).await {
             state.groups_data = groups;
+        }
+    } else {
+        // Fallback: try old groups.log for backward compat
+        let groups_path = base_path.join("groups.log");
+        if groups_path.exists() {
+            if let Ok(groups) = load_groups_file(&groups_path).await {
+                state.groups_data = groups.into_iter().map(|(id, ack_floor)| {
+                    (id, GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() })
+                }).collect();
+            }
         }
     }
     state
@@ -489,7 +508,7 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
         let path = entry.path();
         if !path.is_file() { continue; }
         let fname = entry.file_name().to_string_lossy().to_string();
-        if fname.ends_with(".log") && fname != "groups.log" {
+        if fname.ends_with(".log") && fname != "groups.log" && fname != "state.log" {
             let name_part = &fname[..fname.len() - 4];
             if let Ok(start_seq) = name_part.parse::<u64>() {
                 segments.push(Segment { path, start_seq });
@@ -500,16 +519,16 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
     Ok(segments)
 }
 
-/// Write the groups.log file (ack_floor for each group). Atomic write via temp file + rename.
-pub async fn save_groups_file(base_path: &Path, groups: &HashMap<String, u64>) -> std::io::Result<()> {
-    let tmp_path = base_path.join("groups.log.tmp");
-    let final_path = base_path.join("groups.log");
+/// Write the state.log file (ack_floor + DLT entries + parked_keys per group). Atomic write via temp file + rename.
+pub async fn save_state_file(base_path: &Path, groups: &HashMap<String, GroupPersistentState>) -> std::io::Result<()> {
+    let tmp_path = base_path.join("state.log.tmp");
+    let final_path = base_path.join("state.log");
 
     {
         let file = File::create(&tmp_path).await?;
         let mut writer = BufWriter::new(file);
-        for (group_id, ack_floor) in groups {
-            write_group_entry(&mut writer, group_id, *ack_floor).await?;
+        for (group_id, state) in groups {
+            write_state_entry(&mut writer, group_id, state).await?;
         }
         writer.flush().await?;
     }
@@ -518,27 +537,124 @@ pub async fn save_groups_file(base_path: &Path, groups: &HashMap<String, u64>) -
     Ok(())
 }
 
-async fn write_group_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer: &mut W, group_id: &str, ack_floor: u64) -> std::io::Result<()> {
+async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer: &mut W, group_id: &str, state: &GroupPersistentState) -> std::io::Result<()> {
     use bytes::{BufMut, BytesMut};
     let group_bytes = group_id.as_bytes();
     let group_len = group_bytes.len() as u16;
-    let len = 8 + 2 + group_len as u32;
-    
+    let parked_keys_count = state.parked_keys.len() as u32;
+    let dlt_count = state.dlt_entries.len() as u32;
+
+    // Calculate total content length
+    let mut content_len = 8 + 2 + group_len as u32 + 4 + 4; // ack_floor + group_len + group + parked_keys_count + dlt_count
+    for key in &state.parked_keys {
+        content_len += 2 + key.len() as u32;
+    }
+    for (seq, entry) in &state.dlt_entries {
+        let reason_bytes = entry.reason.as_bytes();
+        content_len += 8 + 2 + entry.key.as_ref().map_or(0, |k| k.len()) as u32 + 2 + reason_bytes.len() as u32 + 4;
+    }
+
+    // CRC over content
+    let mut content_buf = BytesMut::with_capacity(content_len as usize);
+    content_buf.put_u64(state.ack_floor);
+    content_buf.put_u16(group_len);
+    content_buf.put_slice(group_bytes);
+    content_buf.put_u32(parked_keys_count);
+    for key in &state.parked_keys {
+        content_buf.put_u16(key.len() as u16);
+        content_buf.put_slice(key);
+    }
+    content_buf.put_u32(dlt_count);
+    for (seq, entry) in &state.dlt_entries {
+        content_buf.put_u64(*seq);
+        let key_len = entry.key.as_ref().map_or(0, |k| k.len()) as u16;
+        content_buf.put_u16(key_len);
+        if let Some(k) = &entry.key { content_buf.put_slice(k); }
+        let reason_bytes = entry.reason.as_bytes();
+        content_buf.put_u16(reason_bytes.len() as u16);
+        content_buf.put_slice(reason_bytes);
+        content_buf.put_u32(entry.attempts);
+    }
+
     let mut hasher = Hasher::new();
-    hasher.update(&ack_floor.to_be_bytes());
-    hasher.update(&group_len.to_be_bytes());
-    hasher.update(group_bytes);
+    hasher.update(&content_buf);
     let crc = hasher.finalize();
 
-    let mut buf = BytesMut::with_capacity((4 + 4 + len) as usize);
-    buf.put_u32(len);
+    let mut buf = BytesMut::with_capacity(4 + 4 + content_len as usize);
+    buf.put_u32(content_len);
     buf.put_u32(crc);
-    buf.put_u64(ack_floor);
-    buf.put_u16(group_len);
-    buf.put_slice(group_bytes);
+    buf.extend_from_slice(&content_buf);
 
     writer.write_all(&buf).await?;
     Ok(())
+}
+
+async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersistentState>, std::io::Error> {
+    use bytes::Buf;
+    let mut groups: HashMap<String, GroupPersistentState> = HashMap::new();
+    let file = File::open(path).await?;
+    let mut reader = BufReader::new(file);
+
+    loop {
+        let mut len_buf = [0u8; 4];
+        if reader.read_exact(&mut len_buf).await.is_err() { break; }
+        let len = u32::from_be_bytes(len_buf);
+
+        let mut crc_buf = [0u8; 4];
+        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
+        let stored_crc = u32::from_be_bytes(crc_buf);
+
+        let mut content_buf = vec![0u8; len as usize];
+        if reader.read_exact(&mut content_buf).await.is_err() { break; }
+
+        let mut hasher = Hasher::new();
+        hasher.update(&content_buf);
+        if hasher.finalize() != stored_crc { continue; }
+
+        let mut cursor = std::io::Cursor::new(content_buf);
+        if cursor.remaining() < 10 { continue; }
+
+        let ack_floor = cursor.get_u64();
+        let group_len = cursor.get_u16();
+        if cursor.remaining() < group_len as usize { continue; }
+        let group_bytes = cursor.copy_to_bytes(group_len as usize);
+        let group_id = String::from_utf8_lossy(&group_bytes).to_string();
+
+        let mut state = GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() };
+
+        if cursor.remaining() < 4 { continue; }
+        let parked_keys_count = cursor.get_u32();
+        for _ in 0..parked_keys_count {
+            if cursor.remaining() < 2 { break; }
+            let key_len = cursor.get_u16();
+            if cursor.remaining() < key_len as usize { break; }
+            let key = Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize));
+            state.parked_keys.insert(key);
+        }
+
+        if cursor.remaining() < 4 { continue; }
+        let dlt_count = cursor.get_u32();
+        for _ in 0..dlt_count {
+            if cursor.remaining() < 8 { break; }
+            let seq = cursor.get_u64();
+            if cursor.remaining() < 2 { break; }
+            let key_len = cursor.get_u16();
+            let key = if key_len > 0 {
+                if cursor.remaining() < key_len as usize { break; }
+                Some(Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize)))
+            } else { None };
+            if cursor.remaining() < 2 { break; }
+            let reason_len = cursor.get_u16();
+            if cursor.remaining() < reason_len as usize { break; }
+            let reason = String::from_utf8_lossy(&cursor.copy_to_bytes(reason_len as usize)).to_string();
+            if cursor.remaining() < 4 { break; }
+            let attempts = cursor.get_u32();
+            state.dlt_entries.insert(seq, DltEntry { reason, attempts, key });
+        }
+
+        groups.insert(group_id, state);
+    }
+    Ok(groups)
 }
 
 async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
