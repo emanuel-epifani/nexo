@@ -85,7 +85,7 @@ class StreamSubscription<T> {
           .string(this.consumerId!)
           .u64(this.generation)
         );
-      } catch { /* connection may already be closed */ }
+      } catch { /* connection may already be closed or member already removed */ }
     }
     await this.loopDone;
   }

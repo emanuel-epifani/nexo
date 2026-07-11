@@ -351,6 +351,7 @@ impl ConsumerGroup {
         while self.ack_floor + 1 < self.next_deliver_seq
             && !self.pending.contains_key(&(self.ack_floor + 1))
             && !self.redeliver.iter().any(|seq| *seq == self.ack_floor + 1)
+            && !self.parked.contains(&(self.ack_floor + 1))
         {
             self.ack_floor += 1;
         }

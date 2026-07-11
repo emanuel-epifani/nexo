@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -21,7 +21,7 @@ use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
 
 struct TopicShared {
     inner: Mutex<TopicInner>,
-    notify: Notify,
+    wake_tx: watch::Sender<u64>,
     persisted_seq: Arc<AtomicU64>,
 }
 
@@ -169,7 +169,7 @@ impl StreamManager {
             persisted_seq,
         });
 
-        topic_ref.notify.notify_waiters();
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(seq)
     }
 
@@ -223,8 +223,10 @@ impl StreamManager {
 
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
 
+        let mut wake_rx = topic_ref.wake_tx.subscribe();
+
         loop {
-            let notified = topic_ref.notify.notified();
+            let wake_ver = *wake_rx.borrow();
 
             match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit) {
                 Ok(FetchAttempt::Ready(messages)) => return Ok(messages),
@@ -232,10 +234,14 @@ impl StreamManager {
                     return self.cold_fetch(&topic_ref, topic, group, consumer_id, generation, limit, from_seq, &group_cancel).await;
                 }
                 Ok(FetchAttempt::Wait) => {}
-                Err(e) if e == "NOT_MEMBER" && !self.is_active_member(&topic_ref, group, consumer_id) => {
+                Err(e) if (e == "NOT_MEMBER" || e == "FENCED") && !self.is_active_member(&topic_ref, group, consumer_id) => {
                     return Ok(Vec::new());
                 }
                 Err(e) => return Err(e),
+            }
+
+            if *wake_rx.borrow() != wake_ver {
+                continue;
             }
 
             if Instant::now() >= deadline {
@@ -243,7 +249,7 @@ impl StreamManager {
             }
 
             tokio::select! {
-                _ = notified => {}
+                _ = wake_rx.changed() => {}
                 _ = sleep_until(deadline) => return Ok(Vec::new()),
                 _ = group_cancel.cancelled() => return Ok(Vec::new()),
             }
@@ -290,7 +296,7 @@ impl StreamManager {
             }
             inner.groups_dirty = true;
         }
-        topic_ref.notify.notify_waiters();
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(())
     }
 
@@ -323,7 +329,7 @@ impl StreamManager {
             true
         };
         if should_notify {
-            topic_ref.notify.notify_waiters();
+            topic_ref.wake_tx.send_modify(|v| *v += 1);
         }
         Ok(())
     }
@@ -381,7 +387,7 @@ impl StreamManager {
                 }
             }
             if should_notify {
-                topic_ref.notify.notify_waiters();
+                topic_ref.wake_tx.send_modify(|v| *v += 1);
             }
         }
     }
@@ -508,7 +514,7 @@ impl StreamManager {
                 groups_dirty: false,
                 full_config: config,
             }),
-            notify: Notify::new(),
+            wake_tx: watch::channel(0u64).0,
             persisted_seq,
         })
     }
@@ -622,7 +628,7 @@ impl StreamManager {
                             }
                         }
                         if should_notify {
-                            topic_ref.notify.notify_waiters();
+                            topic_ref.wake_tx.send_modify(|v| *v += 1);
                         }
                     }
                 }
@@ -656,7 +662,7 @@ impl StreamManager {
                             }
                         }
                         if should_notify {
-                            topic_ref.notify.notify_waiters();
+                            topic_ref.wake_tx.send_modify(|v| *v += 1);
                         }
                     }
                 }
@@ -704,6 +710,13 @@ impl StreamManager {
 
         if is_fetching_cold {
             return Ok(FetchAttempt::Ready(Vec::new()));
+        }
+
+        // If the group is backpressured, don't trigger cold reads — nothing can be delivered.
+        if let Some(group_ref) = groups.get(group) {
+            if group_ref.is_backpressured() {
+                return Ok(FetchAttempt::Wait);
+            }
         }
 
         if from_seq < next_seq {

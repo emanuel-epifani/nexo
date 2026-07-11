@@ -166,7 +166,7 @@ mod stream_tests {
             ack_message(&manager, group, topic, &consumer, 2).await;
 
             let probe = join_session(&manager, group, topic, "client-B").await;
-            assert_eq!(probe.ack_floor, 2);
+            assert_eq!(probe.ack_floor, 0, "ack_floor must not advance over parked msg-1");
         }
 
         #[tokio::test]
