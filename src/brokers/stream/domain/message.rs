@@ -5,5 +5,6 @@ use serde::{Serialize, Deserialize};
 pub struct Message {
     pub seq: u64,
     pub timestamp: u64,
+    pub key: Option<Bytes>,
     pub payload: Bytes,
 }

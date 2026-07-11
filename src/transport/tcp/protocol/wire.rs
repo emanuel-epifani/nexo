@@ -46,6 +46,11 @@ impl PayloadWriter {
         self
     }
 
+    pub fn put_u16(&mut self, v: u16) -> &mut Self {
+        self.buf.put_u16(v);
+        self
+    }
+
     pub fn put_u64(&mut self, v: u64) -> &mut Self {
         self.buf.put_u64(v);
         self
@@ -109,6 +114,20 @@ impl PayloadCursor {
             return Err(ParseError::Invalid("Payload too short for u32".into()));
         }
         Ok(self.data.get_u32())
+    }
+
+    pub fn read_u16(&mut self) -> Result<u16, ParseError> {
+        if !self.has_remaining(2) {
+            return Err(ParseError::Invalid("Payload too short for u16".into()));
+        }
+        Ok(self.data.get_u16())
+    }
+
+    pub fn read_bytes(&mut self, len: usize) -> Result<Bytes, ParseError> {
+        if !self.has_remaining(len) {
+            return Err(ParseError::Invalid(format!("Payload too short: expected {} bytes", len)));
+        }
+        Ok(self.data.copy_to_bytes(len))
     }
 
     pub fn read_u64(&mut self) -> Result<u64, ParseError> {

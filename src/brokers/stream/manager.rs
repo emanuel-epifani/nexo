@@ -150,13 +150,13 @@ impl StreamManager {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, payload: Bytes) -> Result<u64, String> {
+    pub async fn publish(&self, topic: &str, key: Option<Bytes>, payload: Bytes) -> Result<u64, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let persisted_seq = topic_ref.persisted_seq.clone();
 
         let (seq, timestamp) = {
             let mut inner = Self::lock_topic(&topic_ref.inner);
-            inner.state.append(payload.clone())
+            inner.state.append(key.clone(), payload.clone())
         };
 
         let _ = self.storage_tx.send(StorageCommand::Append {
@@ -164,6 +164,7 @@ impl StreamManager {
             messages: vec![MessageToAppend {
                 seq,
                 timestamp,
+                key,
                 payload,
             }],
             persisted_seq,
@@ -263,18 +264,24 @@ impl StreamManager {
 
     pub async fn ack(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let mut inner = Self::lock_topic(&topic_ref.inner);
-        let head_seq = inner.state.head_seq;
-        let Some(group_ref) = inner.groups.get_mut(group) else {
-            return Err("Group not found".to_string());
-        };
+        let key_unblocked = {
+            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let head_seq = inner.state.head_seq;
+            let Some(group_ref) = inner.groups.get_mut(group) else {
+                return Err("Group not found".to_string());
+            };
 
-        let was_clamped = group_ref.clamp_head(head_seq);
-        group_ref.ack(consumer_id, generation, seq)?;
-        if was_clamped {
+            let was_clamped = group_ref.clamp_head(head_seq);
+            let key_unblocked = group_ref.ack(consumer_id, generation, seq)?;
+            if was_clamped {
+                inner.groups_dirty = true;
+            }
             inner.groups_dirty = true;
+            key_unblocked
+        };
+        if key_unblocked {
+            topic_ref.wake_tx.send_modify(|v| *v += 1);
         }
-        inner.groups_dirty = true;
         Ok(())
     }
 

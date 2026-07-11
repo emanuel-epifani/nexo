@@ -5,6 +5,7 @@ export class Cursor {
   constructor(public buf: Buffer, public offset = 0) { }
 
   readU8(): number { return this.buf.readUInt8(this.offset++); }
+  readU16(): number { const v = this.buf.readUInt16BE(this.offset); this.offset += 2; return v; }
   readU32(): number { const v = this.buf.readUInt32BE(this.offset); this.offset += 4; return v; }
   readU64(): bigint { const v = this.buf.readBigUInt64BE(this.offset); this.offset += 8; return v; }
 
@@ -87,6 +88,20 @@ export class FrameWriter {
     this.ensure(1);
     this.buf.writeUInt8(v, this.offset);
     this.offset += 1;
+    return this;
+  }
+
+  u16(v: number): this {
+    this.ensure(2);
+    this.buf.writeUInt16BE(v, this.offset);
+    this.offset += 2;
+    return this;
+  }
+
+  bytes(v: Uint8Array): this {
+    this.ensure(v.length);
+    Buffer.from(v).copy(this.buf, this.offset);
+    this.offset += v.length;
     return this;
   }
 

@@ -33,7 +33,7 @@ pub const OP_S_LEAVE: u8 = 0x39;
 #[derive(Debug)]
 enum StreamCommand {
     Create { topic: String, options: StreamCreateOptions },
-    Publish { topic: String, payload: Bytes },
+    Publish { topic: String, key: Option<Bytes>, payload: Bytes },
     Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
     Join { topic: String, group: String },
     Ack { topic: String, group: String, consumer_id: String, generation: u64, seq: u64 },
@@ -60,8 +60,10 @@ impl StreamCommand {
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
+                let key_len = cursor.read_u16()?;
+                let key = if key_len > 0 { Some(cursor.read_bytes(key_len as usize)?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, payload })
+                Ok(Self::Publish { topic, key, payload })
             }
             OP_S_FETCH => {
                 let topic = cursor.read_string()?;
@@ -132,6 +134,9 @@ fn encode_fetch(messages: &[Message]) -> Bytes {
     for msg in messages {
         w.put_u64(msg.seq);
         w.put_u64(msg.timestamp);
+        let key_len = msg.key.as_ref().map_or(0, |k| k.len());
+        w.put_u16(key_len as u16);
+        if let Some(k) = &msg.key { w.put_raw(k); }
         w.put_bytes(&msg.payload);
     }
     w.into_bytes()
@@ -174,7 +179,7 @@ pub async fn handle(
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
-        StreamCommand::Publish { topic, payload } => match stream.publish(&topic, payload).await {
+        StreamCommand::Publish { topic, key, payload } => match stream.publish(&topic, key, payload).await {
             Ok(seq) => Response::Data(encode_publish(seq)),
             Err(e) => Response::Error(e),
         },

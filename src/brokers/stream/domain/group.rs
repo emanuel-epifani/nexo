@@ -8,15 +8,18 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::brokers::stream::domain::message::Message;
 
+#[derive(Clone)]
 pub struct PendingMsg {
     pub consumer_id: String,
     pub delivered_at: Instant,
     pub delivery_count: u32,
+    pub key: Option<Bytes>,
 }
 
 struct GroupMember {
@@ -32,7 +35,10 @@ pub struct ConsumerGroup {
     pub pending: HashMap<u64, PendingMsg>,
     pub redeliver: VecDeque<u64>,
     pub parked: HashSet<u64>,
+    pub parked_keys: HashSet<Bytes>,
     pub delivery_attempts: HashMap<u64, u32>,
+    pub keys_in_flight: HashMap<Bytes, u64>,
+    pub blocked_by_key: HashMap<Bytes, VecDeque<u64>>,
     // === Config ===
     pub max_ack_pending: usize,
     pub ack_wait: Duration,
@@ -55,7 +61,10 @@ impl ConsumerGroup {
             pending: HashMap::new(),
             redeliver: VecDeque::new(),
             parked: HashSet::new(),
+            parked_keys: HashSet::new(),
             delivery_attempts: HashMap::new(),
+            keys_in_flight: HashMap::new(),
+            blocked_by_key: HashMap::new(),
             max_ack_pending,
             ack_wait,
             max_deliveries,
@@ -79,7 +88,10 @@ impl ConsumerGroup {
             pending: HashMap::new(),
             redeliver: VecDeque::new(),
             parked: HashSet::new(),
+            parked_keys: HashSet::new(),
             delivery_attempts: HashMap::new(),
+            keys_in_flight: HashMap::new(),
+            blocked_by_key: HashMap::new(),
             max_ack_pending,
             ack_wait,
             max_deliveries,
@@ -147,20 +159,35 @@ impl ConsumerGroup {
     }
 
     /// Acknowledge a message. Removes from pending and tries to advance ack_floor.
-    pub fn ack(&mut self, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
+    pub fn ack(&mut self, consumer_id: &str, generation: u64, seq: u64) -> Result<bool, String> {
         self.ensure_active_consumer(consumer_id, generation)?;
 
-        match self.pending.get(&seq) {
-            Some(msg) if msg.consumer_id == consumer_id => {}
+        let pending_msg = match self.pending.get(&seq) {
+            Some(msg) if msg.consumer_id == consumer_id => msg.clone(),
             Some(_) => return Err("NOT_OWNER".to_string()),
             None => return Err(format!("seq {} not pending", seq)),
-        }
+        };
 
         self.pending.remove(&seq);
         self.delivery_attempts.remove(&seq);
         self.parked.remove(&seq);
+
+        let mut key_unblocked = false;
+        if let Some(key) = &pending_msg.key {
+            self.keys_in_flight.remove(key);
+            if let Some(blocked) = self.blocked_by_key.get_mut(key) {
+                if let Some(next_seq) = blocked.pop_front() {
+                    self.redeliver.push_back(next_seq);
+                    key_unblocked = true;
+                }
+                if blocked.is_empty() {
+                    self.blocked_by_key.remove(key);
+                }
+            }
+        }
+
         self.try_advance_floor();
-        Ok(())
+        Ok(key_unblocked)
     }
 
     /// Negative acknowledge: move message back to redeliver queue.
@@ -178,7 +205,7 @@ impl ConsumerGroup {
         for seq in expired {
             if let Some(msg) = self.pending.remove(&seq) {
                 tracing::debug!("[Group:{}] Redelivery timeout seq={} (attempts={})", self.id, seq, msg.delivery_count);
-                self.release_seq(seq, msg.delivery_count);
+                self.release_seq(seq, msg.delivery_count, msg.key);
             }
         }
 
@@ -239,6 +266,27 @@ impl ConsumerGroup {
             changed = true;
         }
 
+        let before_keys = self.keys_in_flight.len();
+        self.keys_in_flight.retain(|_, seq| *seq >= head_seq);
+        if self.keys_in_flight.len() != before_keys {
+            changed = true;
+        }
+
+        let before_blocked = self.blocked_by_key.values().map(|v| v.len()).sum::<usize>();
+        self.blocked_by_key.retain(|_, blocked| {
+            blocked.retain(|seq| *seq >= head_seq);
+            !blocked.is_empty()
+        });
+        let after_blocked = self.blocked_by_key.values().map(|v| v.len()).sum::<usize>();
+        if after_blocked != before_blocked {
+            changed = true;
+        }
+
+        // Clean up parked_keys when no parked messages remain
+        if self.parked.is_empty() {
+            self.parked_keys.clear();
+        }
+
         if changed {
             self.is_fetching_cold = false;
             self.try_advance_floor();
@@ -256,7 +304,10 @@ impl ConsumerGroup {
         self.pending.clear();
         self.redeliver.clear();
         self.parked.clear();
+        self.parked_keys.clear();
         self.delivery_attempts.clear();
+        self.keys_in_flight.clear();
+        self.blocked_by_key.clear();
         self.members.clear();
         self.is_fetching_cold = false;
         self.generation = self.generation.saturating_add(1);
@@ -376,12 +427,29 @@ impl ConsumerGroup {
     }
 
     fn issue_delivery(&mut self, consumer_id: &str, msg: Message) -> Option<Message> {
+        // If this key is poisoned (a previous message with same key was parked), park immediately
+        if let Some(key) = &msg.key {
+            if self.parked_keys.contains(key) {
+                self.parked.insert(msg.seq);
+                self.delivery_attempts.remove(&msg.seq);
+                self.try_advance_floor();
+                return None;
+            }
+        }
+
         let next_attempt = self.delivery_attempts.get(&msg.seq).copied().unwrap_or(0).saturating_add(1);
         if next_attempt > self.max_deliveries {
-            self.parked.insert(msg.seq);
-            self.delivery_attempts.remove(&msg.seq);
+            self.park_msg(&msg);
             self.try_advance_floor();
             return None;
+        }
+
+        if let Some(key) = &msg.key {
+            if self.keys_in_flight.contains_key(key) {
+                self.blocked_by_key.entry(key.clone()).or_default().push_back(msg.seq);
+                return None;
+            }
+            self.keys_in_flight.insert(key.clone(), msg.seq);
         }
 
         self.delivery_attempts.insert(msg.seq, next_attempt);
@@ -389,28 +457,59 @@ impl ConsumerGroup {
             consumer_id: consumer_id.to_string(),
             delivered_at: Instant::now(),
             delivery_count: next_attempt,
+            key: msg.key.clone(),
         });
         Some(msg)
     }
 
-    fn release_seq(&mut self, seq: u64, delivery_count: u32) {
+    fn park_msg(&mut self, msg: &Message) {
+        self.parked.insert(msg.seq);
+        self.delivery_attempts.remove(&msg.seq);
+        if let Some(key) = &msg.key {
+            self.keys_in_flight.remove(key);
+            self.parked_keys.insert(key.clone());
+            if let Some(blocked) = self.blocked_by_key.remove(key) {
+                for blocked_seq in blocked {
+                    self.parked.insert(blocked_seq);
+                    self.delivery_attempts.remove(&blocked_seq);
+                }
+            }
+        }
+    }
+
+    fn release_seq(&mut self, seq: u64, delivery_count: u32, key: Option<Bytes>) {
         if delivery_count >= self.max_deliveries {
             self.parked.insert(seq);
             self.delivery_attempts.remove(&seq);
-        } else if !self.redeliver.iter().any(|queued| *queued == seq) {
-            self.redeliver.push_back(seq);
+            if let Some(k) = &key {
+                self.keys_in_flight.remove(k);
+                self.parked_keys.insert(k.clone());
+                if let Some(blocked) = self.blocked_by_key.remove(k) {
+                    for blocked_seq in blocked {
+                        self.parked.insert(blocked_seq);
+                        self.delivery_attempts.remove(&blocked_seq);
+                    }
+                }
+            }
+        } else {
+            if let Some(k) = &key {
+                self.keys_in_flight.remove(k);
+            }
+            if !self.redeliver.iter().any(|queued| *queued == seq) {
+                self.redeliver.push_back(seq);
+            }
         }
     }
 
     fn release_consumer(&mut self, consumer_id: &str) {
-        let seqs: Vec<(u64, u32)> = self.pending.iter()
+        let seqs: Vec<(u64, u32, Option<Bytes>)> = self.pending.iter()
             .filter(|(_, msg)| msg.consumer_id == consumer_id)
-            .map(|(seq, msg)| (*seq, msg.delivery_count))
+            .map(|(seq, msg)| (*seq, msg.delivery_count, msg.key.clone()))
             .collect();
 
-        for (seq, delivery_count) in seqs {
+        for (seq, delivery_count, key) in seqs {
             self.pending.remove(&seq);
-            self.release_seq(seq, delivery_count);
+            self.release_seq(seq, delivery_count, key);
         }
 
         self.try_advance_floor();

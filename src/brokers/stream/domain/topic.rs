@@ -96,7 +96,7 @@ impl TopicState {
         }
     }
 
-    pub fn append(&mut self, payload: Bytes) -> (u64, u64) {
+    pub fn append(&mut self, key: Option<Bytes>, payload: Bytes) -> (u64, u64) {
         let seq = self.next_seq;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -110,6 +110,7 @@ impl TopicState {
         self.log.push_back(Message {
             seq,
             timestamp,
+            key,
             payload,
         });
         self.next_seq += 1;

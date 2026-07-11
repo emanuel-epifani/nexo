@@ -50,6 +50,7 @@ pub struct Segment {
 pub struct MessageToAppend {
     pub seq: u64,
     pub timestamp: u64,
+    pub key: Option<Bytes>,
     pub payload: Bytes,
 }
 
@@ -235,7 +236,7 @@ impl StorageManager {
 
         let mut buffer = Vec::new();
         for msg in &messages {
-            serialize_message(&mut buffer, msg.seq, msg.timestamp, &msg.payload);
+            serialize_message(&mut buffer, msg.seq, msg.timestamp, msg.key.as_deref(), &msg.payload);
         }
         let bytes_len = buffer.len() as u64;
 
@@ -385,12 +386,15 @@ impl StorageManager {
 // ==========================================
 
 /// Serialize a message into a buffer (does NOT write to disk).
-pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, payload: &[u8]) {
+pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Option<&[u8]>, payload: &[u8]) {
     use bytes::BufMut;
-    let len = 8 + 8 + payload.len() as u32;
+    let key_len = key.map_or(0, |k| k.len()) as u16;
+    let len = 8 + 8 + 2 + key_len as u32 + payload.len() as u32;
     let mut hasher = Hasher::new();
     hasher.update(&seq.to_be_bytes());
     hasher.update(&timestamp.to_be_bytes());
+    hasher.update(&key_len.to_be_bytes());
+    if let Some(k) = key { hasher.update(k); }
     hasher.update(payload);
     let crc = hasher.finalize();
 
@@ -398,6 +402,8 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, payload: &
     buf.put_u32(crc);
     buf.put_u64(seq);
     buf.put_u64(timestamp);
+    buf.put_u16(key_len);
+    if let Some(k) = key { buf.put_slice(k); }
     buf.put_slice(payload);
 }
 
@@ -427,16 +433,23 @@ pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> V
         hasher.update(&content_buf);
         if hasher.finalize() != stored_crc { continue; }
 
-        if content_buf.len() < 16 { continue; }
+        if content_buf.len() < 18 { continue; }
         
         let mut cursor = std::io::Cursor::new(content_buf);
         let seq = cursor.get_u64();
         let timestamp = cursor.get_u64();
+        let key_len = cursor.get_u16();
+        let key = if key_len > 0 {
+            let key_bytes = cursor.copy_to_bytes(key_len as usize);
+            Some(Bytes::copy_from_slice(&key_bytes))
+        } else {
+            None
+        };
         let payload_len = cursor.remaining();
         let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
         if seq >= start_seq {
-            msgs.push(Message { seq, timestamp, payload });
+            msgs.push(Message { seq, timestamp, key, payload });
             if msgs.len() >= limit { break; }
         }
     }
@@ -553,15 +566,22 @@ async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
         hasher.update(&content_buf);
         if hasher.finalize() != stored_crc { break; }
 
-        if content_buf.len() < 16 { break; }
+        if content_buf.len() < 18 { break; }
         
         let mut cursor = std::io::Cursor::new(content_buf);
         let seq = cursor.get_u64();
         let timestamp = cursor.get_u64();
+        let key_len = cursor.get_u16();
+        let key = if key_len > 0 {
+            let key_bytes = cursor.copy_to_bytes(key_len as usize);
+            Some(Bytes::copy_from_slice(&key_bytes))
+        } else {
+            None
+        };
         let payload_len = cursor.remaining();
         let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
-        msgs.push_back(Message { seq, timestamp, payload });
+        msgs.push_back(Message { seq, timestamp, key, payload });
     }
     msgs
 }

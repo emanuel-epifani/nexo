@@ -36,6 +36,7 @@ export interface StreamSubscribeOptions {
 
 export interface StreamMessage<T> {
   seq: bigint;
+  key?: Uint8Array;
   data: T;
 }
 
@@ -59,7 +60,7 @@ class StreamSubscription<T> {
     private readonly streamName: string,
     private readonly group: string,
     private readonly logger: Logger,
-    private readonly callback: (data: T) => Promise<any> | any,
+    private readonly callback: (data: T, meta: { seq: bigint; key?: Uint8Array }) => Promise<any> | any,
     private readonly batchSize: number,
     private readonly waitMs: number,
     private readonly concurrency: number,
@@ -139,19 +140,21 @@ class StreamSubscription<T> {
     const count = res.cursor.readU32();
     if (count === 0) return;
 
-    const batch: { seq: bigint; data: T }[] = [];
+    const batch: { seq: bigint; key?: Uint8Array; data: T }[] = [];
     for (let i = 0; i < count; i++) {
       const seq = res.cursor.readU64();
       res.cursor.readU64(); // skip timestamp
+      const keyLen = res.cursor.readU16();
+      const key = keyLen > 0 ? res.cursor.readBuffer(keyLen) : undefined;
       const payloadLen = res.cursor.readU32();
       const payloadBuf = res.cursor.readBuffer(payloadLen);
-      batch.push({ seq, data: new Cursor(payloadBuf).decodeAny() as T });
+      batch.push({ seq, key, data: new Cursor(payloadBuf).decodeAny() as T });
     }
 
-    await runConcurrent(batch, this.concurrency, async ({ seq, data }) => {
+    await runConcurrent(batch, this.concurrency, async ({ seq, key, data }) => {
       if (!this.active) return;
       try {
-        await this.callback(data);
+        await this.callback(data, { seq, key });
         this.conn.sendFireAndForget(StreamOpcode.S_ACK, w => w
           .string(this.streamName)
           .string(this.group)
@@ -199,16 +202,25 @@ export class NexoStream<T = any> {
     await this.conn.send(StreamOpcode.S_DELETE, w => w.string(this.name));
   }
 
-  async publish(data: T): Promise<void> {
-    await this.conn.send(StreamOpcode.S_PUB, w => w
-      .string(this.name)
-      .any(data)
-    );
+  async publish(data: T, options: { key?: string | Uint8Array } = {}): Promise<void> {
+    await this.conn.send(StreamOpcode.S_PUB, w => {
+      w.string(this.name);
+      if (options.key === undefined) {
+        w.u16(0);
+      } else {
+        const keyBytes = typeof options.key === 'string'
+          ? new TextEncoder().encode(options.key)
+          : options.key;
+        w.u16(keyBytes.length);
+        w.bytes(keyBytes);
+      }
+      w.any(data);
+    });
   }
 
   async subscribe(
     group: string,
-    callback: (data: T) => Promise<any> | any,
+    callback: (data: T, meta: { seq: bigint; key?: Uint8Array }) => Promise<any> | any,
     options: StreamSubscribeOptions = {}
   ): Promise<{ stop: () => Promise<void> }> {
     if (!group) throw new Error('Consumer Group is required for subscription');
