@@ -108,18 +108,13 @@ impl StreamManager {
         if !existed_on_disk {
             if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
                 tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
-            } else {
-                let config_path = base_path.join("config.json");
-                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
-                    let _ = tokio::fs::write(&config_path, data).await;
-                }
             }
-        } else {
-            let config_path = base_path.join("config.json");
-            if !config_path.exists() {
-                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
-                    let _ = tokio::fs::write(&config_path, data).await;
-                }
+        }
+
+        let config_path = base_path.join("config.json");
+        if !config_path.exists() {
+            if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                let _ = tokio::fs::write(&config_path, data).await;
             }
         }
 
@@ -318,11 +313,8 @@ impl StreamManager {
                 return Err("Group not found".to_string());
             };
 
-            let was_clamped = group_ref.clamp_head(head_seq);
+            group_ref.clamp_head(head_seq);
             let key_unblocked = group_ref.ack(consumer_id, generation, seq)?;
-            if was_clamped {
-                inner.groups_dirty = true;
-            }
             inner.groups_dirty = true;
             key_unblocked
         };
@@ -667,7 +659,7 @@ impl StreamManager {
                             continue;
                         }
 
-                        let Ok(outcome) = reply_rx.await else {
+                        let Ok(new_head_seq) = reply_rx.await else {
                             continue;
                         };
 
@@ -675,10 +667,10 @@ impl StreamManager {
                         {
                             let mut inner = StreamManager::lock_topic(&topic_ref.inner);
                             let mut groups_changed = false;
-                            if outcome.head_seq != inner.state.head_seq {
-                                inner.state.apply_head(outcome.head_seq);
+                            if new_head_seq != inner.state.head_seq {
+                                inner.state.apply_head(new_head_seq);
                                 for group in inner.groups.values_mut() {
-                                    if group.clamp_head(outcome.head_seq) {
+                                    if group.clamp_head(new_head_seq) {
                                         groups_changed = true;
                                     }
                                 }

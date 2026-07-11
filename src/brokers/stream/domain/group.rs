@@ -29,10 +29,6 @@ pub struct DltEntry {
     pub key: Option<Bytes>,
 }
 
-struct GroupMember {
-    connection_client_id: String,
-}
-
 pub struct ConsumerGroup {
     pub id: String,
     // === Persistent state (saved to disk) ===
@@ -51,7 +47,7 @@ pub struct ConsumerGroup {
     pub ack_wait: Duration,
     pub max_deliveries: u32,
     // === Member tracking (for disconnect cleanup) ===
-    members: HashMap<String, GroupMember>,
+    members: HashMap<String, String>, // consumer_id → connection_client_id
     // === Runtime State ===
     pub is_fetching_cold: bool,
     pub generation: u64,
@@ -337,17 +333,15 @@ impl ConsumerGroup {
 
     pub fn add_member(&mut self, connection_client_id: String) -> String {
         let consumer_id = Uuid::new_v4().to_string();
-        self.members.insert(consumer_id.clone(), GroupMember {
-            connection_client_id,
-        });
+        self.members.insert(consumer_id.clone(), connection_client_id);
         consumer_id
     }
 
     pub fn remove_member(&mut self, consumer_id: &str) -> Option<String> {
-        if let Some(member) = self.members.remove(consumer_id) {
+        if let Some(connection_client_id) = self.members.remove(consumer_id) {
             self.release_consumer(consumer_id);
             self.invalidate_inflight();
-            return Some(member.connection_client_id);
+            return Some(connection_client_id);
         }
         None
     }
@@ -452,11 +446,15 @@ impl ConsumerGroup {
         }
 
         if let Some(key) = &msg.key {
-            if self.keys_in_flight.contains_key(key) {
-                self.blocked_by_key.entry(key.clone()).or_default().push_back(msg.seq);
-                return None;
+            if let Some(&in_flight_seq) = self.keys_in_flight.get(key) {
+                if in_flight_seq != msg.seq {
+                    self.blocked_by_key.entry(key.clone()).or_default().push_back(msg.seq);
+                    return None;
+                }
+                // Same seq: redelivery of the in-flight message — allow it through.
+            } else {
+                self.keys_in_flight.insert(key.clone(), msg.seq);
             }
-            self.keys_in_flight.insert(key.clone(), msg.seq);
         }
 
         self.delivery_attempts.insert(msg.seq, next_attempt);
@@ -497,9 +495,8 @@ impl ConsumerGroup {
         if delivery_count >= self.max_deliveries {
             self.move_to_dlt(seq, format!("max_deliveries exceeded ({})", self.max_deliveries), delivery_count, key);
         } else {
-            if let Some(k) = &key {
-                self.keys_in_flight.remove(k);
-            }
+            // Keep key in keys_in_flight to preserve per-key ordering during redelivery.
+            // issue_delivery allows re-delivery of the same seq via keys_in_flight[key] == seq check.
             if !self.redeliver.iter().any(|queued| *queued == seq) {
                 self.redeliver.push_back(seq);
             }

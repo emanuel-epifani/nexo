@@ -89,6 +89,7 @@ class StreamSubscription<T> {
 
   async stop(): Promise<void> {
     this.active = false;
+    await this.loopDone;
     if (this.consumerId !== null) {
       try {
         await this.conn.send(StreamOpcode.S_LEAVE, w => w
@@ -99,7 +100,6 @@ class StreamSubscription<T> {
         );
       } catch { /* connection may already be closed or member already removed */ }
     }
-    await this.loopDone;
   }
 
   private async join(): Promise<void> {

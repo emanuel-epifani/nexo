@@ -63,11 +63,6 @@ pub struct MessageToAppend {
     pub payload: Bytes,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RetentionOutcome {
-    pub head_seq: u64,
-}
-
 // ==========================================
 // COMMANDS
 // ==========================================
@@ -96,7 +91,7 @@ pub enum StorageCommand {
         topic_name: String,
         retention: RetentionOptions,
         max_segment_size: u64,
-        reply: oneshot::Sender<RetentionOutcome>,
+        reply: oneshot::Sender<u64>,
     },
 
     DropTopic {
@@ -334,17 +329,13 @@ impl StorageManager {
         all_msgs
     }
 
-    async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> RetentionOutcome {
+    async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> u64 {
         if retention.max_age_ms.is_none() && retention.max_bytes.is_none() {
-            return RetentionOutcome {
-                head_seq: find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1),
-            };
+            return find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
         }
         let mut segments = find_segments(base_path).await.unwrap_or_default();
         if segments.len() <= 1 {
-            return RetentionOutcome {
-                head_seq: segments.first().map(|s| s.start_seq).unwrap_or(1),
-            };
+            return segments.first().map(|s| s.start_seq).unwrap_or(1);
         }
 
         if let Some(max_age) = retention.max_age_ms {
@@ -385,8 +376,7 @@ impl StorageManager {
             }
         }
 
-        let head_seq = find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
-        RetentionOutcome { head_seq }
+        find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1)
     }
 }
 

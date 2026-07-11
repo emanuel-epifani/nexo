@@ -970,6 +970,47 @@ mod stream_tests {
         }
 
         #[tokio::test]
+        async fn test_per_key_ordering_timeout_does_not_break_ordering() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 10;
+            config.ram_soft_limit = 1;
+            let manager = build_manager(config).await;
+            let topic = "per-key-timeout-order";
+            let group = "g-pk-timeout-order";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let key = Bytes::from("key-K");
+            manager.publish(topic, Some(key.clone()), Bytes::from("msg-1")).await.unwrap();
+            manager.publish(topic, Some(key.clone()), Bytes::from("msg-2")).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Fetch msg-1 only (limit=1). msg-2 stays fresh, not yet delivered.
+            let batch1 = fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            assert_eq!(batch1.len(), 1);
+            assert_eq!(batch1[0].seq, 1);
+
+            // Wait for msg-1 to timeout (ack_wait=50ms). It goes back to redeliver.
+            // The key K stays in keys_in_flight (fix), so msg-2 must NOT be delivered.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+
+            // Fetch again: msg-1 should be redelivered, NOT msg-2.
+            let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch2.len(), 1, "only msg-1 should be available (key K still locked)");
+            assert_eq!(batch2[0].seq, 1, "msg-1 must be redelivered before msg-2");
+
+            // Ack msg-1 → unblocks key K → msg-2 can now be delivered
+            ack_message(&manager, group, topic, &consumer, 1).await;
+
+            let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch3.len(), 1);
+            assert_eq!(batch3[0].seq, 2, "msg-2 delivered after msg-1 acked");
+        }
+
+        #[tokio::test]
         async fn test_dlt_peek_after_park() {
             let temp_dir = tempfile::tempdir().unwrap();
             let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
