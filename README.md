@@ -212,7 +212,7 @@ await mailQ.subscribe((msg) => console.log(msg));
 // --- 4. Stream (Durable history Event Log) ---
 const stream = await client.stream<UserEvent>('user-events').create();
 await stream.publish({ type: 'login', userId: 'u1' });
-await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+await stream.subscribe('analytics', (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
 
 
 //Every broker support Binary format (zero JSON overhead)

@@ -71,7 +71,7 @@ const stream = await client.stream<UserEvent>('user-events').create();
 // Publisher
 await stream.publish({ type: 'login', userId: 'u1' });
 // Consumer (must specify group)
-await stream.subscribe('analytics', (msg) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+await stream.subscribe('analytics', (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
 // Delete topic
 await stream.delete();
 ```

@@ -11,14 +11,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicConfig {
-    pub persistence_path: String,
     pub max_segment_size: u64,
     pub retention: RetentionOptions,
-    pub retention_check_ms: u64,
-    pub default_flush_ms: u64,
     pub ram_soft_limit: usize,
-    pub ram_hard_limit: usize,
-    pub eviction_interval_ms: u64,
     pub max_ack_pending: usize,
     pub ack_wait_ms: u64,
     pub max_deliveries: u32,
@@ -44,14 +39,9 @@ impl TopicConfig {
         };
 
         Self {
-            persistence_path: sys.persistence_path.clone(),
             max_segment_size: sys.max_segment_size,
             retention,
-            retention_check_ms: sys.retention_check_interval_ms,
-            default_flush_ms: sys.default_flush_ms,
             ram_soft_limit: sys.ram_soft_limit,
-            ram_hard_limit: sys.ram_hard_limit,
-            eviction_interval_ms: sys.eviction_interval_ms,
             max_ack_pending: sys.max_ack_pending,
             ack_wait_ms: sys.ack_wait_ms,
             max_deliveries: sys.max_deliveries,

@@ -112,13 +112,19 @@ impl StreamManager {
         }
 
         let config_path = base_path.join("config.json");
-        if !config_path.exists() {
+        let needs_write = !config_path.exists() || {
+            match tokio::fs::read_to_string(&config_path).await {
+                Ok(data) => serde_json::from_str::<TopicConfig>(&data).is_err(),
+                Err(_) => true,
+            }
+        };
+        if needs_write {
             if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
                 let _ = tokio::fs::write(&config_path, data).await;
             }
         }
 
-        let shared = Self::build_topic_shared(name.clone(), topic_config).await;
+        let shared = Self::build_topic_shared(name.clone(), topic_config, &self.config.persistence_path).await;
 
         use dashmap::mapref::entry::Entry;
         match self.topics.entry(name) {
@@ -450,14 +456,11 @@ impl StreamManager {
                 dlt_count: group.dlt.len(),
             }).collect();
 
-            let mut safe_config = inner.full_config.clone();
-            safe_config.persistence_path = "".to_string();
-
             topics.push(TopicSnapshot {
                 name: inner.state.name.clone(),
                 last_seq: inner.state.next_seq.saturating_sub(1),
                 groups,
-                config: safe_config,
+                config: inner.full_config.clone(),
             });
         }
 
@@ -521,7 +524,15 @@ impl StreamManager {
             }
 
             let topic_config = Self::load_topic_config(&path, StreamCreateOptions::default(), &self.config).await;
-            let topic_ref = Self::build_topic_shared(name.clone(), topic_config).await;
+
+            let config_path = path.join("config.json");
+            if !config_path.exists() {
+                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                    let _ = tokio::fs::write(&config_path, data).await;
+                }
+            }
+
+            let topic_ref = Self::build_topic_shared(name.clone(), topic_config, &self.config.persistence_path).await;
 
             use dashmap::mapref::entry::Entry;
             match self.topics.entry(name.clone()) {
@@ -534,13 +545,13 @@ impl StreamManager {
         }
     }
 
-    async fn build_topic_shared(name: String, config: TopicConfig) -> Arc<TopicShared> {
-        let base_path = PathBuf::from(&config.persistence_path).join(&name);
+    async fn build_topic_shared(name: String, config: TopicConfig, persistence_path: &str) -> Arc<TopicShared> {
+        let base_path = PathBuf::from(persistence_path).join(&name);
         if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
             tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
         }
 
-        let recovered = recover_topic(&name, PathBuf::from(config.persistence_path.clone())).await;
+        let recovered = recover_topic(&name, PathBuf::from(persistence_path)).await;
         let state = TopicState::restore(name.clone(), config.ram_soft_limit, recovered.head_seq.max(1), recovered.messages);
 
         let ack_wait = Duration::from_millis(config.ack_wait_ms);
@@ -644,16 +655,15 @@ impl StreamManager {
                         _ = timer.tick() => {}
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
-                        let (retention, max_segment_size) = {
+                        let retention = {
                             let inner = StreamManager::lock_topic(&topic_ref.inner);
-                            (inner.full_config.retention.clone(), inner.full_config.max_segment_size)
+                            inner.full_config.retention.clone()
                         };
 
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if storage_tx.send(StorageCommand::ApplyRetention {
                             topic_name,
                             retention,
-                            max_segment_size,
                             reply: reply_tx,
                         }).is_err() {
                             continue;

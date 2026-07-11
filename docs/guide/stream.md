@@ -326,11 +326,61 @@ Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active
                     [ FILE SYSTEM ]
 ```
 
-## Retention
+## Configuration
 
-When your stream reaches its limits, old data is automatically purged.
+### How it works
+
+1. Server starts → reads env vars (global defaults)
+2. Topic created → server snapshots defaults into `config.json` (per-topic)
+3. SDK can override `retention` at creation — everything else uses system defaults
+4. On restart → each topic reads its own `config.json` (ignores current env vars)
+
+> **Existing topics are not affected by env var changes.** Only new topics pick up new defaults.
+
+### Environment Variables
+
+Global, set at server startup.
+
+| Variable | Default | Description |
+|:---|:---|:---|
+| `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Base directory for all stream data |
+| `STREAM_DEFAULT_FLUSH_MS` | `50` | Max durability window (ms) |
+| `STREAM_MAX_SEGMENT_SIZE` | `104857600` (100MB) | Max segment file size before rollover |
+| `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
+| `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |
+| `STREAM_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) | Default `maxAgeMs` if SDK omits it |
+| `STREAM_EVICTION_INTERVAL_MS` | `500` | RAM eviction task interval |
+| `STREAM_RAM_SOFT_LIMIT` | `1000` | Max messages in RAM per topic before eviction to disk |
+| `STREAM_MAX_ACK_PENDING` | `10000` | Max unacked messages per consumer group |
+| `STREAM_MAX_OPEN_FILES` | `256` | Max open file handles (LRU cache) |
+| `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |
+| `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLT |
+
+### Per-Topic (`config.json`)
+
+Persisted at topic creation, read on restart.
+
+| Field | From | SDK override? |
+|:---|:---|:---|
+| `retention` | SDK or system default | **Yes** |
+| `max_segment_size` | System default | No |
+| `ram_soft_limit` | System default | No |
+| `max_ack_pending` | System default | No |
+| `ack_wait_ms` | System default | No |
+| `max_deliveries` | System default | No |
+
+### Retention
+
+The only SDK-overridable setting. Set at `create()`, persisted in `config.json`:
+
+```typescript
+await client.stream('my-topic').create({
+  retention: { maxAgeMs: 3_600_000, maxBytes: 100_000_000 }  // 1h, 100MB
+});
+```
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| `maxAgeMs` | **7 days** | Delete data older than this |
-| `maxBytes` | **1 GB** | Delete oldest data when total size exceeds this |
+| `maxAgeMs` | 7 days | Delete data older than this |
+| `maxBytes` | 1 GB | Delete oldest data when total exceeds this |
+

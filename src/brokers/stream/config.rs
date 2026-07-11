@@ -10,7 +10,6 @@ pub struct SystemStreamConfig {
     pub default_retention_age_ms: u64,
     pub eviction_interval_ms: u64,
     pub ram_soft_limit: usize,
-    pub ram_hard_limit: usize,
     pub max_ack_pending: usize,
     pub max_open_files: usize,
     pub ack_wait_ms: u64,
@@ -28,7 +27,6 @@ impl Default for SystemStreamConfig {
             default_retention_age_ms: 604800000, // 7 days
             eviction_interval_ms: 500,
             ram_soft_limit: 1000,
-            ram_hard_limit: 20000,
             max_ack_pending: 10000,
             max_open_files: 256,
             ack_wait_ms: 30000, // 30 seconds
@@ -49,7 +47,6 @@ impl SystemStreamConfig {
             default_retention_age_ms:    get_env("STREAM_DEFAULT_RETENTION_AGE_MS", default.default_retention_age_ms),
             eviction_interval_ms:        get_env("STREAM_EVICTION_INTERVAL_MS", default.eviction_interval_ms),
             ram_soft_limit:              get_env("STREAM_RAM_SOFT_LIMIT", default.ram_soft_limit),
-            ram_hard_limit:              get_env("STREAM_RAM_HARD_LIMIT", default.ram_hard_limit),
             max_ack_pending:             get_env("STREAM_MAX_ACK_PENDING", default.max_ack_pending),
             max_open_files:              get_env("STREAM_MAX_OPEN_FILES", default.max_open_files),
             ack_wait_ms:                 get_env("STREAM_ACK_WAIT_MS", default.ack_wait_ms),

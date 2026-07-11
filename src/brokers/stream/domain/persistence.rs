@@ -90,7 +90,6 @@ pub enum StorageCommand {
     ApplyRetention {
         topic_name: String,
         retention: RetentionOptions,
-        max_segment_size: u64,
         reply: oneshot::Sender<u64>,
     },
 
@@ -183,7 +182,7 @@ impl StorageManager {
                     error!("Failed to save state for {}: {}", topic_name, e);
                 }
             }
-            StorageCommand::ApplyRetention { topic_name, retention, max_segment_size: _, reply } => {
+            StorageCommand::ApplyRetention { topic_name, retention, reply } => {
                 let base_path = self.base_path.join(&topic_name);
                 let outcome = self.apply_retention(&topic_name, &base_path, &retention).await;
                 let _ = reply.send(outcome);

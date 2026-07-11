@@ -649,7 +649,6 @@ mod stream_tests {
             let mut config = Config::global().stream.clone();
             config.persistence_path = path_str.clone();
             config.ram_soft_limit = 100;
-            config.ram_hard_limit = 200;
             config.eviction_interval_ms = 100;
             config.default_flush_ms = 50;
             config.max_segment_size = 500;
