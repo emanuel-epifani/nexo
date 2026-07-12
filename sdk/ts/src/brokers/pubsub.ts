@@ -10,14 +10,20 @@ enum PubSubOpcode {
 const PubSubCommands = {
   publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) => {
     const retain = options?.retain === true;
+    if (options?.ttl !== undefined && (options.ttl < 0 || !Number.isInteger(options.ttl))) {
+      throw new Error(`[PubSub] Invalid ttl: ${options.ttl}`);
+    }
     const hasTtl = options?.ttl !== undefined;
     const flags = (retain ? 0x01 : 0x00) | (hasTtl ? 0x02 : 0x00);
     return conn.send(PubSubOpcode.PUB, w => {
       w.string(topic).u8(flags);
-      if (hasTtl) w.u64(options!.ttl!);
+      if (hasTtl) w.u32(options!.ttl!);
       w.any(data);
     });
   },
+
+  clear: (conn: NexoConnection, topic: string) =>
+    conn.send(PubSubOpcode.PUB, w => w.string(topic).u8(0x04).any(Buffer.alloc(0))),
 
   subscribe: (conn: NexoConnection, topic: string) =>
     conn.send(PubSubOpcode.SUB, w => w.string(topic)),
@@ -34,6 +40,7 @@ export interface PublishOptions {
 export class NexoTopic<T = any> {
   constructor(private broker: NexoPubSub, public readonly name: string) { }
   async publish(data: T, options?: PublishOptions) { return this.broker.publish(this.name, data, options); }
+  async clear() { return this.broker.clear(this.name); }
   async subscribe(cb: (data: T) => void) { return this.broker.subscribe(this.name, cb); }
   async unsubscribe() { return this.broker.unsubscribe(this.name); }
 }
@@ -64,6 +71,10 @@ export class NexoPubSub {
 
   async publish(topic: string, data: any, options?: PublishOptions): Promise<void> {
     await PubSubCommands.publish(this.conn, topic, data, options || {});
+  }
+
+  async clear(topic: string): Promise<void> {
+    await PubSubCommands.clear(this.conn, topic);
   }
 
   async subscribe(topic: string, callback: Handler): Promise<void> {

@@ -11,13 +11,13 @@ pub(crate) struct RetainedMessage {
 }
 
 impl RetainedMessage {
-    pub(crate) fn new(data: Bytes, ttl_seconds: Option<u64>) -> Self {
-        let expires_at = ttl_seconds.map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
+    pub(crate) fn new(data: Bytes, ttl_seconds: Option<u32>) -> Self {
+        let expires_at = ttl_seconds.map(|secs| Instant::now() + std::time::Duration::from_secs(secs as u64));
         let expires_at_unix = ttl_seconds.map(|secs| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs() + secs
+                .as_secs() + secs as u64
         });
         Self { data, expires_at, expires_at_unix }
     }
@@ -42,8 +42,8 @@ impl RetainedMessage {
                 .unwrap_or_default()
                 .as_secs();
             if unix_ts > now_unix {
-                let remaining = unix_ts - now_unix;
-                Some(Instant::now() + std::time::Duration::from_secs(remaining))
+                let remaining = ((unix_ts - now_unix).min(u32::MAX as u64)) as u32;
+                Some(Instant::now() + std::time::Duration::from_secs(remaining as u64))
             } else {
                 None
             }

@@ -3,7 +3,7 @@ use std::env;
 #[derive(Debug, Clone)]
 pub struct PubSubConfig {
     pub persistence_path: String,
-    pub default_retained_ttl_seconds: u64,
+    pub default_retained_ttl_seconds: u32,
     pub cleanup_interval_seconds: u64,
     pub retained_flush_ms: u64,
 }

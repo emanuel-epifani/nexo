@@ -23,7 +23,7 @@ pub const OP_UNSUB: u8 = 0x23;
 
 #[derive(Debug)]
 enum PubSubCommand {
-    Publish { topic: String, retain: bool, ttl: Option<u64>, payload: Bytes },
+    Publish { topic: String, retain: bool, clear: bool, ttl: Option<u32>, payload: Bytes },
     Subscribe { topic: String },
     Unsubscribe { topic: String },
 }
@@ -35,9 +35,10 @@ impl PubSubCommand {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
                 let retain = flags & 0x01 != 0;
-                let ttl = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
+                let clear = flags & 0x04 != 0;
+                let ttl = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
                 let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, retain, ttl, payload })
+                Ok(Self::Publish { topic, retain, clear, ttl, payload })
             }
             OP_SUB => {
                 let topic = cursor.read_string()?;
@@ -70,8 +71,8 @@ pub async fn handle(
     let pubsub = &engine.pubsub;
 
     match cmd {
-        PubSubCommand::Publish { topic, retain, ttl, payload } => {
-            let _count = pubsub.publish(&topic, payload, retain, ttl);
+        PubSubCommand::Publish { topic, retain, clear, ttl, payload } => {
+            let _count = pubsub.publish(&topic, payload, retain, clear, ttl);
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {

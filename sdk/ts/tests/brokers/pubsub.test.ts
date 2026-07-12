@@ -52,6 +52,45 @@ describe('PUBSUB', () => {
         await nexo.pubsub(pattern).unsubscribe();
     });
 
+    it('should clear retained messages', async () => {
+        const topic = `clear-retained-${randomUUID()}`;
+
+        // Publish retained value
+        await nexo.pubsub<string>(topic).publish('dark', { retain: true });
+
+        // First subscriber receives retained
+        const received: string[] = [];
+        await nexo.pubsub<string>(topic).subscribe((data) => received.push(data));
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0]).toBe('dark');
+
+        // Clear retained
+        await nexo.pubsub<string>(topic).clear();
+
+        // Unsubscribe and resubscribe - should not receive retained
+        await nexo.pubsub(topic).unsubscribe();
+        const afterClear: string[] = [];
+        await nexo.pubsub<string>(topic).subscribe((data) => afterClear.push(data));
+        await new Promise(r => setTimeout(r, 200));
+        expect(afterClear).toEqual([]);
+    });
+
+    it('should reject invalid ttl values', async () => {
+        const topic = `ttl-invalid-${randomUUID()}`;
+
+        // Negative ttl
+        await expect(nexo.pubsub(topic).publish('x', { ttl: -1 }))
+            .rejects.toThrow(/Invalid ttl/);
+
+        // Non-integer ttl
+        await expect(nexo.pubsub(topic).publish('x', { ttl: 1.5 }))
+            .rejects.toThrow(/Invalid ttl/);
+
+        // Out of u32 range
+        await expect(nexo.pubsub(topic).publish('x', { ttl: 0xFFFFFFFF + 1 }))
+            .rejects.toThrow();
+    });
+
     it('should handle Multi-Level Wildcard (#) correctly', async () => {
         // Pattern: sensors/#
         // Should match: sensors/temp

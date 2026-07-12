@@ -35,7 +35,7 @@ mod pubsub_tests {
 
             // 3. Publish
             let payload = Bytes::from("24.5");
-            let count = manager.publish(topic, payload.clone(), false, None);
+            let count = manager.publish(topic, payload.clone(), false, false, None);
             assert_eq!(count, 1, "Should deliver to 1 subscriber");
 
             // 4. Verify Receipt
@@ -55,16 +55,16 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "home/+/status");
 
             // MATCH: "home/kitchen/status"
-            manager.publish("home/kitchen/status", Bytes::from("on"), false, None);
+            manager.publish("home/kitchen/status", Bytes::from("on"), false, false, None);
             let msg = rx.recv().await.expect("Should match + wildcard");
             assert_eq!(msg.topic, "home/kitchen/status");
 
             // NO MATCH: "home/kitchen/fridge/status" (too deep)
-            let count = manager.publish("home/kitchen/fridge/status", Bytes::from("off"), false, None);
+            let count = manager.publish("home/kitchen/fridge/status", Bytes::from("off"), false, false, None);
             assert_eq!(count, 0, "Should not match nested levels");
 
             // NO MATCH: "home/status" (too shallow)
-            let count = manager.publish("home/status", Bytes::from("err"), false, None);
+            let count = manager.publish("home/status", Bytes::from("err"), false, false, None);
             assert_eq!(count, 0);
         }
 
@@ -79,11 +79,11 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "logs/#");
 
             // MATCH: "logs/error"
-            manager.publish("logs/error", Bytes::from("e1"), false, None);
+            manager.publish("logs/error", Bytes::from("e1"), false, false, None);
             assert_eq!(rx.recv().await.unwrap().topic, "logs/error");
 
             // MATCH: "logs/app/backend/error" (deep)
-            manager.publish("logs/app/backend/error", Bytes::from("e2"), false, None);
+            manager.publish("logs/app/backend/error", Bytes::from("e2"), false, false, None);
             assert_eq!(rx.recv().await.unwrap().topic, "logs/app/backend/error");
         }
 
@@ -93,7 +93,7 @@ mod pubsub_tests {
             let topic = "config/settings";
 
             // 1. Publish Retained (No subscribers yet)
-            manager.publish(topic, Bytes::from("dark_mode"), true, None);
+            manager.publish(topic, Bytes::from("dark_mode"), true, false, None);
 
             // 2. New Client Connects & Subscribes
             let client_id = "late_joiner".to_string();
@@ -124,14 +124,14 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "chat/room1");
 
             // Verify subscription exists (indirectly via publish count)
-            let count = manager.publish("chat/room1", Bytes::from("hi"), false, None);
+            let count = manager.publish("chat/room1", Bytes::from("hi"), false, false, None);
             assert_eq!(count, 1);
 
             // Explicit disconnect (simulates socket close)
             manager.disconnect(&client_id);
 
             // Publish again -> Should be 0 subscribers
-            let count = manager.publish("chat/room1", Bytes::from("anyone?"), false, None);
+            let count = manager.publish("chat/room1", Bytes::from("anyone?"), false, false, None);
             assert_eq!(count, 0, "Client should be unsubscribed after disconnect");
         }
 
@@ -141,7 +141,7 @@ mod pubsub_tests {
             let topic = "sensors/temp";
 
             // Publish retained with custom TTL (2 seconds)
-            manager.publish(topic, Bytes::from("23.5"), true, Some(2));
+            manager.publish(topic, Bytes::from("23.5"), true, false, Some(2));
 
             // Subscribe immediately - should receive retained
             let client_id = "sub1".to_string();
@@ -172,7 +172,7 @@ mod pubsub_tests {
             let topic = "config/theme";
 
             // 1. Publish retained
-            manager.publish(topic, Bytes::from("dark"), true, None);
+            manager.publish(topic, Bytes::from("dark"), true, false, None);
 
             // 2. Verify retained exists
             let client_id = "sub1".to_string();
@@ -184,7 +184,7 @@ mod pubsub_tests {
             assert_eq!(msg.payload, Bytes::from("dark"));
 
             // 3. Clear retained with empty payload (MQTT standard)
-            manager.publish(topic, Bytes::from(""), true, None);
+            manager.publish(topic, Bytes::from(""), true, true, None);
 
             // 4. New subscriber should NOT receive retained
             let client_id2 = "sub2".to_string();
@@ -210,7 +210,7 @@ mod pubsub_tests {
                 config.persistence_path = path.clone();
                 let manager = Arc::new(PubSubManager::new(Arc::new(config)));
                 
-                manager.publish(topic, payload.clone(), true, None);
+                manager.publish(topic, payload.clone(), true, false, None);
 
                 // Wait for async save to disk
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -242,12 +242,50 @@ mod pubsub_tests {
         }
 
         #[tokio::test]
+        async fn test_expired_retained_not_loaded_after_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+
+            let topic = "persistent/expired";
+            let payload = Bytes::from("old_value");
+
+            {
+                let mut config = nexo::config::Config::global().pubsub.clone();
+                config.persistence_path = path.clone();
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+
+                // Publish retained with 1 second TTL
+                manager.publish(topic, payload.clone(), true, false, Some(1));
+
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                drop(manager);
+            }
+
+            // Wait for retained to expire
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            {
+                let mut config = nexo::config::Config::global().pubsub.clone();
+                config.persistence_path = path.clone();
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
+
+                let client_id = "after_restart".to_string();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                manager2.connect(&client_id, tx);
+                manager2.subscribe(&client_id, topic);
+
+                let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+                assert!(result.is_err(), "Expired retained should not be loaded after restart");
+            }
+        }
+
+        #[tokio::test]
         async fn test_cleanup_expired_retained_background() {
             let (manager, _tmp) = setup_pubsub_manager().await;
             let topic = "temp/sensor";
 
             // Publish retained with 1 second TTL
-            manager.publish(topic, Bytes::from("old_value"), true, Some(1));
+            manager.publish(topic, Bytes::from("old_value"), true, false, Some(1));
 
             // Verify retained exists
             let client_id = "sub1".to_string();
@@ -303,7 +341,7 @@ mod pubsub_tests {
             
             // Publish 100 messages while disconnect is happening
             for _ in 0..100 {
-                manager.publish("test/topic", Bytes::from("data"), false, None);
+                manager.publish("test/topic", Bytes::from("data"), false, false, None);
             }
             
             // Should complete without deadlock
@@ -320,9 +358,9 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "#");
             
             // Should receive ALL messages from any topic
-            manager.publish("sensors/temp", Bytes::from("1"), false, None);
-            manager.publish("logs/error", Bytes::from("2"), false, None);
-            manager.publish("any/random/topic", Bytes::from("3"), false, None);
+            manager.publish("sensors/temp", Bytes::from("1"), false, false, None);
+            manager.publish("logs/error", Bytes::from("2"), false, false, None);
+            manager.publish("any/random/topic", Bytes::from("3"), false, false, None);
             
             let msg1 = rx.recv().await.expect("Should receive message 1");
             let msg2 = rx.recv().await.expect("Should receive message 2");
@@ -340,9 +378,9 @@ mod pubsub_tests {
             let (manager, _tmp) = setup_pubsub_manager().await;
             
             // Publish retained on specific topics
-            manager.publish("sensors/temp", Bytes::from("20"), true, None);
-            manager.publish("sensors/humidity", Bytes::from("60"), true, None);
-            manager.publish("sensors/pressure", Bytes::from("1013"), true, None);
+            manager.publish("sensors/temp", Bytes::from("20"), true, false, None);
+            manager.publish("sensors/humidity", Bytes::from("60"), true, false, None);
+            manager.publish("sensors/pressure", Bytes::from("1013"), true, false, None);
             
             // Subscribe with wildcard AFTER retained messages exist
             let client_id = "wildcard_late".to_string();
@@ -384,7 +422,7 @@ mod pubsub_tests {
             }
             
             // Publish one message
-            let count = manager.publish(topic, Bytes::from("breaking_news"), false, None);
+            let count = manager.publish(topic, Bytes::from("breaking_news"), false, false, None);
             assert_eq!(count, 3, "Should deliver to all 3 subscribers");
             
             // All 3 clients should receive the message
@@ -408,7 +446,7 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "sensors/temp");
             
             // Publish
-            manager.publish("sensors/temp", Bytes::from("data"), false, None);
+            manager.publish("sensors/temp", Bytes::from("data"), false, false, None);
             
             // Should receive only 1 message (not 2)
             let msg1 = rx.recv().await.expect("Should receive message");
@@ -431,7 +469,7 @@ mod pubsub_tests {
             manager.unsubscribe(&client_id, "sensors/temp");
             
             // Publish should work normally
-            let count = manager.publish("sensors/temp", Bytes::from("data"), false, None);
+            let count = manager.publish("sensors/temp", Bytes::from("data"), false, false, None);
             assert_eq!(count, 0, "Should have no subscribers");
         }
 
@@ -470,9 +508,9 @@ mod pubsub_tests {
             let topic = "config/setting";
             
             // Publish retained 3 times on same topic
-            manager.publish(topic, Bytes::from("v1"), true, None);
-            manager.publish(topic, Bytes::from("v2"), true, None);
-            manager.publish(topic, Bytes::from("v3"), true, None);
+            manager.publish(topic, Bytes::from("v1"), true, false, None);
+            manager.publish(topic, Bytes::from("v2"), true, false, None);
+            manager.publish(topic, Bytes::from("v3"), true, false, None);
             
             // New subscriber should receive only latest (v3)
             let client_id = "late".to_string();
@@ -501,7 +539,7 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "sensors/kitchen/+");
             
             // Publish to topic that matches BOTH patterns
-            manager.publish("sensors/kitchen/temp", Bytes::from("data"), false, None);
+            manager.publish("sensors/kitchen/temp", Bytes::from("data"), false, false, None);
             
             // Should receive message only once (deduplicated by client_id)
             let msg1 = rx.recv().await.expect("Should receive message");
@@ -543,7 +581,7 @@ mod pubsub_tests {
 
             for _ in 0..MSG_COUNT {
                 let start = Instant::now();
-                manager.publish(topic, payload.clone(), false, None);
+                manager.publish(topic, payload.clone(), false, false, None);
                 bench.record(start.elapsed());
             }
 
@@ -569,7 +607,7 @@ mod pubsub_tests {
 
             for _ in 0..MSG_COUNT {
                 let start = Instant::now();
-                manager.publish("bench/server1/metric", payload.clone(), false, None);
+                manager.publish("bench/server1/metric", payload.clone(), false, false, None);
                 bench.record(start.elapsed());
             }
 
@@ -601,7 +639,7 @@ mod pubsub_tests {
 
             for _ in 0..count {
                 let start = Instant::now();
-                manager.publish(topic, payload.clone(), false, None);
+                manager.publish(topic, payload.clone(), false, false, None);
                 bench.record(start.elapsed());
             }
 

@@ -154,13 +154,13 @@ impl PubSubManager {
         root.remove_subscriber(&parts, client_id);
     }
 
-    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
+    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, clear: bool, ttl_seconds: Option<u32>) -> usize {
         if topic.is_empty() { return 0; }
 
         let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
 
-        if retain {
-            let retained = if data.is_empty() {
+        if clear || retain {
+            let retained = if clear {
                 None
             } else {
                 Some(RetainedMessage::new(data.clone(), Some(ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds))))

@@ -106,6 +106,9 @@ export class FrameWriter {
   }
 
   u32(v: number): this {
+    if (v < 0 || v > 0xFFFFFFFF || !Number.isInteger(v)) {
+      throw new Error(`u32 value out of range: ${v}`);
+    }
     this.ensure(4);
     this.buf.writeUInt32BE(v, this.offset);
     this.offset += 4;
@@ -113,8 +116,12 @@ export class FrameWriter {
   }
 
   u64(v: bigint | number): this {
+    const value = typeof v === 'bigint' ? v : BigInt(v);
+    if (value < 0n || value > 0xFFFFFFFFFFFFFFFFn) {
+      throw new Error(`u64 value out of range: ${v}`);
+    }
     this.ensure(8);
-    this.buf.writeBigUInt64BE(typeof v === 'bigint' ? v : BigInt(v), this.offset);
+    this.buf.writeBigUInt64BE(value, this.offset);
     this.offset += 8;
     return this;
   }

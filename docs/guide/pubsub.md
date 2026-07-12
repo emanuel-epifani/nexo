@@ -64,4 +64,10 @@ await client.pubsub<string>('config/theme').subscribe((theme) => {
 
 Retained messages are **persisted to SQLite** and survive server restarts. They have a default **TTL of 1 hour** (configurable via `PUBSUB_DEFAULT_RETAINED_TTL_SECS`), after which they are automatically cleaned up.
 
-To clear a retained message, publish an empty payload with `retain: true`.
+To clear a retained message, use `clear()`:
+
+```typescript
+await client.pubsub<string>('config/theme').clear();
+```
+
+A later subscriber on that topic will not receive a retained value.
