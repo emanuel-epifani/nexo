@@ -125,7 +125,7 @@ impl PubSubManager {
         }
     }
 
-    pub fn validate_subscribe_pattern(pattern: &str) -> Result<(), String> {
+    fn validate_subscribe_pattern(pattern: &str) -> Result<(), String> {
         if pattern.is_empty() {
             return Err("Subscribe pattern cannot be empty".into());
         }
@@ -141,7 +141,7 @@ impl PubSubManager {
         Ok(())
     }
 
-    pub fn validate_publish_topic(topic: &str) -> Result<(), String> {
+    fn validate_publish_topic(topic: &str) -> Result<(), String> {
         if topic.is_empty() {
             return Err("Publish topic cannot be empty".into());
         }
@@ -156,12 +156,9 @@ impl PubSubManager {
         Ok(())
     }
 
-    pub fn subscribe(&self, client_id: &str, pattern: &str) {
-        if let Err(e) = Self::validate_subscribe_pattern(pattern) {
-            tracing::warn!("Invalid subscribe pattern '{}': {}", pattern, e);
-            return;
-        }
-        let Some(mut info) = self.clients.get_mut(client_id) else { return; };
+    pub fn subscribe(&self, client_id: &str, pattern: &str) -> Result<(), String> {
+        Self::validate_subscribe_pattern(pattern)?;
+        let Some(mut info) = self.clients.get_mut(client_id) else { return Ok(()); };
         info.subscriptions.insert(pattern.to_string());
         let sender = info.sender.clone();
         drop(info);
@@ -177,6 +174,7 @@ impl PubSubManager {
             let msg = Arc::new(PubSubMessage::new(p, b));
             let _ = sender.send(msg);
         }
+        Ok(())
     }
 
     pub fn unsubscribe(&self, client_id: &str, pattern: &str) {
@@ -189,11 +187,8 @@ impl PubSubManager {
         root.remove_subscriber(&parts, client_id);
     }
 
-    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, clear: bool, ttl_seconds: Option<u32>) -> usize {
-        if let Err(e) = Self::validate_publish_topic(topic) {
-            tracing::warn!("Invalid publish topic '{}': {}", topic, e);
-            return 0;
-        }
+    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, clear: bool, ttl_seconds: Option<u32>) -> Result<usize, String> {
+        Self::validate_publish_topic(topic)?;
 
         let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
 
@@ -237,7 +232,7 @@ impl PubSubManager {
             self.disconnect(&client_id);
         }
 
-        sent_count
+        Ok(sent_count)
     }
 
 }
