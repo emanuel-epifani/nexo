@@ -382,6 +382,76 @@ mod stream_tests {
             let msgs = manager.read(topic, 1, 10).await;
             assert!(msgs.is_empty());
         }
+
+        #[tokio::test]
+        async fn test_disconnect_redelivers_inflight_to_another_consumer() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "disconnect-redeliver";
+            let group = "g-disconnect-redeliver";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 3 messages
+            for i in 1..=3 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            // Consumer A joins and fetches all 3 (without acking)
+            let consumer_a = join_session(&manager, group, topic, "client-A").await;
+            let msgs_a = fetch_messages(&manager, group, topic, &consumer_a, 10, 0).await;
+            assert_eq!(msgs_a.len(), 3, "Consumer A should receive all 3 messages");
+
+            // Consumer A leaves (simulates disconnect)
+            manager.leave_group(group, topic, &consumer_a.consumer_id, consumer_a.generation).await.unwrap();
+
+            // Consumer B joins and should get the 3 messages redelivered
+            let consumer_b = join_session(&manager, group, topic, "client-B").await;
+            let msgs_b = fetch_messages(&manager, group, topic, &consumer_b, 10, 0).await;
+            assert_eq!(msgs_b.len(), 3, "Consumer B should receive redelivered messages");
+
+            // Verify same seqs (redelivery, not new messages)
+            let seqs_b: Vec<u64> = msgs_b.iter().map(|m| m.seq).collect();
+            assert!(seqs_b.contains(&1), "seq 1 should be redelivered");
+            assert!(seqs_b.contains(&2), "seq 2 should be redelivered");
+            assert!(seqs_b.contains(&3), "seq 3 should be redelivered");
+        }
+
+        #[tokio::test]
+        async fn test_max_ack_pending_backpressure() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 3;
+            let manager = build_manager(config).await;
+            let topic = "backpressure-test";
+            let group = "g-backpressure";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 5 messages
+            for i in 1..=5 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Fetch with limit=10 but max_ack_pending=3 → only 3 delivered
+            let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch1.len(), 3, "Should only get 3 messages (max_ack_pending=3)");
+
+            // Fetch again → empty (backpressure: pending=3, max=3)
+            let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch2.len(), 0, "Should be backpressured (no new messages)");
+
+            // Ack 1 message → frees 1 slot
+            ack_message(&manager, group, topic, &consumer, 1).await;
+
+            // Fetch again → 1 more message (seq 4)
+            let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch3.len(), 1, "Should get 1 more after acking 1");
+            assert_eq!(batch3[0].seq, 4);
+        }
     }
 
     mod persistence {
@@ -1322,6 +1392,47 @@ mod stream_tests {
             assert!(seqs.contains(&2));
             assert!(seqs.contains(&4));
             assert!(!seqs.contains(&3), "msg-3 (same key-A) must be blocked");
+        }
+
+        #[tokio::test]
+        async fn test_generation_fencing_old_generation_rejected() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "fencing-test";
+            let group = "g-fencing";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish(topic, None, Bytes::from("msg-1")).await.unwrap();
+
+            // Consumer A joins → gets generation N
+            let consumer_a = join_session(&manager, group, topic, "client-A").await;
+            let old_gen = consumer_a.generation;
+
+            // Fetch works with correct generation
+            let msgs = fetch_messages(&manager, group, topic, &consumer_a, 10, 0).await;
+            assert_eq!(msgs.len(), 1);
+
+            // Seek triggers reset_runtime() → generation increments to N+1
+            manager.seek(group, topic, nexo::brokers::stream::options::SeekTarget::Beginning).await.unwrap();
+
+            // New consumer joins → gets generation N+1
+            let consumer_b = join_session(&manager, group, topic, "client-B").await;
+            assert!(consumer_b.generation > old_gen, "New generation should be greater after seek");
+
+            // Fetch with old generation → FENCED
+            let result = manager.fetch(group, &consumer_a.consumer_id, old_gen, 10, topic, 0).await;
+            assert!(matches!(result, Err(ref e) if e == "FENCED"), "Old generation fetch should be FENCED");
+
+            // Ack with old generation → FENCED
+            let ack_result = manager.ack(group, topic, &consumer_a.consumer_id, old_gen, 1).await;
+            assert!(matches!(ack_result, Err(ref e) if e == "FENCED"), "Old generation ack should be FENCED");
+
+            // New consumer can fetch and ack normally
+            let msgs_b = fetch_messages(&manager, group, topic, &consumer_b, 10, 0).await;
+            assert_eq!(msgs_b.len(), 1, "New consumer should receive redelivered msg");
+            assert_eq!(msgs_b[0].seq, 1);
+            ack_message(&manager, group, topic, &consumer_b, 1).await;
         }
     }
 }

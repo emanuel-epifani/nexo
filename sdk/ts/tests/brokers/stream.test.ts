@@ -82,9 +82,6 @@ describe('STREAM', () => {
             receivedB.add(d.id);
         });
 
-        // Wait for join
-        await new Promise(r => setTimeout(r, 500));
-
         // Publish messages
         for (let i = 0; i < 100; i++) {
             await nexo.stream(topic).publish({ id: i });
@@ -123,7 +120,7 @@ describe('STREAM', () => {
         // 3. Disconnect Client A
         await tempClientA.disconnect();
 
-        // 4. Wait for pending messages to be redelivered
+        // 4. Wait for group rebalance (B picks up A's partition)
         await new Promise(r => setTimeout(r, 500));
 
         // 5. Publish more (20-59) — B should handle everything
@@ -269,112 +266,43 @@ describe('STREAM', () => {
         await subStart.stop();
     });
 
-    it('should peek DLT after poison message', async () => {
-        const topic = `stream-dlt-peek-${randomUUID()}`;
-        const group = 'dlt-peek-group';
+    // DLT mechanism (redelivery → park → peek/delete/purge/move) is tested
+    // comprehensively in Rust tests with per-test config (ack_wait_ms=50, max_deliveries=2).
+    // No need to duplicate here — it would require either slow timeouts or env var hacks.
+
+    it('should stop quickly during long-poll wait (no messages available)', async () => {
+        const topic = `stream-stop-idle-${randomUUID()}`;
         await nexo.stream(topic).create();
 
-        // Publish a poison message that always throws
-        await nexo.stream(topic).publish({ crash: true });
+        const sub = await clientA.stream(topic).subscribe('idle-stop-group', () => {});
 
-        const received: any[] = [];
-        const sub = await clientA.stream(topic).subscribe(group, async (d: any) => {
-            if (d.crash) throw new Error('poison');
-            received.push(d);
-        });
+        // Let the consumer enter long-poll (no messages published)
+        await new Promise(r => setTimeout(r, 200));
 
-        // Wait for redelivery to exhaust max_deliveries and park in DLT
-        await new Promise(r => setTimeout(r, 3000));
-
-        const dlt = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dlt.length).toBeGreaterThanOrEqual(1);
-        expect(dlt[0].reason).toContain('max_deliveries');
-
+        const start = Date.now();
         await sub.stop();
+        const elapsed = Date.now() - start;
+
+        // Should stop in under 2s, not wait for the full 20s long-poll
+        expect(elapsed).toBeLessThan(2000);
     });
 
-    it('should moveToStream and redeliver from DLT', async () => {
-        const topic = `stream-dlt-move-${randomUUID()}`;
-        const group = 'dlt-move-group';
+    it('should not deliver messages after stop() returns', async () => {
+        const topic = `stream-stop-nodeliver-${randomUUID()}`;
         await nexo.stream(topic).create();
 
-        await nexo.stream(topic).publish({ crash: true });
-
-        let canProcess = false;
         const received: any[] = [];
-        const sub = await clientA.stream(topic).subscribe(group, async (d: any) => {
-            if (d.crash && !canProcess) throw new Error('poison');
-            received.push(d);
-        });
+        const sub = await clientA.stream(topic).subscribe('nodeliver-group', (d) => received.push(d));
 
-        // Wait for DLT
-        await new Promise(r => setTimeout(r, 3000));
-        const dlt = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dlt.length).toBeGreaterThanOrEqual(1);
-
-        // Move back to stream and allow processing
-        canProcess = true;
-        await nexo.stream(topic).moveToStream(group, dlt[0].seq);
-
-        await waitFor(() => expect(received.length).toBeGreaterThanOrEqual(1), { timeout: 5000 });
+        await nexo.stream(topic).publish({ id: 1 });
+        await waitFor(() => expect(received.length).toBe(1));
 
         await sub.stop();
-    });
 
-    it('should deleteDlt and prevent redelivery', async () => {
-        const topic = `stream-dlt-delete-${randomUUID()}`;
-        const group = 'dlt-delete-group';
-        await nexo.stream(topic).create();
+        // Publish after stop — should not be received
+        await nexo.stream(topic).publish({ id: 2 });
+        await new Promise(r => setTimeout(r, 500));
 
-        await nexo.stream(topic).publish({ crash: true });
-
-        const received: any[] = [];
-        const sub = await clientA.stream(topic).subscribe(group, async (d: any) => {
-            if (d.crash) throw new Error('poison');
-            received.push(d);
-        });
-
-        // Wait for DLT
-        await new Promise(r => setTimeout(r, 3000));
-        const dlt = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dlt.length).toBeGreaterThanOrEqual(1);
-
-        // Delete from DLT
-        await nexo.stream(topic).deleteDlt(group, dlt[0].seq);
-
-        const dltAfter = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dltAfter.length).toBe(0);
-
-        await sub.stop();
-    });
-
-    it('should purgeDlt and clear all entries', async () => {
-        const topic = `stream-dlt-purge-${randomUUID()}`;
-        const group = 'dlt-purge-group';
-        await nexo.stream(topic).create();
-
-        for (let i = 0; i < 3; i++) {
-            await nexo.stream(topic).publish({ crash: true });
-        }
-
-        const received: any[] = [];
-        const sub = await clientA.stream(topic).subscribe(group, async (d: any) => {
-            if (d.crash) throw new Error('poison');
-            received.push(d);
-        });
-
-        // Wait for DLT
-        await new Promise(r => setTimeout(r, 3000));
-        const dlt = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dlt.length).toBeGreaterThanOrEqual(1);
-
-        // Purge all
-        const count = await nexo.stream(topic).purgeDlt(group);
-        expect(count).toBeGreaterThanOrEqual(1);
-
-        const dltAfter = await nexo.stream(topic).peekDlt(group, 10, 0);
-        expect(dltAfter.length).toBe(0);
-
-        await sub.stop();
+        expect(received.length).toBe(1);
     });
 });

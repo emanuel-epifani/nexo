@@ -89,7 +89,9 @@ class StreamSubscription<T> {
 
   async stop(): Promise<void> {
     this.active = false;
-    await this.loopDone;
+    // Send LEAVE first to unblock any in-flight long-poll FETCH.
+    // The server removes the consumer and sends a wake notification,
+    // causing the pending FETCH to return immediately (0 messages).
     if (this.consumerId !== null) {
       try {
         await this.conn.send(StreamOpcode.S_LEAVE, w => w
@@ -100,6 +102,7 @@ class StreamSubscription<T> {
         );
       } catch { /* connection may already be closed or member already removed */ }
     }
+    await this.loopDone;
   }
 
   private async join(): Promise<void> {

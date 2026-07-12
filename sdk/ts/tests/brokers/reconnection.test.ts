@@ -213,4 +213,74 @@ describe('SOCKET RECONNECTION', () => {
         await waitFor(() => expect(receivedBefore).toContain('msg-before'));
         await waitFor(() => expect(receivedAfter).toContain('msg-after'));
     });
+
+    // =========================================
+    // STREAM: In-flight redelivery after reconnect (at-least-once)
+    // =========================================
+
+    it('STREAM: In-flight message should be redelivered after crash (at-least-once)', async () => {
+        const streamName = `reconnect-stream-inflight-${randomUUID()}`;
+        const group = `g-inflight-${randomUUID()}`;
+        await nexo.stream(streamName).create();
+
+        // Publish a message BEFORE subscribing
+        await nexo.stream(streamName).publish({ important: true });
+
+        const received: any[] = [];
+        let firstDelivery = true;
+
+        await nexo.stream(streamName).subscribe(group, async (msg) => {
+            received.push(msg);
+            if (firstDelivery) {
+                firstDelivery = false;
+                // Kill connection BEFORE acking — message is in-flight
+                (nexo as any).conn.socket.destroy();
+                // Throw to prevent ack (loop will catch error and retry)
+                throw new Error('crash before ack');
+            }
+            // Second delivery: process normally (auto-ack)
+        });
+
+        // Wait for redelivery: ack_wait expires → message redelivered after reconnect
+        await waitFor(
+            () => expect(received.length).toBeGreaterThanOrEqual(2),
+            { timeout: 30000 }
+        );
+
+        expect(received[0]).toEqual({ important: true });
+        expect(received[1]).toEqual({ important: true });
+    });
+
+    // =========================================
+    // STREAM: Key-based ordering via TCP (same-key serialization)
+    // =========================================
+
+    it('STREAM: Same-key messages should be delivered serially via TCP', async () => {
+        const streamName = `key-order-tcp-${randomUUID()}`;
+        const group = `g-key-order-${randomUUID()}`;
+        await nexo.stream(streamName).create();
+
+        // Publish 3 messages with same key
+        await nexo.stream(streamName).publish({ n: 1 }, { key: 'order-key' });
+        await nexo.stream(streamName).publish({ n: 2 }, { key: 'order-key' });
+        await nexo.stream(streamName).publish({ n: 3 }, { key: 'order-key' });
+
+        const received: number[] = [];
+        let inFlight = false;
+
+        const sub = await nexo.stream(streamName).subscribe(group, async (data: any) => {
+            // If key ordering works, we should never have concurrent same-key processing
+            if (inFlight) throw new Error('Concurrent same-key delivery detected');
+            inFlight = true;
+            received.push(data.n);
+            inFlight = false;
+        }, { batchSize: 1, concurrency: 1 });
+
+        await waitFor(() => expect(received.length).toBe(3), { timeout: 10000 });
+
+        // Messages should be in order (same key = serial)
+        expect(received).toEqual([1, 2, 3]);
+
+        await sub.stop();
+    });
 });
