@@ -125,7 +125,42 @@ impl PubSubManager {
         }
     }
 
+    pub fn validate_subscribe_pattern(pattern: &str) -> Result<(), String> {
+        if pattern.is_empty() {
+            return Err("Subscribe pattern cannot be empty".into());
+        }
+        let parts: Vec<&str> = pattern.split('/').collect();
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                return Err("Subscribe pattern contains empty segments".into());
+            }
+            if *part == "#" && i != parts.len() - 1 {
+                return Err("# wildcard must be the last segment".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_publish_topic(topic: &str) -> Result<(), String> {
+        if topic.is_empty() {
+            return Err("Publish topic cannot be empty".into());
+        }
+        for part in topic.split('/') {
+            if part.is_empty() {
+                return Err("Publish topic contains empty segments".into());
+            }
+            if part == "+" || part == "#" {
+                return Err("Publish topic cannot contain wildcards (+ or #)".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn subscribe(&self, client_id: &str, pattern: &str) {
+        if let Err(e) = Self::validate_subscribe_pattern(pattern) {
+            tracing::warn!("Invalid subscribe pattern '{}': {}", pattern, e);
+            return;
+        }
         let Some(mut info) = self.clients.get_mut(client_id) else { return; };
         info.subscriptions.insert(pattern.to_string());
         let sender = info.sender.clone();
@@ -155,7 +190,10 @@ impl PubSubManager {
     }
 
     pub fn publish(&self, topic: &str, data: Bytes, retain: bool, clear: bool, ttl_seconds: Option<u32>) -> usize {
-        if topic.is_empty() { return 0; }
+        if let Err(e) = Self::validate_publish_topic(topic) {
+            tracing::warn!("Invalid publish topic '{}': {}", topic, e);
+            return 0;
+        }
 
         let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
 

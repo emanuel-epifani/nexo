@@ -312,7 +312,111 @@ mod pubsub_tests {
     }
 
     // =========================================================================================
-    // 2. ROBUSTNESS TESTS (Concurrency, Edge Cases, Stress)
+    // 2. VALIDATION TESTS
+    // =========================================================================================
+
+    mod validation {
+        use super::*;
+
+        #[test]
+        fn test_subscribe_hash_in_middle_rejected() {
+            assert!(PubSubManager::validate_subscribe_pattern("sensors/#/temp").is_err());
+            assert!(PubSubManager::validate_subscribe_pattern("#/temp").is_err());
+            assert!(PubSubManager::validate_subscribe_pattern("a/#/b").is_err());
+        }
+
+        #[test]
+        fn test_subscribe_hash_at_end_ok() {
+            assert!(PubSubManager::validate_subscribe_pattern("sensors/#").is_ok());
+            assert!(PubSubManager::validate_subscribe_pattern("#").is_ok());
+            assert!(PubSubManager::validate_subscribe_pattern("a/b/#").is_ok());
+        }
+
+        #[test]
+        fn test_subscribe_empty_pattern_rejected() {
+            assert!(PubSubManager::validate_subscribe_pattern("").is_err());
+        }
+
+        #[test]
+        fn test_subscribe_empty_segment_rejected() {
+            assert!(PubSubManager::validate_subscribe_pattern("sensors//temp").is_err());
+            assert!(PubSubManager::validate_subscribe_pattern("/temp").is_err());
+            assert!(PubSubManager::validate_subscribe_pattern("temp/").is_err());
+        }
+
+        #[test]
+        fn test_subscribe_plus_anywhere_ok() {
+            assert!(PubSubManager::validate_subscribe_pattern("sensors/+/temp").is_ok());
+            assert!(PubSubManager::validate_subscribe_pattern("+").is_ok());
+            assert!(PubSubManager::validate_subscribe_pattern("a/+/b/+/c").is_ok());
+        }
+
+        #[test]
+        fn test_publish_with_plus_rejected() {
+            assert!(PubSubManager::validate_publish_topic("sensors/+/temp").is_err());
+            assert!(PubSubManager::validate_publish_topic("+").is_err());
+            assert!(PubSubManager::validate_publish_topic("a/+/b").is_err());
+        }
+
+        #[test]
+        fn test_publish_with_hash_rejected() {
+            assert!(PubSubManager::validate_publish_topic("sensors/#").is_err());
+            assert!(PubSubManager::validate_publish_topic("#").is_err());
+            assert!(PubSubManager::validate_publish_topic("a/b/#").is_err());
+        }
+
+        #[test]
+        fn test_publish_empty_topic_rejected() {
+            assert!(PubSubManager::validate_publish_topic("").is_err());
+        }
+
+        #[test]
+        fn test_publish_empty_segment_rejected() {
+            assert!(PubSubManager::validate_publish_topic("sensors//temp").is_err());
+            assert!(PubSubManager::validate_publish_topic("/temp").is_err());
+            assert!(PubSubManager::validate_publish_topic("temp/").is_err());
+        }
+
+        #[test]
+        fn test_publish_concrete_topic_ok() {
+            assert!(PubSubManager::validate_publish_topic("sensors/temp").is_ok());
+            assert!(PubSubManager::validate_publish_topic("a").is_ok());
+            assert!(PubSubManager::validate_publish_topic("a/b/c/d").is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_subscribe_invalid_pattern_no_delivery() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let client_id = "bad_sub".to_string();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            manager.connect(&client_id, tx);
+
+            manager.subscribe(&client_id, "sensors/#/temp");
+            let count = manager.publish("sensors/real/temp", Bytes::from("data"), false, false, None);
+            assert_eq!(count, 0, "Invalid subscription should not receive messages");
+
+            let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+            assert!(result.is_err(), "Should not receive any message");
+        }
+
+        #[tokio::test]
+        async fn test_publish_with_wildcard_no_delivery() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let client_id = "sub1".to_string();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            manager.connect(&client_id, tx);
+            manager.subscribe(&client_id, "sensors/+/temp");
+
+            let count = manager.publish("sensors/+/temp", Bytes::from("data"), false, false, None);
+            assert_eq!(count, 0, "Publish with wildcard should not deliver");
+
+            let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+            assert!(result.is_err(), "Should not receive any message");
+        }
+    }
+
+    // =========================================================================================
+    // 3. ROBUSTNESS TESTS (Concurrency, Edge Cases, Stress)
     // =========================================================================================
 
     mod robustness {

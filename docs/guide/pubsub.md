@@ -45,7 +45,7 @@ await allSensors.subscribe((data) => console.log('Sensor value:', data.value));
 ```
 
 ::: warning Wildcards are subscribe-only
-You can only subscribe with wildcards. Publishing must always target a **concrete topic** (no `+` or `#`).
+You can only subscribe with wildcards. Publishing must always target a **concrete topic** (no `+` or `#`). The `#` wildcard must be the **last segment** in a subscribe pattern (e.g. `sensors/#` is valid, `sensors/#/temp` is rejected). Empty segments are not allowed in either publish or subscribe (e.g. `sensors//temp` is rejected).
 :::
 
 ## Retained Messages
@@ -71,3 +71,16 @@ await client.pubsub<string>('config/theme').clear();
 ```
 
 A later subscriber on that topic will not receive a retained value.
+
+## Configuration
+
+### Environment Variables
+
+Global, set at server startup.
+
+| Variable | Default | Description |
+|:---|:---|:---|
+| `PUBSUB_ROOT_PERSISTENCE_PATH` | `./data/pubsub` | Directory for retained messages SQLite DB |
+| `PUBSUB_DEFAULT_RETAINED_TTL_SECS` | `3600` (1h) | Default TTL for retained messages when no explicit `ttl` is provided |
+| `PUBSUB_CLEANUP_INTERVAL_SECS` | `60` | Background cleanup interval for expired retained messages |
+| `PUBSUB_RETAINED_FLUSH_MS` | `500` | How often retained messages are flushed to SQLite |

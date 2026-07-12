@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 
+use crate::brokers::pub_sub::PubSubManager;
 use crate::transport::tcp::protocol::wire::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
@@ -72,10 +73,16 @@ pub async fn handle(
 
     match cmd {
         PubSubCommand::Publish { topic, retain, clear, ttl, payload } => {
+            if let Err(e) = PubSubManager::validate_publish_topic(&topic) {
+                return Response::Error(e);
+            }
             let _count = pubsub.publish(&topic, payload, retain, clear, ttl);
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {
+            if let Err(e) = PubSubManager::validate_subscribe_pattern(&topic) {
+                return Response::Error(e);
+            }
             pubsub.subscribe(session_id, &topic);
             Response::Ok
         }
