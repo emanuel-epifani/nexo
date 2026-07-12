@@ -1,9 +1,8 @@
 pub mod config;
-pub mod domain;
+mod domain;
 pub mod manager;
 pub mod options;
 pub mod snapshot;
 pub mod tcp;
 
-pub use manager::*;
-pub use domain::queue::*;
+pub use manager::QueueManager;

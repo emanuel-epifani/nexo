@@ -1,5 +1,5 @@
 pub mod config;
-pub mod domain;
+mod domain;
 pub mod manager;
 pub mod tcp;
 

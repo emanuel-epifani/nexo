@@ -29,8 +29,6 @@ pub enum StorageOp {
     },
     
     // DLQ Operations
-    /// Insert a message into DLQ
-    InsertDLQ(DlqMessage),
     /// Delete a message from DLQ
     DeleteDLQ(Uuid),
     /// Move message from main queue to DLQ (atomic)
@@ -375,21 +373,6 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         }
         
         // DLQ Operations
-        StorageOp::InsertDLQ(msg) => {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-            )?;
-            stmt.execute(params![
-                msg.id.as_bytes(),
-                msg.payload.as_ref(),
-                msg.priority,
-                msg.attempts,
-                msg.created_at as i64,
-                msg.failed_at as i64,
-                msg.failure_reason
-            ])?;
-        }
         StorageOp::DeleteDLQ(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
             stmt.execute(params![id.as_bytes()])?;

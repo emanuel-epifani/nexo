@@ -18,7 +18,7 @@ use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::domain::dlq::{DlqMessage, DlqState};
 use crate::brokers::queue::domain::persistence::{QueueStore, StorageOp};
 use crate::brokers::queue::config::SystemQueueConfig;
-use crate::brokers::queue::snapshot::{QueueMessagePreview, QueueSnapshot};
+use crate::brokers::queue::snapshot::QueueSnapshot;
 
 // ==========================================
 // SHARED STATE

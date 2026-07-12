@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use nexo::config::Config;
 use nexo::NexoEngine;
 use nexo::transport::tcp;

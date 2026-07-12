@@ -8,7 +8,7 @@ use common::Benchmark;
 #[cfg(test)]
 mod stream_tests {
     use super::*;
-    use nexo::brokers::stream::domain::message::Message;
+    use nexo::brokers::stream::Message;
     use nexo::brokers::stream::manager::JoinGroupResult;
     use nexo::brokers::stream::StreamManager;
     use std::sync::Arc;

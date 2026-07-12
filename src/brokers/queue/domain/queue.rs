@@ -13,7 +13,6 @@ use hashlink::LinkedHashSet;
 use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::domain::dlq::DlqMessage;
-use crate::brokers::queue::snapshot::{MessageStateTag, QueueMessagePreview};
 
 // ==========================================
 // MESSAGE & CONFIG
@@ -161,7 +160,7 @@ impl QueueState {
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
     pub fn nack(&mut self, id: Uuid, reason: String, max_retries: u32) -> (Option<Message>, Option<DlqMessage>) {
         // 1. Check existence and update fields
-        let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
+        let (should_dlq, _priority) = if let Some(msg) = self.registry.get_mut(&id) {
             msg.failure_reason = Some(reason.clone());
             (msg.attempts >= max_retries, msg.priority)
         } else {
@@ -260,72 +259,6 @@ impl QueueState {
         }
 
         (pending, inflight)
-    }
-
-
-    pub fn has_ready_messages(&self) -> bool {
-        !self.waiting_for_dispatch.is_empty()
-    }
-
-    /// Re-queue an InFlight message back to Ready state immediately.
-    /// Used when a waiter (consumer connection) dies before receiving the response.
-    /// Undoes the attempt increment from take_batch since the message was never delivered.
-    pub fn requeue_inflight(&mut self, id: Uuid) -> bool {
-        let is_inflight = self.registry.get(&id)
-            .map(|m| matches!(m.state, MessageState::InFlight(_)))
-            .unwrap_or(false);
-
-        if !is_inflight { return false; }
-
-        if self.transition_to(id, MessageState::Ready) {
-            if let Some(msg) = self.registry.get_mut(&id) {
-                msg.visible_at = 0;
-                msg.attempts = msg.attempts.saturating_sub(1);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Peek messages without consuming them (for DLQ inspection)
-    pub fn peek_messages(&self, limit: usize) -> Vec<Message> {
-        let mut messages = Vec::new();
-        let mut count = 0;
-
-        for (_, queue) in self.waiting_for_dispatch.iter().rev() {
-            for id in queue.iter() {
-                if count >= limit {
-                    break;
-                }
-                if let Some(msg) = self.registry.get(id) {
-                    messages.push(msg.clone());
-                    count += 1;
-                }
-            }
-            if count >= limit {
-                break;
-            }
-        }
-
-        messages
-    }
-
-    /// Get total message count
-    pub fn len(&self) -> usize {
-        self.registry.len()
-    }
-
-    /// Remove a message by ID (for DLQ operations)
-    pub fn remove_by_id(&mut self, id: Uuid) -> Option<Message> {
-        self.delete_message_and_return(id)
-    }
-
-    /// Clear all messages (for purge)
-    pub fn clear(&mut self) {
-        self.registry.clear();
-        self.waiting_for_dispatch.clear();
-        self.waiting_for_ack.clear();
     }
 
     // --- Internal helpers ---

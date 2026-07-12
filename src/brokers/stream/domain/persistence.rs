@@ -18,7 +18,7 @@ use bytes::Bytes;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter, AsyncReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, info, debug, warn};
+use tracing::{error, info};
 use crc32fast::Hasher;
 
 use crate::brokers::stream::options::RetentionOptions;
@@ -538,7 +538,7 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
     for key in &state.parked_keys {
         content_len += 2 + key.len() as u32;
     }
-    for (seq, entry) in &state.dlt_entries {
+    for (_seq, entry) in &state.dlt_entries {
         let reason_bytes = entry.reason.as_bytes();
         content_len += 8 + 2 + entry.key.as_ref().map_or(0, |k| k.len()) as u32 + 2 + reason_bytes.len() as u32 + 4;
     }

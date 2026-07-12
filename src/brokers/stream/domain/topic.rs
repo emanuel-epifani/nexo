@@ -61,17 +61,6 @@ pub struct TopicState {
 }
 
 impl TopicState {
-    pub fn new(name: String, ram_soft_limit: usize) -> Self {
-        Self {
-            name,
-            log: VecDeque::new(),
-            next_seq: 1, // sequences start at 1 (0 = "nothing processed")
-            head_seq: 1,
-            ram_start_seq: 1,
-            ram_soft_limit,
-        }
-    }
-
     pub fn restore(name: String, ram_soft_limit: usize, head_seq: u64, messages: VecDeque<Message>) -> Self {
         let next_seq = messages.back().map(|m| m.seq + 1).unwrap_or(head_seq.max(1));
         let ram_start_seq = messages.front().map(|m| m.seq).unwrap_or(next_seq.max(head_seq));

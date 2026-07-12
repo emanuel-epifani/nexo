@@ -1,8 +1,7 @@
 pub mod config;
-pub mod domain;
+mod domain;
 pub mod manager;
 pub mod snapshot;
 pub mod tcp;
 
-pub use manager::*;
-pub use domain::*;
+pub use manager::StoreManager;
