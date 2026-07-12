@@ -561,11 +561,9 @@ mod queue_tests {
                 let msg3 = manager2.pop(&q2).await.expect("Should recover msg1_q2");
                 assert_eq!(msg3.payload, Bytes::from("msg1_q2"));
 
-                // Verify snapshot includes restored queues
-                let snapshot = manager2.get_snapshot().await;
-                let queue_names: Vec<String> = snapshot.iter().map(|q| q.name.clone()).collect();
-                assert!(queue_names.contains(&q1), "Snapshot should include q1");
-                assert!(queue_names.contains(&q2), "Snapshot should include q2");
+                // Verify queues restored after recovery
+                assert!(manager2.exists(&q1).await, "Queue q1 should be restored");
+                assert!(manager2.exists(&q2).await, "Queue q2 should be restored");
             }
         }
 

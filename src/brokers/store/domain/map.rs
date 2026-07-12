@@ -12,7 +12,7 @@ pub struct Entry {
 }
 
 #[derive(Clone)]
-pub struct MapStore {
+pub struct Map {
     inner: Arc<DashMap<String, Entry>>,
     config: Arc<StoreConfig>,
 }
@@ -20,7 +20,7 @@ pub struct MapStore {
 #[derive(Debug, Clone)]
 pub struct MapValue(pub Bytes);
 
-impl MapStore {
+impl Map {
     pub fn new(config: Arc<StoreConfig>) -> Self {
         let inner = Arc::new(DashMap::new());
 

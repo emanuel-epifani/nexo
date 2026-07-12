@@ -23,12 +23,17 @@ pub const OP_MAP_DEL: u8 = 0x04;
 
 #[derive(Debug)]
 enum StoreCommand {
-    MapSet { key: String, ttl: Option<u64>, value: Bytes },
-    MapGet { key: String },
-    MapDel { key: String },
+    Map(MapCmd),
 }
 
-impl StoreCommand {
+#[derive(Debug)]
+enum MapCmd {
+    Set { key: String, ttl: Option<u64>, value: Bytes },
+    Get { key: String },
+    Del { key: String },
+}
+
+impl MapCmd {
     fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_MAP_SET => {
@@ -36,16 +41,42 @@ impl StoreCommand {
                 let flags = cursor.read_u8()?;
                 let ttl = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
                 let value = cursor.read_remaining();
-                Ok(Self::MapSet { key, ttl, value })
+                Ok(Self::Set { key, ttl, value })
             }
             OP_MAP_GET => {
                 let key = cursor.read_string()?;
-                Ok(Self::MapGet { key })
+                Ok(Self::Get { key })
             }
             OP_MAP_DEL => {
                 let key = cursor.read_string()?;
-                Ok(Self::MapDel { key })
+                Ok(Self::Del { key })
             }
+            _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
+        }
+    }
+
+    fn dispatch(self, map: &crate::brokers::store::domain::map::Map) -> Response {
+        match self {
+            Self::Set { key, ttl, value } => {
+                map.set(key, value, ttl);
+                Response::Ok
+            }
+            Self::Get { key } => map
+                .get(&key)
+                .map(Response::Data)
+                .unwrap_or(Response::Null),
+            Self::Del { key } => {
+                map.del(&key);
+                Response::Ok
+            }
+        }
+    }
+}
+
+impl StoreCommand {
+    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+        match opcode {
+            OP_MAP_SET..=OP_MAP_DEL => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
             _ => Err(ParseError::Invalid(format!("Unknown Store opcode: 0x{:02X}", opcode))),
         }
     }
@@ -62,19 +93,6 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
     };
 
     match cmd {
-        StoreCommand::MapSet { key, ttl, value } => {
-            engine.store.map.set(key, value, ttl);
-            Response::Ok
-        }
-        StoreCommand::MapGet { key } => engine
-            .store
-            .map
-            .get(&key)
-            .map(Response::Data)
-            .unwrap_or(Response::Null),
-        StoreCommand::MapDel { key } => {
-            engine.store.map.del(&key);
-            Response::Ok
-        }
+        StoreCommand::Map(c) => c.dispatch(&engine.store.map),
     }
 }

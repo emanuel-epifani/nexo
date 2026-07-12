@@ -15,7 +15,6 @@ use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::snapshot::{ConsumerGroupSnapshot, StreamSnapshot, TopicSnapshot};
 use crate::brokers::stream::domain::persistence::{recover_topic, GroupPersistentState, MessageToAppend, StorageCommand, StorageManager};
 use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
 
@@ -444,29 +443,6 @@ impl StreamManager {
         }
     }
 
-    pub async fn get_snapshot(&self) -> StreamSnapshot {
-        let mut topics = Vec::new();
-
-        for (_, topic_ref) in Self::collect_topics(&self.topics) {
-            let inner = Self::lock_topic(&topic_ref.inner);
-            let groups = inner.groups.values().map(|group| ConsumerGroupSnapshot {
-                id: group.id.clone(),
-                ack_floor: group.ack_floor,
-                pending_count: group.pending.len(),
-                dlt_count: group.dlt.len(),
-            }).collect();
-
-            topics.push(TopicSnapshot {
-                name: inner.state.name.clone(),
-                last_seq: inner.state.next_seq.saturating_sub(1),
-                groups,
-                config: inner.full_config.clone(),
-            });
-        }
-
-        StreamSnapshot { topics }
-    }
-
     pub async fn exists(&self, name: &str) -> bool {
         if self.topics.contains_key(name) {
             return true;
@@ -552,7 +528,7 @@ impl StreamManager {
         }
 
         let recovered = recover_topic(&name, PathBuf::from(persistence_path)).await;
-        let state = TopicState::restore(name.clone(), config.ram_soft_limit, recovered.head_seq.max(1), recovered.messages);
+        let state = TopicState::restore(config.ram_soft_limit, recovered.head_seq.max(1), recovered.messages);
 
         let ack_wait = Duration::from_millis(config.ack_wait_ms);
         let persisted_seq = Arc::new(AtomicU64::new(state.next_seq.saturating_sub(1)));

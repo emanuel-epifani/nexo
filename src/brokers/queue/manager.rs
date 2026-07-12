@@ -18,7 +18,6 @@ use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::domain::dlq::{DlqMessage, DlqState};
 use crate::brokers::queue::domain::persistence::{QueueStore, StorageOp};
 use crate::brokers::queue::config::SystemQueueConfig;
-use crate::brokers::queue::snapshot::QueueSnapshot;
 
 // ==========================================
 // SHARED STATE
@@ -31,7 +30,6 @@ struct QueueShared {
 }
 
 struct QueueInner {
-    name: String,
     state: QueueState,
     dlq: DlqState,
     config: QueueConfig,
@@ -137,7 +135,6 @@ impl QueueManager {
 
         Arc::new(QueueShared {
             inner: Mutex::new(QueueInner {
-                name,
                 state: main_state,
                 dlq: dlq_state,
                 config,
@@ -421,25 +418,6 @@ impl QueueManager {
                 _ = sleep_until(deadline) => return Ok(vec![]),
             }
         }
-    }
-
-    pub async fn get_snapshot(&self) -> Vec<QueueSnapshot> {
-        let mut queues = Vec::new();
-
-        for entry in self.queues.iter() {
-            let shared = entry.value().clone();
-            let inner = Self::lock(&shared.inner);
-            let (pending, inflight) = inner.state.get_counters();
-            queues.push(QueueSnapshot {
-                name: inner.name.clone(),
-                pending,
-                inflight,
-                dlq: inner.dlq.len(),
-                config: inner.config.clone(),
-            });
-        }
-
-        queues
     }
 
     pub async fn exists(&self, name: &str) -> bool {

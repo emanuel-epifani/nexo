@@ -50,7 +50,6 @@ impl TopicConfig {
 }
 
 pub struct TopicState {
-    pub name: String,
     // Single log
     pub log: VecDeque<Message>,
     pub next_seq: u64,
@@ -61,12 +60,11 @@ pub struct TopicState {
 }
 
 impl TopicState {
-    pub fn restore(name: String, ram_soft_limit: usize, head_seq: u64, messages: VecDeque<Message>) -> Self {
+    pub fn restore(ram_soft_limit: usize, head_seq: u64, messages: VecDeque<Message>) -> Self {
         let next_seq = messages.back().map(|m| m.seq + 1).unwrap_or(head_seq.max(1));
         let ram_start_seq = messages.front().map(|m| m.seq).unwrap_or(next_seq.max(head_seq));
 
         Self {
-            name,
             log: messages,
             next_seq,
             head_seq,

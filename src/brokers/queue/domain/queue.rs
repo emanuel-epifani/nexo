@@ -246,21 +246,6 @@ impl QueueState {
         (requeued_msgs, dlq_msgs)
     }
 
-    pub fn get_counters(&self) -> (usize, usize) {
-        let mut pending = 0;
-        let mut inflight = 0;
-
-        for (_, queue) in &self.waiting_for_dispatch {
-            pending += queue.len();
-        }
-
-        for (_, list) in &self.waiting_for_ack {
-            inflight += list.len();
-        }
-
-        (pending, inflight)
-    }
-
     // --- Internal helpers ---
 
     /// Pop a single message from the queue. Returns (message, is_earliest_timeout).
