@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
-use crate::brokers::pub_sub::{ClientId, PubSubMessage};
+use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::Config;
 use crate::transport::tcp::dispatcher::Dispatcher;
 use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
@@ -36,7 +36,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     // ==========================================
     // Channel to receive push notifications from the PubSub Engine
     let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
-    engine.pubsub.connect(ClientId(session_id.clone()), push_tx);
+    engine.pubsub.connect(&session_id, push_tx);
 
     // Background task: forwards PubSub pushes to the socket's outbound channel
     let outbound_bridge = outbound_tx.clone();
@@ -98,7 +98,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
     request_set.abort_all();
     bridge_handle.abort();
-    engine.pubsub.disconnect(&ClientId(session_id.clone()));
+    engine.pubsub.disconnect(&session_id);
     engine.stream.disconnect(session_id).await;
 
     Ok(())

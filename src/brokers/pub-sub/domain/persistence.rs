@@ -7,7 +7,7 @@ use super::retained::RetainedMessage;
 
 pub(crate) fn init_db(path: &str) -> std::result::Result<Connection, rusqlite::Error> {
     if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent).unwrap_or(());
+        let _ = std::fs::create_dir_all(parent);
     }
 
     let conn = Connection::open(path)?;
@@ -33,11 +33,10 @@ pub(crate) fn load_all(conn: &Connection) -> std::result::Result<Vec<(String, Re
 
     let mut results = Vec::new();
     for entry in entries {
-        if let Ok((path, data, expires)) = entry {
-            let msg = RetainedMessage::from_persisted(data, expires);
-            if !msg.is_expired() {
-                results.push((path, msg));
-            }
+        let (path, data, expires) = entry?;
+        let msg = RetainedMessage::from_persisted(data, expires);
+        if !msg.is_expired() {
+            results.push((path, msg));
         }
     }
     Ok(results)

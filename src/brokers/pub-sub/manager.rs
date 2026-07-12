@@ -11,8 +11,7 @@ use crate::brokers::pub_sub::config::PubSubConfig;
 use crate::brokers::pub_sub::domain::persistence;
 use crate::brokers::pub_sub::domain::radix_tree::Node;
 use crate::brokers::pub_sub::domain::retained::RetainedMessage;
-use crate::brokers::pub_sub::snapshot::{PubSubSnapshot, WildcardSubscription, WildcardSubscriptions};
-use crate::brokers::pub_sub::{ClientId, ClientInfo, ClientRegistry, PubSubMessage};
+use crate::brokers::pub_sub::domain::types::{ClientInfo, ClientRegistry, PubSubMessage};
 
 pub struct PubSubManager {
     tree: Arc<RwLock<Node>>,
@@ -28,25 +27,32 @@ impl PubSubManager {
         let clients = Arc::new(DashMap::new());
         let persistence_path = format!("{}/retained.db", config.persistence_path);
 
-        // Load retained from SQLite
-        if let Ok(conn) = persistence::init_db(&persistence_path) {
-            if let Ok(loaded) = persistence::load_all(&conn) {
-                let mut root = tree.write();
-                for (path, msg) in loaded {
-                    let parts: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
-                    root.set_retained(&parts, Some(msg));
+        let loaded = match persistence::init_db(&persistence_path) {
+            Ok(conn) => match persistence::load_all(&conn) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!("Failed to load retained topics from SQLite DB: {}", e);
+                    Vec::new()
                 }
-            } else {
-                tracing::warn!("Failed to load retained topics from SQLite DB");
+            },
+            Err(e) => {
+                tracing::warn!("Failed to initialize SQLite for retained at {}: {}", persistence_path, e);
+                Vec::new()
             }
-        } else {
-             tracing::warn!("Failed to initialize SQLite for retained at {}", persistence_path);
+        };
+
+        {
+            let mut root = tree.write();
+            for (path, msg) in loaded {
+                let parts: Vec<String> = path.split('/').map(|s| s.to_string()).collect();
+                root.set_retained(&parts, Some(msg));
+            }
         }
 
         // Background Flush Task
         let flush_tree = tree.clone();
         let flush_dirty = retained_dirty.clone();
-        let flush_path = persistence_path.clone();
+        let flush_path = persistence_path;
         let flush_ms = config.retained_flush_ms;
         
         tokio::spawn(async move {
@@ -102,14 +108,14 @@ impl PubSubManager {
         }
     }
 
-    pub fn connect(&self, client_id: ClientId, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
-        self.clients.insert(client_id, ClientInfo {
+    pub fn connect(&self, client_id: &str, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
+        self.clients.insert(Arc::from(client_id), ClientInfo {
             sender,
             subscriptions: HashSet::new(),
         });
     }
 
-    pub fn disconnect(&self, client_id: &ClientId) {
+    pub fn disconnect(&self, client_id: &str) {
         if let Some((_, info)) = self.clients.remove(client_id) {
             let mut root = self.tree.write();
             for sub in info.subscriptions {
@@ -119,13 +125,11 @@ impl PubSubManager {
         }
     }
 
-    pub fn subscribe(&self, client_id: &ClientId, pattern: &str) {
-        let sender = if let Some(mut info) = self.clients.get_mut(client_id) {
-            info.subscriptions.insert(pattern.to_string());
-            info.sender.clone()
-        } else {
-            return;
-        };
+    pub fn subscribe(&self, client_id: &str, pattern: &str) {
+        let Some(mut info) = self.clients.get_mut(client_id) else { return; };
+        info.subscriptions.insert(pattern.to_string());
+        let sender = info.sender.clone();
+        drop(info);
 
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
         let mut root = self.tree.write();
@@ -135,33 +139,34 @@ impl PubSubManager {
         root.collect_retained_for_pattern(&parts, "", &mut retained);
 
         for (p, b) in retained {
-            let p = if p.starts_with('/') { p[1..].to_string() } else { p };
             let msg = Arc::new(PubSubMessage::new(p, b));
             let _ = sender.send(msg);
         }
     }
 
-    pub fn unsubscribe(&self, client_id: &ClientId, pattern: &str) {
-        if let Some(mut info) = self.clients.get_mut(client_id) {
-            info.subscriptions.remove(pattern);
-        }
+    pub fn unsubscribe(&self, client_id: &str, pattern: &str) {
+        let Some(mut info) = self.clients.get_mut(client_id) else { return; };
+        info.subscriptions.remove(pattern);
+        drop(info);
+
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
         let mut root = self.tree.write();
         root.remove_subscriber(&parts, client_id);
     }
 
     pub fn publish(&self, topic: &str, data: Bytes, retain: bool, ttl_seconds: Option<u64>) -> usize {
+        if topic.is_empty() { return 0; }
+
         let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
-        if parts.is_empty() { return 0; }
 
         if retain {
-            let mut root = self.tree.write();
-            if data.is_empty() {
-                root.set_retained(&parts, None);
+            let retained = if data.is_empty() {
+                None
             } else {
-                let effective_ttl = ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds);
-                root.set_retained(&parts, Some(RetainedMessage::new(data.clone(), Some(effective_ttl))));
-            }
+                Some(RetainedMessage::new(data.clone(), Some(ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds))))
+            };
+            let mut root = self.tree.write();
+            root.set_retained(&parts, retained);
             self.retained_dirty.store(true, Ordering::Relaxed);
         }
 
@@ -179,7 +184,7 @@ impl PubSubManager {
         let mut zombies = Vec::new();
 
         for client_id in matched {
-            if let Some(info) = self.clients.get(&client_id) {
+            if let Some(info) = self.clients.get(client_id.as_ref()) {
                 if info.sender.send(msg.clone()).is_ok() {
                     sent_count += 1;
                 } else {

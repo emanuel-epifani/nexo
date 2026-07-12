@@ -1,11 +1,10 @@
 //! PubSub Radix Tree Node: Topic routing data structure
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use bytes::Bytes;
-use crate::brokers::pub_sub::snapshot::TopicSnapshot;
 
 use super::retained::RetainedMessage;
-use super::types::ClientId;
 
 pub(crate) struct Node {
     // Exact match children: "kitchen" -> Node
@@ -18,9 +17,17 @@ pub(crate) struct Node {
     // Wildcard '#' child: matches everything remaining
     // Note: Used for routing messages TO subscribers who used '#'
     pub(crate) hash_child: Option<Box<Node>>,
-    /// Only stores ClientIds. Sender resolution happens via shared DashMap at publish time.
-    pub(crate) subscribers: HashSet<ClientId>,
+    /// Only stores client ids. Sender resolution happens via shared DashMap at publish time.
+    pub(crate) subscribers: HashSet<Arc<str>>,
     pub(crate) retained: Option<RetainedMessage>,
+}
+
+fn join_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{}/{}", parent, child)
+    }
 }
 
 impl Node {
@@ -42,82 +49,68 @@ impl Node {
             && self.retained.is_none()
     }
 
-    pub(crate) fn insert_subscriber(&mut self, parts: &[String], client: &ClientId) {
+    pub(crate) fn insert_subscriber(&mut self, parts: &[String], client: &str) {
         let mut current = self;
-        for (i, part) in parts.iter().enumerate() {
-            if part == "#" {
-                if current.hash_child.is_none() {
-                    current.hash_child = Some(Box::new(Node::new()));
+        for part in parts {
+            match part.as_str() {
+                "#" => {
+                    current.hash_child.get_or_insert_with(|| Box::new(Node::new()))
+                        .subscribers.insert(Arc::from(client));
+                    return;
                 }
-                current.hash_child.as_mut().unwrap().subscribers.insert(client.clone());
-                return;
-            } else if part == "+" {
-                if current.plus_child.is_none() {
-                    current.plus_child = Some(Box::new(Node::new()));
+                "+" => {
+                    current = current.plus_child.get_or_insert_with(|| Box::new(Node::new()));
                 }
-                current = current.plus_child.as_mut().unwrap();
-            } else {
-                current = current.children.entry(part.clone()).or_insert_with(Node::new);
+                _ => {
+                    current = current.children.entry(part.clone()).or_insert_with(Node::new);
+                }
             }
         }
-        current.subscribers.insert(client.clone());
+        current.subscribers.insert(Arc::from(client));
     }
 
-    pub(crate) fn remove_subscriber(&mut self, parts: &[String], client: &ClientId) -> bool {
-        if parts.is_empty() {
+    pub(crate) fn remove_subscriber(&mut self, parts: &[String], client: &str) -> bool {
+        let Some((head, tail)) = parts.split_first() else {
             self.subscribers.remove(client);
             return self.is_empty();
+        };
+
+        match head.as_str() {
+            "#" => {
+                if let Some(mut hash_node) = self.hash_child.take() {
+                    hash_node.subscribers.remove(client);
+                    if !hash_node.is_empty() {
+                        self.hash_child = Some(hash_node);
+                    }
+                }
+            }
+            "+" => {
+                if let Some(mut plus_node) = self.plus_child.take() {
+                    if !plus_node.remove_subscriber(tail, client) {
+                        self.plus_child = Some(plus_node);
+                    }
+                }
+            }
+            _ => {
+                if let Some(mut child) = self.children.remove(head) {
+                    if !child.remove_subscriber(tail, client) {
+                        self.children.insert(head.clone(), child);
+                    }
+                }
+            }
         }
 
-        let head = &parts[0];
-        let tail = &parts[1..];
-        let mut should_remove = false;
-
-        if head == "#" {
-            if let Some(ref mut hash_node) = self.hash_child {
-                hash_node.subscribers.remove(client);
-                if hash_node.is_empty() {
-                    should_remove = true;
-                }
-            }
-            if should_remove {
-                self.hash_child = None;
-            }
-        } else if head == "+" {
-            if let Some(ref mut plus_node) = self.plus_child {
-                if plus_node.remove_subscriber(tail, client) {
-                    should_remove = true;
-                }
-            }
-            if should_remove {
-                self.plus_child = None;
-            }
-        } else {
-            if let Some(child) = self.children.get_mut(head) {
-                if child.remove_subscriber(tail, client) {
-                    should_remove = true;
-                }
-            }
-            if should_remove {
-                self.children.remove(head);
-            }
-        }
-        
         self.is_empty()
     }
 
-    pub(crate) fn match_subscribers(&self, parts: &[String], results: &mut Vec<ClientId>) {
+    pub(crate) fn match_subscribers(&self, parts: &[String], results: &mut Vec<Arc<str>>) {
         // "#" matches everything from here
         if let Some(hash_node) = &self.hash_child {
-            for client in &hash_node.subscribers {
-                results.push(client.clone());
-            }
+            results.extend(hash_node.subscribers.iter().cloned());
         }
 
         if parts.is_empty() {
-            for client in &self.subscribers {
-                results.push(client.clone());
-            }
+            results.extend(self.subscribers.iter().cloned());
             return;
         }
 
@@ -154,17 +147,21 @@ impl Node {
         let head = &pattern[0];
         let tail = &pattern[1..];
 
-        if head == "+" {
-            for (key, child) in &self.children {
-                let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
-                child.collect_retained_for_pattern(tail, &next_path, results);
+        match head.as_str() {
+            "+" => {
+                for (key, child) in &self.children {
+                    let next_path = join_path(current_path, key);
+                    child.collect_retained_for_pattern(tail, &next_path, results);
+                }
             }
-        } else if head == "#" {
-            self.collect_all_retained_for_subscribe(current_path, results);
-        } else {
-            if let Some(child) = self.children.get(head) {
-                let next_path = if current_path.is_empty() { head.clone() } else { format!("{}/{}", current_path, head) };
-                child.collect_retained_for_pattern(tail, &next_path, results);
+            "#" => {
+                self.collect_all_retained_for_subscribe(current_path, results);
+            }
+            _ => {
+                if let Some(child) = self.children.get(head) {
+                    let next_path = join_path(current_path, head);
+                    child.collect_retained_for_pattern(tail, &next_path, results);
+                }
             }
         }
     }
@@ -176,7 +173,7 @@ impl Node {
             }
         }
         for (key, child) in &self.children {
-            let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
+            let next_path = join_path(current_path, key);
             child.collect_all_retained_for_subscribe(&next_path, results);
         }
     }
@@ -188,69 +185,42 @@ impl Node {
             }
         }
         for (key, child) in &self.children {
-            let next_path = if current_path.is_empty() { key.clone() } else { format!("{}/{}", current_path, key) };
+            let next_path = join_path(current_path, key);
             child.collect_all_retained(&next_path, results);
+        }
+    }
+
+    fn cleanup_child(child: &mut Option<Box<Node>>) -> bool {
+        if let Some(node) = child.as_mut() {
+            let cleaned = node.cleanup_expired_retained();
+            if node.is_empty() {
+                *child = None;
+            }
+            cleaned
+        } else {
+            false
         }
     }
 
     pub(crate) fn cleanup_expired_retained(&mut self) -> bool {
         let mut cleaned = false;
-        
+
         if let Some(retained) = &self.retained {
             if retained.is_expired() {
                 self.retained = None;
                 cleaned = true;
             }
         }
-        
-        for child in self.children.values_mut() {
-            if child.cleanup_expired_retained() {
-                cleaned = true;
-            }
-        }
-        
-        if let Some(ref mut plus_child) = self.plus_child {
-            if plus_child.cleanup_expired_retained() {
-                cleaned = true;
-            }
-        }
-        
-        if let Some(ref mut hash_child) = self.hash_child {
-            if hash_child.cleanup_expired_retained() {
-                cleaned = true;
-            }
-        }
-        
+
+        self.children.retain(|_, child| {
+            let child_cleaned = child.cleanup_expired_retained();
+            cleaned |= child_cleaned;
+            !child.is_empty()
+        });
+
+        cleaned |= Self::cleanup_child(&mut self.plus_child);
+        cleaned |= Self::cleanup_child(&mut self.hash_child);
+
         cleaned
-    }
-
-    pub(crate) fn collect_filtered_topics(&self, base_path: &str, search: Option<&str>, topics: &mut Vec<TopicSnapshot>) {
-        if !base_path.is_empty() {
-            let matches = search.map_or(true, |s| base_path.contains(s));
-            if matches && (!self.subscribers.is_empty() || self.retained.is_some()) {
-                topics.push(TopicSnapshot {
-                    full_path: base_path.to_string(),
-                    subscribers: self.subscribers.len(),
-                    retained_payload: self.retained.as_ref()
-                        .filter(|r| !r.is_expired())
-                        .map(|retained| retained.data.clone()),
-                });
-            }
-        }
-
-        for (child_name, child_node) in &self.children {
-            let full_path = if base_path.is_empty() { child_name.clone() } else { format!("{}/{}", base_path, child_name) };
-            child_node.collect_filtered_topics(&full_path, search, topics);
-        }
-
-        if let Some(plus_node) = &self.plus_child {
-            let full_path = if base_path.is_empty() { "+".to_string() } else { format!("{}/+", base_path) };
-            plus_node.collect_filtered_topics(&full_path, search, topics);
-        }
-
-        if let Some(hash_node) = &self.hash_child {
-            let full_path = if base_path.is_empty() { "#".to_string() } else { format!("{}/#", base_path) };
-            hash_node.collect_filtered_topics(&full_path, search, topics);
-        }
     }
 }

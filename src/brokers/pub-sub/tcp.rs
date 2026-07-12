@@ -2,7 +2,6 @@
 
 use bytes::Bytes;
 
-use crate::brokers::pub_sub::ClientId;
 use crate::transport::tcp::protocol::wire::PayloadCursor;
 use crate::transport::tcp::protocol::{ParseError, Response};
 use crate::NexoEngine;
@@ -24,7 +23,7 @@ pub const OP_UNSUB: u8 = 0x23;
 
 #[derive(Debug)]
 enum PubSubCommand {
-    Publish { topic: String, retain: Option<bool>, ttl: Option<u64>, payload: Bytes },
+    Publish { topic: String, retain: bool, ttl: Option<u64>, payload: Bytes },
     Subscribe { topic: String },
     Unsubscribe { topic: String },
 }
@@ -35,7 +34,7 @@ impl PubSubCommand {
             OP_PUB => {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let retain: Option<bool> = if flags & 0x01 != 0 { Some(true) } else { None };
+                let retain = flags & 0x01 != 0;
                 let ttl = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
                 let payload = cursor.read_remaining();
                 Ok(Self::Publish { topic, retain, ttl, payload })
@@ -69,19 +68,18 @@ pub async fn handle(
     };
 
     let pubsub = &engine.pubsub;
-    let client_id = ClientId(session_id.to_owned());
 
     match cmd {
         PubSubCommand::Publish { topic, retain, ttl, payload } => {
-            let _count = pubsub.publish(&topic, payload, retain.unwrap_or(false), ttl);
+            let _count = pubsub.publish(&topic, payload, retain, ttl);
             Response::Ok
         }
         PubSubCommand::Subscribe { topic } => {
-            pubsub.subscribe(&client_id, &topic);
+            pubsub.subscribe(session_id, &topic);
             Response::Ok
         }
         PubSubCommand::Unsubscribe { topic } => {
-            pubsub.unsubscribe(&client_id, &topic);
+            pubsub.unsubscribe(session_id, &topic);
             Response::Ok
         }
     }

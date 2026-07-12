@@ -2,12 +2,10 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
-use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct RetainedMessage {
     pub(crate) data: Bytes,
-    #[serde(skip)]
     pub(crate) expires_at: Option<Instant>,
     pub(crate) expires_at_unix: Option<u64>,
 }
@@ -18,19 +16,31 @@ impl RetainedMessage {
         let expires_at_unix = ttl_seconds.map(|secs| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs() + secs
         });
         Self { data, expires_at, expires_at_unix }
     }
 
     pub(crate) fn is_expired(&self) -> bool {
-        self.expires_at.map_or(false, |exp| Instant::now() >= exp)
+        if let Some(exp) = self.expires_at {
+            Instant::now() >= exp
+        } else {
+            self.expires_at_unix.map_or(false, |unix| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() >= unix
+            })
+        }
     }
 
     pub(crate) fn from_persisted(data: Bytes, expires_at_unix: Option<u64>) -> Self {
         let expires_at = expires_at_unix.and_then(|unix_ts| {
-            let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             if unix_ts > now_unix {
                 let remaining = unix_ts - now_unix;
                 Some(Instant::now() + std::time::Duration::from_secs(remaining))

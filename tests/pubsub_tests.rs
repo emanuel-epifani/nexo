@@ -1,4 +1,4 @@
-use nexo::brokers::pub_sub::{PubSubManager, ClientId};
+use nexo::brokers::pub_sub::PubSubManager;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use bytes::Bytes;
@@ -23,11 +23,11 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_basic_pub_sub() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("sub1".to_string());
+            let client_id = "sub1".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
 
             // 1. Connect
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             // 2. Subscribe
             let topic = "sensors/temp";
@@ -47,9 +47,9 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_wildcard_plus_single_level() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("wild_plus".to_string());
+            let client_id = "wild_plus".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             // Subscribe to "home/+/status"
             manager.subscribe(&client_id, "home/+/status");
@@ -71,9 +71,9 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_wildcard_hash_multi_level() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("wild_hash".to_string());
+            let client_id = "wild_hash".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             // Subscribe to "logs/#"
             manager.subscribe(&client_id, "logs/#");
@@ -96,9 +96,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from("dark_mode"), true, None);
 
             // 2. New Client Connects & Subscribes
-            let client_id = ClientId("late_joiner".to_string());
+            let client_id = "late_joiner".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             manager.subscribe(&client_id, topic);
 
@@ -117,10 +117,10 @@ mod pubsub_tests {
             config.persistence_path = path;
             let manager = Arc::new(PubSubManager::new(Arc::new(config)));
             
-            let client_id = ClientId("leaver".to_string());
+            let client_id = "leaver".to_string();
             let (tx, _rx) = mpsc::unbounded_channel();
 
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, "chat/room1");
 
             // Verify subscription exists (indirectly via publish count)
@@ -144,9 +144,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from("23.5"), true, Some(2));
 
             // Subscribe immediately - should receive retained
-            let client_id = ClientId("sub1".to_string());
+            let client_id = "sub1".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, topic);
 
             let msg = rx.recv().await.expect("Should receive retained message");
@@ -156,9 +156,9 @@ mod pubsub_tests {
             tokio::time::sleep(Duration::from_secs(3)).await;
 
             // New subscriber should NOT receive expired retained
-            let client_id2 = ClientId("sub2".to_string());
+            let client_id2 = "sub2".to_string();
             let (tx2, mut rx2) = mpsc::unbounded_channel();
-            manager.connect(client_id2.clone(), tx2);
+            manager.connect(&client_id2, tx2);
             manager.subscribe(&client_id2, topic);
 
             // Should timeout (no retained message)
@@ -175,9 +175,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from("dark"), true, None);
 
             // 2. Verify retained exists
-            let client_id = ClientId("sub1".to_string());
+            let client_id = "sub1".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, topic);
 
             let msg = rx.recv().await.expect("Should receive retained");
@@ -187,9 +187,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from(""), true, None);
 
             // 4. New subscriber should NOT receive retained
-            let client_id2 = ClientId("sub2".to_string());
+            let client_id2 = "sub2".to_string();
             let (tx2, mut rx2) = mpsc::unbounded_channel();
-            manager.connect(client_id2.clone(), tx2);
+            manager.connect(&client_id2, tx2);
             manager.subscribe(&client_id2, topic);
 
             let result = tokio::time::timeout(Duration::from_millis(100), rx2.recv()).await;
@@ -229,9 +229,9 @@ mod pubsub_tests {
                 let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
 
                 // Subscribe - should receive retained from disk
-                let client_id = ClientId("after_restart".to_string());
+                let client_id = "after_restart".to_string();
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                manager2.connect(client_id.clone(), tx);
+                manager2.connect(&client_id, tx);
                 manager2.subscribe(&client_id, topic);
 
                 let msg = rx.recv().await.expect("Should receive retained after restart");
@@ -250,9 +250,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from("old_value"), true, Some(1));
 
             // Verify retained exists
-            let client_id = ClientId("sub1".to_string());
+            let client_id = "sub1".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, topic);
 
             let msg = rx.recv().await.expect("Should receive retained");
@@ -263,9 +263,9 @@ mod pubsub_tests {
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // New subscriber should NOT receive expired retained
-            let client_id2 = ClientId("sub2".to_string());
+            let client_id2 = "sub2".to_string();
             let (tx2, mut rx2) = mpsc::unbounded_channel();
-            manager.connect(client_id2.clone(), tx2);
+            manager.connect(&client_id2, tx2);
             manager.subscribe(&client_id2, topic);
 
             let result = tokio::time::timeout(Duration::from_millis(100), rx2.recv()).await;
@@ -283,10 +283,10 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_concurrent_publish_disconnect() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("concurrent".to_string());
+            let client_id = "concurrent".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
             
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, "test/topic");
             
             // Spawn consumer to drain channel
@@ -313,10 +313,10 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_global_hash_subscriber() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("global".to_string());
+            let client_id = "global".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
             
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, "#");
             
             // Should receive ALL messages from any topic
@@ -345,9 +345,9 @@ mod pubsub_tests {
             manager.publish("sensors/pressure", Bytes::from("1013"), true, None);
             
             // Subscribe with wildcard AFTER retained messages exist
-            let client_id = ClientId("wildcard_late".to_string());
+            let client_id = "wildcard_late".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, "sensors/+");
             
             // Should receive ALL 3 retained messages
@@ -376,9 +376,9 @@ mod pubsub_tests {
             // Create 3 clients subscribing to same topic
             let mut receivers = Vec::new();
             for i in 0..3 {
-                let client_id = ClientId(format!("client_{}", i));
+                let client_id = format!("client_{}", i);
                 let (tx, rx) = mpsc::unbounded_channel();
-                manager.connect(client_id.clone(), tx);
+                manager.connect(&client_id, tx);
                 manager.subscribe(&client_id, topic);
                 receivers.push(rx);
             }
@@ -398,10 +398,10 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_same_client_multiple_subscriptions() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("multi_sub".to_string());
+            let client_id = "multi_sub".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
             
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             
             // Subscribe to same topic twice (should deduplicate)
             manager.subscribe(&client_id, "sensors/temp");
@@ -422,10 +422,10 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_unsubscribe_without_subscribe() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("never_subbed".to_string());
+            let client_id = "never_subbed".to_string();
             let (tx, _rx) = mpsc::unbounded_channel();
             
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             
             // Unsubscribe from topic never subscribed to (should not panic)
             manager.unsubscribe(&client_id, "sensors/temp");
@@ -438,10 +438,10 @@ mod pubsub_tests {
         #[tokio::test]
         async fn test_disconnect_during_subscribe() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("race".to_string());
+            let client_id = "race".to_string();
             let (tx, _rx) = mpsc::unbounded_channel();
             
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             
             // Subscribe and disconnect in parallel (race condition test)
             let manager_clone = manager.clone();
@@ -475,9 +475,9 @@ mod pubsub_tests {
             manager.publish(topic, Bytes::from("v3"), true, None);
             
             // New subscriber should receive only latest (v3)
-            let client_id = ClientId("late".to_string());
+            let client_id = "late".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             manager.subscribe(&client_id, topic);
             
             let msg = rx.recv().await.expect("Should receive retained");
@@ -493,9 +493,9 @@ mod pubsub_tests {
             let (manager, _tmp) = setup_pubsub_manager().await;
             
             // Client subscribes to multiple overlapping patterns
-            let client_id = ClientId("multi_pattern".to_string());
+            let client_id = "multi_pattern".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
             
             manager.subscribe(&client_id, "sensors/+/temp");
             manager.subscribe(&client_id, "sensors/kitchen/+");
@@ -525,9 +525,9 @@ mod pubsub_tests {
         #[tokio::test]
         async fn bench_pubsub_throughput_exact_match() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("bench_sub".to_string());
+            let client_id = "bench_sub".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             let topic = "bench/speed";
             manager.subscribe(&client_id, topic);
@@ -553,9 +553,9 @@ mod pubsub_tests {
         #[tokio::test]
         async fn bench_pubsub_throughput_wildcard_match() {
             let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = ClientId("bench_wild".to_string());
+            let client_id = "bench_wild".to_string();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(client_id.clone(), tx);
+            manager.connect(&client_id, tx);
 
             // Subscribe with wildcard
             manager.subscribe(&client_id, "bench/+/metric");
@@ -584,9 +584,9 @@ mod pubsub_tests {
 
             // Create 100 subscribers
             for i in 0..num_subs {
-                let client_id = ClientId(format!("sub_{}", i));
+                let client_id = format!("sub_{}", i);
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                manager.connect(client_id.clone(), tx);
+                manager.connect(&client_id, tx);
                 manager.subscribe(&client_id, topic);
 
                 tokio::spawn(async move {
