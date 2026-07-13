@@ -87,12 +87,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
           scope: '@emanuelepifani'
-
-      - name: Update npm
-        run: npm install -g npm@latest
 
       - name: Install dependencies
         working-directory: sdk/ts
@@ -117,7 +114,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Deploy to Vercel
         working-directory: .
