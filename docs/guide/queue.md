@@ -139,15 +139,11 @@ Global, set at server startup.
 | `QUEUE_DEFAULT_FLUSH_MS` | `100` | Max durability window (ms) — how often writes are flushed to disk |
 | `QUEUE_WRITER_BATCH_SIZE` | `50000` | SQLite writer batch size (internal tuning) |
 
-### Per-Queue (`config.json`)
+### SDK Overrides
 
-Persisted at queue creation, read on restart.
+Fields settable at `create()` time. If omitted, system defaults apply.
 
-| Field | From | SDK override? |
+| Field | SDK option | System default (env var) |
 |:---|:---|:---|
-| `visibility_timeout_ms` | SDK or system default | **Yes** |
-| `max_retries` | SDK or system default | **Yes** |
-| `default_batch_size` | System default | No |
-| `default_wait_ms` | System default | No |
-| `default_flush_ms` | System default | No |
-| `writer_batch_size` | System default | No |
+| Visibility timeout | `visibilityTimeoutMs` | `30000` (`QUEUE_VISIBILITY_MS`) |
+| Max retries | `maxRetries` | `5` (`QUEUE_MAX_RETRIES`) |

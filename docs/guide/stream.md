@@ -356,22 +356,13 @@ Global, set at server startup.
 | `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |
 | `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLT |
 
-### Per-Topic (`config.json`)
+### SDK Overrides
 
-Persisted at topic creation, read on restart.
+Fields settable at `create()` time. If omitted, system defaults apply.
 
-| Field | From | SDK override? |
+| Field | SDK option | System default (env var) |
 |:---|:---|:---|
-| `retention` | SDK or system default | **Yes** |
-| `max_segment_size` | System default | No |
-| `ram_soft_limit` | System default | No |
-| `max_ack_pending` | System default | No |
-| `ack_wait_ms` | System default | No |
-| `max_deliveries` | System default | No |
-
-### Retention
-
-The only SDK-overridable setting. Set at `create()`, persisted in `config.json`:
+| Retention | `retention: { maxAgeMs, maxBytes }` | 7 days, 1GB (`STREAM_DEFAULT_RETENTION_AGE_MS`, `STREAM_DEFAULT_RETENTION_BYTES`) |
 
 ```typescript
 await client.stream('my-topic').create({
