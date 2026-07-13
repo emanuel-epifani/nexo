@@ -126,8 +126,8 @@ impl QueueState {
         }
     }
 
-    /// Pop the highest priority message. Returns (message, needs_pulse).
-    pub fn pop(&mut self, visibility_timeout_ms: u64) -> (Option<Message>, bool) {
+    /// Pop the highest priority message.
+    pub fn pop(&mut self, visibility_timeout_ms: u64) -> Option<Message> {
         self.pop_single(visibility_timeout_ms)
     }
 
@@ -137,23 +137,17 @@ impl QueueState {
     }
 
     /// Take up to `max` messages for batch consumption.
-    pub fn take_batch(&mut self, max: usize, visibility_timeout_ms: u64) -> (Vec<Message>, bool) {
+    pub fn take_batch(&mut self, max: usize, visibility_timeout_ms: u64) -> Vec<Message> {
         let mut result = Vec::with_capacity(max);
-        let mut any_earliest = false;
 
         while result.len() < max {
             match self.pop_single(visibility_timeout_ms) {
-                (Some(msg), is_earliest) => {
-                    if is_earliest {
-                        any_earliest = true;
-                    }
-                    result.push(msg);
-                }
-                (None, _) => break,
+                Some(msg) => result.push(msg),
+                None => break,
             }
         }
 
-        (result, any_earliest)
+        result
     }
 
     /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
@@ -248,8 +242,8 @@ impl QueueState {
 
     // --- Internal helpers ---
 
-    /// Pop a single message from the queue. Returns (message, is_earliest_timeout).
-    fn pop_single(&mut self, visibility_timeout_ms: u64) -> (Option<Message>, bool) {
+    /// Pop a single message from the queue.
+    fn pop_single(&mut self, visibility_timeout_ms: u64) -> Option<Message> {
         let now = current_time_ms();
 
         // Find highest priority ready message
@@ -260,7 +254,7 @@ impl QueueState {
 
         let next_id = match next_id {
             Some(id) => id,
-            None => return (None, false),
+            None => return None,
         };
 
         let timeout = now + visibility_timeout_ms;
@@ -270,18 +264,10 @@ impl QueueState {
         if let Some(msg) = self.registry.get_mut(&next_id) {
             msg.visible_at = timeout;
             msg.attempts += 1;
-
-            // Check if this is the earliest timeout
-            let is_earliest = self.waiting_for_ack
-                .keys()
-                .next()
-                .map(|&t| t == timeout)
-                .unwrap_or(false);
-
-            return (Some(msg.clone()), is_earliest);
+            return Some(msg.clone());
         }
 
-        (None, false)
+        None
     }
 
     /// Remove a message ID from the appropriate index based on its state

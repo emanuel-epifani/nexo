@@ -293,7 +293,7 @@ impl QueueManager {
     pub async fn pop(&self, queue_name: &str) -> Option<Message> {
         let shared = self.get_queue(queue_name)?;
 
-        let (msg_opt, _) = {
+        let msg_opt = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
             inner.state.pop(vt)
@@ -382,7 +382,7 @@ impl QueueManager {
         let msgs = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
-            let (msgs, _) = inner.state.take_batch(max_val, vt);
+            let msgs = inner.state.take_batch(max_val, vt);
             msgs
         };
         if !msgs.is_empty() {
@@ -403,7 +403,7 @@ impl QueueManager {
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;
-                let (msgs, _) = inner.state.take_batch(max_val, vt);
+                let msgs = inner.state.take_batch(max_val, vt);
                 msgs
             };
             if !msgs.is_empty() {
@@ -422,7 +422,7 @@ impl QueueManager {
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;
-                let (msgs, _) = inner.state.take_batch(max_val, vt);
+                let msgs = inner.state.take_batch(max_val, vt);
                 msgs
             };
             if !msgs.is_empty() {
