@@ -54,23 +54,6 @@ impl MapCmd {
             _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
         }
     }
-
-    fn dispatch(self, map: &crate::brokers::store::domain::map::Map) -> Response {
-        match self {
-            Self::Set { key, ttl, value } => {
-                map.set(key, value, ttl);
-                Response::Ok
-            }
-            Self::Get { key } => map
-                .get(&key)
-                .map(Response::Data)
-                .unwrap_or(Response::Null),
-            Self::Del { key } => {
-                map.del(&key);
-                Response::Ok
-            }
-        }
-    }
 }
 
 impl StoreCommand {
@@ -93,6 +76,21 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
     };
 
     match cmd {
-        StoreCommand::Map(c) => c.dispatch(&engine.store.map),
+        StoreCommand::Map(c) => match c {
+            MapCmd::Set { key, ttl, value } => {
+                engine.store.map.set(key, value, ttl);
+                Response::Ok
+            }
+            MapCmd::Get { key } => engine
+                .store
+                .map
+                .get(&key)
+                .map(Response::Data)
+                .unwrap_or(Response::Null),
+            MapCmd::Del { key } => {
+                engine.store.map.del(&key);
+                Response::Ok
+            }
+        },
     }
 }
