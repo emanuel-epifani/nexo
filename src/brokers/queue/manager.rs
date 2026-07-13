@@ -374,6 +374,10 @@ impl QueueManager {
         let max_val = max.unwrap_or(self.config.default_batch_size);
         let wait_val = wait_ms.unwrap_or(self.config.default_wait_ms);
 
+        if max_val == 0 {
+            return Err("batch_size must be >= 1".to_string());
+        }
+
         // Try immediate fetch
         let msgs = {
             let mut inner = Self::lock(&shared.inner);

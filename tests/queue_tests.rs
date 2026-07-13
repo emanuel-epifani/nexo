@@ -214,6 +214,19 @@ mod queue_tests {
         use super::*;
 
         #[tokio::test]
+        async fn test_consume_batch_rejects_zero() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("adv_batch_zero_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg"), 0).await.unwrap();
+
+            let result = manager.consume_batch(q.clone(), Some(0), Some(100)).await;
+            assert!(result.is_err(), "batch_size=0 should return error");
+            assert_eq!(result.unwrap_err(), "batch_size must be >= 1");
+        }
+
+        #[tokio::test]
         async fn test_batch_consume() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("adv_batch_{}", Uuid::new_v4());

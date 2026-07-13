@@ -249,6 +249,9 @@ export class NexoQueue<T = any> {
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
     const concurrency = options.concurrency ?? DEFAULT_CONFIG.queue.concurrency;
 
+    if (batchSize < 1) throw new Error(`batchSize must be >= 1, got ${batchSize}`);
+    if (concurrency < 1) throw new Error(`concurrency must be >= 1, got ${concurrency}`);
+
     let active = true;
 
     const loop = async () => {

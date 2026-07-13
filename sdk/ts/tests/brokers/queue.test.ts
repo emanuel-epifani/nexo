@@ -4,6 +4,22 @@ import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
 describe('QUEUE', () => {
+    it('should reject batchSize=0 in subscribe', async () => {
+        const qName = `queue-batch-zero-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await expect(q.subscribe(async () => {}, { batchSize: 0 })).rejects.toThrow(/batchSize must be >= 1/);
+        await q.delete();
+    });
+
+    it('should reject concurrency=0 in subscribe', async () => {
+        const qName = `queue-conc-zero-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await expect(q.subscribe(async () => {}, { concurrency: 0 })).rejects.toThrow(/concurrency must be >= 1/);
+        await q.delete();
+    });
+
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
         const qName = `queue-life-${randomUUID()}`;
         const q = await nexo.queue(qName).create();
