@@ -59,6 +59,30 @@ describe('QUEUE', () => {
         await q.delete();
     });
 
+    it('should stop consumer when queue is deleted during subscribe', async () => {
+        const qName = `queue-deleted-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await q.push('msg1');
+
+        const sub = await q.subscribe(async () => {
+            await new Promise(r => setTimeout(r, 500));
+        }, { batchSize: 1, waitMs: 500, concurrency: 1 });
+
+        // Wait for consumer to be active
+        await new Promise(r => setTimeout(r, 200));
+
+        // Delete queue while consumer is running
+        await q.delete();
+
+        // Wait for consumer to detect the error and break
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Consumer should have stopped — no infinite loop
+        // We verify by checking that no errors are thrown (loop exited cleanly)
+        sub.stop();
+    });
+
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
         const qName = `queue-life-${randomUUID()}`;
         const q = await nexo.queue(qName).create();

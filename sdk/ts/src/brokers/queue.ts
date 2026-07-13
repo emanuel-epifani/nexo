@@ -2,7 +2,7 @@ import { NexoConnection } from '../connection';
 import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
-import { ConnectionClosedError } from '../errors';
+import { ConnectionClosedError, RequestTimeoutError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 
 enum QueueOpcode {
@@ -287,12 +287,12 @@ export class NexoQueue<T = any> {
         } catch (e: any) {
           if (!active) break;
           // Catch-all for connection issues to prevent Unhandled Rejection
-          if (!this.conn.isConnected || e instanceof ConnectionClosedError || e.code === 'ECONNRESET') {
+          if (!this.conn.isConnected || e instanceof ConnectionClosedError || e instanceof RequestTimeoutError || e.code === 'ECONNRESET') {
             await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
             continue;
           }
-          this.logger.error(`[QUEUE-LOOP:${this.name}] CRITICAL ERROR:`, e);
-          await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.long));
+          this.logger.error(`[Queue:${this.name}] Consumer stopping:`, e.message);
+          break;
         }
       }
     };
