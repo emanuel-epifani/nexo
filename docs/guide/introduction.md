@@ -13,7 +13,7 @@ The operational overhead is disproportionate to the actual problems being solved
 
 ## The Solution
 
-Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**. One TCP connection. One binary. Four engines.
+Nexo is an **all-in-one broker** designed to make project setup, local development, and developer experience as smooth as possible. One binary, one TCP connection, one SDK — four communication models ready to use out of the box.
 
 - **Unified:** One TCP connection for Caching, Pub/Sub, Queues, and Streams.
 - **Simple:** Deploy a single binary. No clusters to manage. No JVMs to tune.
@@ -66,3 +66,13 @@ await q.push({ to: "test@test.com" });
 const stream = await client.stream('events').create();
 await stream.publish({ type: 'login', userId: 'u1' });
 ```
+
+## When NOT to Use Nexo
+
+Nexo is built for vertical deployments and developer experience, not for every scenario. It is **NOT** the right choice if:
+
+- **You need multi-region replication** — Nexo is a single-node broker. If you need geo-distributed replication, use Kafka or NATS with clustering.
+- **You're at Kafka-scale throughput** (>1M msg/sec sustained with multiple TB/day) — Nexo handles impressive throughput for a single node, but it won't replace a multi-broker Kafka cluster at petabyte scale.
+- **You need exactly-once delivery semantics across distributed consumers** — Nexo Queue provides at-least-once with acks and retries. If you need exactly-once across distributed systems, look elsewhere.
+
+If none of the above applies to you, Nexo might be exactly what you're looking for.

@@ -22,6 +22,8 @@ One Binary. Four Brokers. Zero Operational Headaches.
   - [PUB/SUB (Real-Time Broadcast)](#2-pubsub-real-time-broadcast)
   - [QUEUE (Job Processing)](#3-queue-job-processing)
   - [STREAM (Event Log)](#4-stream-event-log)
+- [Performance](#-performance)
+- [When NOT to Use Nexo](#️-when-not-to-use-nexo)
 - [Getting Started](#getting-started)
 
 ---
@@ -30,9 +32,9 @@ One Binary. Four Brokers. Zero Operational Headaches.
 
 Modern backend architecture suffers from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized systems—Redis for caching, RabbitMQ for jobs, Kafka for streams—each with its own protocol, configuration, and maintenance overhead.
 
-Nexo offers a **pragmatic trade-off**: it sacrifices "infinite horizontal scale" for **operational simplicity** and **vertical performance**.
+Nexo is an **all-in-one broker** designed to make project setup, local development, and developer experience as smooth as possible. One binary, one TCP connection, one SDK — four communication models ready to use out of the box.
 
-Here's the reality: most scale-ups will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 99%—companies that need **high throughput without operational complexity**.
+Here's the reality: most projects will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 90%—teams that need **high throughput without operational complexity**, and want their local environment to match production without emulators or mocks.
 
 ## 🏗️ Architecture
 
@@ -73,10 +75,10 @@ Nexo is built on the four pillars of modern event-driven architecture. Instead o
 
 Each broker is purpose-built to solve a specific architectural pattern:
 
-*   **Store** replaces external caches (like Redis) for shared state.
-*   **Pub/Sub** replaces message buses (like MQTT/Redis PubSub) for real-time volatility.
-*   **Queue** replaces job queues (like RabbitMQ/SQS) for reliable background work.
-*   **Stream** replaces event logs (like Kafka) for durable history.
+*   **Store**: in-memory key-value with TTL for shared state across services.
+*   **Pub/Sub**: transient message bus with wildcard topic routing for real-time broadcast.
+*   **Queue**: durable FIFO with acks, retries, priority, and Dead Letter Queues for reliable background work.
+*   **Stream**: append-only event log with consumer groups and server-side key ordering for durable history.
 
 Everything is available instantly via a unified Client.
 
@@ -161,11 +163,36 @@ Everything is available instantly via a unified Client.
                                      └────────────┘   └────────────┘
 ```
 
-*   **Partition-Free Architecture:** Unlike Kafka, Nexo streams are a single, contiguous log. This guarantees absolute global ordering of events and eliminates the operational headache of managing and rebalancing partitions.
+*   **Partition-Free Architecture:** Nexo streams are a single, contiguous log with **server-side key ordering**. No partition keys to choose, no rebalancing, no out-of-order events across partitions. What you append is what consumers read, in the exact order.
 *   **Immutable History:** Events are strictly appended and never modified, ensuring a tamper-proof audit log.
 *   **Consumer Groups:** Maintains separate read cursors (offsets) for different consumers, allowing independent processing speeds.
 *   **Replayability:** Consumers can rewind their offset to re-process historical events from any point in time.
 
+
+## 📊 Performance
+
+Benchmarks run on MacBook Pro M4 (Single Node):
+
+| Engine   | Throughput     | Latency (p99) |
+|----------|----------------|---------------|
+| Store    | 4.5M ops/sec   | < 1 µs        |
+| PubSub   | 3.8M msg/sec   | < 1 µs        |
+| Stream   | 1.9M ops/sec   | < 1 µs        |
+| Queue    | 400k ops/sec   | 2 µs          |
+
+---
+
+## ⚠️ When NOT to Use Nexo
+
+Nexo is built for vertical deployments and developer experience, not for every scenario. It is **NOT** the right choice if:
+
+- **You need multi-region replication** — Nexo is a single-node broker. If you need geo-distributed replication, use Kafka or NATS with clustering.
+- **You're at Kafka-scale throughput** (>1M msg/sec sustained with multiple TB/day) — Nexo handles impressive throughput for a single node, but it won't replace a multi-broker Kafka cluster at petabyte scale.
+- **You need exactly-once delivery semantics across distributed consumers** — Nexo Queue provides at-least-once with acks and retries. If you need exactly-once across distributed systems, look elsewhere.
+
+If none of the above applies to you, Nexo might be exactly what you're looking for.
+
+---
 
 ## 🚀 Getting Started
 

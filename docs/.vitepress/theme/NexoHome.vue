@@ -80,14 +80,14 @@ const engines = [
   {
     icon: 'list-ordered',
     title: 'Queue',
-    desc: 'Reliable job processing with priority, retry and Dead Letter Queues.',
+    desc: 'Reliable job processing with Priority, Retry and Dead Letter Queues.',
     perf: '400k ops/sec',
     link: '/guide/queue',
   },
   {
     icon: 'activity',
     title: 'Stream',
-    desc: 'Persistent event log with Consumer Groups, partitions and offset tracking.',
+    desc: 'Persistent event log with Consumer Groups, server-side Key Ordering and Offset Tracking.',
     perf: '1.9M ops/sec',
     link: '/guide/stream',
   },
@@ -133,22 +133,19 @@ function handleCopy() {
     <section class="hero-section">
       <div class="hero-glow" />
       <div class="hero-content">
-        <div class="hero-badge">
-          ⚡ High Performance · Zero Config
-        </div>
         <h1 class="hero-title">
           <span class="hero-title-nexo">Nexo</span>
         </h1>
         <p class="hero-subtitle">
-          <span class="hero-subtitle-white">Your Entire Stack </span>
-          <span class="hero-subtitle-gradient">in a Single Binary</span>
+          <span class="hero-subtitle-white">All Your Brokers</span>
+          <span class="hero-subtitle-gradient"> in a Single Binary</span>
         </p>
         <p class="hero-desc">
           <strong>Cache</strong>, <strong>Pub/Sub</strong>, <strong>Streams</strong>, <strong>Queues</strong>. Everything out of the box in a single high-performance <strong>Rust</strong> binary.
         </p>
         <p class="hero-desc">
           No external dependencies, no emulators, no cloud lock-in. The same container runs on your laptop and in production <br>
-            just <code>docker run</code> and start coding.
+            <br></br>just <code>docker run</code> and start coding.
         </p>
         <a href="/guide/quickstart" class="hero-cta">
           Get Started →
