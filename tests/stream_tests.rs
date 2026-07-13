@@ -1426,4 +1426,70 @@ mod stream_tests {
             ack_message(&manager, group, topic, &consumer_b, 1).await;
         }
     }
+
+    mod persistence_crc {
+        use nexo::brokers::stream::{serialize_message, read_log_segment, recover_topic};
+        use std::path::PathBuf;
+
+        #[tokio::test]
+        async fn read_log_segment_stops_at_corrupted_record() {
+            let tmp = tempfile::tempdir().unwrap();
+            let seg_path: PathBuf = tmp.path().join("1.log");
+
+            // Write 3 valid messages
+            let mut buf = Vec::new();
+            serialize_message(&mut buf, 1, 1000, None, b"msg1");
+            serialize_message(&mut buf, 2, 2000, None, b"msg2");
+            serialize_message(&mut buf, 3, 3000, None, b"msg3");
+            tokio::fs::write(&seg_path, &buf).await.unwrap();
+
+            // Corrupt the CRC of message 2.
+            // Each record: [len=22: 4B][crc: 4B][content: 22B] = 30 bytes total
+            // Record 2 starts at offset 30, CRC at offset 30+4 = 34
+            let mut data = tokio::fs::read(&seg_path).await.unwrap();
+            data[34] ^= 0xFF; // flip bits in CRC of msg2
+            tokio::fs::write(&seg_path, &data).await.unwrap();
+
+            // read_log_segment should stop at msg2, return only msg1
+            let msgs = read_log_segment(&seg_path, 0, 100).await;
+            assert_eq!(msgs.len(), 1, "Should stop at corrupted record");
+            assert_eq!(msgs[0].seq, 1);
+        }
+
+        #[tokio::test]
+        async fn recover_topic_truncates_at_corrupted_record() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("test-topic");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            let mut buf = Vec::new();
+            serialize_message(&mut buf, 1, 1000, None, b"msg1");
+            serialize_message(&mut buf, 2, 2000, None, b"msg2");
+            serialize_message(&mut buf, 3, 3000, None, b"msg3");
+            tokio::fs::write(&seg_path, &buf).await.unwrap();
+
+            // Corrupt CRC of msg2 (offset 34)
+            let mut data = tokio::fs::read(&seg_path).await.unwrap();
+            data[34] ^= 0xFF;
+            tokio::fs::write(&seg_path, &data).await.unwrap();
+
+            let file_size_before = tokio::fs::metadata(&seg_path).await.unwrap().len();
+
+            // recover_topic should stop at msg2, load only msg1, and truncate the file
+            let state = recover_topic("test-topic", tmp.path().to_path_buf()).await;
+            assert_eq!(state.messages.len(), 1, "Recovery should stop at corrupted record");
+            assert_eq!(state.messages[0].seq, 1);
+
+            // File should be truncated to 30 bytes (only msg1)
+            let file_size_after = tokio::fs::metadata(&seg_path).await.unwrap().len();
+            assert_eq!(file_size_after, 30, "Segment file should be truncated to first record only");
+            assert!(file_size_after < file_size_before, "File should be smaller after truncation");
+
+            // Re-reading the truncated file should yield only msg1, no corruption
+            let state2 = recover_topic("test-topic", tmp.path().to_path_buf()).await;
+            assert_eq!(state2.messages.len(), 1, "Re-reading truncated file should have no corruption");
+            assert_eq!(state2.messages[0].seq, 1);
+        }
+    }
 }

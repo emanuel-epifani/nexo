@@ -405,6 +405,34 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Optio
     buf.put_slice(payload);
 }
 
+enum ReadOutcome {
+    Record(Vec<u8>),
+    Corrupted,
+    Eof,
+}
+
+/// Read the next record from a framed file.
+/// Format: [len: u32 BE][crc: u32 BE][content: len bytes]
+/// Returns Corrupted on CRC mismatch, Eof at end of file or read error.
+async fn read_record(reader: &mut BufReader<File>) -> ReadOutcome {
+    let mut len_buf = [0u8; 4];
+    if reader.read_exact(&mut len_buf).await.is_err() { return ReadOutcome::Eof; }
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut crc_buf = [0u8; 4];
+    if reader.read_exact(&mut crc_buf).await.is_err() { return ReadOutcome::Eof; }
+    let stored_crc = u32::from_be_bytes(crc_buf);
+
+    let mut content_buf = vec![0u8; len];
+    if reader.read_exact(&mut content_buf).await.is_err() { return ReadOutcome::Eof; }
+
+    let mut hasher = Hasher::new();
+    hasher.update(&content_buf);
+    if hasher.finalize() != stored_crc { return ReadOutcome::Corrupted; }
+
+    ReadOutcome::Record(content_buf)
+}
+
 /// Read messages from a log segment file starting at a given seq.
 pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
     use bytes::Buf;
@@ -416,39 +444,29 @@ pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> V
     let mut reader = BufReader::new(file);
 
     loop {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() { break; }
-        let len = u32::from_be_bytes(len_buf);
+        match read_record(&mut reader).await {
+            ReadOutcome::Record(content_buf) => {
+                if content_buf.len() < 18 { continue; }
 
-        let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
-        let stored_crc = u32::from_be_bytes(crc_buf);
+                let mut cursor = std::io::Cursor::new(content_buf);
+                let seq = cursor.get_u64();
+                let timestamp = cursor.get_u64();
+                let key_len = cursor.get_u16();
+                let key = if key_len > 0 {
+                    let key_bytes = cursor.copy_to_bytes(key_len as usize);
+                    Some(Bytes::copy_from_slice(&key_bytes))
+                } else {
+                    None
+                };
+                let payload_len = cursor.remaining();
+                let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
-        let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).await.is_err() { break; }
-
-        let mut hasher = Hasher::new();
-        hasher.update(&content_buf);
-        if hasher.finalize() != stored_crc { continue; }
-
-        if content_buf.len() < 18 { continue; }
-        
-        let mut cursor = std::io::Cursor::new(content_buf);
-        let seq = cursor.get_u64();
-        let timestamp = cursor.get_u64();
-        let key_len = cursor.get_u16();
-        let key = if key_len > 0 {
-            let key_bytes = cursor.copy_to_bytes(key_len as usize);
-            Some(Bytes::copy_from_slice(&key_bytes))
-        } else {
-            None
-        };
-        let payload_len = cursor.remaining();
-        let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
-
-        if seq >= start_seq {
-            msgs.push(Message { seq, timestamp, key, payload });
-            if msgs.len() >= limit { break; }
+                if seq >= start_seq {
+                    msgs.push(Message { seq, timestamp, key, payload });
+                    if msgs.len() >= limit { break; }
+                }
+            }
+            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
         }
     }
     msgs
@@ -585,63 +603,53 @@ async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersiste
     let mut reader = BufReader::new(file);
 
     loop {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() { break; }
-        let len = u32::from_be_bytes(len_buf);
+        match read_record(&mut reader).await {
+            ReadOutcome::Record(content_buf) => {
+                let mut cursor = std::io::Cursor::new(content_buf);
+                if cursor.remaining() < 10 { continue; }
 
-        let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
-        let stored_crc = u32::from_be_bytes(crc_buf);
+                let ack_floor = cursor.get_u64();
+                let group_len = cursor.get_u16();
+                if cursor.remaining() < group_len as usize { continue; }
+                let group_bytes = cursor.copy_to_bytes(group_len as usize);
+                let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
-        let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).await.is_err() { break; }
+                let mut state = GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() };
 
-        let mut hasher = Hasher::new();
-        hasher.update(&content_buf);
-        if hasher.finalize() != stored_crc { continue; }
+                if cursor.remaining() < 4 { continue; }
+                let parked_keys_count = cursor.get_u32();
+                for _ in 0..parked_keys_count {
+                    if cursor.remaining() < 2 { break; }
+                    let key_len = cursor.get_u16();
+                    if cursor.remaining() < key_len as usize { break; }
+                    let key = Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize));
+                    state.parked_keys.insert(key);
+                }
 
-        let mut cursor = std::io::Cursor::new(content_buf);
-        if cursor.remaining() < 10 { continue; }
+                if cursor.remaining() < 4 { continue; }
+                let dlt_count = cursor.get_u32();
+                for _ in 0..dlt_count {
+                    if cursor.remaining() < 8 { break; }
+                    let seq = cursor.get_u64();
+                    if cursor.remaining() < 2 { break; }
+                    let key_len = cursor.get_u16();
+                    let key = if key_len > 0 {
+                        if cursor.remaining() < key_len as usize { break; }
+                        Some(Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize)))
+                    } else { None };
+                    if cursor.remaining() < 2 { break; }
+                    let reason_len = cursor.get_u16();
+                    if cursor.remaining() < reason_len as usize { break; }
+                    let reason = String::from_utf8_lossy(&cursor.copy_to_bytes(reason_len as usize)).to_string();
+                    if cursor.remaining() < 4 { break; }
+                    let attempts = cursor.get_u32();
+                    state.dlt_entries.insert(seq, DltEntry { reason, attempts, key });
+                }
 
-        let ack_floor = cursor.get_u64();
-        let group_len = cursor.get_u16();
-        if cursor.remaining() < group_len as usize { continue; }
-        let group_bytes = cursor.copy_to_bytes(group_len as usize);
-        let group_id = String::from_utf8_lossy(&group_bytes).to_string();
-
-        let mut state = GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() };
-
-        if cursor.remaining() < 4 { continue; }
-        let parked_keys_count = cursor.get_u32();
-        for _ in 0..parked_keys_count {
-            if cursor.remaining() < 2 { break; }
-            let key_len = cursor.get_u16();
-            if cursor.remaining() < key_len as usize { break; }
-            let key = Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize));
-            state.parked_keys.insert(key);
+                groups.insert(group_id, state);
+            }
+            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
         }
-
-        if cursor.remaining() < 4 { continue; }
-        let dlt_count = cursor.get_u32();
-        for _ in 0..dlt_count {
-            if cursor.remaining() < 8 { break; }
-            let seq = cursor.get_u64();
-            if cursor.remaining() < 2 { break; }
-            let key_len = cursor.get_u16();
-            let key = if key_len > 0 {
-                if cursor.remaining() < key_len as usize { break; }
-                Some(Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize)))
-            } else { None };
-            if cursor.remaining() < 2 { break; }
-            let reason_len = cursor.get_u16();
-            if cursor.remaining() < reason_len as usize { break; }
-            let reason = String::from_utf8_lossy(&cursor.copy_to_bytes(reason_len as usize)).to_string();
-            if cursor.remaining() < 4 { break; }
-            let attempts = cursor.get_u32();
-            state.dlt_entries.insert(seq, DltEntry { reason, attempts, key });
-        }
-
-        groups.insert(group_id, state);
     }
     Ok(groups)
 }
@@ -649,44 +657,43 @@ async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersiste
 async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
     use bytes::Buf;
     let mut msgs = VecDeque::new();
-    let file = match File::open(path).await {
+    let file = match OpenOptions::new().read(true).write(true).open(path).await {
         Ok(f) => f,
         Err(_) => return msgs,
     };
 
     let mut reader = BufReader::new(file);
+    let mut valid_bytes: u64 = 0;
     loop {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() { break; }
-        let len = u32::from_be_bytes(len_buf);
+        match read_record(&mut reader).await {
+            ReadOutcome::Record(content_buf) => {
+                valid_bytes += 4 + 4 + content_buf.len() as u64;
+                if content_buf.len() < 18 { continue; }
 
-        let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
-        let stored_crc = u32::from_be_bytes(crc_buf);
+                let mut cursor = std::io::Cursor::new(content_buf);
+                let seq = cursor.get_u64();
+                let timestamp = cursor.get_u64();
+                let key_len = cursor.get_u16();
+                let key = if key_len > 0 {
+                    let key_bytes = cursor.copy_to_bytes(key_len as usize);
+                    Some(Bytes::copy_from_slice(&key_bytes))
+                } else {
+                    None
+                };
+                let payload_len = cursor.remaining();
+                let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
 
-        let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).await.is_err() { break; }
-
-        let mut hasher = Hasher::new();
-        hasher.update(&content_buf);
-        if hasher.finalize() != stored_crc { break; }
-
-        if content_buf.len() < 18 { break; }
-        
-        let mut cursor = std::io::Cursor::new(content_buf);
-        let seq = cursor.get_u64();
-        let timestamp = cursor.get_u64();
-        let key_len = cursor.get_u16();
-        let key = if key_len > 0 {
-            let key_bytes = cursor.copy_to_bytes(key_len as usize);
-            Some(Bytes::copy_from_slice(&key_bytes))
-        } else {
-            None
-        };
-        let payload_len = cursor.remaining();
-        let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
-
-        msgs.push_back(Message { seq, timestamp, key, payload });
+                msgs.push_back(Message { seq, timestamp, key, payload });
+            }
+            ReadOutcome::Corrupted => {
+                error!("Corrupted record at byte {} in {:?}, truncating segment", valid_bytes, path);
+                if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
+                    error!("Failed to truncate segment {:?}: {}", path, e);
+                }
+                break;
+            }
+            ReadOutcome::Eof => break,
+        }
     }
     msgs
 }
@@ -698,32 +705,21 @@ async fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::i
     let mut reader = BufReader::new(file);
 
     loop {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() { break; }
-        let len = u32::from_be_bytes(len_buf);
+        match read_record(&mut reader).await {
+            ReadOutcome::Record(content_buf) => {
+                let mut cursor = std::io::Cursor::new(content_buf);
+                if cursor.remaining() < 10 { continue; }
+                let ack_floor = cursor.get_u64();
+                let group_len = cursor.get_u16();
 
-        let mut crc_buf = [0u8; 4];
-        if reader.read_exact(&mut crc_buf).await.is_err() { break; }
-        let stored_crc = u32::from_be_bytes(crc_buf);
+                if cursor.remaining() < group_len as usize { continue; }
+                let group_bytes = cursor.copy_to_bytes(group_len as usize);
+                let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
-        let mut content_buf = vec![0u8; len as usize];
-        if reader.read_exact(&mut content_buf).await.is_err() { break; }
-
-        let mut hasher = Hasher::new();
-        hasher.update(&content_buf);
-        if hasher.finalize() != stored_crc { break; }
-
-        let mut cursor = std::io::Cursor::new(content_buf);
-        
-        if cursor.remaining() < 10 { continue; }
-        let ack_floor = cursor.get_u64();
-        let group_len = cursor.get_u16();
-
-        if cursor.remaining() < group_len as usize { continue; }
-        let group_bytes = cursor.copy_to_bytes(group_len as usize);
-        let group_id = String::from_utf8_lossy(&group_bytes).to_string();
-
-        groups.insert(group_id, ack_floor);
+                groups.insert(group_id, ack_floor);
+            }
+            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
+        }
     }
     Ok(groups)
 }
