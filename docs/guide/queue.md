@@ -20,10 +20,9 @@ await mailQ.delete();
 
 ## Persistence
 
-All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite.  To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically.
+All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically.
 
-By default, the server flushes data to disk every **200ms**. This interval is globally configurable when starting the Nexo server via the `NEXO_QUEUE_DEFAULT_FLUSH_MS` environment variable.
-
+By default, the server flushes data to disk every **100ms**. This interval is globally configurable via the `QUEUE_DEFAULT_FLUSH_MS` environment variable (see [Configuration](#configuration) below).
 
 ## Advanced Creation
 
@@ -114,3 +113,41 @@ const purgedCount = await criticalQueue.dlq.purge();
 | `moveToQueue(messageId)` | Replay message to main queue (resets attempts) | `boolean` |
 | `delete(messageId)` | Permanently remove a single message | `boolean` |
 | `purge()` | Remove all messages from DLQ | `number` (count) |
+
+## Configuration
+
+### How it works
+
+1. Server starts → reads env vars (global defaults)
+2. Queue created → server snapshots defaults into `config.json` (per-queue)
+3. SDK can override `visibilityTimeoutMs` and `maxRetries` at creation — everything else uses system defaults
+4. On restart → each queue reads its own `config.json` (ignores current env vars)
+
+> **Existing queues are not affected by env var changes.** Only new queues pick up new defaults.
+
+### Environment Variables
+
+Global, set at server startup.
+
+| Variable | Default | Description |
+|:---|:---|:---|
+| `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Base directory for all queue SQLite DBs |
+| `QUEUE_VISIBILITY_MS` | `30000` (30s) | Default visibility timeout — how long before an unacked message is redelivered |
+| `QUEUE_MAX_RETRIES` | `5` | Default max delivery attempts before moving to DLQ |
+| `QUEUE_DEFAULT_BATCH_SIZE` | `10` | Default batch size for server-side consume |
+| `QUEUE_DEFAULT_WAIT_MS` | `0` | Default long-polling wait (ms) when queue is empty |
+| `QUEUE_DEFAULT_FLUSH_MS` | `100` | Max durability window (ms) — how often writes are flushed to disk |
+| `QUEUE_WRITER_BATCH_SIZE` | `50000` | SQLite writer batch size (internal tuning) |
+
+### Per-Queue (`config.json`)
+
+Persisted at queue creation, read on restart.
+
+| Field | From | SDK override? |
+|:---|:---|:---|
+| `visibility_timeout_ms` | SDK or system default | **Yes** |
+| `max_retries` | SDK or system default | **Yes** |
+| `default_batch_size` | System default | No |
+| `default_wait_ms` | System default | No |
+| `default_flush_ms` | System default | No |
+| `writer_batch_size` | System default | No |
