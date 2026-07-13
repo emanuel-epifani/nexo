@@ -190,10 +190,10 @@ export class FrameWriter {
    * be re-`begin()`ed before reuse.
    * Header: [Version:1][FrameType:1][Opcode:1][CorrelationID:4][PayloadLen:4]
    */
-  finish(id: number, opcode: number): Buffer {
+  finish(id: number, opcode: number, frameType: number = FrameType.REQUEST): Buffer {
     const total = this.offset;
     this.buf.writeUInt8(PROTOCOL_VERSION, 0);
-    this.buf.writeUInt8(FrameType.REQUEST, 1);
+    this.buf.writeUInt8(frameType, 1);
     this.buf.writeUInt8(opcode, 2);
     this.buf.writeUInt32BE(id, 3);
     this.buf.writeUInt32BE(total - 11, 7);

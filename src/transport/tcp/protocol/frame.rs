@@ -7,7 +7,9 @@
 //! Header (11 bytes):
 //! [Version: 1] [FrameType: 1] [Meta: 1] [CorrelationID: 4 (BE)] [PayloadLen: 4 (BE)]
 //!   - Version : PROTOCOL_VERSION; mismatched frames are rejected.
-//!   - Meta    : opcode (Request) / status (Response) / push-type (Push).
+//!   - Meta    : opcode (Request / NoResponse) / status (Response) / push-type (Push).
+//!   - FrameType 0x04 (NoResponse): server processes the request but sends no
+//!     response frame. Used for fire-and-forget commands (ack, nack).
 //!
 //! Request payload : [binary typed fields per broker] [Data (if applicable)]
 //! Response payload: STATUS_DATA -> [Data...]; STATUS_ERR -> [utf8 message...]
@@ -33,6 +35,7 @@ pub const PROTOCOL_VERSION: u8 = 0x03;
 pub const TYPE_REQUEST: u8 = 0x01;
 pub const TYPE_RESPONSE: u8 = 0x02;
 pub const TYPE_PUSH_PUBSUB: u8 = 0x03;
+pub const TYPE_REQUEST_NO_RESPONSE: u8 = 0x04;
 
 // ========================================
 // RESPONSE STATUS (Meta byte for Response frames)

@@ -256,8 +256,8 @@ export class NexoConnection extends EventEmitter {
 
   /**
    * Send a command without waiting for the server's response.
-   * The server still sends a response frame, but the client ignores it
-   * (no pending handler registered, so handleFrame silently discards it).
+   * Uses FrameType.REQUEST_NO_RESPONSE so the server processes the command
+   * but does not send a response frame at all (no wasted encode/send/decode).
    * Used for ack/nack where fire-and-forget is acceptable.
    */
   sendFireAndForget(opcode: number, build?: (w: FrameWriter) => void): void {
@@ -268,7 +268,7 @@ export class NexoConnection extends EventEmitter {
 
     this.writer.begin();
     if (build) build(this.writer);
-    const packet = this.writer.finish(id, opcode);
+    const packet = this.writer.finish(id, opcode, FrameType.REQUEST_NO_RESPONSE);
     this.socket.write(packet);
   }
 

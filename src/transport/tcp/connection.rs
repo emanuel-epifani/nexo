@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::Config;
 use crate::transport::tcp::dispatcher::Dispatcher;
-use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, NexoCodec};
+use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
 use crate::NexoEngine;
 
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
@@ -66,14 +66,23 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
 
                 request_set.spawn(async move {
                     let id = frame.header.id();
-                    let response = match frame.header.frame_type {
+                    match frame.header.frame_type {
                         TYPE_REQUEST => {
                             let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
-                            dispatcher.dispatch(frame.header.meta, frame.payload).await
+                            let response = dispatcher.dispatch(frame.header.meta, frame.payload).await;
+                            let _ = tx_clone.send(OutboundFrame::Response { id, response }).await;
                         }
-                        _ => Response::Error("Unsupported frame type".into()),
-                    };
-                    let _ = tx_clone.send(OutboundFrame::Response { id, response }).await;
+                        TYPE_REQUEST_NO_RESPONSE => {
+                            let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
+                            let _ = dispatcher.dispatch(frame.header.meta, frame.payload).await;
+                        }
+                        _ => {
+                            let _ = tx_clone.send(OutboundFrame::Response {
+                                id,
+                                response: Response::Error("Unsupported frame type".into()),
+                            }).await;
+                        }
+                    }
                 });
             }
 

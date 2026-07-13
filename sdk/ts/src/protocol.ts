@@ -10,6 +10,7 @@ export enum FrameType {
   REQUEST = 0x01,
   RESPONSE = 0x02,
   PUSH_PUBSUB = 0x03,
+  REQUEST_NO_RESPONSE = 0x04,
 }
 
 /** @internal */
