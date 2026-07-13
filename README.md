@@ -56,8 +56,10 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers.
                                           │   └──────────────────────────────┘   │
                                           │                                      │
                                           │   ┌──────────────────────────────┐   │
-     ┌─────────────┐                      │   │            QUEUE             │   │
-     └─────────────┘                      │                                      │
+                                          │   │            QUEUE             │   │
+                                          │   │       (Job Processing)      │   │
+                                          │   └──────────────────────────────┘   │
+                                          │                                      │
                                           │   ┌──────────────────────────────┐   │
                                           │   │           STREAM             │   │
                                           │   │          (Event Log)         │   │
@@ -170,7 +172,7 @@ Everything is available instantly via a unified Client.
 ### 1. Run the Server
 
 ```bash
-docker run -d -p 7654:7654 nexobroker/nexo
+docker run -d -p 7654:7654 emanuelepifani/nexo
 ```
 This exposes:
 - Port 7654 (TCP): Main server socket for SDK clients.
