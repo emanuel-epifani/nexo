@@ -399,8 +399,6 @@ impl QueueManager {
         let deadline = Instant::now() + Duration::from_millis(wait_val);
 
         loop {
-            let notified = shared.notify.notified();
-
             // Try fetch under lock
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
@@ -415,6 +413,21 @@ impl QueueManager {
 
             if Instant::now() >= deadline {
                 return Ok(vec![]);
+            }
+
+            // Register interest BEFORE double-checking
+            let notified = shared.notify.notified();
+
+            // Double-check: push may have arrived between the first check and notified()
+            let msgs = {
+                let mut inner = Self::lock(&shared.inner);
+                let vt = inner.config.visibility_timeout_ms;
+                let (msgs, _) = inner.state.take_batch(max_val, vt);
+                msgs
+            };
+            if !msgs.is_empty() {
+                self.persist_batch_state(&shared, &msgs);
+                return Ok(msgs);
             }
 
             tokio::select! {

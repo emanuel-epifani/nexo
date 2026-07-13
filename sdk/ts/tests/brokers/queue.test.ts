@@ -20,6 +20,45 @@ describe('QUEUE', () => {
         await q.delete();
     });
 
+    it('should not DLQ messages on graceful shutdown (requeue via visibility timeout)', async () => {
+        const qName = `queue-shutdown-${randomUUID()}`;
+        const q = await nexo.queue(qName).create({
+            visibilityTimeoutMs: 500,
+            maxRetries: 3,
+        });
+
+        await q.push('msg1');
+        await q.push('msg2');
+
+        // Subscribe with slow callback + batchSize=2 + concurrency=1
+        // Both messages are consumed (in-flight) but only msg1 starts processing
+        const sub = await q.subscribe(async () => {
+            await new Promise(r => setTimeout(r, 1000));
+        }, { batchSize: 2, waitMs: 100, concurrency: 1 });
+
+        // Wait for both messages to be consumed and msg1 to start processing
+        await new Promise(r => setTimeout(r, 200));
+
+        // Graceful stop — waits for msg1 callback to finish, msg2 is skipped (no nack)
+        await sub.stop();
+
+        // By now visibility timeout (500ms) has expired for msg2, server requeued it
+        // maxRetries=3, attempts=1 → 1 < 3 → requeue, NOT DLQ
+        const dlqResult = await q.dlq.peek(10);
+        expect(dlqResult.total).toBe(0);
+
+        // msg2 should be re-delivered to a new consumer
+        const received: string[] = [];
+        const sub2 = await q.subscribe(async (data) => {
+            received.push(data);
+        }, { batchSize: 5, waitMs: 500, concurrency: 1 });
+
+        await waitFor(() => expect(received).toContain('msg2'));
+        sub2.stop();
+
+        await q.delete();
+    });
+
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
         const qName = `queue-life-${randomUUID()}`;
         const q = await nexo.queue(qName).create();

@@ -271,9 +271,6 @@ export class NexoQueue<T = any> {
 
           await runConcurrent(messages, concurrency, async (msg) => {
             if (!active) {
-              if (this.conn.isConnected) {
-                this.nack(msg.id, "Consumer stopped");
-              }
               return;
             }
             try {
