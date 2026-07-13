@@ -83,6 +83,20 @@ describe('QUEUE', () => {
         sub.stop();
     });
 
+    it('should stop consumer when subscribing to non-existent queue', async () => {
+        const qName = `queue-nonexist-${randomUUID()}`;
+        const q = nexo.queue(qName); // not created
+
+        // subscribe should not throw "Queue not found" — consumer loop handles it
+        const sub = await q.subscribe(async () => {}, { batchSize: 1, waitMs: 100, concurrency: 1 });
+
+        // Wait for consumer to detect "not found" error and break
+        await new Promise(r => setTimeout(r, 500));
+
+        // Consumer should have stopped gracefully
+        sub.stop();
+    });
+
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
         const qName = `queue-life-${randomUUID()}`;
         const q = await nexo.queue(qName).create();

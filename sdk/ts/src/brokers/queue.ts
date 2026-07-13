@@ -240,11 +240,6 @@ export class NexoQueue<T = any> {
    * with messages split between them by the server.
    */
   async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
-    // Fail Fast: Check existence first
-    if (!(await this.exists())) {
-      throw new Error(`Queue '${this.name}' not found`);
-    }
-
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.queue.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
     const concurrency = options.concurrency ?? DEFAULT_CONFIG.queue.concurrency;
