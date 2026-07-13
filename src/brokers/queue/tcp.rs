@@ -38,9 +38,15 @@ pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 // ==========================================
 
 #[derive(Debug)]
+struct PushItem {
+    priority: Option<u8>,
+    payload: Bytes,
+}
+
+#[derive(Debug)]
 enum QueueCommand {
     Create { q_name: String, options: QueueCreateOptions },
-    Push { q_name: String, priority: Option<u8>, payload: Bytes },
+    Push { q_name: String, items: Vec<PushItem> },
     Consume { q_name: String, batch_size: usize, wait_ms: u64 },
     Delete { q_name: String },
     Ack { id: Uuid, q_name: String },
@@ -64,10 +70,16 @@ impl QueueCommand {
             }
             OP_Q_PUSH => {
                 let q_name = cursor.read_string()?;
-                let flags = cursor.read_u8()?;
-                let priority = if flags & 0x01 != 0 { Some(cursor.read_u8()?) } else { None };
-                let payload = cursor.read_remaining();
-                Ok(Self::Push { q_name, priority, payload })
+                let count = cursor.read_u32()? as usize;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let flags = cursor.read_u8()?;
+                    let priority = if flags & 0x01 != 0 { Some(cursor.read_u8()?) } else { None };
+                    let payload_len = cursor.read_u32()? as usize;
+                    let payload = cursor.read_bytes(payload_len)?;
+                    items.push(PushItem { priority, payload });
+                }
+                Ok(Self::Push { q_name, items })
             }
             OP_Q_CONSUME => {
                 let q_name = cursor.read_string()?;
@@ -175,9 +187,12 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
-        QueueCommand::Push { q_name, priority, payload } => {
-            let priority = priority.unwrap_or(0);
-            match queue.push(q_name, payload, priority).await {
+        QueueCommand::Push { q_name, items } => {
+            let batch: Vec<(Bytes, u8)> = items
+                .into_iter()
+                .map(|item| (item.payload, item.priority.unwrap_or(0)))
+                .collect();
+            match queue.push_batch(q_name, batch).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e),
             }

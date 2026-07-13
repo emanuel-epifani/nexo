@@ -43,6 +43,20 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
 await criticalQueue.push({ type: 'urgent' }, { priority: 255 });
 ```
 
+## Batch Push
+
+Push multiple messages in a single network request. Reduces round-trip overhead and improves throughput when producing bursts of messages.
+
+```typescript
+await mailQ.pushBatch([
+  { data: { to: 'user1@example.com' } },
+  { data: { to: 'user2@example.com' } },
+  { data: { to: 'user3@example.com' }, options: { priority: 10 } },
+]);
+```
+
+Each item can have its own `priority`. The server processes all items atomically under a single lock, then notifies consumers once.
+
 ## Consumer Tuning
 
 Queues are **pull-based**: the SDK continuously polls the server for new messages in a loop, processes them, and polls again. The server never pushes messages to the client. Three parameters control this behavior:

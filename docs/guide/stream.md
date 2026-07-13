@@ -22,6 +22,22 @@ await stream.subscribe('analytics', (msg, meta) => {
 });
 ```
 
+## Batch Publish
+
+Publish multiple events in a single network request. Returns the sequence numbers assigned to each event.
+
+```typescript
+const seqs = await stream.publishBatch([
+  { data: { type: 'login', userId: 'u1' }, key: 'u1' },
+  { data: { type: 'login', userId: 'u2' }, key: 'u2' },
+  { data: { type: 'heartbeat' } },
+]);
+
+// seqs = [1n, 2n, 3n]
+```
+
+Each item can have its own `key` for per-key ordering. The server appends all events atomically under a single lock, then notifies consumers once.
+
 ---
 
 ## The Scaling Model

@@ -305,4 +305,47 @@ describe('STREAM', () => {
 
         expect(received.length).toBe(1);
     });
+
+    it('should publish batch and return seq numbers', async () => {
+        const topic = `stream-batch-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const seqs = await nexo.stream(topic).publishBatch([
+            { data: 'msg1' },
+            { data: 'msg2' },
+            { data: 'msg3' },
+        ]);
+
+        expect(seqs.length).toBe(3);
+        expect(seqs[0]).toBe(1n);
+        expect(seqs[1]).toBe(2n);
+        expect(seqs[2]).toBe(3n);
+    });
+
+    it('should publish batch with keys', async () => {
+        const topic = `stream-batch-keys-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: { data: any, key?: Uint8Array }[] = [];
+        const sub = await clientA.stream(topic).subscribe('g-batch-keys', (data, meta) => {
+            received.push({ data, key: meta.key });
+        });
+
+        await nexo.stream(topic).publishBatch([
+            { data: 'msg1', key: 'key-A' },
+            { data: 'msg2', key: 'key-B' },
+            { data: 'msg3' },
+        ]);
+
+        await waitFor(() => expect(received.length).toBe(3));
+        sub.stop();
+    });
+
+    it('should handle empty publishBatch gracefully', async () => {
+        const topic = `stream-batch-empty-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const seqs = await nexo.stream(topic).publishBatch([]);
+        expect(seqs.length).toBe(0);
+    });
 });

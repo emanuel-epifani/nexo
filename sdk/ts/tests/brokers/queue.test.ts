@@ -346,4 +346,55 @@ describe('QUEUE', () => {
         expect(dlqResult.total).toBe(1);
         expect(dlqResult.items[0].failureReason).toBe("Specific Failure Reason");
     });
+
+    it('should push batch of messages', async () => {
+        const qName = `batch-push-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await q.pushBatch([
+            { data: 'msg1' },
+            { data: 'msg2' },
+            { data: 'msg3' },
+        ]);
+
+        const received: string[] = [];
+        const sub = await q.subscribe(async (data) => {
+            received.push(data);
+        }, { batchSize: 10, waitMs: 500, concurrency: 1 });
+
+        await waitFor(() => expect(received.length).toBe(3));
+        sub.stop();
+        await q.delete();
+    });
+
+    it('should push batch with mixed priorities', async () => {
+        const qName = `batch-prio-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await q.pushBatch([
+            { data: 'low', options: { priority: 0 } },
+            { data: 'high', options: { priority: 10 } },
+            { data: 'mid', options: { priority: 5 } },
+        ]);
+
+        const received: string[] = [];
+        const sub = await q.subscribe(async (data) => {
+            received.push(data);
+        }, { batchSize: 3, waitMs: 500, concurrency: 1 });
+
+        await waitFor(() => expect(received.length).toBe(3));
+        expect(received[0]).toBe('high');
+        expect(received[1]).toBe('mid');
+        expect(received[2]).toBe('low');
+        sub.stop();
+        await q.delete();
+    });
+
+    it('should handle empty pushBatch gracefully', async () => {
+        const qName = `batch-empty-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        await q.pushBatch([]);
+        await q.delete();
+    });
 });

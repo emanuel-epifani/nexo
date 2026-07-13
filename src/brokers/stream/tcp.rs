@@ -35,9 +35,15 @@ pub const OP_S_PURGE_DLT: u8 = 0x3D;
 // ==========================================
 
 #[derive(Debug)]
+struct PubItem {
+    key: Option<Bytes>,
+    payload: Bytes,
+}
+
+#[derive(Debug)]
 enum StreamCommand {
     Create { topic: String, options: StreamCreateOptions },
-    Publish { topic: String, key: Option<Bytes>, payload: Bytes },
+    Publish { topic: String, items: Vec<PubItem> },
     Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
     Join { topic: String, group: String },
     Ack { topic: String, group: String, consumer_id: String, generation: u64, seq: u64 },
@@ -68,10 +74,16 @@ impl StreamCommand {
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
-                let key_len = cursor.read_u16()?;
-                let key = if key_len > 0 { Some(cursor.read_bytes(key_len as usize)?) } else { None };
-                let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, key, payload })
+                let count = cursor.read_u32()? as usize;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let key_len = cursor.read_u16()? as usize;
+                    let key = if key_len > 0 { Some(cursor.read_bytes(key_len)?) } else { None };
+                    let payload_len = cursor.read_u32()? as usize;
+                    let payload = cursor.read_bytes(payload_len)?;
+                    items.push(PubItem { key, payload });
+                }
+                Ok(Self::Publish { topic, items })
             }
             OP_S_FETCH => {
                 let topic = cursor.read_string()?;
@@ -154,9 +166,12 @@ impl StreamCommand {
 // WIRE RESPONSES
 // ==========================================
 
-fn encode_publish(seq: u64) -> Bytes {
-    let mut w = PayloadWriter::with_capacity(8);
-    w.put_u64(seq);
+fn encode_publish_batch(seqs: &[u64]) -> Bytes {
+    let mut w = PayloadWriter::new();
+    w.put_u32(seqs.len() as u32);
+    for &seq in seqs {
+        w.put_u64(seq);
+    }
     w.into_bytes()
 }
 
@@ -231,9 +246,15 @@ pub async fn handle(
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },
-        StreamCommand::Publish { topic, key, payload } => match stream.publish(&topic, key, payload).await {
-            Ok(seq) => Response::Data(encode_publish(seq)),
-            Err(e) => Response::Error(e),
+        StreamCommand::Publish { topic, items } => {
+            let batch: Vec<(Option<Bytes>, Bytes)> = items
+                .into_iter()
+                .map(|item| (item.key, item.payload))
+                .collect();
+            match stream.publish_batch(&topic, batch).await {
+                Ok(seqs) => Response::Data(encode_publish_batch(&seqs)),
+                Err(e) => Response::Error(e),
+            }
         },
         StreamCommand::Fetch { topic, group, consumer_id, generation, limit, wait_ms } => {
             match stream.fetch(&group, &consumer_id, generation, limit as usize, &topic, wait_ms as u64).await {

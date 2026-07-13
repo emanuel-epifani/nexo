@@ -1,6 +1,13 @@
 import { DataType, FrameType, PROTOCOL_VERSION } from './protocol';
 
 /** @internal */
+export function anySize(data: unknown): number {
+  if (Buffer.isBuffer(data)) return 1 + data.length;
+  if (typeof data === 'string') return 1 + Buffer.byteLength(data, 'utf8');
+  return 1 + Buffer.byteLength(JSON.stringify(data ?? null), 'utf8');
+}
+
+/** @internal */
 export class Cursor {
   constructor(public buf: Buffer, public offset = 0) { }
 

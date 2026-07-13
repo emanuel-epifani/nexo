@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { Cursor } from '../codec';
+import { Cursor, anySize } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError } from '../errors';
@@ -49,9 +49,24 @@ const QueueCommands = {
     const hasPriority = options?.priority !== undefined;
     const flags = hasPriority ? 0x01 : 0x00;
     return conn.send(QueueOpcode.Q_PUSH, w => {
-      w.string(name).u8(flags);
+      w.string(name).u32(1).u8(flags);
       if (hasPriority) w.u8(options!.priority!);
+      w.u32(anySize(data));
       w.any(data);
+    });
+  },
+
+  pushBatch: (conn: NexoConnection, name: string, items: { data: any, options?: QueuePushOptions }[]) => {
+    return conn.send(QueueOpcode.Q_PUSH, w => {
+      w.string(name).u32(items.length);
+      for (const item of items) {
+        const hasPriority = item.options?.priority !== undefined;
+        const flags = hasPriority ? 0x01 : 0x00;
+        w.u8(flags);
+        if (hasPriority) w.u8(item.options!.priority!);
+        w.u32(anySize(item.data));
+        w.any(item.data);
+      }
     });
   },
 
@@ -232,6 +247,11 @@ export class NexoQueue<T = any> {
 
   async push(data: T, options: QueuePushOptions = {}): Promise<void> {
     await QueueCommands.push(this.conn, this.name, data, options);
+  }
+
+  async pushBatch(items: { data: T, options?: QueuePushOptions }[]): Promise<void> {
+    if (items.length === 0) return;
+    await QueueCommands.pushBatch(this.conn, this.name, items);
   }
 
   /**

@@ -1492,4 +1492,98 @@ mod stream_tests {
             assert_eq!(state2.messages[0].seq, 1);
         }
     }
+
+    mod batch {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_batch_publish_single_item() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "batch-single";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let seqs = manager.publish_batch(topic, vec![(None, Bytes::from("hello"))]).await.unwrap();
+            assert_eq!(seqs.len(), 1);
+            assert_eq!(seqs[0], 1);
+
+            let msgs = manager.read(topic, 1, 100).await;
+            assert_eq!(msgs.len(), 1);
+            assert_eq!(msgs[0].payload, Bytes::from("hello"));
+        }
+
+        #[tokio::test]
+        async fn test_batch_publish_multiple_items() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "batch-multi";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let items: Vec<(Option<Bytes>, Bytes)> = (1..=5)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            let seqs = manager.publish_batch(topic, items).await.unwrap();
+            assert_eq!(seqs.len(), 5);
+            assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+
+            let msgs = manager.read(topic, 1, 100).await;
+            assert_eq!(msgs.len(), 5);
+            for (i, msg) in msgs.iter().enumerate() {
+                assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
+            }
+        }
+
+        #[tokio::test]
+        async fn test_batch_publish_with_keys() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "batch-keys";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let items = vec![
+                (Some(Bytes::from("key-A")), Bytes::from("msg-1")),
+                (Some(Bytes::from("key-B")), Bytes::from("msg-2")),
+                (None, Bytes::from("msg-3")),
+            ];
+            let seqs = manager.publish_batch(topic, items).await.unwrap();
+            assert_eq!(seqs.len(), 3);
+
+            let msgs = manager.read(topic, 1, 100).await;
+            assert_eq!(msgs[0].key, Some(Bytes::from("key-A")));
+            assert_eq!(msgs[1].key, Some(Bytes::from("key-B")));
+            assert_eq!(msgs[2].key, None);
+        }
+
+        #[tokio::test]
+        async fn test_batch_publish_empty() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "batch-empty";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let seqs = manager.publish_batch(topic, vec![]).await.unwrap();
+            assert!(seqs.is_empty());
+
+            let msgs = manager.read(topic, 1, 100).await;
+            assert!(msgs.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_batch_publish_nonexistent_topic() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+
+            let result = manager.publish_batch("nonexistent", vec![(None, Bytes::from("data"))]).await;
+            assert!(result.is_err());
+        }
+    }
 }

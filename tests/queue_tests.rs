@@ -726,4 +726,73 @@ mod queue_tests {
 
     }
 
+    mod batch {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_batch_push_single_item() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("batch_single_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push_batch(q.clone(), vec![(Bytes::from("hello"), 0)]).await.unwrap();
+
+            let msg = manager.pop(&q).await.expect("Should pop message");
+            assert_eq!(msg.payload, Bytes::from("hello"));
+        }
+
+        #[tokio::test]
+        async fn test_batch_push_multiple_items() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("batch_multi_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            let items: Vec<(Bytes, u8)> = (0..5)
+                .map(|i| (Bytes::from(format!("msg_{}", i)), 0))
+                .collect();
+            manager.push_batch(q.clone(), items).await.unwrap();
+
+            for i in 0..5 {
+                let msg = manager.pop(&q).await.expect("Should pop message");
+                assert_eq!(msg.payload, Bytes::from(format!("msg_{}", i)));
+            }
+            assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
+        }
+
+        #[tokio::test]
+        async fn test_batch_push_mixed_priorities() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("batch_prio_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            let items = vec![
+                (Bytes::from("low"), 0u8),
+                (Bytes::from("high"), 10u8),
+                (Bytes::from("mid"), 5u8),
+            ];
+            manager.push_batch(q.clone(), items).await.unwrap();
+
+            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("high"));
+            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("mid"));
+            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("low"));
+        }
+
+        #[tokio::test]
+        async fn test_batch_push_empty() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("batch_empty_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push_batch(q.clone(), vec![]).await.unwrap();
+            assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
+        }
+
+        #[tokio::test]
+        async fn test_batch_push_nonexistent_queue() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let result = manager.push_batch("nonexistent".to_string(), vec![(Bytes::from("data"), 0)]).await;
+            assert!(result.is_err());
+        }
+    }
+
 }

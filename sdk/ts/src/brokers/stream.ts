@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { Cursor } from '../codec';
+import { Cursor, anySize } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
@@ -216,9 +216,9 @@ export class NexoStream<T = any> {
     await this.conn.send(StreamOpcode.S_DELETE, w => w.string(this.name));
   }
 
-  async publish(data: T, options: { key?: string | Uint8Array } = {}): Promise<void> {
-    await this.conn.send(StreamOpcode.S_PUB, w => {
-      w.string(this.name);
+  async publish(data: T, options: { key?: string | Uint8Array } = {}): Promise<bigint> {
+    const res = await this.conn.send(StreamOpcode.S_PUB, w => {
+      w.string(this.name).u32(1);
       if (options.key === undefined) {
         w.u16(0);
       } else {
@@ -228,8 +228,37 @@ export class NexoStream<T = any> {
         w.u16(keyBytes.length);
         w.bytes(keyBytes);
       }
+      w.u32(anySize(data));
       w.any(data);
     });
+    const count = res.cursor.readU32();
+    return count > 0 ? res.cursor.readU64() : 0n;
+  }
+
+  async publishBatch(items: { data: T, key?: string | Uint8Array }[]): Promise<bigint[]> {
+    if (items.length === 0) return [];
+    const res = await this.conn.send(StreamOpcode.S_PUB, w => {
+      w.string(this.name).u32(items.length);
+      for (const item of items) {
+        if (item.key === undefined) {
+          w.u16(0);
+        } else {
+          const keyBytes = typeof item.key === 'string'
+            ? new TextEncoder().encode(item.key)
+            : item.key;
+          w.u16(keyBytes.length);
+          w.bytes(keyBytes);
+        }
+        w.u32(anySize(item.data));
+        w.any(item.data);
+      }
+    });
+    const count = res.cursor.readU32();
+    const seqs: bigint[] = [];
+    for (let i = 0; i < count; i++) {
+      seqs.push(res.cursor.readU64());
+    }
+    return seqs;
   }
 
   async subscribe(

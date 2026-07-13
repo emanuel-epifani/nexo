@@ -150,28 +150,40 @@ impl StreamManager {
         Ok(())
     }
 
-    pub async fn publish(&self, topic: &str, key: Option<Bytes>, payload: Bytes) -> Result<u64, String> {
+    pub async fn publish_batch(&self, topic: &str, items: Vec<(Option<Bytes>, Bytes)>) -> Result<Vec<u64>, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let persisted_seq = topic_ref.persisted_seq.clone();
 
-        let (seq, timestamp) = {
+        let (seqs, messages_to_append) = {
             let mut inner = Self::lock_topic(&topic_ref.inner);
-            inner.state.append(key.clone(), payload.clone())
+            let mut seqs = Vec::with_capacity(items.len());
+            let mut messages_to_append = Vec::with_capacity(items.len());
+            for (key, payload) in items {
+                let (seq, timestamp) = inner.state.append(key.clone(), payload.clone());
+                seqs.push(seq);
+                messages_to_append.push(MessageToAppend {
+                    seq,
+                    timestamp,
+                    key,
+                    payload,
+                });
+            }
+            (seqs, messages_to_append)
         };
 
         let _ = self.storage_tx.send(StorageCommand::Append {
             topic_name: topic.to_string(),
-            messages: vec![MessageToAppend {
-                seq,
-                timestamp,
-                key,
-                payload,
-            }],
+            messages: messages_to_append,
             persisted_seq,
         });
 
         topic_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(seq)
+        Ok(seqs)
+    }
+
+    pub async fn publish(&self, topic: &str, key: Option<Bytes>, payload: Bytes) -> Result<u64, String> {
+        let seqs = self.publish_batch(topic, vec![(key, payload)]).await?;
+        Ok(seqs.into_iter().next().unwrap_or(0))
     }
 
     pub async fn peek_dlt(&self, topic: &str, group: &str, limit: usize, offset: usize) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, String> {

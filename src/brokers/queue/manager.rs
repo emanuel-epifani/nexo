@@ -274,20 +274,30 @@ impl QueueManager {
         Ok(())
     }
 
-    pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8) -> Result<(), String> {
+    pub async fn push_batch(&self, queue_name: String, items: Vec<(Bytes, u8)>) -> Result<(), String> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
         let shared = self.get_queue(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
 
-        let msg = Message::new(payload, priority);
         {
             let mut inner = Self::lock(&shared.inner);
-            inner.state.push(msg.clone());
+            for (payload, priority) in &items {
+                let msg = Message::new(payload.clone(), *priority);
+                inner.state.push(msg.clone());
+                shared.store.execute(StorageOp::Insert(msg));
+            }
         }
 
-        shared.store.execute(StorageOp::Insert(msg));
         shared.notify.notify_waiters();
 
         Ok(())
+    }
+
+    pub async fn push(&self, queue_name: String, payload: Bytes, priority: u8) -> Result<(), String> {
+        self.push_batch(queue_name, vec![(payload, priority)]).await
     }
 
     pub async fn pop(&self, queue_name: &str) -> Option<Message> {
