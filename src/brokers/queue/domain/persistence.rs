@@ -212,9 +212,10 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
     }
 
     if let Err(e) = tx.commit() {
-        error!("Failed to commit batch: {}", e);
+        error!("Failed to commit batch ({} ops retained for retry): {}", batch.len(), e);
+        return;
     }
-    
+
     batch.clear();
 }
 
