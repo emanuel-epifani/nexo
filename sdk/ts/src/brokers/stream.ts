@@ -1,5 +1,4 @@
 import { NexoConnection } from '../connection';
-import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
@@ -161,8 +160,7 @@ class StreamSubscription<T> {
       const keyLen = res.cursor.readU16();
       const key = keyLen > 0 ? res.cursor.readBuffer(keyLen) : undefined;
       const payloadLen = res.cursor.readU32();
-      const payloadBuf = res.cursor.readBuffer(payloadLen);
-      batch.push({ seq, key, data: new Cursor(payloadBuf).decodeAny() as T });
+      batch.push({ seq, key, data: res.cursor.decodeAnyFromBuffer(payloadLen) as T });
     }
 
     await runConcurrent(batch, this.concurrency, async ({ seq, key, data }) => {

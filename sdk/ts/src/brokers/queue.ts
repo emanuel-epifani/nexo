@@ -1,5 +1,4 @@
 import { NexoConnection } from '../connection';
-import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError } from '../errors';
@@ -80,8 +79,7 @@ const QueueCommands = {
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
-      const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = new Cursor(payloadBuf).decodeAny();
+      const data = res.cursor.decodeAnyFromBuffer(payloadLen);
       messages.push({ id: idHex, data });
     }
     return messages;
@@ -112,8 +110,7 @@ const QueueCommands = {
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
       const payloadLen = res.cursor.readU32();
-      const payloadBuf = res.cursor.readBuffer(payloadLen);
-      const data = new Cursor(payloadBuf).decodeAny();
+      const data = res.cursor.decodeAnyFromBuffer(payloadLen);
       const attempts = res.cursor.readU32();
       const failureReason = res.cursor.readString();
       items.push({ id: idHex, data, attempts, failureReason });

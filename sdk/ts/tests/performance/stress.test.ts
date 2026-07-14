@@ -122,6 +122,54 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
         });
+        it('QUEUE - CONSUME+ACK - subscriber throughput', async () => {
+            const q = nexo.queue('bench-queue-consume');
+            await q.create();
+
+            const TOTAL = 50_000;
+            const payload = { op: 'job', data: 'x', t: Date.now() };
+
+            // Pre-fill queue
+            for (let i = 0; i < TOTAL; i++) await q.push(payload);
+
+            const probe = new BenchmarkProbe('QUEUE CONSUME+ACK', TOTAL);
+            let consumed = 0;
+            probe.startTimer();
+
+            const sub = await q.subscribe(async () => {
+                consumed++;
+            }, { batchSize: 50, waitMs: 100, concurrency: 10 });
+
+            while (consumed < TOTAL) await new Promise(r => setTimeout(r, 50));
+            await sub.stop();
+            probe.printResult();
+
+            await q.delete();
+        });
+        it('STREAM - SUBSCRIBE+ACK - subscriber throughput', async () => {
+            const topic = 'bench-stream-subscribe';
+            await nexo.stream(topic).create();
+
+            const TOTAL = 50_000;
+            const payload = { op: 'event', data: 'x', t: Date.now() };
+
+            // Pre-fill stream
+            for (let i = 0; i < TOTAL; i++) await nexo.stream(topic).publish(payload);
+
+            const probe = new BenchmarkProbe('STREAM SUBSCRIBE+ACK', TOTAL);
+            let consumed = 0;
+            probe.startTimer();
+
+            const sub = await nexo.stream(topic).subscribe('bench-group', async () => {
+                consumed++;
+            }, { batchSize: 100, waitMs: 100, concurrency: 10 });
+
+            while (consumed < TOTAL) await new Promise(r => setTimeout(r, 50));
+            await sub.stop();
+            probe.printResult();
+
+            await nexo.stream(topic).delete();
+        });
     })
 
     describe('LATENCY', () => {
@@ -211,54 +259,3 @@ describe('Stress test', () => {
     })
 
 });
-/* PRIMA
-
-[STORE SET]
- 🚀 Throughput:  217,166 ops/sec
- ⏱️  Latency:     p50: 0.22ms | p99: 0.96ms | MAX: 1.95ms (samples: 50000)
-
-[STORE GET]
- 🚀 Throughput:  235,981 ops/sec
- ⏱️  Latency:     p50: 0.21ms | p99: 0.86ms | MAX: 1.58ms (samples: 50000)
-
-[QUEUE PUSH]
- 🚀 Throughput:  155,862 ops/sec
- ⏱️  Latency:     p50: 0.27ms | p99: 1.07ms | MAX: 3.68ms (samples: 50000)
-
-[STREAM PUBLISH]
- 🚀 Throughput:  161,910 ops/sec
- ⏱️  Latency:     p50: 0.24ms | p99: 1.27ms | MAX: 9.31ms (samples: 50000)
-
-[PUBSUB PUBLISH]
- 🚀 Throughput:  209,122 ops/sec
- ⏱️  Latency:     p50: 0.24ms | p99: 0.97ms | MAX: 1.63ms (samples: 50000)
-
-[STORE SET LATENCY]
- 🚀 Throughput:  44,699 ops/sec
- ⏱️  Latency:     p50: 0.02ms | p99: 0.05ms | MAX: 1.41ms (samples: 100000)
-
-[STORE GET LATENCY]
- 🚀 Throughput:  43,625 ops/sec
- ⏱️  Latency:     p50: 0.02ms | p99: 0.05ms | MAX: 0.89ms (samples: 100000)
-2026-07-14T10:15:23.475584Z  INFO Queue Persistence Writer stopped for "./data/queues/bench-queue-throughput.db"
-2026-07-14T10:15:23.484637Z  INFO [StreamManager] Creating topic 'bench-stream-throughput'
-
-[QUEUE PUSH LATENCY]
- 🚀 Throughput:  38,906 ops/sec
- ⏱️  Latency:     p50: 0.02ms | p99: 0.05ms | MAX: 5.81ms (samples: 100000)
-2026-07-14T10:15:33.515130Z  INFO Queue Persistence Writer stopped for "./data/queues/bench-queue-latency.db"
-2026-07-14T10:15:33.519617Z  INFO [StreamManager] Creating topic 'bench-stream-latency'
-2026-07-14T10:15:38.284615Z  INFO [StreamManager] Disconnecting client: 618341ed-0371-4529-899d-be6c178d4bfc
-
-[STREAM PUBLISH LATENCY]
- 🚀 Throughput:  41,957 ops/sec
- ⏱️  Latency:     p50: 0.02ms | p99: 0.05ms | MAX: 0.88ms (samples: 100000)
-
-[PUBSUB PUBLISH LATENCY]
- 🚀 Throughput:  42,915 ops/sec
- ⏱️  Latency:     p50: 0.02ms | p99: 0.05ms | MAX: 0.61ms (samples: 100000)
-
- */
-/*DOPO
-
- */

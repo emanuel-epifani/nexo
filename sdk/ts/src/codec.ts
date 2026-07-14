@@ -47,6 +47,26 @@ export class Cursor {
         return this.buf.subarray(start, end);
     }
   }
+
+  /**
+   * Decode a DataType-prefixed value from a sub-buffer of known length.
+   * Avoids allocating a new Cursor per message in batch consume/fetch paths.
+   */
+  decodeAnyFromBuffer(len: number): any {
+    const type = this.buf.readUInt8(this.offset++);
+    const start = this.offset;
+    const end = this.offset + (len - 1);
+    this.offset = end;
+    switch (type) {
+      case DataType.JSON:
+        return start === end ? null : JSON.parse(this.buf.toString('utf8', start, end));
+      case DataType.STRING:
+        return this.buf.toString('utf8', start, end);
+      case DataType.RAW:
+      default:
+        return this.buf.subarray(start, end);
+    }
+  }
 }
 
 /**
