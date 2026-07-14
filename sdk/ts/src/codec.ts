@@ -182,11 +182,17 @@ export class FrameWriter {
   }
 
   any(data: unknown): this {
-    if (Buffer.isBuffer(data)) {
+    if (data instanceof Uint8Array) {
       this.ensure(1 + data.length);
       this.buf.writeUInt8(DataType.RAW, this.offset++);
-      data.copy(this.buf, this.offset);
+      this.buf.set(data, this.offset);
       this.offset += data.length;
+    } else if (data instanceof ArrayBuffer) {
+      const view = new Uint8Array(data);
+      this.ensure(1 + view.length);
+      this.buf.writeUInt8(DataType.RAW, this.offset++);
+      this.buf.set(view, this.offset);
+      this.offset += view.length;
     } else if (typeof data === 'string') {
       const len = Buffer.byteLength(data, 'utf8');
       this.ensure(1 + len);
@@ -209,13 +215,21 @@ export class FrameWriter {
    * Serializes data exactly once (unlike `u32(anySize(x)) + any(x)`).
    */
   anyWithLen(data: unknown): this {
-    if (Buffer.isBuffer(data)) {
+    if (data instanceof Uint8Array) {
       this.ensure(4 + 1 + data.length);
       this.buf.writeUInt32BE(1 + data.length, this.offset);
       this.offset += 4;
       this.buf.writeUInt8(DataType.RAW, this.offset++);
-      data.copy(this.buf, this.offset);
+      this.buf.set(data, this.offset);
       this.offset += data.length;
+    } else if (data instanceof ArrayBuffer) {
+      const view = new Uint8Array(data);
+      this.ensure(4 + 1 + view.length);
+      this.buf.writeUInt32BE(1 + view.length, this.offset);
+      this.offset += 4;
+      this.buf.writeUInt8(DataType.RAW, this.offset++);
+      this.buf.set(view, this.offset);
+      this.offset += view.length;
     } else if (typeof data === 'string') {
       const len = Buffer.byteLength(data, 'utf8');
       this.ensure(4 + 1 + len);

@@ -108,6 +108,13 @@
   -webkit-text-fill-color: transparent;
 }
 
+@media (max-width: 640px) {
+  .hero-subtitle-white,
+  .hero-subtitle-gradient {
+    display: block;
+  }
+}
+
 .hero-desc {
   font-size: 1rem;
   line-height: 1.7;

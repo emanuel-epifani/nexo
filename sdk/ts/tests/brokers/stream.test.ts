@@ -385,6 +385,49 @@ describe('STREAM', () => {
         await nexo.stream(topic).delete();
     });
 
+    it('should publish Uint8Array data and receive raw bytes back', async () => {
+        const topic = `stream-pub-uint8-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: any[] = [];
+        const sub = await clientA.stream(topic).subscribe('g-pub-uint8', (data) => {
+            received.push(data);
+        });
+
+        const payload = new Uint8Array([0x01, 0x02, 0xFF, 0x00]);
+        await nexo.stream(topic).publish(payload);
+
+        await waitFor(() => expect(received.length).toBe(1));
+        sub.stop();
+
+        expect(received[0]).toBeInstanceOf(Uint8Array);
+        expect(Buffer.from(received[0])).toEqual(Buffer.from(payload));
+
+        await nexo.stream(topic).delete();
+    });
+
+    it('should publish ArrayBuffer data and receive raw bytes back', async () => {
+        const topic = `stream-pub-arraybuf-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: any[] = [];
+        const sub = await clientA.stream(topic).subscribe('g-pub-arraybuf', (data) => {
+            received.push(data);
+        });
+
+        const payload = new ArrayBuffer(3);
+        new Uint8Array(payload).set([0x41, 0x42, 0x43]);
+        await nexo.stream(topic).publish(payload);
+
+        await waitFor(() => expect(received.length).toBe(1));
+        sub.stop();
+
+        expect(received[0]).toBeInstanceOf(Uint8Array);
+        expect(Buffer.from(received[0])).toEqual(Buffer.from(new Uint8Array(payload)));
+
+        await nexo.stream(topic).delete();
+    });
+
     it('should handle empty publishBatch gracefully', async () => {
         const topic = `stream-batch-empty-${randomUUID()}`;
         await nexo.stream(topic).create();
