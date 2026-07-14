@@ -120,7 +120,7 @@ export class FrameWriter {
 
   bytes(v: Uint8Array): this {
     this.ensure(v.length);
-    Buffer.from(v).copy(this.buf, this.offset);
+    this.buf.set(v, this.offset);
     this.offset += v.length;
     return this;
   }

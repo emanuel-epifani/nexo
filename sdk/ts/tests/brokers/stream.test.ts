@@ -341,6 +341,50 @@ describe('STREAM', () => {
         sub.stop();
     });
 
+    it('should publish with string key and verify receipt', async () => {
+        const topic = `stream-pub-key-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: { data: any, key?: Uint8Array }[] = [];
+        const sub = await clientA.stream(topic).subscribe('g-pub-key', (data, meta) => {
+            received.push({ data, key: meta.key });
+        });
+
+        const seq = await nexo.stream(topic).publish({ x: 1 }, { key: 'my-key' });
+        expect(seq).toBeGreaterThan(0n);
+
+        await waitFor(() => expect(received.length).toBe(1));
+        sub.stop();
+
+        expect(received[0].data).toEqual({ x: 1 });
+        expect(received[0].key).toBeDefined();
+        expect(Buffer.from(received[0].key!).toString('utf8')).toBe('my-key');
+
+        await nexo.stream(topic).delete();
+    });
+
+    it('should publish with Uint8Array key and verify receipt', async () => {
+        const topic = `stream-pub-rawkey-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const received: { data: any, key?: Uint8Array }[] = [];
+        const sub = await clientA.stream(topic).subscribe('g-pub-rawkey', (data, meta) => {
+            received.push({ data, key: meta.key });
+        });
+
+        const rawKey = new Uint8Array([0x01, 0x02, 0xFF]);
+        await nexo.stream(topic).publish('payload', { key: rawKey });
+
+        await waitFor(() => expect(received.length).toBe(1));
+        sub.stop();
+
+        expect(received[0].data).toBe('payload');
+        expect(received[0].key).toBeDefined();
+        expect(Buffer.from(received[0].key!)).toEqual(Buffer.from(rawKey));
+
+        await nexo.stream(topic).delete();
+    });
+
     it('should handle empty publishBatch gracefully', async () => {
         const topic = `stream-batch-empty-${randomUUID()}`;
         await nexo.stream(topic).create();

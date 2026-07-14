@@ -5,6 +5,7 @@ import { ConnectionClosedError, NotConnectedError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 
 const FETCH_TIMEOUT_MARGIN_MS = 5000;
+const textEncoder = new TextEncoder();
 
 enum StreamOpcode {
   S_CREATE = 0x30,
@@ -221,7 +222,7 @@ export class NexoStream<T = any> {
         w.u16(0);
       } else {
         const keyBytes = typeof options.key === 'string'
-          ? new TextEncoder().encode(options.key)
+          ? textEncoder.encode(options.key)
           : options.key;
         w.u16(keyBytes.length);
         w.bytes(keyBytes);
@@ -241,7 +242,7 @@ export class NexoStream<T = any> {
           w.u16(0);
         } else {
           const keyBytes = typeof item.key === 'string'
-            ? new TextEncoder().encode(item.key)
+            ? textEncoder.encode(item.key)
             : item.key;
           w.u16(keyBytes.length);
           w.bytes(keyBytes);
