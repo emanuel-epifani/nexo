@@ -1,4 +1,4 @@
-import { DataType, FrameType, PROTOCOL_VERSION } from './protocol';
+import { DataType, FrameType, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './protocol';
 
 /** @internal */
 export class Cursor {
@@ -82,7 +82,7 @@ export class Cursor {
  */
 export class FrameWriter {
   private buf!: Buffer;
-  private offset = 11;
+  private offset = HEADER_SIZE;
 
   /**
    * Start a new frame. Allocates a fresh internal buffer; default initial size
@@ -90,7 +90,7 @@ export class FrameWriter {
    */
   begin(initialSize = 256): this {
     this.buf = Buffer.allocUnsafe(initialSize);
-    this.offset = 11;
+    this.offset = HEADER_SIZE;
     return this;
   }
 
@@ -245,11 +245,11 @@ export class FrameWriter {
    */
   finish(id: number, opcode: number, frameType: number = FrameType.REQUEST): Buffer {
     const total = this.offset;
-    this.buf.writeUInt8(PROTOCOL_VERSION, 0);
-    this.buf.writeUInt8(frameType, 1);
-    this.buf.writeUInt8(opcode, 2);
-    this.buf.writeUInt32BE(id, 3);
-    this.buf.writeUInt32BE(total - 11, 7);
+    this.buf.writeUInt8(PROTOCOL_VERSION, HEADER_OFFSET.VERSION);
+    this.buf.writeUInt8(frameType, HEADER_OFFSET.TYPE);
+    this.buf.writeUInt8(opcode, HEADER_OFFSET.META);
+    this.buf.writeUInt32BE(id, HEADER_OFFSET.ID);
+    this.buf.writeUInt32BE(total - HEADER_SIZE, HEADER_OFFSET.PAYLOAD_LEN);
     return this.buf.subarray(0, total);
   }
 }

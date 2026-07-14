@@ -2,7 +2,7 @@ import * as net from 'net';
 import { EventEmitter } from 'events';
 import { Logger } from './utils/logger';
 import { NexoConnectionConfig } from './config';
-import { FrameType, ResponseStatus, PROTOCOL_VERSION } from './protocol';
+import { FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './protocol';
 import { Cursor, FrameWriter } from './codec';
 import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
 
@@ -159,10 +159,10 @@ export class NexoConnection extends EventEmitter {
 
     while (true) {
       // Need at least header (11 bytes): [Version:1][Type:1][Meta:1][ID:4][Len:4]
-      if (this.buffer.length < 11) break;
+      if (this.buffer.length < HEADER_SIZE) break;
 
-      const payloadLen = this.buffer.readUInt32BE(7);
-      const totalFrameLen = 11 + payloadLen;
+      const payloadLen = this.buffer.readUInt32BE(HEADER_OFFSET.PAYLOAD_LEN);
+      const totalFrameLen = HEADER_SIZE + payloadLen;
 
       if (this.buffer.length < totalFrameLen) break;
 
@@ -175,15 +175,15 @@ export class NexoConnection extends EventEmitter {
   }
 
   private handleFrame(frame: Buffer) {
-    const version = frame.readUInt8(0);
+    const version = frame.readUInt8(HEADER_OFFSET.VERSION);
     if (version !== PROTOCOL_VERSION) {
       this.logger.error(`Unsupported protocol version: 0x${version.toString(16).padStart(2, '0')} (expected 0x${PROTOCOL_VERSION.toString(16).padStart(2, '0')})`);
       return;
     }
-    const type = frame.readUInt8(1);
-    const meta = frame.readUInt8(2);
-    const id = frame.readUInt32BE(3);
-    const payload = frame.subarray(11);
+    const type = frame.readUInt8(HEADER_OFFSET.TYPE);
+    const meta = frame.readUInt8(HEADER_OFFSET.META);
+    const id = frame.readUInt32BE(HEADER_OFFSET.ID);
+    const payload = frame.subarray(HEADER_SIZE);
 
     switch (type) {
       case FrameType.RESPONSE: {

@@ -27,3 +27,17 @@ export enum DataType {
   STRING = 0x01,
   JSON = 0x02,
 }
+
+/**
+ * Frame header layout (11 bytes, big-endian):
+ * [Version:1][FrameType:1][Meta:1][CorrelationID:4][PayloadLen:4]
+ * @internal
+ */
+export const HEADER_SIZE = 11;
+export const HEADER_OFFSET = {
+  VERSION: 0,
+  TYPE: 1,
+  META: 2,
+  ID: 3,
+  PAYLOAD_LEN: 7,
+} as const;
