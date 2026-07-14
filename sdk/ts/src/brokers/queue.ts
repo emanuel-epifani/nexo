@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { Cursor, anySize } from '../codec';
+import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError } from '../errors';
@@ -51,8 +51,7 @@ const QueueCommands = {
     return conn.send(QueueOpcode.Q_PUSH, w => {
       w.string(name).u32(1).u8(flags);
       if (hasPriority) w.u8(options!.priority!);
-      w.u32(anySize(data));
-      w.any(data);
+      w.anyWithLen(data);
     });
   },
 
@@ -64,8 +63,7 @@ const QueueCommands = {
         const flags = hasPriority ? 0x01 : 0x00;
         w.u8(flags);
         if (hasPriority) w.u8(item.options!.priority!);
-        w.u32(anySize(item.data));
-        w.any(item.data);
+        w.anyWithLen(item.data);
       }
     });
   },

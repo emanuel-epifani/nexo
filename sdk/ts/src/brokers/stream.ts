@@ -1,5 +1,5 @@
 import { NexoConnection } from '../connection';
-import { Cursor, anySize } from '../codec';
+import { Cursor } from '../codec';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
@@ -228,8 +228,7 @@ export class NexoStream<T = any> {
         w.u16(keyBytes.length);
         w.bytes(keyBytes);
       }
-      w.u32(anySize(data));
-      w.any(data);
+      w.anyWithLen(data);
     });
     const count = res.cursor.readU32();
     return count > 0 ? res.cursor.readU64() : 0n;
@@ -249,8 +248,7 @@ export class NexoStream<T = any> {
           w.u16(keyBytes.length);
           w.bytes(keyBytes);
         }
-        w.u32(anySize(item.data));
-        w.any(item.data);
+        w.anyWithLen(item.data);
       }
     });
     const count = res.cursor.readU32();

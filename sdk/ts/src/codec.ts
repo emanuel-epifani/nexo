@@ -1,13 +1,6 @@
 import { DataType, FrameType, PROTOCOL_VERSION } from './protocol';
 
 /** @internal */
-export function anySize(data: unknown): number {
-  if (Buffer.isBuffer(data)) return 1 + data.length;
-  if (typeof data === 'string') return 1 + Buffer.byteLength(data, 'utf8');
-  return 1 + Buffer.byteLength(JSON.stringify(data ?? null), 'utf8');
-}
-
-/** @internal */
 export class Cursor {
   constructor(public buf: Buffer, public offset = 0) { }
 
@@ -184,6 +177,39 @@ export class FrameWriter {
       const json = JSON.stringify(data ?? null);
       const len = Buffer.byteLength(json, 'utf8');
       this.ensure(1 + len);
+      this.buf.writeUInt8(DataType.JSON, this.offset++);
+      this.buf.write(json, this.offset, len, 'utf8');
+      this.offset += len;
+    }
+    return this;
+  }
+
+  /**
+   * Write a u32 length prefix followed by the any-encoded value.
+   * Serializes data exactly once (unlike `u32(anySize(x)) + any(x)`).
+   */
+  anyWithLen(data: unknown): this {
+    if (Buffer.isBuffer(data)) {
+      this.ensure(4 + 1 + data.length);
+      this.buf.writeUInt32BE(1 + data.length, this.offset);
+      this.offset += 4;
+      this.buf.writeUInt8(DataType.RAW, this.offset++);
+      data.copy(this.buf, this.offset);
+      this.offset += data.length;
+    } else if (typeof data === 'string') {
+      const len = Buffer.byteLength(data, 'utf8');
+      this.ensure(4 + 1 + len);
+      this.buf.writeUInt32BE(1 + len, this.offset);
+      this.offset += 4;
+      this.buf.writeUInt8(DataType.STRING, this.offset++);
+      if (len > 0) this.buf.write(data, this.offset, len, 'utf8');
+      this.offset += len;
+    } else {
+      const json = JSON.stringify(data ?? null);
+      const len = Buffer.byteLength(json, 'utf8');
+      this.ensure(4 + 1 + len);
+      this.buf.writeUInt32BE(1 + len, this.offset);
+      this.offset += 4;
       this.buf.writeUInt8(DataType.JSON, this.offset++);
       this.buf.write(json, this.offset, len, 'utf8');
       this.offset += len;

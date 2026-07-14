@@ -6,7 +6,7 @@ import { DEFAULT_HOST, DEFAULT_PORT } from '../src/config';
 // ============================================================
 // Single source of truth: change here to switch debug/release.
 // ============================================================
-const BUILD_MODE: 'debug' | 'release' = 'debug';
+const BUILD_MODE: 'debug' | 'release' = 'release';
 const ROOT_DIR = path.resolve(__dirname, '../../../');
 const BINARY_PATH = path.join(ROOT_DIR, `target/${BUILD_MODE}/nexo`);
 const CARGO_BUILD_CMD = BUILD_MODE === 'release' ? 'cargo build --release' : 'cargo build';
