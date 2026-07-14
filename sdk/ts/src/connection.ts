@@ -273,6 +273,7 @@ export class NexoConnection extends EventEmitter {
     this.shouldReconnect = false;
     this.isReconnecting = false;
     this.stopSweep();
+    this.pending.forEach(p => p.reject(new ConnectionClosedError()));
     this.pending.clear();
     this.socket.destroy();
     this.isConnected = false;

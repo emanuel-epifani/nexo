@@ -1,5 +1,6 @@
 import { execSync, spawn, ChildProcess } from 'node:child_process';
 import { Socket } from 'node:net';
+import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_HOST, DEFAULT_PORT } from '../src/config';
 
@@ -10,6 +11,7 @@ const BUILD_MODE: 'debug' | 'release' = 'release';
 const ROOT_DIR = path.resolve(__dirname, '../../../');
 const BINARY_PATH = path.join(ROOT_DIR, `target/${BUILD_MODE}/nexo`);
 const CARGO_BUILD_CMD = BUILD_MODE === 'release' ? 'cargo build --release' : 'cargo build';
+const DATA_DIR = path.join(ROOT_DIR, 'data');
 
 // ============================================================
 // Server lifecycle helpers
@@ -27,6 +29,20 @@ async function isServerRunning(host: string, port: number): Promise<boolean> {
   });
 }
 
+function killExistingServer(host: string, port: number): void {
+  try {
+    // Kill any process listening on the Nexo port (leftover from crashed runs)
+    execSync(`lsof -ti tcp:${port} | xargs kill -9 2>/dev/null || true`, { stdio: 'ignore' });
+  } catch { /* ignore */ }
+}
+
+function cleanDataDir(): void {
+  if (fs.existsSync(DATA_DIR)) {
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  }
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
 async function waitForPort(host: string, port: number, retries = 20): Promise<void> {
   for (let i = 0; i < retries; i++) {
     if (await isServerRunning(host, port)) return;
@@ -37,7 +53,6 @@ async function waitForPort(host: string, port: number, retries = 20): Promise<vo
 
 async function runNexoServer(host: string, port: number): Promise<void> {
   console.log(`[TestSetup] Spawning Nexo server from: ${BINARY_PATH}`);
-  // Server defaults match SDK defaults (127.0.0.1:7654) — no env override needed.
   serverProcess = spawn(BINARY_PATH, [], {
     stdio: 'inherit',
     cwd: ROOT_DIR,
@@ -48,7 +63,7 @@ async function runNexoServer(host: string, port: number): Promise<void> {
 
 function killServer(): void {
   if (serverProcess) {
-    serverProcess.kill();
+    serverProcess.kill('SIGTERM');
     serverProcess = null;
   }
 }
@@ -60,23 +75,23 @@ export default async function setup() {
   const host = DEFAULT_HOST;
   const port = DEFAULT_PORT;
 
-  // If Nexo is already running (e.g. Debugging in IDE), skip build and spawn
-  if (await isServerRunning(host, port)) {
-    console.log(`[GlobalSetup] Nexo is already running on ${host}:${port}. Reusing instance (Debug Mode).`);
-    return;
-  }
+  // 1. Kill any leftover server from previous/crashed runs
+  killExistingServer(host, port);
 
-  // --- FULL INTEGRATION FLOW ---
-  // 1. Build the Rust binary to ensure we're testing the latest code
+  // 2. Clean data dir (queues, streams, retained messages)
+  cleanDataDir();
+
+  // 3. Build the Rust binary to ensure we're testing the latest code
   console.log(`--- 🛠️  Building Nexo Server in "${BUILD_MODE}" mode ---`);
   execSync(CARGO_BUILD_CMD, { cwd: ROOT_DIR, stdio: 'inherit' });
 
-  // 2. Start the server once for the entire suite
+  // 4. Start the server
   await runNexoServer(host, port);
 
-  // 3. Return the teardown function
+  // 5. Teardown: kill server and clean data dir
   return async () => {
     console.log('--- 🛑 Shutting down Nexo Server ---');
     killServer();
+    cleanDataDir();
   };
 }
