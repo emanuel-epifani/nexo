@@ -175,18 +175,15 @@ export class NexoConnection extends EventEmitter {
   }
 
   private handleFrame(frame: Buffer) {
-    const cursor = new Cursor(frame);
-    const version = cursor.readU8();
+    const version = frame.readUInt8(0);
     if (version !== PROTOCOL_VERSION) {
       this.logger.error(`Unsupported protocol version: 0x${version.toString(16).padStart(2, '0')} (expected 0x${PROTOCOL_VERSION.toString(16).padStart(2, '0')})`);
       return;
     }
-    const type = cursor.readU8();
-    const meta = cursor.readU8(); // Opcode for requests, Status for responses
-    const id = cursor.readU32();
-    cursor.readU32(); // Skip payloadLen
-
-    const payload = cursor.buf.subarray(cursor.offset);
+    const type = frame.readUInt8(1);
+    const meta = frame.readUInt8(2);
+    const id = frame.readUInt32BE(3);
+    const payload = frame.subarray(11);
 
     switch (type) {
       case FrameType.RESPONSE: {
