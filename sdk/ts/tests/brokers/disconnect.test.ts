@@ -23,4 +23,40 @@ describe('DISCONNECT', () => {
         // Must reject with ConnectionClosedError, not hang
         await expect(consumePromise).rejects.toThrow('Connection closed');
     });
+
+    it('should register and remove SIGINT/SIGTERM listeners per client', async () => {
+        const beforeCount = process.listenerCount('SIGINT');
+
+        const client = await NexoClient.connect();
+
+        // Each client registers its own listener
+        expect(process.listenerCount('SIGINT')).toBe(beforeCount + 1);
+        expect(process.listenerCount('SIGTERM')).toBe(beforeCount + 1);
+
+        client.disconnect();
+
+        // disconnect() removes the listener — no leak
+        expect(process.listenerCount('SIGINT')).toBe(beforeCount);
+        expect(process.listenerCount('SIGTERM')).toBe(beforeCount);
+    });
+
+    it('should register listeners for multiple clients independently', async () => {
+        const beforeCount = process.listenerCount('SIGINT');
+
+        const clientA = await NexoClient.connect();
+        const clientB = await NexoClient.connect();
+
+        // Both clients registered their own listeners
+        expect(process.listenerCount('SIGINT')).toBe(beforeCount + 2);
+
+        // Disconnect clientA — only its listener is removed
+        clientA.disconnect();
+        expect(process.listenerCount('SIGINT')).toBe(beforeCount + 1);
+
+        // ClientB still has its listener and working connection
+        expect((clientB as any).conn.isConnected).toBe(true);
+
+        clientB.disconnect();
+        expect(process.listenerCount('SIGINT')).toBe(beforeCount);
+    });
 });

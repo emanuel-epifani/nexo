@@ -19,6 +19,7 @@ export class NexoClient {
 
   public readonly store: NexoStore;
   private readonly pubsubBroker: NexoPubSub;
+  private shutdownHandler: (() => void) | null = null;
 
   constructor(options: NexoOptions = {}) {
     this.logger = new Logger({ 
@@ -43,7 +44,14 @@ export class NexoClient {
     return client;
   }
 
-  disconnect() { this.conn.disconnect(); }
+  disconnect() {
+    if (this.shutdownHandler && typeof process !== 'undefined') {
+      process.removeListener('SIGINT', this.shutdownHandler);
+      process.removeListener('SIGTERM', this.shutdownHandler);
+      this.shutdownHandler = null;
+    }
+    this.conn.disconnect();
+  }
 
   queue<T = any>(name: string): NexoQueue<T> {
     return new NexoQueue<T>(this.conn, name, this.logger);
@@ -58,15 +66,12 @@ export class NexoClient {
   }
 
   private setupGracefulShutdown() {
-    const shutdown = async () => {
-      this.logger.info("Graceful shutdown triggered. Disconnecting...");
+    this.shutdownHandler = () => {
       this.disconnect();
-      process.exit(0);
     };
-
-    if (typeof process !== 'undefined' && process.listenerCount && process.listenerCount('SIGINT') === 0) {
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
+    if (typeof process !== 'undefined') {
+      process.on('SIGINT', this.shutdownHandler);
+      process.on('SIGTERM', this.shutdownHandler);
     }
   }
 }
