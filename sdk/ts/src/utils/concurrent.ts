@@ -18,11 +18,11 @@ export async function runConcurrent<T>(
     for (const item of items) await fn(item);
     return;
   }
-  const queue = [...items];
+  let idx = 0;
   const workers = Array(Math.min(concurrency, items.length))
     .fill(null)
     .map(async () => {
-      while (queue.length) await fn(queue.shift()!);
+      while (idx < items.length) await fn(items[idx++]);
     });
   await Promise.all(workers);
 }

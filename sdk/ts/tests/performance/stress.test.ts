@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {BenchmarkProbe} from "../utils/benchmark-misure";
 import {nexo} from "../nexo";
+import {runConcurrent} from "../../src/utils/concurrent";
 
 
 describe('Stress test', () => {
@@ -253,6 +254,39 @@ describe('Stress test', () => {
                 await topic.publish(payload);
                 probe.record(performance.now() - t0);
             }
+
+            probe.printResult();
+        });
+    })
+
+    describe('UTILS', () => {
+        it('runConcurrent - correctness (all items processed, no duplicates)', async () => {
+            const items = Array.from({length: 1000}, (_, i) => i);
+            const processed: number[] = [];
+            let maxConcurrent = 0;
+            let current = 0;
+
+            await runConcurrent(items, 10, async (item) => {
+                current++;
+                maxConcurrent = Math.max(maxConcurrent, current);
+                await new Promise(r => setTimeout(r, 0));
+                processed.push(item);
+                current--;
+            });
+
+            expect(processed.length).toBe(1000);
+            expect(new Set(processed).size).toBe(1000);
+            expect(maxConcurrent).toBeLessThanOrEqual(10);
+        });
+
+        it('runConcurrent - performance (100k items, concurrency 10)', async () => {
+            const items = Array.from({length: 100_000}, (_, i) => i);
+            const probe = new BenchmarkProbe('runConcurrent', items.length);
+            probe.startTimer();
+
+            await runConcurrent(items, 10, async () => {
+                probe.record(0);
+            });
 
             probe.printResult();
         });
