@@ -212,7 +212,7 @@ export class FrameWriter {
 
   /**
    * Write a u32 length prefix followed by the any-encoded value.
-   * Serializes data exactly once (unlike `u32(anySize(x)) + any(x)`).
+   * Serializes data exactly once in a single pass.
    */
   anyWithLen(data: unknown): this {
     if (data instanceof Uint8Array) {

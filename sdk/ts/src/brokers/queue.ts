@@ -307,14 +307,13 @@ export class NexoQueue<T = any> {
       }
     };
 
-    const loopDone = loop().catch(err => {
+    loop().catch(err => {
       this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
     });
 
     return {
-      stop: async () => {
+      stop: () => {
         active = false;
-        await loopDone;
       }
     };
   }
