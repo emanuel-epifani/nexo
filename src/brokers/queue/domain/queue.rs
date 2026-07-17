@@ -18,7 +18,7 @@ use crate::brokers::queue::domain::dlq::DlqMessage;
 // MESSAGE & CONFIG
 // ==========================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum MessageState {
     Ready,                  // In waiting_for_dispatch
     InFlight,               // In waiting_for_ack (timestamp in visible_at)
@@ -97,7 +97,7 @@ impl QueueState {
     /// Push a message to the queue.
     pub fn push(&mut self, msg: Message) {
         let id = msg.id;
-        let initial_state = msg.state.clone();
+        let initial_state = msg.state;
         let priority = msg.priority;
         let visible_at = msg.visible_at;
 
@@ -276,7 +276,7 @@ impl QueueState {
 
         // Update state and add to new index
         if let Some(msg) = self.registry.get_mut(&id) {
-            msg.state = new_state.clone();
+            msg.state = new_state;
 
             match new_state {
                 MessageState::Ready => {

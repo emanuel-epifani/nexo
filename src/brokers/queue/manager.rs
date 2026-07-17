@@ -194,10 +194,7 @@ impl QueueManager {
                     }
 
                     for dlq_msg in dlq_msgs {
-                        shared.store.execute(StorageOp::MoveToDLQ {
-                            id: dlq_msg.id,
-                            msg: dlq_msg,
-                        });
+                        shared.store.execute(StorageOp::MoveToDLQ(dlq_msg));
                     }
 
                     if !requeued.is_empty() {
@@ -369,10 +366,7 @@ impl QueueManager {
         }
 
         if let Some(dlq_message) = dlq_msg {
-            shared.store.execute(StorageOp::MoveToDLQ {
-                id: dlq_message.id,
-                msg: dlq_message,
-            });
+            shared.store.execute(StorageOp::MoveToDLQ(dlq_message));
             return true;
         }
 
@@ -407,16 +401,18 @@ impl QueueManager {
             return Ok(vec![]);
         }
 
-        // Long polling loop (like stream fetch)
+        // Long polling loop
         let deadline = Instant::now() + Duration::from_millis(wait_val);
 
         loop {
+            // Register interest before checking
+            let notified = shared.notify.notified();
+
             // Try fetch under lock
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;
-                let msgs = inner.state.take_batch(max_val, vt);
-                msgs
+                inner.state.take_batch(max_val, vt)
             };
             if !msgs.is_empty() {
                 self.persist_batch_state(&shared, &msgs);
@@ -425,21 +421,6 @@ impl QueueManager {
 
             if Instant::now() >= deadline {
                 return Ok(vec![]);
-            }
-
-            // Register interest BEFORE double-checking
-            let notified = shared.notify.notified();
-
-            // Double-check: push may have arrived between the first check and notified()
-            let msgs = {
-                let mut inner = Self::lock(&shared.inner);
-                let vt = inner.config.visibility_timeout_ms;
-                let msgs = inner.state.take_batch(max_val, vt);
-                msgs
-            };
-            if !msgs.is_empty() {
-                self.persist_batch_state(&shared, &msgs);
-                return Ok(msgs);
             }
 
             tokio::select! {
@@ -481,10 +462,7 @@ impl QueueManager {
         };
 
         if let Some(msg) = new_msg {
-            shared.store.execute(StorageOp::MoveToMain {
-                id: message_id,
-                msg,
-            });
+            shared.store.execute(StorageOp::MoveToMain(msg));
             shared.notify.notify_waiters();
             Ok(true)
         } else {

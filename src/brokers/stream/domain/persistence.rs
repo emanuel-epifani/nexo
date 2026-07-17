@@ -425,9 +425,28 @@ async fn read_record(reader: &mut BufReader<File>) -> ReadOutcome {
     ReadOutcome::Record(content_buf)
 }
 
+/// Parse a message from a framed record content buffer.
+fn parse_message(content: &[u8]) -> Option<Message> {
+    use bytes::Buf;
+    if content.len() < 18 { return None; }
+    let mut cursor = std::io::Cursor::new(content);
+    let seq = cursor.get_u64();
+    let timestamp = cursor.get_u64();
+    let key_len = cursor.get_u16();
+    let key = if key_len > 0 {
+        if cursor.remaining() < key_len as usize { return None; }
+        let key_bytes = cursor.copy_to_bytes(key_len as usize);
+        Some(Bytes::copy_from_slice(&key_bytes))
+    } else {
+        None
+    };
+    let payload_len = cursor.remaining();
+    let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
+    Some(Message { seq, timestamp, key, payload })
+}
+
 /// Read messages from a log segment file starting at a given seq.
 pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
-    use bytes::Buf;
     let mut msgs = Vec::new();
     let file = match File::open(path).await {
         Ok(f) => f,
@@ -438,24 +457,11 @@ pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> V
     loop {
         match read_record(&mut reader).await {
             ReadOutcome::Record(content_buf) => {
-                if content_buf.len() < 18 { continue; }
-
-                let mut cursor = std::io::Cursor::new(content_buf);
-                let seq = cursor.get_u64();
-                let timestamp = cursor.get_u64();
-                let key_len = cursor.get_u16();
-                let key = if key_len > 0 {
-                    let key_bytes = cursor.copy_to_bytes(key_len as usize);
-                    Some(Bytes::copy_from_slice(&key_bytes))
-                } else {
-                    None
-                };
-                let payload_len = cursor.remaining();
-                let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
-
-                if seq >= start_seq {
-                    msgs.push(Message { seq, timestamp, key, payload });
-                    if msgs.len() >= limit { break; }
+                if let Some(msg) = parse_message(&content_buf) {
+                    if msg.seq >= start_seq {
+                        msgs.push(msg);
+                        if msgs.len() >= limit { break; }
+                    }
                 }
             }
             ReadOutcome::Corrupted | ReadOutcome::Eof => break,
@@ -482,16 +488,6 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
     if state_path.exists() {
         if let Ok(groups) = load_state_file(&state_path).await {
             state.groups_data = groups;
-        }
-    } else {
-        // Fallback: try old groups.log for backward compat
-        let groups_path = base_path.join("groups.log");
-        if groups_path.exists() {
-            if let Ok(groups) = load_groups_file(&groups_path).await {
-                state.groups_data = groups.into_iter().map(|(id, ack_floor)| {
-                    (id, GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() })
-                }).collect();
-            }
         }
     }
     state
@@ -647,7 +643,6 @@ async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersiste
 }
 
 async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
-    use bytes::Buf;
     let mut msgs = VecDeque::new();
     let file = match OpenOptions::new().read(true).write(true).open(path).await {
         Ok(f) => f,
@@ -660,22 +655,9 @@ async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
         match read_record(&mut reader).await {
             ReadOutcome::Record(content_buf) => {
                 valid_bytes += 4 + 4 + content_buf.len() as u64;
-                if content_buf.len() < 18 { continue; }
-
-                let mut cursor = std::io::Cursor::new(content_buf);
-                let seq = cursor.get_u64();
-                let timestamp = cursor.get_u64();
-                let key_len = cursor.get_u16();
-                let key = if key_len > 0 {
-                    let key_bytes = cursor.copy_to_bytes(key_len as usize);
-                    Some(Bytes::copy_from_slice(&key_bytes))
-                } else {
-                    None
-                };
-                let payload_len = cursor.remaining();
-                let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
-
-                msgs.push_back(Message { seq, timestamp, key, payload });
+                if let Some(msg) = parse_message(&content_buf) {
+                    msgs.push_back(msg);
+                }
             }
             ReadOutcome::Corrupted => {
                 error!("Corrupted record at byte {} in {:?}, truncating segment", valid_bytes, path);
@@ -690,28 +672,3 @@ async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
     msgs
 }
 
-async fn load_groups_file(path: &PathBuf) -> Result<HashMap<String, u64>, std::io::Error> {
-    use bytes::Buf;
-    let mut groups = HashMap::new();
-    let file = File::open(path).await?;
-    let mut reader = BufReader::new(file);
-
-    loop {
-        match read_record(&mut reader).await {
-            ReadOutcome::Record(content_buf) => {
-                let mut cursor = std::io::Cursor::new(content_buf);
-                if cursor.remaining() < 10 { continue; }
-                let ack_floor = cursor.get_u64();
-                let group_len = cursor.get_u16();
-
-                if cursor.remaining() < group_len as usize { continue; }
-                let group_bytes = cursor.copy_to_bytes(group_len as usize);
-                let group_id = String::from_utf8_lossy(&group_bytes).to_string();
-
-                groups.insert(group_id, ack_floor);
-            }
-            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
-        }
-    }
-    Ok(groups)
-}

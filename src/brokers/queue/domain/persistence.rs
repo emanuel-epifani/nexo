@@ -32,15 +32,9 @@ pub enum StorageOp {
     /// Delete a message from DLQ
     DeleteDLQ(Uuid),
     /// Move message from main queue to DLQ (atomic)
-    MoveToDLQ {
-        id: Uuid,
-        msg: DlqMessage,
-    },
+    MoveToDLQ(DlqMessage),
     /// Move message from DLQ to main queue (atomic)
-    MoveToMain {
-        id: Uuid,
-        msg: Message,
-    },
+    MoveToMain(Message),
     /// Purge all messages from DLQ
     PurgeDLQ,
 }
@@ -378,10 +372,10 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
             stmt.execute(params![id.as_bytes()])?;
         }
-        StorageOp::MoveToDLQ { id, msg } => {
+        StorageOp::MoveToDLQ(msg) => {
             // Atomic: delete from queue, insert into DLQ
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            stmt.execute(params![id.as_bytes()])?;
+            stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, error)
@@ -397,10 +391,10 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.failure_reason
             ])?;
         }
-        StorageOp::MoveToMain { id, msg } => {
+        StorageOp::MoveToMain(msg) => {
             // Atomic: delete from DLQ, insert into queue
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
-            stmt.execute(params![id.as_bytes()])?;
+            stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at)
@@ -414,8 +408,6 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 0u32, // reset attempts
                 msg.created_at as i64
             ])?;
-            // failure_reason is lost when moving back to main because table doesn't support it yet
-            // and we are resetting the message anyway.
         }
         StorageOp::PurgeDLQ => {
             tx.execute("DELETE FROM dlq_messages", [])?;
