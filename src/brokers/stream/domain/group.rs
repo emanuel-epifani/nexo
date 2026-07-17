@@ -52,6 +52,7 @@ pub struct ConsumerGroup {
     pub is_fetching_cold: bool,
     pub generation: u64,
     pub cancel: CancellationToken,
+    last_clamped_head: u64,
 }
 
 impl ConsumerGroup {
@@ -75,6 +76,7 @@ impl ConsumerGroup {
             is_fetching_cold: false,
             generation: 1,
             cancel: CancellationToken::new(),
+            last_clamped_head: 0,
         }
     }
 
@@ -102,6 +104,7 @@ impl ConsumerGroup {
             is_fetching_cold: false,
             generation: 1,
             cancel: CancellationToken::new(),
+            last_clamped_head: 0,
         }
     }
 
@@ -229,6 +232,9 @@ impl ConsumerGroup {
 
     pub fn clamp_head(&mut self, head_seq: u64) -> bool {
         let head_seq = head_seq.max(1);
+        if head_seq <= self.last_clamped_head {
+            return false;
+        }
         let mut changed = false;
 
         if self.ack_floor < head_seq.saturating_sub(1) {
@@ -298,6 +304,7 @@ impl ConsumerGroup {
             self.invalidate_inflight();
         }
 
+        self.last_clamped_head = head_seq;
         changed
     }
 
@@ -316,6 +323,7 @@ impl ConsumerGroup {
         self.members.clear();
         self.is_fetching_cold = false;
         self.generation = self.generation.saturating_add(1);
+        self.last_clamped_head = 0;
         self.invalidate_inflight();
     }
 

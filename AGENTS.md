@@ -4,6 +4,11 @@
 
 Single-binary Rust broker server exposing **four data-communication models**:
 
+
+
+
+
+
 - **Store**: shared in-memory state (sessions, cache, counters)
 - **Pub/Sub**: transient topic broadcast, low-latency, wildcard matching (`+`, `#`)
 - **Queue**: durable FIFO with acks, delays, priority, retries, DLQ
