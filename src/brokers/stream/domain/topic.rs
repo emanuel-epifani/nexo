@@ -73,7 +73,7 @@ impl TopicState {
         }
     }
 
-    pub fn append(&mut self, key: Option<Bytes>, payload: Bytes) -> (u64, u64) {
+    pub fn append(&mut self, key: Option<Bytes>, payload: Bytes) -> Message {
         let seq = self.next_seq;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -84,15 +84,16 @@ impl TopicState {
             self.ram_start_seq = seq;
         }
 
-        self.log.push_back(Message {
+        let msg = Message {
             seq,
             timestamp,
-            key,
-            payload,
-        });
+            key: key.clone(),
+            payload: payload.clone(),
+        };
+        self.log.push_back(msg.clone());
         self.next_seq += 1;
 
-        (seq, timestamp)
+        msg
     }
 
     pub fn read(&self, from_seq: u64, limit: usize) -> Vec<Message> {

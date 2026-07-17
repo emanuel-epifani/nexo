@@ -15,7 +15,7 @@ use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::persistence::{recover_topic, GroupPersistentState, MessageToAppend, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::persistence::{recover_topic, GroupPersistentState, StorageCommand, StorageManager};
 use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
 
 struct TopicShared {
@@ -159,14 +159,9 @@ impl StreamManager {
             let mut seqs = Vec::with_capacity(items.len());
             let mut messages_to_append = Vec::with_capacity(items.len());
             for (key, payload) in items {
-                let (seq, timestamp) = inner.state.append(key.clone(), payload.clone());
-                seqs.push(seq);
-                messages_to_append.push(MessageToAppend {
-                    seq,
-                    timestamp,
-                    key,
-                    payload,
-                });
+                let msg = inner.state.append(key, payload);
+                seqs.push(msg.seq);
+                messages_to_append.push(msg);
             }
             (seqs, messages_to_append)
         };

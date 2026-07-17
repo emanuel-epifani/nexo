@@ -55,14 +55,6 @@ pub struct Segment {
     pub start_seq: u64,
 }
 
-#[derive(Debug)]
-pub struct MessageToAppend {
-    pub seq: u64,
-    pub timestamp: u64,
-    pub key: Option<Bytes>,
-    pub payload: Bytes,
-}
-
 // ==========================================
 // COMMANDS
 // ==========================================
@@ -71,7 +63,7 @@ pub enum StorageCommand {
     /// Append messages to a topic's active log file.
     Append {
         topic_name: String,
-        messages: Vec<MessageToAppend>,
+        messages: Vec<Message>,
         persisted_seq: Arc<AtomicU64>,
     },
     
@@ -203,7 +195,7 @@ impl StorageManager {
     async fn handle_append(
         &mut self,
         topic_name: String,
-        messages: Vec<MessageToAppend>,
+        messages: Vec<Message>,
         persisted_seq: Arc<AtomicU64>,
     ) {
         if messages.is_empty() { return; }
