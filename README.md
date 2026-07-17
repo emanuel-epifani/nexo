@@ -41,7 +41,7 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers.
 
 *   **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
 *   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
-*   **Unified Interface:** A single TC,P connection handles all protocols, reducing connection overhead.
+*   **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
 
 ```
                                           ┌──────────────────────────────────────┐

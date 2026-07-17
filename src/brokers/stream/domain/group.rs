@@ -178,9 +178,7 @@ impl ConsumerGroup {
         };
 
         self.pending.remove(&seq);
-        if self.pending.is_empty() {
-            self.earliest_deadline = None;
-        }
+        self.recompute_earliest_deadline();
         self.delivery_attempts.remove(&seq);
 
         let mut key_unblocked = false;
@@ -220,7 +218,7 @@ impl ConsumerGroup {
             .collect();
 
         if expired.is_empty() {
-            self.earliest_deadline = self.pending.values().map(|m| m.delivered_at + self.ack_wait).min();
+            self.recompute_earliest_deadline();
             return false;
         }
 
@@ -231,7 +229,7 @@ impl ConsumerGroup {
             }
         }
 
-        self.earliest_deadline = self.pending.values().map(|m| m.delivered_at + self.ack_wait).min();
+        self.recompute_earliest_deadline();
         self.try_advance_floor();
         true
     }
@@ -347,6 +345,14 @@ impl ConsumerGroup {
     }
 
     /// Cancel all in-flight fetches and issue a fresh token.
+    fn recompute_earliest_deadline(&mut self) {
+        self.earliest_deadline = if self.pending.is_empty() {
+            None
+        } else {
+            self.pending.values().map(|m| m.delivered_at + self.ack_wait).min()
+        };
+    }
+
     fn invalidate_inflight(&mut self) {
         self.cancel.cancel();
         self.cancel = CancellationToken::new();
@@ -547,9 +553,7 @@ impl ConsumerGroup {
             self.release_seq(seq, delivery_count, key);
         }
 
-        if self.pending.is_empty() {
-            self.earliest_deadline = None;
-        }
+        self.recompute_earliest_deadline();
         self.try_advance_floor();
     }
 
