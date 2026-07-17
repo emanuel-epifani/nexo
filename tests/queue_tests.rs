@@ -690,6 +690,52 @@ mod queue_tests {
                 assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
             }
         }
+
+        #[tokio::test]
+        async fn test_failure_reason_survives_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("persist_reason_{}", Uuid::new_v4());
+
+            {
+                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let config = QueueCreateOptions {
+                    max_retries: Some(5),
+                    ..Default::default()
+                };
+                manager.create_queue(q.clone(), config).await.unwrap();
+
+                manager.push(q.clone(), Bytes::from("failer"), 0).await.unwrap();
+
+                // Pop → InFlight
+                let msg = manager.pop(&q).await.unwrap();
+
+                // Nack with a reason (requeue, not DLQ since attempts < max_retries)
+                manager.nack(&q, msg.id, "bad_payload".to_string()).await;
+
+                // Wait for flush
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            // Restart
+            {
+                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                assert!(manager2.exists(&q).await, "Queue should survive restart");
+
+                let msg = manager2.pop(&q).await.expect("Requeued message should survive restart");
+                assert_eq!(msg.payload, Bytes::from("failer"));
+                assert_eq!(
+                    msg.failure_reason.as_deref(),
+                    Some("bad_payload"),
+                    "failure_reason should survive restart for requeued messages"
+                );
+            }
+        }
     }
 
     // =========================================================================================

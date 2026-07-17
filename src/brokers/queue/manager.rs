@@ -190,6 +190,7 @@ impl QueueManager {
                             id: msg.id,
                             visible_at: 0,
                             attempts: msg.attempts,
+                            failure_reason: msg.failure_reason.clone(),
                         });
                     }
 
@@ -221,6 +222,7 @@ impl QueueManager {
                 id: msg.id,
                 visible_at: msg.visible_at,
                 attempts: msg.attempts,
+                failure_reason: msg.failure_reason.clone(),
             });
         }
     }
@@ -313,6 +315,7 @@ impl QueueManager {
                 id: msg.id,
                 visible_at: msg.visible_at,
                 attempts: msg.attempts,
+                failure_reason: msg.failure_reason.clone(),
             });
         }
 
@@ -360,6 +363,7 @@ impl QueueManager {
                 id: msg.id,
                 visible_at: msg.visible_at,
                 attempts: msg.attempts,
+                failure_reason: msg.failure_reason.clone(),
             });
             shared.notify.notify_waiters();
             return true;

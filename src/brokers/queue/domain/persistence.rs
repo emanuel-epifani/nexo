@@ -26,6 +26,7 @@ pub enum StorageOp {
         id: Uuid,
         visible_at: u64,
         attempts: u32,
+        failure_reason: Option<String>,
     },
     
     // DLQ Operations
@@ -138,8 +139,7 @@ async fn run_writer(
          PRAGMA synchronous = OFF;
          PRAGMA cache_size = -64000;
          PRAGMA temp_store = MEMORY;
-         PRAGMA mmap_size = 268435456;
-         PRAGMA page_size = 8192;"
+         PRAGMA mmap_size = 268435456;"
     ) {
         error!("Failed to set writer pragmas: {}", e);
     }
@@ -174,6 +174,9 @@ async fn run_writer(
                         // Sender dropped — flush remaining and exit
                         if !batch.is_empty() {
                             flush_batch(&mut conn, &mut batch);
+                        }
+                        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                            error!("Failed to checkpoint WAL on shutdown: {}", e);
                         }
                         info!("Queue Persistence Writer stopped for {:?}", db_path);
                         return;
@@ -243,7 +246,8 @@ fn init_db(conn: &Connection) -> Result<()> {
             priority INTEGER NOT NULL,
             visible_at INTEGER NOT NULL,
             attempts INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            error TEXT
         )",
         [],
     )?;
@@ -267,7 +271,7 @@ fn init_db(conn: &Connection) -> Result<()> {
 
 fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, payload, priority, visible_at, attempts, created_at FROM queue"
+        "SELECT id, payload, priority, visible_at, attempts, created_at, error FROM queue"
     )?;
 
     let message_iter = stmt.query_map([], |row| {
@@ -278,7 +282,8 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let visible_at = row.get::<_, i64>(3)? as u64;
         let attempts: u32 = row.get(4)?;
         let created_at = row.get::<_, i64>(5)? as u64;
- 
+        let error: Option<String> = row.get(6)?;
+
          let now = current_time_ms();
          
          // Reconstruct State
@@ -295,7 +300,7 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
              attempts,
              created_at,
              visible_at,
-             failure_reason: None, // Not persisted in main queue yet
+             failure_reason: error,
              state,
          })
     })?;
@@ -344,27 +349,28 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
         StorageOp::Insert(msg) => {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             )?;
             stmt.execute(params![
                 msg.id.as_bytes(),
-                msg.payload.as_ref(), // Bytes -> &[u8]
+                msg.payload.as_ref(),
                 msg.priority,
                 msg.visible_at as i64,
                 msg.attempts,
-                msg.created_at as i64
+                msg.created_at as i64,
+                msg.failure_reason.as_deref()
             ])?;
         }
         StorageOp::Delete(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
             stmt.execute(params![id.as_bytes()])?;
         }
-        StorageOp::UpdateState { id, visible_at, attempts } => {
+        StorageOp::UpdateState { id, visible_at, attempts, failure_reason } => {
             let mut stmt = tx.prepare_cached(
-                "UPDATE queue SET visible_at = ?1, attempts = ?2 WHERE id = ?3"
+                "UPDATE queue SET visible_at = ?1, attempts = ?2, error = ?3 WHERE id = ?4"
             )?;
-            stmt.execute(params![*visible_at as i64, *attempts, id.as_bytes()])?;
+            stmt.execute(params![*visible_at as i64, *attempts, failure_reason.as_deref(), id.as_bytes()])?;
         }
         
         // DLQ Operations
@@ -397,8 +403,8 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             )?;
             stmt.execute(params![
                 msg.id.as_bytes(),
@@ -406,7 +412,8 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.priority,
                 0i64, // visible_at = 0 (ready immediately)
                 0u32, // reset attempts
-                msg.created_at as i64
+                msg.created_at as i64,
+                msg.failure_reason.as_deref()
             ])?;
         }
         StorageOp::PurgeDLQ => {
