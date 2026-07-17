@@ -283,9 +283,10 @@ impl QueueManager {
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
 
         {
+            let now = current_time_ms();
             let mut inner = Self::lock(&shared.inner);
-            for (payload, priority) in &items {
-                let msg = Message::new(payload.clone(), *priority);
+            for (payload, priority) in items {
+                let msg = Message::new(payload, priority, now);
                 inner.state.push(msg.clone());
                 shared.store.execute(StorageOp::Insert(msg));
             }
@@ -303,10 +304,11 @@ impl QueueManager {
     pub async fn pop(&self, queue_name: &str) -> Option<Message> {
         let shared = self.get_queue(queue_name)?;
 
+        let now = current_time_ms();
         let msg_opt = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
-            inner.state.pop(vt)
+            inner.state.pop(vt, now)
         };
 
         if let Some(msg) = &msg_opt {

@@ -53,6 +53,7 @@ pub struct ConsumerGroup {
     pub generation: u64,
     pub cancel: CancellationToken,
     last_clamped_head: u64,
+    earliest_deadline: Option<Instant>,
 }
 
 impl ConsumerGroup {
@@ -77,6 +78,7 @@ impl ConsumerGroup {
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
+            earliest_deadline: None,
         }
     }
 
@@ -105,6 +107,7 @@ impl ConsumerGroup {
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
+            earliest_deadline: None,
         }
     }
 
@@ -175,6 +178,9 @@ impl ConsumerGroup {
         };
 
         self.pending.remove(&seq);
+        if self.pending.is_empty() {
+            self.earliest_deadline = None;
+        }
         self.delivery_attempts.remove(&seq);
 
         let mut key_unblocked = false;
@@ -197,13 +203,24 @@ impl ConsumerGroup {
 
     /// Negative acknowledge: move message back to redeliver queue.
     pub fn check_redelivery(&mut self) -> bool {
+        if self.pending.is_empty() {
+            self.earliest_deadline = None;
+            return false;
+        }
         let now = Instant::now();
+        if let Some(deadline) = self.earliest_deadline {
+            if now < deadline {
+                return false;
+            }
+        }
+
         let expired: Vec<u64> = self.pending.iter()
             .filter(|(_, msg)| now.duration_since(msg.delivered_at) > self.ack_wait)
             .map(|(seq, _)| *seq)
             .collect();
 
         if expired.is_empty() {
+            self.earliest_deadline = self.pending.values().map(|m| m.delivered_at + self.ack_wait).min();
             return false;
         }
 
@@ -214,6 +231,7 @@ impl ConsumerGroup {
             }
         }
 
+        self.earliest_deadline = self.pending.values().map(|m| m.delivered_at + self.ack_wait).min();
         self.try_advance_floor();
         true
     }
@@ -324,6 +342,7 @@ impl ConsumerGroup {
         self.is_fetching_cold = false;
         self.generation = self.generation.saturating_add(1);
         self.last_clamped_head = 0;
+        self.earliest_deadline = None;
         self.invalidate_inflight();
     }
 
@@ -465,10 +484,16 @@ impl ConsumerGroup {
             }
         }
 
+        let delivered_at = Instant::now();
+        let deadline = delivered_at + self.ack_wait;
+        self.earliest_deadline = Some(match self.earliest_deadline {
+            Some(d) if d < deadline => d,
+            _ => deadline,
+        });
         self.delivery_attempts.insert(msg.seq, next_attempt);
         self.pending.insert(msg.seq, PendingMsg {
             consumer_id: consumer_id.to_string(),
-            delivered_at: Instant::now(),
+            delivered_at,
             delivery_count: next_attempt,
             key: msg.key.clone(),
         });
@@ -522,6 +547,9 @@ impl ConsumerGroup {
             self.release_seq(seq, delivery_count, key);
         }
 
+        if self.pending.is_empty() {
+            self.earliest_deadline = None;
+        }
         self.try_advance_floor();
     }
 

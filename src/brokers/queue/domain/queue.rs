@@ -37,9 +37,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(payload: Bytes, priority: u8) -> Self {
-        let now = current_time_ms();
-
+    pub fn new(payload: Bytes, priority: u8, now: u64) -> Self {
         Self {
             id: Uuid::new_v4(),
             payload,
@@ -127,8 +125,8 @@ impl QueueState {
     }
 
     /// Pop the highest priority message.
-    pub fn pop(&mut self, visibility_timeout_ms: u64) -> Option<Message> {
-        self.pop_single(visibility_timeout_ms)
+    pub fn pop(&mut self, visibility_timeout_ms: u64, now: u64) -> Option<Message> {
+        self.pop_single(visibility_timeout_ms, now)
     }
 
     /// Acknowledge a message (remove from system).
@@ -138,10 +136,11 @@ impl QueueState {
 
     /// Take up to `max` messages for batch consumption.
     pub fn take_batch(&mut self, max: usize, visibility_timeout_ms: u64) -> Vec<Message> {
+        let now = current_time_ms();
         let mut result = Vec::with_capacity(max);
 
         while result.len() < max {
-            match self.pop_single(visibility_timeout_ms) {
+            match self.pop_single(visibility_timeout_ms, now) {
                 Some(msg) => result.push(msg),
                 None => break,
             }
@@ -187,53 +186,36 @@ impl QueueState {
     /// dlq_messages: messages moved to DLQ (need MoveToDlq in DB)
     pub fn process_expired(&mut self, max_retries: u32) -> (Vec<Message>, Vec<DlqMessage>) {
         let now = current_time_ms();
-        let mut ids_to_ready = Vec::new();
-        let mut ids_to_dlq = Vec::new();
+        let mut requeued_msgs = Vec::new();
+        let mut dlq_msgs = Vec::new();
 
-        // Timed out in-flight messages
-        for (&ts, ids) in &self.waiting_for_ack {
-            if ts <= now {
-                for &id in ids {
-                    if let Some(msg) = self.registry.get(&id) {
-                        if msg.attempts >= max_retries {
-                            ids_to_dlq.push(id);
-                        } else {
-                            ids_to_ready.push(id);
-                        }
+        // Collect expired timestamps (BTreeMap keys are sorted ascending)
+        let expired_ts: Vec<u64> = self.waiting_for_ack
+            .keys()
+            .take_while(|&&ts| ts <= now)
+            .copied()
+            .collect();
+
+        for ts in expired_ts {
+            let ids = self.waiting_for_ack.remove(&ts).unwrap_or_default();
+            for id in ids {
+                let should_dlq = self.registry.get(&id)
+                    .map(|m| m.attempts >= max_retries)
+                    .unwrap_or(false);
+
+                if should_dlq {
+                    if let Some(msg) = self.registry.remove(&id) {
+                        dlq_msgs.push(DlqMessage::from_message(msg, "Timeout".to_string()));
+                    }
+                } else {
+                    if let Some(msg) = self.registry.get_mut(&id) {
+                        msg.state = MessageState::Ready;
+                        msg.visible_at = 0;
+                        let priority = msg.priority;
+                        requeued_msgs.push(msg.clone());
+                        self.waiting_for_dispatch.entry(priority).or_default().insert(id);
                     }
                 }
-            } else {
-                break;
-            }
-        }
-
-        let mut requeued_msgs = Vec::new();
-        // Transition to ready
-        for id in ids_to_ready {
-            if self.transition_to(id, MessageState::Ready) {
-                if let Some(msg) = self.registry.get_mut(&id) {
-                    msg.visible_at = 0; // Ready immediately
-                    requeued_msgs.push(msg.clone());
-                }
-            }
-        }
-
-        // Collect DLQ messages and delete from active
-        let mut dlq_msgs = Vec::new();
-        for id in ids_to_dlq {
-            if let Some(msg) = self.registry.remove(&id) { // Remove returns value
-                // Clean up indexes
-                match msg.state {
-                    MessageState::InFlight(ts) => {
-                        if let Some(queue) = self.waiting_for_ack.get_mut(&ts) {
-                            queue.remove(&id);
-                            if queue.is_empty() { self.waiting_for_ack.remove(&ts); }
-                        }
-                    },
-                    // Should be InFlight mostly, but handle others if logic changes
-                    _ => {}
-                }
-                dlq_msgs.push(DlqMessage::from_message(msg, "Timeout".to_string()));
             }
         }
 
@@ -243,9 +225,7 @@ impl QueueState {
     // --- Internal helpers ---
 
     /// Pop a single message from the queue.
-    fn pop_single(&mut self, visibility_timeout_ms: u64) -> Option<Message> {
-        let now = current_time_ms();
-
+    fn pop_single(&mut self, visibility_timeout_ms: u64, now: u64) -> Option<Message> {
         // Find highest priority ready message
         let next_id = self.waiting_for_dispatch
             .iter()
