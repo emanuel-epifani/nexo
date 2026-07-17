@@ -289,7 +289,7 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
          
          // Reconstruct State
          let state = if visible_at > now && attempts > 0 {
-             MessageState::InFlight(visible_at)
+             MessageState::InFlight
          } else {
              MessageState::Ready
          };
