@@ -25,8 +25,8 @@ impl Default for SystemStreamConfig {
             retention_check_interval_ms: 600000,  // 10 minutes
             default_retention_bytes: 1073741824, // 1GB
             default_retention_age_ms: 604800000, // 7 days
-            eviction_interval_ms: 500,
-            ram_soft_limit: 1000,
+            eviction_interval_ms: 10000,
+            ram_soft_limit: 10000,
             max_ack_pending: 10000,
             max_open_files: 256,
             ack_wait_ms: 30000, // 30 seconds
