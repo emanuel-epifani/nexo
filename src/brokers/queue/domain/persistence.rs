@@ -20,6 +20,8 @@ use crate::brokers::queue::domain::dlq::DlqMessage;
 pub enum StorageOp {
     /// Insert a new message (Push)
     Insert(Message),
+    /// Insert multiple messages in one operation (PushBatch)
+    InsertBatch(Vec<Message>),
     /// Remove a message (Ack)
     Delete(Uuid),
     /// Update visibility and attempts (Nack / Timeout / In-flight)
@@ -29,6 +31,8 @@ pub enum StorageOp {
         attempts: u32,
         failure_reason: Option<String>,
     },
+    /// Update visibility and attempts for multiple messages in one operation
+    UpdateStateBatch(Vec<Message>),
     
     // DLQ Operations
     /// Delete a message from DLQ
@@ -363,6 +367,23 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 msg.failure_reason.as_deref()
             ])?;
         }
+        StorageOp::InsertBatch(msgs) => {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            )?;
+            for msg in msgs {
+                stmt.execute(params![
+                    msg.id.as_bytes(),
+                    msg.payload.as_ref(),
+                    msg.priority,
+                    msg.visible_at as i64,
+                    msg.attempts,
+                    msg.created_at as i64,
+                    msg.failure_reason.as_deref()
+                ])?;
+            }
+        }
         StorageOp::Delete(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
             stmt.execute(params![id.as_bytes()])?;
@@ -372,6 +393,19 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 "UPDATE queue SET visible_at = ?1, attempts = ?2, error = ?3 WHERE id = ?4"
             )?;
             stmt.execute(params![*visible_at as i64, *attempts, failure_reason.as_deref(), id.as_bytes()])?;
+        }
+        StorageOp::UpdateStateBatch(msgs) => {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE queue SET visible_at = ?1, attempts = ?2, error = ?3 WHERE id = ?4"
+            )?;
+            for msg in msgs {
+                stmt.execute(params![
+                    msg.visible_at as i64,
+                    msg.attempts,
+                    msg.failure_reason.as_deref(),
+                    msg.id.as_bytes()
+                ])?;
+            }
         }
         
         // DLQ Operations

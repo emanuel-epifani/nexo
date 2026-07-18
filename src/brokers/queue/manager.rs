@@ -186,14 +186,7 @@ impl QueueManager {
                         continue;
                     }
 
-                    for msg in &requeued {
-                        shared.store.execute(StorageOp::UpdateState {
-                            id: msg.id,
-                            visible_at: 0,
-                            attempts: msg.attempts,
-                            failure_reason: msg.failure_reason.clone(),
-                        });
-                    }
+                    Self::persist_batch_state(&shared, &requeued);
 
                     for dlq_msg in dlq_msgs {
                         shared.store.execute(StorageOp::MoveToDLQ(dlq_msg));
@@ -217,14 +210,20 @@ impl QueueManager {
         self.queues.get(name).map(|r| r.value().clone())
     }
 
-    fn persist_batch_state(&self, shared: &Arc<QueueShared>, msgs: &[Message]) {
-        for msg in msgs {
+    fn persist_batch_state(shared: &Arc<QueueShared>, msgs: &[Message]) {
+        if msgs.is_empty() {
+            return;
+        }
+        if msgs.len() == 1 {
+            let msg = &msgs[0];
             shared.store.execute(StorageOp::UpdateState {
                 id: msg.id,
                 visible_at: msg.visible_at,
                 attempts: msg.attempts,
                 failure_reason: msg.failure_reason.clone(),
             });
+        } else {
+            shared.store.execute(StorageOp::UpdateStateBatch(msgs.to_vec()));
         }
     }
 
@@ -282,14 +281,28 @@ impl QueueManager {
         let shared = self.get_queue(&queue_name)
             .ok_or_else(|| format!("Queue '{}' not found. Create it first.", queue_name))?;
 
-        {
-            let now = current_time_ms();
-            let mut inner = Self::lock(&shared.inner);
-            for (payload, priority) in items {
-                let msg = Message::new(payload, priority, now);
+        let now = current_time_ms();
+
+        if items.len() == 1 {
+            let (payload, priority) = items.into_iter().next().unwrap();
+            let msg = Message::new(payload, priority, now);
+            {
+                let mut inner = Self::lock(&shared.inner);
                 inner.state.push(msg.clone());
-                shared.store.execute(StorageOp::Insert(msg));
             }
+            shared.store.execute(StorageOp::Insert(msg));
+        } else {
+            let mut msgs = Vec::with_capacity(items.len());
+            for (payload, priority) in items {
+                msgs.push(Message::new(payload, priority, now));
+            }
+            {
+                let mut inner = Self::lock(&shared.inner);
+                for msg in &msgs {
+                    inner.state.push(msg.clone());
+                }
+            }
+            shared.store.execute(StorageOp::InsertBatch(msgs));
         }
 
         shared.notify.notify_waiters();
@@ -397,7 +410,7 @@ impl QueueManager {
             msgs
         };
         if !msgs.is_empty() {
-            self.persist_batch_state(&shared, &msgs);
+            Self::persist_batch_state(&shared, &msgs);
             return Ok(msgs);
         }
 
@@ -420,7 +433,7 @@ impl QueueManager {
                 inner.state.take_batch(max_val, vt)
             };
             if !msgs.is_empty() {
-                self.persist_batch_state(&shared, &msgs);
+                Self::persist_batch_state(&shared, &msgs);
                 return Ok(msgs);
             }
 
