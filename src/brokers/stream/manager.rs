@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -464,7 +466,7 @@ impl StreamManager {
     }
 
     fn lock_topic<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        mutex.lock()
     }
 
     fn collect_topics(topics: &Arc<DashMap<String, Arc<TopicShared>>>) -> Vec<(String, Arc<TopicShared>)> {

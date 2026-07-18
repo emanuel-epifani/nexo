@@ -2,10 +2,11 @@
 //! Each queue is an Arc<QueueShared> with a Mutex<QueueInner> for state
 //! and a Notify for long-polling wakeup.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
+use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::Notify;
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
@@ -208,7 +209,7 @@ impl QueueManager {
 
     #[inline]
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        mutex.lock()
     }
 
     #[inline]

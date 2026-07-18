@@ -1,6 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use rusqlite::{params, types::Type, Connection, Result};
@@ -98,7 +99,7 @@ impl QueueStore {
     /// Send a storage op to the background writer (sync, never blocks)
     #[inline]
     pub fn execute(&self, op: StorageOp) {
-        if let Some(sender) = self.sender.lock().unwrap().as_ref() {
+        if let Some(sender) = self.sender.lock().as_ref() {
             if let Err(e) = sender.send(op) {
                 error!("Writer channel closed, op lost: {:?}", e.0);
             }
@@ -107,8 +108,8 @@ impl QueueStore {
 
     /// Graceful shutdown: drop sender so writer drains remaining ops, then wait for it to exit
     pub async fn shutdown(&self) {
-        self.sender.lock().unwrap().take(); // drop sender → writer recv() returns None after draining
-        let handle = self.writer_handle.lock().unwrap().take();
+        self.sender.lock().take(); // drop sender → writer recv() returns None after draining
+        let handle = self.writer_handle.lock().take();
         if let Some(handle) = handle {
             let _ = handle.await;
         }
