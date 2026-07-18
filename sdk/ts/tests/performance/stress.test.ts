@@ -76,6 +76,33 @@ describe('Stress test', () => {
 
             await q.delete();
         });
+        it('QUEUE - PUSH BATCH - concurrent workers', async () => {
+            const q = nexo.queue('bench-queue-batch-throughput');
+            await q.create();
+
+            const TOTAL = 50_000;
+            const WORKERS = 50;
+            const BATCH_SIZE = 100;
+            const BATCHES_PER_WORKER = TOTAL / WORKERS / BATCH_SIZE;
+            const payload = { op: 'job', data: 'x', t: Date.now() };
+
+            const probe = new BenchmarkProbe('QUEUE PUSH BATCH', TOTAL);
+            probe.startTimer();
+
+            const worker = async (workerId: number) => {
+                const batch = Array.from({ length: BATCH_SIZE }, () => ({ data: payload }));
+                for (let i = 0; i < BATCHES_PER_WORKER; i++) {
+                    const t0 = performance.now();
+                    await q.pushBatch(batch);
+                    probe.recordBatch(BATCH_SIZE, performance.now() - t0);
+                }
+            };
+
+            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            probe.printResult();
+
+            await q.delete();
+        });
         it('STREAM - PUBLISH - concurrent workers', async () => {
             const topic = 'bench-stream-throughput';
             await nexo.stream(topic).create();
@@ -93,6 +120,33 @@ describe('Stress test', () => {
                     const t0 = performance.now();
                     await nexo.stream(topic).publish(payload);
                     probe.record(performance.now() - t0);
+                }
+            };
+
+            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            probe.printResult();
+
+            await nexo.stream(topic).delete();
+        });
+        it('STREAM - PUBLISH BATCH - concurrent workers', async () => {
+            const topic = 'bench-stream-batch-throughput';
+            await nexo.stream(topic).create();
+
+            const TOTAL = 50_000;
+            const WORKERS = 50;
+            const BATCH_SIZE = 100;
+            const BATCHES_PER_WORKER = TOTAL / WORKERS / BATCH_SIZE;
+            const payload = { op: 'event', data: 'x', t: Date.now() };
+
+            const probe = new BenchmarkProbe('STREAM PUBLISH BATCH', TOTAL);
+            probe.startTimer();
+
+            const worker = async (workerId: number) => {
+                const batch = Array.from({ length: BATCH_SIZE }, () => ({ data: payload }));
+                for (let i = 0; i < BATCHES_PER_WORKER; i++) {
+                    const t0 = performance.now();
+                    await nexo.stream(topic).publishBatch(batch);
+                    probe.recordBatch(BATCH_SIZE, performance.now() - t0);
                 }
             };
 

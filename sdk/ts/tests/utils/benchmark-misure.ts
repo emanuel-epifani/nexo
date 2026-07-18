@@ -20,6 +20,16 @@ export class BenchmarkProbe {
         this.record(Date.now() - startMs);
     }
 
+    // Per operazioni batch: totalMs è il tempo dell'intero batch, count il numero di messaggi.
+    recordBatch(count: number, totalMs: number) {
+        const perMessage = totalMs / count;
+        const remaining = this.totalOps - this.currentIndex;
+        const toRecord = Math.min(count, remaining);
+        for (let i = 0; i < toRecord; i++) {
+            this.latencies[this.currentIndex++] = perMessage;
+        }
+    }
+
     printResult() {
         const durationSec = (performance.now() - this.start) / 1000;
         const throughput = Math.floor(this.totalOps / durationSec);
