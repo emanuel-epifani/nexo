@@ -23,7 +23,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             const stats = probe.printResult();
             expect(stats.throughput).toBeGreaterThan(30_000);
         });
@@ -48,7 +48,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
         });
         it('QUEUE - PUSH - concurrent workers', async () => {
@@ -58,7 +58,7 @@ describe('Stress test', () => {
             const TOTAL = 50_000;
             const WORKERS = 50;
             const OPS_PER_WORKER = TOTAL / WORKERS;
-            const payload = { op: 'job', data: 'x', t: Date.now() };
+            const payload = {op: 'job', data: 'x', t: Date.now()};
 
             const probe = new BenchmarkProbe('QUEUE PUSH', TOTAL);
             probe.startTimer();
@@ -71,7 +71,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
 
             await q.delete();
@@ -84,13 +84,13 @@ describe('Stress test', () => {
             const WORKERS = 50;
             const BATCH_SIZE = 100;
             const BATCHES_PER_WORKER = TOTAL / WORKERS / BATCH_SIZE;
-            const payload = { op: 'job', data: 'x', t: Date.now() };
+            const payload = {op: 'job', data: 'x', t: Date.now()};
 
             const probe = new BenchmarkProbe('QUEUE PUSH BATCH', TOTAL);
             probe.startTimer();
 
             const worker = async (workerId: number) => {
-                const batch = Array.from({ length: BATCH_SIZE }, () => ({ data: payload }));
+                const batch = Array.from({length: BATCH_SIZE}, () => ({data: payload}));
                 for (let i = 0; i < BATCHES_PER_WORKER; i++) {
                     const t0 = performance.now();
                     await q.pushBatch(batch);
@@ -98,7 +98,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
 
             await q.delete();
@@ -110,7 +110,7 @@ describe('Stress test', () => {
             const TOTAL = 50_000;
             const WORKERS = 50;
             const OPS_PER_WORKER = TOTAL / WORKERS;
-            const payload = { op: 'event', data: 'x', t: Date.now() };
+            const payload = {op: 'event', data: 'x', t: Date.now()};
 
             const probe = new BenchmarkProbe('STREAM PUBLISH', TOTAL);
             probe.startTimer();
@@ -123,7 +123,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
 
             await nexo.stream(topic).delete();
@@ -136,13 +136,13 @@ describe('Stress test', () => {
             const WORKERS = 50;
             const BATCH_SIZE = 100;
             const BATCHES_PER_WORKER = TOTAL / WORKERS / BATCH_SIZE;
-            const payload = { op: 'event', data: 'x', t: Date.now() };
+            const payload = {op: 'event', data: 'x', t: Date.now()};
 
             const probe = new BenchmarkProbe('STREAM PUBLISH BATCH', TOTAL);
             probe.startTimer();
 
             const worker = async (workerId: number) => {
-                const batch = Array.from({ length: BATCH_SIZE }, () => ({ data: payload }));
+                const batch = Array.from({length: BATCH_SIZE}, () => ({data: payload}));
                 for (let i = 0; i < BATCHES_PER_WORKER; i++) {
                     const t0 = performance.now();
                     await nexo.stream(topic).publishBatch(batch);
@@ -150,14 +150,14 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
 
             await nexo.stream(topic).delete();
         });
         it('PUBSUB - PUBLISH - concurrent workers', async () => {
             const topic = nexo.pubsub('bench/pubsub-throughput');
-            const payload = { op: 'ping', data: 'x', t: Date.now() };
+            const payload = {op: 'ping', data: 'x', t: Date.now()};
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -174,7 +174,7 @@ describe('Stress test', () => {
                 }
             };
 
-            await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
+            await Promise.all(Array.from({length: WORKERS}, (_, i) => worker(i)));
             probe.printResult();
         });
         it('QUEUE - CONSUME+ACK - subscriber throughput', async () => {
@@ -182,7 +182,7 @@ describe('Stress test', () => {
             await q.create();
 
             const TOTAL = 50_000;
-            const payload = { op: 'job', data: 'x', t: Date.now() };
+            const payload = {op: 'job', data: 'x', t: Date.now()};
 
             // Pre-fill queue
             for (let i = 0; i < TOTAL; i++) await q.push(payload);
@@ -193,7 +193,7 @@ describe('Stress test', () => {
 
             const sub = await q.subscribe(async () => {
                 consumed++;
-            }, { batchSize: 50, waitMs: 100, concurrency: 10 });
+            }, {batchSize: 50, waitMs: 100, concurrency: 10});
 
             while (consumed < TOTAL) await new Promise(r => setTimeout(r, 50));
             await sub.stop();
@@ -206,7 +206,7 @@ describe('Stress test', () => {
             await nexo.stream(topic).create();
 
             const TOTAL = 50_000;
-            const payload = { op: 'event', data: 'x', t: Date.now() };
+            const payload = {op: 'event', data: 'x', t: Date.now()};
 
             // Pre-fill stream
             for (let i = 0; i < TOTAL; i++) await nexo.stream(topic).publish(payload);
@@ -217,7 +217,7 @@ describe('Stress test', () => {
 
             const sub = await nexo.stream(topic).subscribe('bench-group', async () => {
                 consumed++;
-            }, { batchSize: 100, waitMs: 100, concurrency: 10 });
+            }, {batchSize: 100, waitMs: 100, concurrency: 10});
 
             while (consumed < TOTAL) await new Promise(r => setTimeout(r, 50));
             await sub.stop();

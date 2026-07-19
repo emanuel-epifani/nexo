@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -157,7 +157,7 @@ impl StreamManager {
         let persisted_seq = topic_ref.persisted_seq.clone();
 
         let (seqs, messages_to_append) = {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let mut seqs = Vec::with_capacity(items.len());
             let mut messages_to_append = Vec::with_capacity(items.len());
             for (key, payload) in items {
@@ -185,7 +185,7 @@ impl StreamManager {
 
     pub async fn peek_dlt(&self, topic: &str, group: &str, limit: usize, offset: usize) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let inner = Self::lock_topic(&topic_ref.inner);
+        let inner = topic_ref.inner.lock();
         let group_ref = inner.groups.get(group).ok_or("Group not found")?;
         let entries = group_ref.peek_dlt(limit, offset);
         Ok(entries.into_iter().map(|(seq, e)| (seq, e.reason, e.attempts, e.key)).collect())
@@ -194,7 +194,7 @@ impl StreamManager {
     pub async fn move_to_stream(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
             let key_unblocked = group_ref.move_to_stream(seq)?;
             inner.groups_dirty = true;
@@ -207,7 +207,7 @@ impl StreamManager {
     pub async fn delete_dlt(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
             let key_unblocked = group_ref.delete_dlt(seq)?;
             inner.groups_dirty = true;
@@ -222,7 +222,7 @@ impl StreamManager {
     pub async fn purge_dlt(&self, topic: &str, group: &str) -> Result<usize, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
             let count = group_ref.purge_dlt();
             inner.groups_dirty = true;
@@ -236,7 +236,7 @@ impl StreamManager {
         };
 
         let (effective_from_seq, messages, need_cold) = {
-            let inner = Self::lock_topic(&topic_ref.inner);
+            let inner = topic_ref.inner.lock();
             let effective_from_seq = from_seq.max(inner.state.head_seq);
             let messages = inner.state.read(effective_from_seq, limit);
             let need_cold = messages.is_empty()
@@ -263,7 +263,7 @@ impl StreamManager {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
 
         let group_cancel = {
-            let inner = Self::lock_topic(&topic_ref.inner);
+            let inner = topic_ref.inner.lock();
             match inner.groups.get(group) {
                 Some(g) => g.cancel_token(),
                 None => return Err("Group not found".to_string()),
@@ -314,14 +314,14 @@ impl StreamManager {
     }
 
     fn is_active_member(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str) -> bool {
-        let inner = Self::lock_topic(&topic_ref.inner);
+        let inner = topic_ref.inner.lock();
         inner.groups.get(group).map_or(false, |g| g.is_member(consumer_id))
     }
 
     pub async fn ack(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let head_seq = inner.state.head_seq;
             let Some(group_ref) = inner.groups.get_mut(group) else {
                 return Err("Group not found".to_string());
@@ -341,7 +341,7 @@ impl StreamManager {
     pub async fn seek(&self, group: &str, topic: &str, target: SeekTarget) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let last_seq = inner.state.next_seq.saturating_sub(1);
             let head_seq = inner.state.head_seq;
             let max_ack_pending = inner.full_config.max_ack_pending;
@@ -363,7 +363,7 @@ impl StreamManager {
     pub async fn leave_group(&self, group: &str, topic: &str, consumer_id: &str, generation: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let should_notify = {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             let Some(group_ref) = inner.groups.get_mut(group) else {
                 return Err("Group not found".to_string());
             };
@@ -396,7 +396,7 @@ impl StreamManager {
 
     pub async fn join_group(&self, group: &str, topic: &str, connection_client_id: &str) -> Result<JoinGroupResult, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let mut inner = Self::lock_topic(&topic_ref.inner);
+        let mut inner = topic_ref.inner.lock();
         let head_seq = inner.state.head_seq;
         let max_ack_pending = inner.full_config.max_ack_pending;
         let ack_wait = Duration::from_millis(inner.full_config.ack_wait_ms);
@@ -434,7 +434,7 @@ impl StreamManager {
         for (_, topic_ref) in Self::collect_topics(&self.topics) {
             let mut should_notify = false;
             {
-                let mut inner = Self::lock_topic(&topic_ref.inner);
+                let mut inner = topic_ref.inner.lock();
                 if let Some(bindings) = inner.client_map.remove(&client_id) {
                     for binding in bindings {
                         if let Some(group_ref) = inner.groups.get_mut(&binding.group_id) {
@@ -463,10 +463,6 @@ impl StreamManager {
 
     fn get_topic(&self, topic: &str) -> Option<Arc<TopicShared>> {
         self.topics.get(topic).map(|entry| entry.value().clone())
-    }
-
-    fn lock_topic<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock()
     }
 
     fn collect_topics(topics: &Arc<DashMap<String, Arc<TopicShared>>>) -> Vec<(String, Arc<TopicShared>)> {
@@ -578,7 +574,7 @@ impl StreamManager {
                     }
                     for (_, topic_ref) in StreamManager::collect_topics(&topics) {
                         let persisted_seq = topic_ref.persisted_seq.load(Ordering::Acquire);
-                        let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                        let mut inner = topic_ref.inner.lock();
                         inner.state.evict(persisted_seq);
                     }
                 }
@@ -600,7 +596,7 @@ impl StreamManager {
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
                         let groups_data = {
-                            let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let mut inner = topic_ref.inner.lock();
                             if !inner.groups_dirty {
                                 None
                             } else {
@@ -641,7 +637,7 @@ impl StreamManager {
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
                         let retention = {
-                            let inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let inner = topic_ref.inner.lock();
                             inner.full_config.retention.clone()
                         };
 
@@ -660,7 +656,7 @@ impl StreamManager {
 
                         let mut should_notify = false;
                         {
-                            let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let mut inner = topic_ref.inner.lock();
                             let mut groups_changed = false;
                             if new_head_seq != inner.state.head_seq {
                                 inner.state.apply_head(new_head_seq);
@@ -697,7 +693,7 @@ impl StreamManager {
                     for (_, topic_ref) in StreamManager::collect_topics(&topics) {
                         let mut should_notify = false;
                         {
-                            let mut inner = StreamManager::lock_topic(&topic_ref.inner);
+                            let mut inner = topic_ref.inner.lock();
                             let mut groups_changed = false;
                             for group in inner.groups.values_mut() {
                                 if group.check_redelivery() {
@@ -718,7 +714,7 @@ impl StreamManager {
         });
     }
     fn try_fetch_once(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str, generation: u64, limit: usize) -> Result<FetchAttempt, String> {
-        let mut inner = Self::lock_topic(&topic_ref.inner);
+        let mut inner = topic_ref.inner.lock();
         let TopicInner {
             state,
             groups,
@@ -787,7 +783,7 @@ impl StreamManager {
             limit,
             reply: tx,
         }).is_err() {
-            let mut inner = Self::lock_topic(&topic_ref.inner);
+            let mut inner = topic_ref.inner.lock();
             if let Some(group_ref) = inner.groups.get_mut(group) {
                 group_ref.is_fetching_cold = false;
             }
@@ -797,7 +793,7 @@ impl StreamManager {
         let messages = match rx.await {
             Ok(messages) => messages,
             Err(_) => {
-                let mut inner = Self::lock_topic(&topic_ref.inner);
+                let mut inner = topic_ref.inner.lock();
                 if let Some(group_ref) = inner.groups.get_mut(group) {
                     group_ref.is_fetching_cold = false;
                 }
@@ -805,7 +801,7 @@ impl StreamManager {
             }
         };
 
-        let mut inner = Self::lock_topic(&topic_ref.inner);
+        let mut inner = topic_ref.inner.lock();
         let head_seq = inner.state.head_seq;
         if let Some(group_ref) = inner.groups.get_mut(group) {
             group_ref.is_fetching_cold = false;
