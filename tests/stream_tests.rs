@@ -1528,6 +1528,238 @@ mod stream_tests {
         }
     }
 
+    mod regression {
+        use super::*;
+        use nexo::brokers::stream::{serialize_message, recover_topic};
+        use std::path::PathBuf;
+
+        // Regression #2: concurrent publish must preserve contiguous seqs and segment invariant
+        #[tokio::test]
+        async fn concurrent_publish_preserves_segment_invariant() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "reg-concurrent-pub";
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let manager = Arc::new(manager);
+            const PUBLISHERS: usize = 4;
+            const MSGS_PER: usize = 50;
+            const TOTAL: usize = PUBLISHERS * MSGS_PER;
+
+            let mut handles = Vec::new();
+            for _ in 0..PUBLISHERS {
+                let m = manager.clone();
+                let t = topic.to_string();
+                handles.push(tokio::spawn(async move {
+                    let items: Vec<(Option<Bytes>, Bytes)> = (0..MSGS_PER)
+                        .map(|i| (None, Bytes::from(format!("p-{}", i))))
+                        .collect();
+                    m.publish_batch(&t, items).await.unwrap()
+                }));
+            }
+
+            let mut all_seqs = Vec::new();
+            for h in handles {
+                all_seqs.extend(h.await.unwrap());
+            }
+
+            all_seqs.sort();
+            assert_eq!(all_seqs.len(), TOTAL);
+            assert_eq!(all_seqs[0], 1);
+            assert_eq!(all_seqs[TOTAL - 1], TOTAL as u64);
+            // No duplicates
+            let unique: std::collections::HashSet<u64> = all_seqs.iter().copied().collect();
+            assert_eq!(unique.len(), TOTAL, "No duplicate seqs across concurrent publishers");
+            // No gaps
+            for i in 0..TOTAL {
+                assert_eq!(all_seqs[i], (i + 1) as u64, "Seq gap at index {}", i);
+            }
+
+            // Verify all messages are readable via read()
+            let msgs = manager.read(topic, 1, TOTAL as usize * 2).await;
+            assert_eq!(msgs.len(), TOTAL, "All messages must be readable after concurrent publish");
+        }
+
+        // Regression #3: keyless DLT messages must not be redelivered after restart
+        #[tokio::test]
+        async fn keyless_dlt_not_redelivered_after_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap();
+            let mut config = get_test_config(Some(path));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            config.default_flush_ms = 50;
+
+            let topic = "reg-keyless-dlt";
+            let group = "g-reg-keyless-dlt";
+
+            {
+                let manager = build_manager(config.clone()).await;
+                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+
+                let consumer = join_session(&manager, group, topic, "client-A").await;
+                // Fetch, timeout, fetch, timeout → DLT (max_deliveries=2)
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert_eq!(dlt.len(), 1, "Message should be in DLT before restart");
+
+                // Wait for state save (group_save_interval = default_flush_ms * 10 = 500ms)
+                tokio::time::sleep(Duration::from_millis(600)).await;
+            }
+
+            {
+                let manager2 = build_manager(config.clone()).await;
+                let consumer = join_session(&manager2, group, topic, "client-A").await;
+                let batch = fetch_messages(&manager2, group, topic, &consumer, 10, 0).await;
+                assert!(batch.is_empty(), "Keyless DLT message must NOT be redelivered after restart");
+
+                let dlt = manager2.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert_eq!(dlt.len(), 1, "DLT entry should survive restart");
+            }
+        }
+
+        // Regression #4: recovery must truncate partial trailing records
+        #[tokio::test]
+        async fn recovery_truncates_partial_trailing_record() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-partial");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            let mut buf = Vec::new();
+            serialize_message(&mut buf, 1, 1000, None, b"msg1");
+            serialize_message(&mut buf, 2, 2000, None, b"msg2");
+            let valid_len = buf.len() as u64;
+            tokio::fs::write(&seg_path, &buf).await.unwrap();
+
+            // Append partial record (just 10 bytes of garbage — not a complete record)
+            let partial = vec![0xABu8; 10];
+            let mut file_content = tokio::fs::read(&seg_path).await.unwrap();
+            file_content.extend_from_slice(&partial);
+            tokio::fs::write(&seg_path, &file_content).await.unwrap();
+
+            let file_size_before = tokio::fs::metadata(&seg_path).await.unwrap().len();
+            assert!(file_size_before > valid_len, "File should have partial bytes at end");
+
+            // recover_topic should truncate the partial bytes
+            let state = recover_topic("reg-partial", tmp.path().to_path_buf()).await;
+            assert_eq!(state.index.len(), 2, "Should index both valid records");
+            assert!(state.index.contains_key(&1));
+            assert!(state.index.contains_key(&2));
+
+            let file_size_after = tokio::fs::metadata(&seg_path).await.unwrap().len();
+            assert_eq!(file_size_after, valid_len, "Partial trailing bytes must be truncated");
+            assert!(file_size_after < file_size_before, "File must be smaller after truncation");
+
+            // Re-read should be clean
+            let state2 = recover_topic("reg-partial", tmp.path().to_path_buf()).await;
+            assert_eq!(state2.index.len(), 2, "Re-recovery should find no corruption");
+        }
+
+        // Regression #5: ack must wake backpressured long-polling consumers
+        #[tokio::test]
+        async fn ack_wakes_backpressured_long_poll() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 2;
+            let manager = build_manager(config).await;
+            let topic = "reg-ack-wake";
+            let group = "g-reg-ack-wake";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 4 messages
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=4)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Fetch 2 messages (fills pending to max_ack_pending=2)
+            let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
+            assert_eq!(msgs.len(), 2);
+
+            // Start long-poll in a separate task — should be backpressured
+            let m = Arc::new(manager);
+            let m_clone = m.clone();
+            let topic_clone = topic.to_string();
+            let group_clone = group.to_string();
+            let consumer_id = consumer.consumer_id.clone();
+            let generation = consumer.generation;
+            let fetch_handle = tokio::spawn(async move {
+                m_clone.fetch(&group_clone, &consumer_id, generation, 10, &topic_clone, 5000).await.unwrap()
+            });
+
+            // Give the long-poll time to enter the waiting state
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Ack one message — frees a slot and wakes the consumer
+            let start = Instant::now();
+            m.ack(group, topic, &consumer.consumer_id, consumer.generation, msgs[0].seq).await.unwrap();
+
+            // The long-poll should return quickly (not wait 5000ms)
+            let result = fetch_handle.await.unwrap();
+            let elapsed = start.elapsed();
+
+            assert!(!result.is_empty(), "Long-poll should deliver messages after ack frees a slot");
+            assert!(
+                elapsed < Duration::from_millis(2000),
+                "Long-poll should wake quickly after ack, took {:?}",
+                elapsed
+            );
+        }
+
+        // Regression #6: publish during active long-poll must deliver to waiting consumer
+        #[tokio::test]
+        async fn publish_during_fetch_interleaving() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "reg-interleave";
+            let group = "g-reg-interleave";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Start long-poll with 5000ms wait — no messages available yet
+            let m = Arc::new(manager);
+            let m_clone = m.clone();
+            let topic_clone = topic.to_string();
+            let group_clone = group.to_string();
+            let consumer_id = consumer.consumer_id.clone();
+            let generation = consumer.generation;
+            let fetch_handle = tokio::spawn(async move {
+                m_clone.fetch(&group_clone, &consumer_id, generation, 10, &topic_clone, 5000).await.unwrap()
+            });
+
+            // Give the long-poll time to enter waiting state
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Publish a message — should wake the long-poll
+            let start = Instant::now();
+            m.publish(topic, None, Bytes::from("interleaved-msg")).await.unwrap();
+
+            let result = fetch_handle.await.unwrap();
+            let elapsed = start.elapsed();
+
+            assert_eq!(result.len(), 1, "Long-poll should receive the published message");
+            assert_eq!(result[0].payload, Bytes::from("interleaved-msg"));
+            assert!(
+                elapsed < Duration::from_millis(2000),
+                "Long-poll should wake quickly after publish, took {:?}",
+                elapsed
+            );
+        }
+    }
+
     mod stress {
         use super::*;
 
