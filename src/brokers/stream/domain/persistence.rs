@@ -6,7 +6,7 @@
 //! - Reads messages from segment files at specific byte offsets.
 //! - Applies retention and saves group state.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -65,6 +65,7 @@ pub enum StorageCommand {
     /// Append messages to a topic's log file. Fire-and-forget.
     /// Manager computes the file_path and offsets.
     Append {
+        topic_name: String,
         file_path: PathBuf,
         messages: Vec<Message>,
     },
@@ -98,6 +99,7 @@ pub struct StorageManager {
     base_path: PathBuf,
     rx: mpsc::UnboundedReceiver<StorageCommand>,
     open_files: LruCache<PathBuf, File>,
+    segment_cache: HashMap<String, Vec<Segment>>,
 }
 
 impl StorageManager {
@@ -110,6 +112,7 @@ impl StorageManager {
             base_path: PathBuf::from(base_path),
             rx,
             open_files: LruCache::new(NonZeroUsize::new(max_open_files).unwrap()),
+            segment_cache: HashMap::new(),
         }
     }
 
@@ -133,8 +136,8 @@ impl StorageManager {
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { file_path, messages } => {
-                self.handle_append(file_path, messages).await;
+            StorageCommand::Append { topic_name, file_path, messages } => {
+                self.handle_append(&topic_name, file_path, messages).await;
             }
             StorageCommand::ReadRange { topic_name, offsets, reply } => {
                 let msgs = self.read_range(&topic_name, offsets).await;
@@ -152,6 +155,7 @@ impl StorageManager {
                 let _ = reply.send(outcome);
             }
             StorageCommand::DropTopic { topic_name, reply } => {
+                self.segment_cache.remove(&topic_name);
                 let topic_path = self.base_path.join(&topic_name);
                 let to_remove: Vec<PathBuf> = self.open_files.iter()
                     .filter(|(p, _)| p.starts_with(&topic_path))
@@ -170,10 +174,12 @@ impl StorageManager {
 
     async fn handle_append(
         &mut self,
+        topic_name: &str,
         file_path: PathBuf,
         messages: Vec<Message>,
     ) {
         if messages.is_empty() { return; }
+        self.segment_cache.remove(topic_name);
 
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
@@ -214,25 +220,28 @@ impl StorageManager {
     }
 
     /// Read messages from segment files at specific byte offsets.
-    async fn read_range(&self, topic_name: &str, offsets: Vec<(u64, u64)>) -> Vec<Message> {
+    async fn read_range(&mut self, topic_name: &str, offsets: Vec<(u64, u64)>) -> Vec<Message> {
         if offsets.is_empty() { return Vec::new(); }
 
         let base_path = self.base_path.join(topic_name);
-        let segments = find_segments(&base_path).await.unwrap_or_default();
+        let segments = self.get_segments(topic_name, &base_path).await;
         if segments.is_empty() { return Vec::new(); }
 
-        // Group offsets by segment
-        let mut result = Vec::with_capacity(offsets.len());
+        // Group offsets by segment to open each file once
+        let mut by_segment: HashMap<usize, Vec<(u64, u64)>> = HashMap::new();
         for (seq, byte_offset) in offsets {
-            // Find which segment contains this offset
-            // We need to read from the segment file at the given byte offset
-            // Segments are sorted by start_seq, so we find the segment whose start_seq <= seq
-            let segment = segments.iter().rposition(|s| s.start_seq <= seq)
-                .map(|idx| &segments[idx]);
+            if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= seq) {
+                by_segment.entry(idx).or_default().push((seq, byte_offset));
+            }
+        }
 
-            if let Some(seg) = segment {
-                if let Ok(file) = File::open(&seg.path).await {
-                    let mut reader = BufReader::new(file);
+        let mut result = Vec::new();
+        for (idx, mut seg_offsets) in by_segment {
+            seg_offsets.sort_by_key(|(_, off)| *off);
+            let seg = &segments[idx];
+            if let Ok(file) = File::open(&seg.path).await {
+                let mut reader = BufReader::new(file);
+                for (seq, byte_offset) in seg_offsets {
                     if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
                         match read_record(&mut reader).await {
                             ReadOutcome::Record(content_buf) => {
@@ -248,10 +257,21 @@ impl StorageManager {
                 }
             }
         }
+        result.sort_by_key(|m| m.seq);
         result
     }
 
+    async fn get_segments(&mut self, topic_name: &str, base_path: &Path) -> Vec<Segment> {
+        if let Some(cached) = self.segment_cache.get(topic_name) {
+            return cached.clone();
+        }
+        let segments = find_segments(base_path).await.unwrap_or_default();
+        self.segment_cache.insert(topic_name.to_string(), segments.clone());
+        segments
+    }
+
     async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> u64 {
+        self.segment_cache.remove(_topic_name);
         if retention.max_age_ms.is_none() && retention.max_bytes.is_none() {
             return find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
         }
@@ -460,7 +480,7 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
         let path = entry.path();
         if !path.is_file() { continue; }
         let fname = entry.file_name().to_string_lossy().to_string();
-        if fname.ends_with(".log") && fname != "groups.log" && fname != "state.log" {
+        if fname.ends_with(".log") && fname != "state.log" {
             let name_part = &fname[..fname.len() - 4];
             if let Ok(start_seq) = name_part.parse::<u64>() {
                 segments.push(Segment { path, start_seq });

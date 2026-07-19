@@ -40,7 +40,6 @@ struct TopicState {
     groups_dirty: bool,
     full_config: TopicConfig,
     file_offset: u64,
-    active_segment_start: u64,
     active_path: PathBuf,
 }
 
@@ -177,7 +176,6 @@ impl StreamManager {
             }
 
             if state.file_offset == 0 {
-                state.active_segment_start = first_seq;
                 let base_path = PathBuf::from(&self.config.persistence_path).join(topic);
                 state.active_path = base_path.join(format!("{}.log", first_seq));
             }
@@ -188,10 +186,17 @@ impl StreamManager {
                 current_offset += record_len(msg.key.as_deref(), &msg.payload);
             }
             state.file_offset = current_offset;
+
+            // Post-write rollover: if the segment now exceeds max_segment_size,
+            // force a new segment on the next publish
+            if state.file_offset >= state.full_config.max_segment_size {
+                state.file_offset = 0;
+            }
             (seqs, messages, state.active_path.clone())
         };
 
         let _ = self.storage_tx.send(StorageCommand::Append {
+            topic_name: topic.to_string(),
             file_path,
             messages,
         });
@@ -235,9 +240,7 @@ impl StreamManager {
             state.groups_dirty = true;
             key_unblocked
         };
-        if key_unblocked {
-            topic_ref.wake_tx.send_modify(|v| *v += 1);
-        }
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(key_unblocked)
     }
 
@@ -565,7 +568,6 @@ impl StreamManager {
                 groups_dirty: false,
                 full_config: config,
                 file_offset: recovered.last_segment_size,
-                active_segment_start: recovered.segments.last().map(|s| s.start_seq).unwrap_or(1),
                 active_path: recovered.segments.last()
                     .map(|s| s.path.clone())
                     .unwrap_or_else(|| {
