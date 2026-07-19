@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -611,7 +611,7 @@ impl StreamManager {
                                         dlt_entries: group.dlt.clone(),
                                         parked_keys: group.parked_keys.clone(),
                                     })
-                                }).collect::<HashMap<_, _>>())
+                                }).collect::<BTreeMap<_, _>>())
                             }
                         };
 

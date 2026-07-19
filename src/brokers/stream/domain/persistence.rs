@@ -6,7 +6,7 @@
 //! - Manages an LRU Cache of file descriptors to prevent OS limits exhaustion.
 //! - Executes a global periodic flush to sync bytes to disk and notify topic actors.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ use crate::brokers::stream::domain::group::DltEntry;
 #[derive(Default, Clone)]
 pub struct GroupPersistentState {
     pub ack_floor: u64,
-    pub dlt_entries: HashMap<u64, DltEntry>,
+    pub dlt_entries: BTreeMap<u64, DltEntry>,
     pub parked_keys: HashSet<Bytes>,
 }
 
@@ -44,7 +44,7 @@ pub struct RecoveredState {
     /// All segment paths in order
     pub segments: Vec<Segment>,
     /// Group ID -> GroupPersistentState
-    pub groups_data: HashMap<String, GroupPersistentState>,
+    pub groups_data: BTreeMap<String, GroupPersistentState>,
     /// First retained sequence on disk
     pub head_seq: u64,
 }
@@ -76,7 +76,7 @@ pub enum StorageCommand {
 
     SaveState {
         topic_name: String,
-        groups: HashMap<String, GroupPersistentState>,
+        groups: BTreeMap<String, GroupPersistentState>,
     },
 
     ApplyRetention {
@@ -515,7 +515,7 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
 }
 
 /// Write the state.log file (ack_floor + DLT entries + parked_keys per group). Atomic write via temp file + rename.
-pub async fn save_state_file(base_path: &Path, groups: &HashMap<String, GroupPersistentState>) -> std::io::Result<()> {
+pub async fn save_state_file(base_path: &Path, groups: &BTreeMap<String, GroupPersistentState>) -> std::io::Result<()> {
     let tmp_path = base_path.join("state.log.tmp");
     let final_path = base_path.join("state.log");
 
@@ -584,9 +584,9 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
     Ok(())
 }
 
-async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersistentState>, std::io::Error> {
+async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersistentState>, std::io::Error> {
     use bytes::Buf;
-    let mut groups: HashMap<String, GroupPersistentState> = HashMap::new();
+    let mut groups: BTreeMap<String, GroupPersistentState> = BTreeMap::new();
     let file = File::open(path).await?;
     let mut reader = BufReader::new(file);
 
@@ -602,7 +602,7 @@ async fn load_state_file(path: &PathBuf) -> Result<HashMap<String, GroupPersiste
                 let group_bytes = cursor.copy_to_bytes(group_len as usize);
                 let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
-                let mut state = GroupPersistentState { ack_floor, dlt_entries: HashMap::new(), parked_keys: HashSet::new() };
+                let mut state = GroupPersistentState { ack_floor, dlt_entries: BTreeMap::new(), parked_keys: HashSet::new() };
 
                 if cursor.remaining() < 4 { continue; }
                 let parked_keys_count = cursor.get_u32();

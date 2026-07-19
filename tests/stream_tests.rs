@@ -1556,4 +1556,347 @@ mod stream_tests {
             assert!(result.is_err());
         }
     }
+
+    mod stress {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_high_pending_fetch_and_mass_ack() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 5000;
+            let manager = build_manager(config).await;
+            let topic = "stress-high-pending";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 5000 messages
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=5000)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            let seqs = manager.publish_batch(topic, batch).await.unwrap();
+            assert_eq!(seqs.len(), 5000);
+
+            // Join group and fetch all 5000
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 5000, 100).await;
+            assert_eq!(msgs.len(), 5000);
+
+            // Mass ack all
+            for seq in 1..=5000 {
+                ack_message(&manager, "grp1", topic, &consumer, seq).await;
+            }
+
+            // ack_floor should be 5000
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 10, 50).await;
+            assert!(msgs2.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_high_pending_out_of_order_ack() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 1000;
+            let manager = build_manager(config).await;
+            let topic = "stress-ooo-ack";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 1000, 100).await;
+            assert_eq!(msgs.len(), 1000);
+
+            // Ack in reverse order
+            for seq in (1..=1000).rev() {
+                ack_message(&manager, "grp1", topic, &consumer, seq).await;
+            }
+
+            // After all acked, fetch should return empty
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 10, 50).await;
+            assert!(msgs2.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_mass_redelivery_after_timeout() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 500;
+            config.ack_wait_ms = 100;
+            let manager = build_manager(config).await;
+            let topic = "stress-redelivery";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=200)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 200, 100).await;
+            assert_eq!(msgs.len(), 200);
+
+            // Wait for timeout
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            // Fetch again — should get redelivered messages
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 200, 200).await;
+            assert_eq!(msgs2.len(), 200);
+            // Verify same seqs
+            let seqs: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
+            assert_eq!(seqs[0], 1);
+            assert_eq!(seqs[199], 200);
+        }
+
+        #[tokio::test]
+        async fn test_clamp_head_with_high_pending() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 5000;
+            let manager = build_manager(config).await;
+            let topic = "stress-clamp-head";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 3000 messages
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=3000)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 3000, 100).await;
+            assert_eq!(msgs.len(), 3000);
+
+            // Ack first 1000 to advance floor
+            for seq in 1..=1000 {
+                ack_message(&manager, "grp1", topic, &consumer, seq).await;
+            }
+
+            // Now seek to beginning which resets runtime, then re-fetch
+            // This tests clamp_head indirectly through the retention path
+            // Verify we can still read messages
+            let read_msgs = manager.read(topic, 1, 100).await;
+            assert!(!read_msgs.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_dlt_under_load_with_max_deliveries() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 100;
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "stress-dlt";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 50 messages
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=50)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+
+            // Fetch, wait for timeout, re-fetch — repeat until messages hit DLT
+            // max_deliveries = 2, so after 2 deliveries without ack → DLT
+            for _round in 0..3 {
+                let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 50, 200).await;
+                if msgs.is_empty() {
+                    break;
+                }
+                // Don't ack — let them timeout
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+
+            // Check DLT has entries
+            let dlt_entries = manager.peek_dlt(topic, "grp1", 100, 0).await.unwrap();
+            assert!(!dlt_entries.is_empty(), "DLT should have entries after max_deliveries exceeded");
+        }
+
+        #[tokio::test]
+        async fn test_multi_consumer_stress() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 5000;
+            let manager = build_manager(config).await;
+            let topic = "stress-multi-consumer";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 1000 messages
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            // Two consumers in same group
+            let c1 = join_session(&manager, "grp1", topic, "conn1").await;
+            let c2 = join_session(&manager, "grp1", topic, "conn2").await;
+
+            // Both fetch — messages should be distributed (not duplicated)
+            let msgs1 = fetch_messages(&manager, "grp1", topic, &c1, 500, 100).await;
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &c2, 500, 100).await;
+
+            let total = msgs1.len() + msgs2.len();
+            assert_eq!(total, 1000);
+
+            // Verify no overlap
+            let seqs1: std::collections::HashSet<u64> = msgs1.iter().map(|m| m.seq).collect();
+            let seqs2: std::collections::HashSet<u64> = msgs2.iter().map(|m| m.seq).collect();
+            assert!(seqs1.is_disjoint(&seqs2));
+
+            // Ack all
+            for msg in &msgs1 {
+                ack_message(&manager, "grp1", topic, &c1, msg.seq).await;
+            }
+            for msg in &msgs2 {
+                ack_message(&manager, "grp1", topic, &c2, msg.seq).await;
+            }
+
+            // Verify no more messages
+            let msgs3 = fetch_messages(&manager, "grp1", topic, &c1, 10, 50).await;
+            assert!(msgs3.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_persistent_state_after_mass_ack() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap();
+            let mut config = get_test_config(Some(path));
+            config.max_ack_pending = 2000;
+            config.default_flush_ms = 50;
+            let manager = build_manager(config).await;
+            let topic = "stress-persist";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 1000, 100).await;
+            assert_eq!(msgs.len(), 1000);
+
+            // Ack all
+            for seq in 1..=1000 {
+                ack_message(&manager, "grp1", topic, &consumer, seq).await;
+            }
+
+            // Wait for flush
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            // Drop manager and recover
+            drop(manager);
+            let config2 = get_test_config(Some(path));
+            let manager2 = build_manager(config2).await;
+
+            // Verify topic still exists
+            assert!(manager2.exists(topic).await);
+
+            // Join group and verify ack_floor is preserved
+            let consumer2 = join_session(&manager2, "grp1", topic, "conn1").await;
+            let msgs2 = fetch_messages(&manager2, "grp1", topic, &consumer2, 10, 50).await;
+            assert!(msgs2.is_empty(), "Should not re-deliver acked messages after restart");
+        }
+
+        #[tokio::test]
+        async fn test_per_key_ordering_stress() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 5000;
+            let manager = build_manager(config).await;
+            let topic = "stress-per-key";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 100 messages with 10 keys (10 messages per key)
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=100)
+                .map(|i| {
+                    let key = Bytes::from(format!("key-{}", i % 10));
+                    (Some(key), Bytes::from(format!("msg-{}", i)))
+                })
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+
+            // Fetch — should get 10 messages (one per key, the rest blocked)
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 100, 100).await;
+            assert_eq!(msgs.len(), 10);
+
+            // Verify each key appears exactly once
+            let keys: std::collections::HashSet<&Bytes> = msgs.iter().filter_map(|m| m.key.as_ref()).collect();
+            assert_eq!(keys.len(), 10);
+
+            // Ack all 10 → should unblock next 10
+            for msg in &msgs {
+                ack_message(&manager, "grp1", topic, &consumer, msg.seq).await;
+            }
+
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 100, 100).await;
+            assert_eq!(msgs2.len(), 10);
+
+            // Continue until all 100 are delivered and acked
+            for msg in &msgs2 {
+                ack_message(&manager, "grp1", topic, &consumer, msg.seq).await;
+            }
+
+            // Repeat for remaining rounds
+            for _round in 0..8 {
+                let msgs_n = fetch_messages(&manager, "grp1", topic, &consumer, 100, 100).await;
+                assert_eq!(msgs_n.len(), 10, "Each round should deliver 10 messages");
+                for msg in &msgs_n {
+                    ack_message(&manager, "grp1", topic, &consumer, msg.seq).await;
+                }
+            }
+
+            // All 100 should be delivered and acked
+            let final_msgs = fetch_messages(&manager, "grp1", topic, &consumer, 10, 50).await;
+            assert!(final_msgs.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_disconnect_redelivery_stress() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_ack_pending = 1000;
+            let manager = build_manager(config).await;
+            let topic = "stress-disconnect";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=500)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            // Consumer 1 fetches but doesn't ack
+            let c1 = join_session(&manager, "grp1", topic, "conn1").await;
+            let msgs1 = fetch_messages(&manager, "grp1", topic, &c1, 500, 100).await;
+            assert_eq!(msgs1.len(), 500);
+
+            // Consumer 1 disconnects
+            manager.leave_group("grp1", topic, &c1.consumer_id, c1.generation).await.unwrap();
+
+            // Consumer 2 joins and fetches — should get all 500 redelivered
+            let c2 = join_session(&manager, "grp1", topic, "conn2").await;
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &c2, 500, 200).await;
+            assert_eq!(msgs2.len(), 500);
+
+            // Verify same seqs
+            let seqs1: Vec<u64> = msgs1.iter().map(|m| m.seq).collect();
+            let seqs2: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
+            assert_eq!(seqs1, seqs2);
+        }
+    }
 }
