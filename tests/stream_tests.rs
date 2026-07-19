@@ -711,8 +711,6 @@ mod stream_tests {
 
             let mut config = Config::global().stream.clone();
             config.persistence_path = path_str.clone();
-            config.ram_soft_limit = 100;
-            config.eviction_interval_ms = 100;
             config.default_flush_ms = 50;
             config.max_segment_size = 500;
 
@@ -746,8 +744,6 @@ mod stream_tests {
 
             let mut config = Config::global().stream.clone();
             config.persistence_path = path_str.clone();
-            config.ram_soft_limit = 2; // Only 2 messages allowed in RAM
-            config.eviction_interval_ms = 50;
             config.default_flush_ms = 50;
 
             let manager = build_manager(config).await;
@@ -1005,7 +1001,6 @@ mod stream_tests {
             let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
             config.ack_wait_ms = 50;
             config.max_deliveries = 10;
-            config.ram_soft_limit = 1;
             let manager = build_manager(config).await;
             let topic = "per-key-timeout-order";
             let group = "g-pk-timeout-order";
@@ -1398,33 +1393,8 @@ mod stream_tests {
     }
 
     mod persistence_crc {
-        use nexo::brokers::stream::{serialize_message, read_log_segment, recover_topic};
+        use nexo::brokers::stream::{serialize_message, recover_topic};
         use std::path::PathBuf;
-
-        #[tokio::test]
-        async fn read_log_segment_stops_at_corrupted_record() {
-            let tmp = tempfile::tempdir().unwrap();
-            let seg_path: PathBuf = tmp.path().join("1.log");
-
-            // Write 3 valid messages
-            let mut buf = Vec::new();
-            serialize_message(&mut buf, 1, 1000, None, b"msg1");
-            serialize_message(&mut buf, 2, 2000, None, b"msg2");
-            serialize_message(&mut buf, 3, 3000, None, b"msg3");
-            tokio::fs::write(&seg_path, &buf).await.unwrap();
-
-            // Corrupt the CRC of message 2.
-            // Each record: [len=22: 4B][crc: 4B][content: 22B] = 30 bytes total
-            // Record 2 starts at offset 30, CRC at offset 30+4 = 34
-            let mut data = tokio::fs::read(&seg_path).await.unwrap();
-            data[34] ^= 0xFF; // flip bits in CRC of msg2
-            tokio::fs::write(&seg_path, &data).await.unwrap();
-
-            // read_log_segment should stop at msg2, return only msg1
-            let msgs = read_log_segment(&seg_path, 0, 100).await;
-            assert_eq!(msgs.len(), 1, "Should stop at corrupted record");
-            assert_eq!(msgs[0].seq, 1);
-        }
 
         #[tokio::test]
         async fn recover_topic_truncates_at_corrupted_record() {
@@ -1446,10 +1416,11 @@ mod stream_tests {
 
             let file_size_before = tokio::fs::metadata(&seg_path).await.unwrap().len();
 
-            // recover_topic should stop at msg2, load only msg1, and truncate the file
+            // recover_topic should stop at msg2, index only msg1, and truncate the file
             let state = recover_topic("test-topic", tmp.path().to_path_buf()).await;
-            assert_eq!(state.messages.len(), 1, "Recovery should stop at corrupted record");
-            assert_eq!(state.messages[0].seq, 1);
+            assert_eq!(state.index.len(), 1, "Recovery should stop at corrupted record");
+            assert!(state.index.contains_key(&1));
+            assert_eq!(state.next_seq, 2);
 
             // File should be truncated to 30 bytes (only msg1)
             let file_size_after = tokio::fs::metadata(&seg_path).await.unwrap().len();
@@ -1458,8 +1429,8 @@ mod stream_tests {
 
             // Re-reading the truncated file should yield only msg1, no corruption
             let state2 = recover_topic("test-topic", tmp.path().to_path_buf()).await;
-            assert_eq!(state2.messages.len(), 1, "Re-reading truncated file should have no corruption");
-            assert_eq!(state2.messages[0].seq, 1);
+            assert_eq!(state2.index.len(), 1, "Re-reading truncated file should have no corruption");
+            assert!(state2.index.contains_key(&1));
         }
     }
 
@@ -1792,8 +1763,8 @@ mod stream_tests {
                 ack_message(&manager, "grp1", topic, &consumer, seq).await;
             }
 
-            // Wait for flush
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Wait for flush (group save interval = default_flush_ms * 10 = 500ms)
+            tokio::time::sleep(Duration::from_millis(600)).await;
 
             // Drop manager and recover
             drop(manager);
@@ -1897,6 +1868,49 @@ mod stream_tests {
             let seqs1: Vec<u64> = msgs1.iter().map(|m| m.seq).collect();
             let seqs2: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
             assert_eq!(seqs1, seqs2);
+        }
+
+        #[tokio::test]
+        async fn test_fetch_partial_batch_does_not_block_next_deliver() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "partial-batch";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish seq 1..=10
+            let batch: Vec<(Option<Bytes>, Bytes)> = (1..=10)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch).await.unwrap();
+
+            let consumer = join_session(&manager, "grp1", topic, "conn1").await;
+
+            // Fetch with limit=20 — only 10 exist, should get 10
+            let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 20, 50).await;
+            assert_eq!(msgs.len(), 10, "should get all available messages, not block on missing seqs");
+
+            // Verify seqs 1..=10
+            let seqs: Vec<u64> = msgs.iter().map(|m| m.seq).collect();
+            assert_eq!(seqs, (1..=10).collect::<Vec<_>>());
+
+            // Ack all
+            for seq in 1..=10 {
+                ack_message(&manager, "grp1", topic, &consumer, seq).await;
+            }
+
+            // Publish 5 more (seq 11..=15)
+            let batch2: Vec<(Option<Bytes>, Bytes)> = (11..=15)
+                .map(|i| (None, Bytes::from(format!("msg-{}", i))))
+                .collect();
+            manager.publish_batch(topic, batch2).await.unwrap();
+
+            // Fetch with limit=20 again — should get only 11..=15
+            let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 20, 50).await;
+            assert_eq!(msgs2.len(), 5, "should get only new messages, not retry old ones");
+            let seqs2: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
+            assert_eq!(seqs2, (11..=15).collect::<Vec<_>>());
         }
     }
 }

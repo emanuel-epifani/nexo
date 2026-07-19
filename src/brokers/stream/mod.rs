@@ -6,4 +6,4 @@ pub mod tcp;
 
 pub use manager::StreamManager;
 pub use domain::message::Message;
-pub use domain::persistence::{serialize_message, read_log_segment, recover_topic};
+pub use domain::persistence::{serialize_message, recover_topic};

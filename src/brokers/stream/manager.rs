@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -17,13 +17,13 @@ use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::persistence::{recover_topic, GroupPersistentState, StorageCommand, StorageManager};
-use crate::brokers::stream::domain::topic::{TopicConfig, TopicState};
+use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::topic::TopicConfig;
 
 struct TopicShared {
-    inner: Mutex<TopicInner>,
+    next_seq: AtomicU64,
+    state: Mutex<TopicState>,
     wake_tx: watch::Sender<u64>,
-    persisted_seq: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -32,18 +32,16 @@ struct ConsumerBinding {
     consumer_id: String,
 }
 
-struct TopicInner {
-    state: TopicState,
+struct TopicState {
+    head_seq: u64,
+    index: BTreeMap<u64, u64>,
     groups: HashMap<String, ConsumerGroup>,
     client_map: HashMap<String, Vec<ConsumerBinding>>,
     groups_dirty: bool,
     full_config: TopicConfig,
-}
-
-enum FetchAttempt {
-    Ready(Vec<Message>),
-    NeedColdRead { from_seq: u64 },
-    Wait,
+    file_offset: u64,
+    active_segment_start: u64,
+    active_path: PathBuf,
 }
 
 pub struct JoinGroupResult {
@@ -71,8 +69,6 @@ impl StreamManager {
             config.persistence_path.clone(),
             storage_rx,
             config.max_open_files,
-            config.default_flush_ms,
-            config.max_segment_size,
         );
         tokio::spawn(storage_manager.run());
 
@@ -153,25 +149,49 @@ impl StreamManager {
     }
 
     pub async fn publish_batch(&self, topic: &str, items: Vec<(Option<Bytes>, Bytes)>) -> Result<Vec<u64>, String> {
+        if items.is_empty() { return Ok(Vec::new()); }
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let persisted_seq = topic_ref.persisted_seq.clone();
 
-        let (seqs, messages_to_append) = {
-            let mut inner = topic_ref.inner.lock();
-            let mut seqs = Vec::with_capacity(items.len());
-            let mut messages_to_append = Vec::with_capacity(items.len());
-            for (key, payload) in items {
-                let msg = inner.state.append(key, payload);
-                seqs.push(msg.seq);
-                messages_to_append.push(msg);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let mut seqs = Vec::with_capacity(items.len());
+        let mut messages = Vec::with_capacity(items.len());
+        for (key, payload) in items {
+            let seq = topic_ref.next_seq.fetch_add(1, Ordering::SeqCst);
+            seqs.push(seq);
+            messages.push(Message { seq, timestamp, key, payload });
+        }
+
+        let file_path = {
+            let mut state = topic_ref.state.lock();
+            let bytes_len: u64 = messages.iter().map(|m| record_len(m.key.as_deref(), &m.payload)).sum();
+
+            if state.file_offset + bytes_len > state.full_config.max_segment_size && state.file_offset > 0 {
+                state.file_offset = 0;
             }
-            (seqs, messages_to_append)
+
+            if state.file_offset == 0 {
+                let first_seq = messages.first().unwrap().seq;
+                state.active_segment_start = first_seq;
+                let base_path = PathBuf::from(&self.config.persistence_path).join(topic);
+                state.active_path = base_path.join(format!("{}.log", first_seq));
+            }
+
+            let mut current_offset = state.file_offset;
+            for msg in &messages {
+                state.index.insert(msg.seq, current_offset);
+                current_offset += record_len(msg.key.as_deref(), &msg.payload);
+            }
+            state.file_offset = current_offset;
+            state.active_path.clone()
         };
 
         let _ = self.storage_tx.send(StorageCommand::Append {
-            topic_name: topic.to_string(),
-            messages: messages_to_append,
-            persisted_seq,
+            file_path,
+            messages,
         });
 
         topic_ref.wake_tx.send_modify(|v| *v += 1);
@@ -185,8 +205,8 @@ impl StreamManager {
 
     pub async fn peek_dlt(&self, topic: &str, group: &str, limit: usize, offset: usize) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let inner = topic_ref.inner.lock();
-        let group_ref = inner.groups.get(group).ok_or("Group not found")?;
+        let state = topic_ref.state.lock();
+        let group_ref = state.groups.get(group).ok_or("Group not found")?;
         let entries = group_ref.peek_dlt(limit, offset);
         Ok(entries.into_iter().map(|(seq, e)| (seq, e.reason, e.attempts, e.key)).collect())
     }
@@ -194,10 +214,10 @@ impl StreamManager {
     pub async fn move_to_stream(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = topic_ref.inner.lock();
-            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let mut state = topic_ref.state.lock();
+            let group_ref = state.groups.get_mut(group).ok_or("Group not found")?;
             let key_unblocked = group_ref.move_to_stream(seq)?;
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
             key_unblocked
         };
         topic_ref.wake_tx.send_modify(|v| *v += 1);
@@ -207,10 +227,10 @@ impl StreamManager {
     pub async fn delete_dlt(&self, topic: &str, group: &str, seq: u64) -> Result<bool, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = topic_ref.inner.lock();
-            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let mut state = topic_ref.state.lock();
+            let group_ref = state.groups.get_mut(group).ok_or("Group not found")?;
             let key_unblocked = group_ref.delete_dlt(seq)?;
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
             key_unblocked
         };
         if key_unblocked {
@@ -222,10 +242,10 @@ impl StreamManager {
     pub async fn purge_dlt(&self, topic: &str, group: &str) -> Result<usize, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
-            let mut inner = topic_ref.inner.lock();
-            let group_ref = inner.groups.get_mut(group).ok_or("Group not found")?;
+            let mut state = topic_ref.state.lock();
+            let group_ref = state.groups.get_mut(group).ok_or("Group not found")?;
             let count = group_ref.purge_dlt();
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
             Ok(count)
         }
     }
@@ -235,25 +255,22 @@ impl StreamManager {
             return Vec::new();
         };
 
-        let (effective_from_seq, messages, need_cold) = {
-            let inner = topic_ref.inner.lock();
-            let effective_from_seq = from_seq.max(inner.state.head_seq);
-            let messages = inner.state.read(effective_from_seq, limit);
-            let need_cold = messages.is_empty()
-                && effective_from_seq < inner.state.ram_start_seq
-                && effective_from_seq < inner.state.next_seq;
-            (effective_from_seq, messages, need_cold)
+        let offsets = {
+            let state = topic_ref.state.lock();
+            state.index.range(from_seq..)
+                .take(limit)
+                .map(|(seq, offset)| (*seq, *offset))
+                .collect::<Vec<_>>()
         };
 
-        if !messages.is_empty() || !need_cold {
-            return messages;
+        if offsets.is_empty() {
+            return Vec::new();
         }
 
         let (tx, rx) = oneshot::channel();
-        let _ = self.storage_tx.send(StorageCommand::ColdRead {
+        let _ = self.storage_tx.send(StorageCommand::ReadRange {
             topic_name: topic.to_string(),
-            from_seq: effective_from_seq,
-            limit,
+            offsets,
             reply: tx,
         });
         rx.await.unwrap_or_default()
@@ -263,34 +280,26 @@ impl StreamManager {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
 
         let group_cancel = {
-            let inner = topic_ref.inner.lock();
-            match inner.groups.get(group) {
+            let state = topic_ref.state.lock();
+            match state.groups.get(group) {
                 Some(g) => g.cancel_token(),
                 None => return Err("Group not found".to_string()),
             }
         };
 
         if wait_ms == 0 {
-            return match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit)? {
-                FetchAttempt::Ready(messages) => Ok(messages),
-                FetchAttempt::NeedColdRead { from_seq } => self.cold_fetch(&topic_ref, topic, group, consumer_id, generation, limit, from_seq, &group_cancel).await,
-                FetchAttempt::Wait => Ok(Vec::new()),
-            };
+            return self.try_fetch_once(&topic_ref, topic, group, consumer_id, generation, limit, &group_cancel).await;
         }
 
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
-
         let mut wake_rx = topic_ref.wake_tx.subscribe();
 
         loop {
             let wake_ver = *wake_rx.borrow();
 
-            match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit) {
-                Ok(FetchAttempt::Ready(messages)) => return Ok(messages),
-                Ok(FetchAttempt::NeedColdRead { from_seq }) => {
-                    return self.cold_fetch(&topic_ref, topic, group, consumer_id, generation, limit, from_seq, &group_cancel).await;
-                }
-                Ok(FetchAttempt::Wait) => {}
+            match self.try_fetch_once(&topic_ref, topic, group, consumer_id, generation, limit, &group_cancel).await {
+                Ok(messages) if !messages.is_empty() => return Ok(messages),
+                Ok(_) => {}
                 Err(e) if (e == "NOT_MEMBER" || e == "FENCED") && !self.is_active_member(&topic_ref, group, consumer_id) => {
                     return Ok(Vec::new());
                 }
@@ -314,22 +323,22 @@ impl StreamManager {
     }
 
     fn is_active_member(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str) -> bool {
-        let inner = topic_ref.inner.lock();
-        inner.groups.get(group).map_or(false, |g| g.is_member(consumer_id))
+        let state = topic_ref.state.lock();
+        state.groups.get(group).map_or(false, |g| g.is_member(consumer_id))
     }
 
     pub async fn ack(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let key_unblocked = {
-            let mut inner = topic_ref.inner.lock();
-            let head_seq = inner.state.head_seq;
-            let Some(group_ref) = inner.groups.get_mut(group) else {
+            let mut state = topic_ref.state.lock();
+            let head_seq = state.head_seq;
+            let Some(group_ref) = state.groups.get_mut(group) else {
                 return Err("Group not found".to_string());
             };
 
             group_ref.clamp_head(head_seq);
             let key_unblocked = group_ref.ack(consumer_id, generation, seq)?;
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
             key_unblocked
         };
         if key_unblocked {
@@ -341,20 +350,20 @@ impl StreamManager {
     pub async fn seek(&self, group: &str, topic: &str, target: SeekTarget) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
-            let mut inner = topic_ref.inner.lock();
-            let last_seq = inner.state.next_seq.saturating_sub(1);
-            let head_seq = inner.state.head_seq;
-            let max_ack_pending = inner.full_config.max_ack_pending;
-            let ack_wait = Duration::from_millis(inner.full_config.ack_wait_ms);
-            let max_deliveries = inner.full_config.max_deliveries;
-            let group_ref = inner.groups.entry(group.to_string())
+            let mut state = topic_ref.state.lock();
+            let last_seq = topic_ref.next_seq.load(Ordering::Acquire).saturating_sub(1);
+            let head_seq = state.head_seq;
+            let max_ack_pending = state.full_config.max_ack_pending;
+            let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
+            let max_deliveries = state.full_config.max_deliveries;
+            let group_ref = state.groups.entry(group.to_string())
                 .or_insert_with(|| ConsumerGroup::new(group.to_string(), head_seq, max_ack_pending, ack_wait, max_deliveries));
 
             match target {
                 SeekTarget::Beginning => group_ref.seek_beginning(head_seq),
                 SeekTarget::End => group_ref.seek_end(last_seq),
             }
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
         }
         topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(())
@@ -363,8 +372,8 @@ impl StreamManager {
     pub async fn leave_group(&self, group: &str, topic: &str, consumer_id: &str, generation: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let should_notify = {
-            let mut inner = topic_ref.inner.lock();
-            let Some(group_ref) = inner.groups.get_mut(group) else {
+            let mut state = topic_ref.state.lock();
+            let Some(group_ref) = state.groups.get_mut(group) else {
                 return Err("Group not found".to_string());
             };
 
@@ -377,15 +386,15 @@ impl StreamManager {
             };
 
             let mut remove_client_key = false;
-            if let Some(bindings) = inner.client_map.get_mut(&connection_client_id) {
+            if let Some(bindings) = state.client_map.get_mut(&connection_client_id) {
                 bindings.retain(|binding| !(binding.group_id == group && binding.consumer_id == consumer_id));
                 remove_client_key = bindings.is_empty();
             }
             if remove_client_key {
-                inner.client_map.remove(&connection_client_id);
+                state.client_map.remove(&connection_client_id);
             }
 
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
             true
         };
         if should_notify {
@@ -396,30 +405,30 @@ impl StreamManager {
 
     pub async fn join_group(&self, group: &str, topic: &str, connection_client_id: &str) -> Result<JoinGroupResult, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let mut inner = topic_ref.inner.lock();
-        let head_seq = inner.state.head_seq;
-        let max_ack_pending = inner.full_config.max_ack_pending;
-        let ack_wait = Duration::from_millis(inner.full_config.ack_wait_ms);
-        let max_deliveries = inner.full_config.max_deliveries;
+        let mut state = topic_ref.state.lock();
+        let head_seq = state.head_seq;
+        let max_ack_pending = state.full_config.max_ack_pending;
+        let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
+        let max_deliveries = state.full_config.max_deliveries;
         let client_id = connection_client_id.to_string();
         let group_id = group.to_string();
-        let group_exists = inner.groups.contains_key(&group_id);
+        let group_exists = state.groups.contains_key(&group_id);
 
         let (ack_floor, consumer_id, generation, was_clamped) = {
-            let group_ref = inner.groups.entry(group_id.clone())
+            let group_ref = state.groups.entry(group_id.clone())
                 .or_insert_with(|| ConsumerGroup::new(group_id.clone(), head_seq, max_ack_pending, ack_wait, max_deliveries));
             let was_clamped = group_ref.clamp_head(head_seq);
             let consumer_id = group_ref.add_member(client_id.clone());
             (group_ref.ack_floor, consumer_id, group_ref.generation(), was_clamped)
         };
 
-        inner.client_map.entry(client_id).or_default().push(ConsumerBinding {
+        state.client_map.entry(client_id).or_default().push(ConsumerBinding {
             group_id: group_id.clone(),
             consumer_id: consumer_id.clone(),
         });
 
         if !group_exists || was_clamped {
-            inner.groups_dirty = true;
+            state.groups_dirty = true;
         }
 
         Ok(JoinGroupResult {
@@ -434,13 +443,13 @@ impl StreamManager {
         for (_, topic_ref) in Self::collect_topics(&self.topics) {
             let mut should_notify = false;
             {
-                let mut inner = topic_ref.inner.lock();
-                if let Some(bindings) = inner.client_map.remove(&client_id) {
+                let mut state = topic_ref.state.lock();
+                if let Some(bindings) = state.client_map.remove(&client_id) {
                     for binding in bindings {
-                        if let Some(group_ref) = inner.groups.get_mut(&binding.group_id) {
+                        if let Some(group_ref) = state.groups.get_mut(&binding.group_id) {
                             if group_ref.remove_member(&binding.consumer_id).is_some() {
                                 should_notify = true;
-                                inner.groups_dirty = true;
+                                state.groups_dirty = true;
                             }
                         }
                     }
@@ -533,55 +542,44 @@ impl StreamManager {
         }
 
         let recovered = recover_topic(&name, PathBuf::from(persistence_path)).await;
-        let state = TopicState::restore(config.ram_soft_limit, recovered.head_seq.max(1), recovered.messages);
+        let head_seq = recovered.head_seq.max(1);
+        let next_seq = recovered.next_seq.max(head_seq);
 
         let ack_wait = Duration::from_millis(config.ack_wait_ms);
-        let persisted_seq = Arc::new(AtomicU64::new(state.next_seq.saturating_sub(1)));
         let mut groups = HashMap::new();
         for (group_id, group_state) in recovered.groups_data {
             groups.insert(
                 group_id.clone(),
-                ConsumerGroup::restore(group_id, group_state.ack_floor, state.head_seq, config.max_ack_pending, ack_wait, config.max_deliveries, group_state.dlt_entries, group_state.parked_keys),
+                ConsumerGroup::restore(group_id, group_state.ack_floor, head_seq, config.max_ack_pending, ack_wait, config.max_deliveries, group_state.dlt_entries, group_state.parked_keys),
             );
         }
 
         Arc::new(TopicShared {
-            inner: Mutex::new(TopicInner {
-                state,
+            next_seq: AtomicU64::new(next_seq),
+            state: Mutex::new(TopicState {
+                head_seq,
+                index: recovered.index,
                 groups,
                 client_map: HashMap::new(),
                 groups_dirty: false,
                 full_config: config,
+                file_offset: recovered.last_segment_size,
+                active_segment_start: recovered.segments.last().map(|s| s.start_seq).unwrap_or(1),
+                active_path: recovered.segments.last()
+                    .map(|s| s.path.clone())
+                    .unwrap_or_else(|| {
+                        PathBuf::from(persistence_path).join(&name).join("1.log")
+                    }),
             }),
             wake_tx: watch::channel(0u64).0,
-            persisted_seq,
         })
     }
 
     fn spawn_background_tasks(&self) {
         let cancel = self.cancel.clone();
         let topics = self.topics.clone();
-        let eviction_interval_ms = self.config.eviction_interval_ms;
-        tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                let mut timer = tokio::time::interval(Duration::from_millis(eviction_interval_ms));
-                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = timer.tick() => {}
-                    }
-                    for (_, topic_ref) in StreamManager::collect_topics(&topics) {
-                        let persisted_seq = topic_ref.persisted_seq.load(Ordering::Acquire);
-                        let mut inner = topic_ref.inner.lock();
-                        inner.state.evict(persisted_seq);
-                    }
-                }
-            }
-        });
 
-        let topics = self.topics.clone();
+        // Task 1: Periodic group state save
         let storage_tx = self.storage_tx.clone();
         let groups_interval_ms = self.config.default_flush_ms * 10;
         tokio::spawn({
@@ -596,12 +594,12 @@ impl StreamManager {
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
                         let groups_data = {
-                            let mut inner = topic_ref.inner.lock();
-                            if !inner.groups_dirty {
+                            let mut state = topic_ref.state.lock();
+                            if !state.groups_dirty {
                                 None
                             } else {
-                                inner.groups_dirty = false;
-                                Some(inner.groups.iter().map(|(id, group)| {
+                                state.groups_dirty = false;
+                                Some(state.groups.iter().map(|(id, group)| {
                                     (id.clone(), GroupPersistentState {
                                         ack_floor: group.ack_floor,
                                         dlt_entries: group.dlt.clone(),
@@ -622,6 +620,7 @@ impl StreamManager {
             }
         });
 
+        // Task 2: Retention enforcement
         let topics = self.topics.clone();
         let storage_tx = self.storage_tx.clone();
         let retention_check_ms = self.config.retention_check_interval_ms;
@@ -637,8 +636,8 @@ impl StreamManager {
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
                         let retention = {
-                            let inner = topic_ref.inner.lock();
-                            inner.full_config.retention.clone()
+                            let state = topic_ref.state.lock();
+                            state.full_config.retention.clone()
                         };
 
                         let (reply_tx, reply_rx) = oneshot::channel();
@@ -656,17 +655,22 @@ impl StreamManager {
 
                         let mut should_notify = false;
                         {
-                            let mut inner = topic_ref.inner.lock();
-                            let mut groups_changed = false;
-                            if new_head_seq != inner.state.head_seq {
-                                inner.state.apply_head(new_head_seq);
-                                for group in inner.groups.values_mut() {
+                            let mut state = topic_ref.state.lock();
+                            if new_head_seq != state.head_seq {
+                                state.head_seq = new_head_seq;
+                                // Trim index entries below new head_seq
+                                let to_remove: Vec<u64> = state.index.range(..new_head_seq).map(|(k, _)| *k).collect();
+                                for k in to_remove {
+                                    state.index.remove(&k);
+                                }
+                                let mut groups_changed = false;
+                                for group in state.groups.values_mut() {
                                     if group.clamp_head(new_head_seq) {
                                         groups_changed = true;
                                     }
                                 }
                                 if groups_changed {
-                                    inner.groups_dirty = true;
+                                    state.groups_dirty = true;
                                 }
                                 should_notify = true;
                             }
@@ -679,6 +683,7 @@ impl StreamManager {
             }
         });
 
+        // Task 3: Redelivery check (ack timeouts)
         let topics = self.topics.clone();
         tokio::spawn({
             let cancel = cancel.clone();
@@ -693,16 +698,16 @@ impl StreamManager {
                     for (_, topic_ref) in StreamManager::collect_topics(&topics) {
                         let mut should_notify = false;
                         {
-                            let mut inner = topic_ref.inner.lock();
+                            let mut state = topic_ref.state.lock();
                             let mut groups_changed = false;
-                            for group in inner.groups.values_mut() {
+                            for group in state.groups.values_mut() {
                                 if group.check_redelivery() {
                                     groups_changed = true;
                                     should_notify = true;
                                 }
                             }
                             if groups_changed {
-                                inner.groups_dirty = true;
+                                state.groups_dirty = true;
                             }
                         }
                         if should_notify {
@@ -713,109 +718,88 @@ impl StreamManager {
             }
         });
     }
-    fn try_fetch_once(&self, topic_ref: &Arc<TopicShared>, group: &str, consumer_id: &str, generation: u64, limit: usize) -> Result<FetchAttempt, String> {
-        let mut inner = topic_ref.inner.lock();
-        let TopicInner {
-            state,
-            groups,
-            groups_dirty,
-            ..
-        } = &mut *inner;
-
-        let head_seq = state.head_seq;
-        let next_seq = state.next_seq;
-        let ram_start_seq = state.ram_start_seq;
-
-        let (was_clamped, messages, is_fetching_cold, from_seq) = {
-            let group_ref = match groups.get_mut(group) {
-                Some(g) => g,
-                None => return Err("Group not found".to_string()),
+    /// Try to fetch messages for a consumer. Reads from storage via index if needed.
+    async fn try_fetch_once(
+        &self,
+        topic_ref: &Arc<TopicShared>,
+        topic: &str,
+        group: &str,
+        consumer_id: &str,
+        generation: u64,
+        limit: usize,
+        group_cancel: &CancellationToken,
+    ) -> Result<Vec<Message>, String> {
+        // 1. Compute fetch plan under lock (which seqs to read)
+        let (plan, was_clamped) = {
+            let mut state = topic_ref.state.lock();
+            let head_seq = state.head_seq;
+            let Some(group_ref) = state.groups.get_mut(group) else {
+                return Err("Group not found".to_string());
             };
 
             let was_clamped = group_ref.clamp_head(head_seq);
-
-            if group_ref.is_backpressured() {
-                return Ok(FetchAttempt::Ready(Vec::new()));
-            }
-
-            let messages = group_ref.fetch(consumer_id, generation, limit, &state.log, ram_start_seq, head_seq)?;
-            let is_fetching_cold = group_ref.is_fetching_cold;
-            let from_seq = group_ref.next_fetch_seq(head_seq);
-            (was_clamped, messages, is_fetching_cold, from_seq)
+            let backpressured = group_ref.is_backpressured();
+            let plan = if backpressured {
+                Vec::new()
+            } else {
+                group_ref.fetch_plan(head_seq, limit)
+            };
+            (plan, was_clamped)
         };
 
         if was_clamped {
-            *groups_dirty = true;
+            topic_ref.state.lock().groups_dirty = true;
         }
 
-        if !messages.is_empty() {
-            return Ok(FetchAttempt::Ready(messages));
+        if plan.is_empty() {
+            return Ok(Vec::new());
         }
 
-        if is_fetching_cold {
-            return Ok(FetchAttempt::Ready(Vec::new()));
-        }
-
-        // If the group is backpressured, don't trigger cold reads — nothing can be delivered.
-        if let Some(group_ref) = groups.get(group) {
-            if group_ref.is_backpressured() {
-                return Ok(FetchAttempt::Wait);
-            }
-        }
-
-        if from_seq < next_seq {
-            if from_seq < ram_start_seq {
-                if let Some(group_ref) = groups.get_mut(group) {
-                    group_ref.is_fetching_cold = true;
-                }
-                return Ok(FetchAttempt::NeedColdRead { from_seq });
-            }
-        }
-
-        Ok(FetchAttempt::Wait)
-    }
-
-    async fn cold_fetch(&self, topic_ref: &Arc<TopicShared>, topic: &str, group: &str, consumer_id: &str, generation: u64, limit: usize, from_seq: u64, group_cancel: &CancellationToken) -> Result<Vec<Message>, String> {
-        let (tx, rx) = oneshot::channel();
-        if self.storage_tx.send(StorageCommand::ColdRead {
-            topic_name: topic.to_string(),
-            from_seq,
-            limit,
-            reply: tx,
-        }).is_err() {
-            let mut inner = topic_ref.inner.lock();
-            if let Some(group_ref) = inner.groups.get_mut(group) {
-                group_ref.is_fetching_cold = false;
-            }
-            return Err("Disk read failed".to_string());
-        }
-
-        let messages = match rx.await {
-            Ok(messages) => messages,
-            Err(_) => {
-                let mut inner = topic_ref.inner.lock();
-                if let Some(group_ref) = inner.groups.get_mut(group) {
-                    group_ref.is_fetching_cold = false;
-                }
-                return Err("Disk read failed".to_string());
-            }
+        // 2. Look up offsets in index (under lock, then released)
+        let offsets = {
+            let state = topic_ref.state.lock();
+            plan.iter()
+                .filter_map(|seq| state.index.get(seq).map(|off| (*seq, *off)))
+                .collect::<Vec<_>>()
         };
 
-        let mut inner = topic_ref.inner.lock();
-        let head_seq = inner.state.head_seq;
-        if let Some(group_ref) = inner.groups.get_mut(group) {
-            group_ref.is_fetching_cold = false;
-            if group_cancel.is_cancelled() {
-                return Ok(Vec::new());
-            }
-            let was_clamped = group_ref.clamp_head(head_seq);
-            let registered = group_ref.register_cold_messages(consumer_id, generation, messages, head_seq)?;
-            if was_clamped {
-                inner.groups_dirty = true;
-            }
-            Ok(registered)
-        } else {
-            Err("Group disappeared during cold read".to_string())
+        if offsets.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // 3. Read messages from storage (outside any lock)
+        if group_cancel.is_cancelled() {
+            return Ok(Vec::new());
+        }
+
+        let (tx, rx) = oneshot::channel();
+        if self.storage_tx.send(StorageCommand::ReadRange {
+            topic_name: topic.to_string(),
+            offsets,
+            reply: tx,
+        }).is_err() {
+            return Err("Storage read failed".to_string());
+        }
+
+        let messages = rx.await.map_err(|_| "Storage read failed".to_string())?;
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 4. Deliver messages to the group (under lock)
+        let mut state = topic_ref.state.lock();
+        let head_seq = state.head_seq;
+        let Some(group_ref) = state.groups.get_mut(group) else {
+            return Err("Group not found".to_string());
+        };
+
+        if group_cancel.is_cancelled() {
+            return Ok(Vec::new());
+        }
+
+        group_ref.clamp_head(head_seq);
+        let result = group_ref.fetch(consumer_id, generation, limit, &messages, head_seq)?;
+        state.groups_dirty = true;
+        Ok(result)
     }
 }

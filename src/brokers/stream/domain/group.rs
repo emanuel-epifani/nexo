@@ -5,7 +5,7 @@
 //! - pending: messages delivered but not yet acked
 //! - redeliver: messages that need to be redelivered (nack or timeout)
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -49,7 +49,6 @@ pub struct ConsumerGroup {
     // === Member tracking (for disconnect cleanup) ===
     members: HashMap<String, String>, // consumer_id → connection_client_id
     // === Runtime State ===
-    pub is_fetching_cold: bool,
     pub generation: u64,
     pub cancel: CancellationToken,
     last_clamped_head: u64,
@@ -74,7 +73,6 @@ impl ConsumerGroup {
             ack_wait,
             max_deliveries,
             members: HashMap::new(),
-            is_fetching_cold: false,
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
@@ -103,7 +101,6 @@ impl ConsumerGroup {
             ack_wait,
             max_deliveries,
             members: HashMap::new(),
-            is_fetching_cold: false,
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
@@ -112,7 +109,8 @@ impl ConsumerGroup {
     }
 
     /// Fetch messages for a client. Serves redeliver queue first, then fresh messages.
-    pub fn fetch(&mut self, consumer_id: &str, generation: u64, limit: usize, log: &VecDeque<Message>, ram_start_seq: u64, head_seq: u64) -> Result<Vec<Message>, String> {
+    /// `messages` is a pre-read batch of messages from the log file (by the manager).
+    pub fn fetch(&mut self, consumer_id: &str, generation: u64, limit: usize, messages: &[Message], head_seq: u64) -> Result<Vec<Message>, String> {
         self.ensure_active_consumer(consumer_id, generation)?;
         self.clamp_head(head_seq);
 
@@ -132,12 +130,12 @@ impl ConsumerGroup {
                     continue;
                 }
 
-                if let Some(msg) = Self::read_from_log(log, ram_start_seq, seq) {
-                    if let Some(msg) = self.issue_delivery(consumer_id, msg) {
+                if let Some(msg) = messages.iter().find(|m| m.seq == seq) {
+                    if let Some(msg) = self.issue_delivery(consumer_id, msg.clone()) {
                         result.push(msg);
                     }
                 } else {
-                    // Cold message: put back and stop (needs disk read or wait for RAM)
+                    // Message not in this batch — put back and stop
                     self.redeliver.insert(seq);
                     break;
                 }
@@ -154,13 +152,13 @@ impl ConsumerGroup {
                 self.ack_floor = self.ack_floor.max(head_seq.saturating_sub(1));
             }
 
-            if let Some(msg) = Self::read_from_log(log, ram_start_seq, seq) {
+            if let Some(msg) = messages.iter().find(|m| m.seq == seq) {
                 self.next_deliver_seq = seq + 1;
-                if let Some(msg) = self.issue_delivery(consumer_id, msg) {
+                if let Some(msg) = self.issue_delivery(consumer_id, msg.clone()) {
                     result.push(msg);
                 }
             } else {
-                break; // no more messages in log
+                break; // no more messages in this batch
             }
         }
 
@@ -314,7 +312,6 @@ impl ConsumerGroup {
         }
 
         if changed {
-            self.is_fetching_cold = false;
             self.try_advance_floor();
             self.invalidate_inflight();
         }
@@ -323,8 +320,30 @@ impl ConsumerGroup {
         changed
     }
 
-    pub fn next_fetch_seq(&self, head_seq: u64) -> u64 {
-        self.redeliver.first().copied().unwrap_or(self.next_deliver_seq).max(head_seq.max(1))
+    /// Compute which seqs need to be read from storage for a fetch operation.
+    /// Returns redeliver seqs first, then fresh seqs, up to the budget.
+    pub fn fetch_plan(&self, head_seq: u64, limit: usize) -> Vec<u64> {
+        let budget = limit.min(self.max_ack_pending.saturating_sub(self.pending.len()));
+        if budget == 0 { return Vec::new(); }
+
+        let mut seqs = Vec::with_capacity(budget);
+
+        // Redeliver seqs (up to budget)
+        for &seq in self.redeliver.iter() {
+            if seqs.len() >= budget { break; }
+            if seq >= head_seq {
+                seqs.push(seq);
+            }
+        }
+
+        // Fresh seqs (fill remaining budget)
+        let fresh_start = self.next_deliver_seq.max(head_seq.max(1));
+        let fresh_count = budget - seqs.len();
+        for i in 0..fresh_count {
+            seqs.push(fresh_start + i as u64);
+        }
+
+        seqs
     }
 
     fn reset_runtime(&mut self) {
@@ -336,7 +355,6 @@ impl ConsumerGroup {
         self.keys_in_flight.clear();
         self.blocked_by_key.clear();
         self.members.clear();
-        self.is_fetching_cold = false;
         self.generation = self.generation.saturating_add(1);
         self.last_clamped_head = 0;
         self.deadlines.clear();
@@ -392,50 +410,6 @@ impl ConsumerGroup {
 
     // --- Internal ---
 
-    /// Specifically registers messages retrieved from disk into the group's pending state.
-    pub fn register_cold_messages(&mut self, consumer_id: &str, generation: u64, messages: Vec<Message>, head_seq: u64) -> Result<Vec<Message>, String> {
-        self.ensure_active_consumer(consumer_id, generation)?;
-        self.clamp_head(head_seq);
-
-        let mut result = Vec::new();
-
-        for msg in messages {
-            if self.pending.len() >= self.max_ack_pending { break; }
-
-            let seq = msg.seq;
-            if seq < head_seq {
-                continue;
-            }
-
-            // 1. Is it a redelivery?
-            let mut is_redelivery = false;
-            // Check if it's in our redeliver queue
-            if self.redeliver.remove(&seq) {
-                is_redelivery = true;
-            }
-
-            // 2. Is it a fresh message?
-            let next_fresh_seq = self.next_deliver_seq.max(head_seq.max(1));
-            if self.next_deliver_seq < head_seq {
-                self.next_deliver_seq = head_seq;
-                self.ack_floor = self.ack_floor.max(head_seq.saturating_sub(1));
-            }
-            let is_fresh = seq == next_fresh_seq;
-
-            if is_redelivery || is_fresh {
-                if is_fresh {
-                    self.next_deliver_seq = seq + 1;
-                }
-
-                if let Some(msg) = self.issue_delivery(consumer_id, msg) {
-                    result.push(msg);
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
     fn try_advance_floor(&mut self) {
         while self.ack_floor + 1 < self.next_deliver_seq
             && !self.pending.contains_key(&(self.ack_floor + 1))
@@ -443,14 +417,6 @@ impl ConsumerGroup {
         {
             self.ack_floor += 1;
         }
-    }
-
-    fn read_from_log(log: &VecDeque<Message>, ram_start_seq: u64, seq: u64) -> Option<Message> {
-        if seq < ram_start_seq || log.is_empty() {
-            return None; // cold read needed — handled by caller
-        }
-        let idx = (seq - ram_start_seq) as usize;
-        log.get(idx).cloned()
     }
 
     fn ensure_active_consumer(&self, consumer_id: &str, generation: u64) -> Result<(), String> {
@@ -602,7 +568,6 @@ mod tests {
     use super::*;
     use crate::brokers::stream::domain::message::Message;
     use bytes::Bytes;
-    use std::collections::VecDeque;
 
     fn make_group(max_ack_pending: usize, ack_wait_ms: u64, max_deliveries: u32) -> ConsumerGroup {
         ConsumerGroup::new(
@@ -623,12 +588,8 @@ mod tests {
         }
     }
 
-    fn fill_log(count: usize) -> VecDeque<Message> {
-        let mut log = VecDeque::new();
-        for i in 1..=count {
-            log.push_back(make_msg(i as u64, None));
-        }
-        log
+    fn fill_log(count: usize) -> Vec<Message> {
+        (1..=count).map(|i| make_msg(i as u64, None)).collect()
     }
 
     // === Basic ack/floor tests ===
@@ -640,7 +601,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        let msgs = g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        let msgs = g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         assert_eq!(msgs.len(), 3);
 
         // ack 1, 2, 3 in order → floor should advance to 3
@@ -659,7 +620,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        let msgs = g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        let msgs = g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         assert_eq!(msgs.len(), 3);
 
         // ack 3 first → floor should NOT advance past 0 (1 and 2 still pending)
@@ -683,7 +644,7 @@ mod tests {
         let c2 = g.add_member("conn2".to_string());
         let gen = g.generation();
 
-        g.fetch(&c1, gen, 1, &log, 1, 1).unwrap();
+        g.fetch(&c1, gen, 1, &log, 1).unwrap();
 
         let err = g.ack(&c2, gen, 1).unwrap_err();
         assert_eq!(err, "NOT_OWNER");
@@ -709,17 +670,17 @@ mod tests {
         let gen = g.generation();
 
         // Fetch 3 (fills max_ack_pending)
-        let msgs = g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        let msgs = g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         assert_eq!(msgs.len(), 3);
         assert!(g.is_backpressured());
 
         // Further fetch returns empty
-        let msgs2 = g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        let msgs2 = g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         assert!(msgs2.is_empty());
 
         // Ack one → can fetch one more
         g.ack(&consumer, gen, 1).unwrap();
-        let msgs3 = g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        let msgs3 = g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         assert_eq!(msgs3.len(), 1);
     }
 
@@ -733,7 +694,7 @@ mod tests {
         let gen = g.generation();
 
         // Fetch and deliver seq 1, 2
-        let msgs = g.fetch(&consumer, gen, 2, &log, 1, 1).unwrap();
+        let msgs = g.fetch(&consumer, gen, 2, &log, 1).unwrap();
         assert_eq!(msgs.len(), 2);
 
         // Simulate redelivery of seq 1 (e.g. from release_consumer)
@@ -742,7 +703,7 @@ mod tests {
         assert!(g.redeliver.contains(&2));
 
         // Next fetch should serve redelivered 1, 2 before fresh 3
-        let msgs2 = g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        let msgs2 = g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         assert_eq!(msgs2[0].seq, 1);
         assert_eq!(msgs2[1].seq, 2);
         assert_eq!(msgs2[2].seq, 3);
@@ -801,7 +762,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 3, &log, 1).unwrap();
 
         // Immediately check → nothing expired
         assert!(!g.check_redelivery());
@@ -815,7 +776,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         assert_eq!(g.pending.len(), 3);
 
         // Wait for timeout
@@ -841,7 +802,7 @@ mod tests {
         let gen = g.generation();
 
         // Deliver 3 messages
-        g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         let total_in_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
         assert_eq!(total_in_deadlines, 3);
 
@@ -865,7 +826,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 5, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 5, &log, 1).unwrap();
         assert_eq!(g.pending.len(), 5);
 
         // Clamp head to 4 → pending 1,2,3 should be removed
@@ -913,7 +874,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 3, &log, 1).unwrap();
         let changed1 = g.clamp_head(3);
         let changed2 = g.clamp_head(3);
         assert!(changed1);
@@ -1018,16 +979,16 @@ mod tests {
     fn test_per_key_ordering_blocks_second_message() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key-A");
-        let log = VecDeque::from(vec![
+        let log = vec![
             make_msg(1, Some(key.clone())),
             make_msg(2, Some(key.clone())),
-        ]);
+        ];
 
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
         // Fetch both — only first should be delivered, second blocked
-        let msgs = g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        let msgs = g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].seq, 1);
 
@@ -1040,16 +1001,16 @@ mod tests {
     fn test_per_key_ordering_ack_unblocks() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key-A");
-        let log = VecDeque::from(vec![
+        let log = vec![
             make_msg(1, Some(key.clone())),
             make_msg(2, Some(key.clone())),
             make_msg(3, Some(key.clone())),
-        ]);
+        ];
 
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         assert!(g.blocked_by_key.contains_key(&key));
 
         // Ack seq 1 → seq 2 should be unblocked into redeliver, seq 3 still blocked
@@ -1062,7 +1023,7 @@ mod tests {
 
         // Ack seq 2 → seq 3 should be unblocked
         // First re-fetch to deliver seq 2 from redeliver
-        g.fetch(&consumer, gen, 10, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         let key_unblocked2 = g.ack(&consumer, gen, 2).unwrap();
         assert!(key_unblocked2);
         assert!(g.redeliver.contains(&3));
@@ -1078,7 +1039,7 @@ mod tests {
         let consumer = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&consumer, gen, 1, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 1, &log, 1).unwrap();
 
         // Reset runtime bumps generation
         g.seek_beginning(1);
@@ -1097,7 +1058,7 @@ mod tests {
         let gen = g.generation();
 
         // Never added as member
-        let err = g.fetch("fake-consumer", gen, 1, &log, 1, 1).unwrap_err();
+        let err = g.fetch("fake-consumer", gen, 1, &log, 1).unwrap_err();
         assert_eq!(err, "NOT_MEMBER");
     }
 
@@ -1110,7 +1071,7 @@ mod tests {
         let c1 = g.add_member("conn1".to_string());
         let gen = g.generation();
 
-        g.fetch(&c1, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&c1, gen, 3, &log, 1).unwrap();
         assert_eq!(g.pending.len(), 3);
 
         // Remove member → pending should go to redeliver
@@ -1127,8 +1088,8 @@ mod tests {
         let c2 = g.add_member("conn2".to_string());
         let gen = g.generation();
 
-        g.fetch(&c1, gen, 2, &log, 1, 1).unwrap();
-        g.fetch(&c2, gen, 2, &log, 1, 1).unwrap();
+        g.fetch(&c1, gen, 2, &log, 1).unwrap();
+        g.fetch(&c2, gen, 2, &log, 1).unwrap();
         assert_eq!(g.pending.len(), 4);
 
         // Remove c1 → only c1's messages should be redelivered
@@ -1147,7 +1108,7 @@ mod tests {
         let gen = g.generation();
 
         // Deliver 1,2,3
-        g.fetch(&consumer, gen, 3, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 3, &log, 1).unwrap();
 
         // Ack 1 and 3 (gap at 2)
         g.ack(&consumer, gen, 1).unwrap();
@@ -1167,7 +1128,7 @@ mod tests {
         let gen = g.generation();
 
         // Deliver only 1
-        g.fetch(&consumer, gen, 1, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 1, &log, 1).unwrap();
         assert_eq!(g.next_deliver_seq, 2);
 
         // Ack 1 → floor should be 1, not higher (next_deliver_seq is 2)
@@ -1215,7 +1176,7 @@ mod tests {
         let gen = g.generation();
 
         // Deliver 5 messages
-        g.fetch(&consumer, gen, 5, &log, 1, 1).unwrap();
+        g.fetch(&consumer, gen, 5, &log, 1).unwrap();
         let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
         assert_eq!(g.pending.len(), total_deadlines);
 
@@ -1252,30 +1213,34 @@ mod tests {
         assert!(seqs.iter().all(|s| *s >= 4));
     }
 
-    // === next_fetch_seq tests ===
+    // === fetch_plan tests ===
 
     #[test]
-    fn test_next_fetch_seq_prefers_redeliver() {
+    fn test_fetch_plan_prefers_redeliver() {
         let mut g = make_group(100, 30000, 5);
         g.next_deliver_seq = 10;
         g.redeliver.insert(5);
 
-        assert_eq!(g.next_fetch_seq(1), 5);
+        let plan = g.fetch_plan(1, 10);
+        assert_eq!(plan[0], 5); // redeliver first
+        assert_eq!(plan[1], 10); // then fresh
     }
 
     #[test]
-    fn test_next_fetch_seq_uses_next_deliver_when_redeliver_empty() {
+    fn test_fetch_plan_uses_next_deliver_when_redeliver_empty() {
         let mut g = make_group(100, 30000, 5);
         g.next_deliver_seq = 10;
 
-        assert_eq!(g.next_fetch_seq(1), 10);
+        let plan = g.fetch_plan(1, 3);
+        assert_eq!(plan, vec![10, 11, 12]);
     }
 
     #[test]
-    fn test_next_fetch_seq_clamps_to_head() {
+    fn test_fetch_plan_clamps_to_head() {
         let mut g = make_group(100, 30000, 5);
         g.next_deliver_seq = 1;
 
-        assert_eq!(g.next_fetch_seq(5), 5);
+        let plan = g.fetch_plan(5, 3);
+        assert_eq!(plan, vec![5, 6, 7]);
     }
 }

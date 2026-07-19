@@ -1,19 +1,14 @@
 //! Topic: Pure Logic Struct (No Actors, No Channels)
 //! Single append-only log per topic (no partitions).
 
-use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::options::{StreamCreateOptions, RetentionOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
-use std::collections::VecDeque;
-use std::time::{SystemTime, UNIX_EPOCH};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicConfig {
     pub max_segment_size: u64,
     pub retention: RetentionOptions,
-    pub ram_soft_limit: usize,
     pub max_ack_pending: usize,
     pub ack_wait_ms: u64,
     pub max_deliveries: u32,
@@ -41,104 +36,9 @@ impl TopicConfig {
         Self {
             max_segment_size: sys.max_segment_size,
             retention,
-            ram_soft_limit: sys.ram_soft_limit,
             max_ack_pending: sys.max_ack_pending,
             ack_wait_ms: sys.ack_wait_ms,
             max_deliveries: sys.max_deliveries,
-        }
-    }
-}
-
-pub struct TopicState {
-    // Single log
-    pub log: VecDeque<Message>,
-    pub next_seq: u64,
-    pub head_seq: u64,
-    pub ram_start_seq: u64,   // first seq in RAM window
-    // Config
-    pub ram_soft_limit: usize,
-}
-
-impl TopicState {
-    pub fn restore(ram_soft_limit: usize, head_seq: u64, messages: VecDeque<Message>) -> Self {
-        let next_seq = messages.back().map(|m| m.seq + 1).unwrap_or(head_seq.max(1));
-        let ram_start_seq = messages.front().map(|m| m.seq).unwrap_or(next_seq.max(head_seq));
-
-        Self {
-            log: messages,
-            next_seq,
-            head_seq,
-            ram_start_seq,
-            ram_soft_limit,
-        }
-    }
-
-    pub fn append(&mut self, key: Option<Bytes>, payload: Bytes) -> Message {
-        let seq = self.next_seq;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        if self.log.is_empty() {
-            self.ram_start_seq = seq;
-        }
-
-        let msg = Message {
-            seq,
-            timestamp,
-            key: key.clone(),
-            payload: payload.clone(),
-        };
-        self.log.push_back(msg.clone());
-        self.next_seq += 1;
-
-        msg
-    }
-
-    pub fn read(&self, from_seq: u64, limit: usize) -> Vec<Message> {
-        let from_seq = from_seq.max(self.head_seq).max(1);
-        // Hot read: from RAM
-        if from_seq >= self.ram_start_seq && !self.log.is_empty() {
-            let idx = (from_seq - self.ram_start_seq) as usize;
-            if idx < self.log.len() {
-                return self.log.iter().skip(idx).take(limit).cloned().collect();
-            }
-        }
-        // Cold read is handled by the manager via StorageManager
-        Vec::new()
-    }
-
-    /// Evict old messages from RAM front (only if persisted to disk)
-    pub fn evict(&mut self, persisted_seq: u64) {
-        while self.log.len() > self.ram_soft_limit {
-            if let Some(front) = self.log.front() {
-                if front.seq <= persisted_seq {
-                    if let Some(removed) = self.log.pop_front() {
-                        self.ram_start_seq = (removed.seq + 1).max(self.head_seq);
-                    }
-                } else {
-                    break; // don't evict unpersisted data
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub fn apply_head(&mut self, head_seq: u64) {
-        self.head_seq = head_seq.max(1);
-        while let Some(front) = self.log.front() {
-            if front.seq < self.head_seq {
-                self.log.pop_front();
-            } else {
-                break;
-            }
-        }
-        if let Some(front) = self.log.front() {
-            self.ram_start_seq = front.seq;
-        } else {
-            self.ram_start_seq = self.next_seq.max(self.head_seq);
         }
     }
 }

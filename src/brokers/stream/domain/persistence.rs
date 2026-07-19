@@ -1,22 +1,20 @@
-//! Storage Manager: Global actor handling all file I/O for stream topics.
+//! Storage Manager: Dumb writer handling all file I/O for stream topics.
 //! 
 //! Responsibilities:
-//! - Offloads disk I/O from individual topic actors.
-//! - Batches writes automatically via `BufWriter` for high throughput.
+//! - Writes directly to File (OS page cache) for immediate pread visibility.
 //! - Manages an LRU Cache of file descriptors to prevent OS limits exhaustion.
-//! - Executes a global periodic flush to sync bytes to disk and notify topic actors.
+//! - Reads messages from segment files at specific byte offsets.
+//! - Applies retention and saves group state.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use lru::LruCache;
 use bytes::Bytes;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter, AsyncReadExt, BufReader};
+use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 use crc32fast::Hasher;
@@ -39,14 +37,18 @@ pub struct GroupPersistentState {
 
 #[derive(Default)]
 pub struct RecoveredState {
-    /// Active messages from the last segment
-    pub messages: VecDeque<Message>,
+    /// seq → byte offset index (rebuilt from segment files)
+    pub index: BTreeMap<u64, u64>,
+    /// Next seq to assign (max seq + 1)
+    pub next_seq: u64,
     /// All segment paths in order
     pub segments: Vec<Segment>,
     /// Group ID -> GroupPersistentState
     pub groups_data: BTreeMap<String, GroupPersistentState>,
     /// First retained sequence on disk
     pub head_seq: u64,
+    /// Size of the last (active) segment in bytes
+    pub last_segment_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -60,17 +62,18 @@ pub struct Segment {
 // ==========================================
 
 pub enum StorageCommand {
-    /// Append messages to a topic's active log file.
+    /// Append messages to a topic's log file. Fire-and-forget.
+    /// Manager computes the file_path and offsets.
     Append {
-        topic_name: String,
+        file_path: PathBuf,
         messages: Vec<Message>,
-        persisted_seq: Arc<AtomicU64>,
     },
     
-    ColdRead {
+    /// Read messages from a topic by reading specific byte offsets from segment files.
+    ReadRange {
         topic_name: String,
-        from_seq: u64,
-        limit: usize,
+        /// (seq, byte_offset) pairs to read
+        offsets: Vec<(u64, u64)>,
         reply: oneshot::Sender<Vec<Message>>,
     },
 
@@ -91,25 +94,10 @@ pub enum StorageCommand {
     }
 }
 
-pub struct TopicContext {
-    active_path: PathBuf,
-    persisted_seq: Arc<AtomicU64>,
-    highest_pending_seq: u64,
-    current_file_size: u64,
-}
-
-// ==========================================
-// STORAGE MANAGER ACTOR
-// ==========================================
-
 pub struct StorageManager {
     base_path: PathBuf,
     rx: mpsc::UnboundedReceiver<StorageCommand>,
-    open_files: LruCache<PathBuf, BufWriter<File>>,
-    topics: HashMap<String, TopicContext>,
-    flush_interval: Duration,
-    max_segment_size: u64,
-    dirty_topics: HashSet<String>,
+    open_files: LruCache<PathBuf, File>,
 }
 
 impl StorageManager {
@@ -117,55 +105,39 @@ impl StorageManager {
         base_path: String,
         rx: mpsc::UnboundedReceiver<StorageCommand>,
         max_open_files: usize,
-        flush_interval_ms: u64,
-        max_segment_size: u64,
     ) -> Self {
         Self {
             base_path: PathBuf::from(base_path),
             rx,
             open_files: LruCache::new(NonZeroUsize::new(max_open_files).unwrap()),
-            topics: HashMap::new(),
-            flush_interval: Duration::from_millis(flush_interval_ms),
-            max_segment_size,
-            dirty_topics: HashSet::new(),
         }
     }
 
     pub async fn run(mut self) {
         info!("StorageManager started");
-        let mut flush_timer = tokio::time::interval(self.flush_interval);
-        flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
-                cmd_res = self.rx.recv() => {
-                    match cmd_res {
-                        Some(cmd) => {
-                            self.handle_command(cmd).await;
-                            while let Ok(next) = self.rx.try_recv() {
-                                self.handle_command(next).await;
-                            }
-                        }
-                        None => break,
+            match self.rx.recv().await {
+                Some(cmd) => {
+                    self.handle_command(cmd).await;
+                    while let Ok(next) = self.rx.try_recv() {
+                        self.handle_command(next).await;
                     }
                 }
-                _ = flush_timer.tick() => {
-                    self.flush_all().await;
-                }
+                None => break,
             }
         }
-        
-        self.flush_all().await;
+
         info!("StorageManager stopped");
     }
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { topic_name, messages, persisted_seq } => {
-                self.handle_append(topic_name, messages, persisted_seq).await;
+            StorageCommand::Append { file_path, messages } => {
+                self.handle_append(file_path, messages).await;
             }
-            StorageCommand::ColdRead { topic_name, from_seq, limit, reply } => {
-                let msgs = self.cold_read(&topic_name, from_seq, limit).await;
+            StorageCommand::ReadRange { topic_name, offsets, reply } => {
+                let msgs = self.read_range(&topic_name, offsets).await;
                 let _ = reply.send(msgs);
             }
             StorageCommand::SaveState { topic_name, groups } => {
@@ -180,10 +152,14 @@ impl StorageManager {
                 let _ = reply.send(outcome);
             }
             StorageCommand::DropTopic { topic_name, reply } => {
-                if let Some(ctx) = self.topics.remove(&topic_name) {
-                    self.open_files.pop(&ctx.active_path);
-                }
                 let topic_path = self.base_path.join(&topic_name);
+                let to_remove: Vec<PathBuf> = self.open_files.iter()
+                    .filter(|(p, _)| p.starts_with(&topic_path))
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                for p in to_remove {
+                    self.open_files.pop(&p);
+                }
                 if topic_path.exists() {
                     let _ = std::fs::remove_dir_all(&topic_path);
                 }
@@ -194,130 +170,85 @@ impl StorageManager {
 
     async fn handle_append(
         &mut self,
-        topic_name: String,
+        file_path: PathBuf,
         messages: Vec<Message>,
-        persisted_seq: Arc<AtomicU64>,
     ) {
         if messages.is_empty() { return; }
 
-        let highest_seq = messages.last().unwrap().seq;
-        let base_topic_path = self.base_path.join(&topic_name);
-
-        if !self.topics.contains_key(&topic_name) {
-            if !base_topic_path.exists() {
-                if let Err(e) = tokio::fs::create_dir_all(&base_topic_path).await {
-                    error!("FATAL: Failed to create topic dir {:?}: {}", base_topic_path, e);
+        if let Some(parent) = file_path.parent() {
+            if !parent.exists() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    error!("FATAL: Failed to create topic dir {:?}: {}", parent, e);
                     return;
                 }
             }
-            
-            let segments = find_segments(&base_topic_path).await.unwrap_or_default();
-            let (active_path, file_size) = if let Some(last) = segments.last() {
-                let size = tokio::fs::metadata(&last.path).await.map(|m| m.len()).unwrap_or(0);
-                (last.path.clone(), size)
-            } else {
-                (base_topic_path.join("1.log"), 0)
-            };
-
-            self.topics.insert(topic_name.clone(), TopicContext {
-                active_path,
-                persisted_seq: persisted_seq.clone(),
-                highest_pending_seq: 0,
-                current_file_size: file_size,
-            });
-        } else {
-            self.topics.get_mut(&topic_name).unwrap().persisted_seq = persisted_seq;
         }
 
         let mut buffer = Vec::new();
         for msg in &messages {
             serialize_message(&mut buffer, msg.seq, msg.timestamp, msg.key.as_deref(), &msg.payload);
         }
-        let bytes_len = buffer.len() as u64;
 
-        let path = {
-            let ctx = self.topics.get_mut(&topic_name).unwrap();
-            if ctx.current_file_size + bytes_len > self.max_segment_size && ctx.current_file_size > 0 {
-                if let Some(mut old_writer) = self.open_files.pop(&ctx.active_path) {
-                    let _ = old_writer.flush().await;
-                }
-                let first_seq = messages.first().unwrap().seq;
-                ctx.active_path = base_topic_path.join(format!("{}.log", first_seq));
-                ctx.current_file_size = 0;
-            }
-            ctx.active_path.clone()
-        };
-
-        match self.get_or_open_writer(&path).await {
+        match self.get_or_open_writer(&file_path).await {
             Ok(writer) => {
                 if let Err(e) = writer.write_all(&buffer).await {
-                    error!("StorageManager: Failed to write to {:?}: {}", path, e);
-                    self.open_files.pop(&path);
-                    return;
+                    error!("StorageManager: Failed to write to {:?}: {}", file_path, e);
+                    self.open_files.pop(&file_path);
                 }
-                let ctx = self.topics.get_mut(&topic_name).unwrap();
-                ctx.current_file_size += bytes_len;
-                ctx.highest_pending_seq = highest_seq;
-                self.dirty_topics.insert(topic_name.clone());
             }
-            Err(e) => error!("StorageManager: Failed to open file {:?}: {}", path, e),
+            Err(e) => {
+                error!("StorageManager: Failed to open file {:?}: {}", file_path, e);
+            }
         }
     }
 
-    async fn get_or_open_writer(&mut self, path: &PathBuf) -> Result<&mut BufWriter<File>, std::io::Error> {
+    async fn get_or_open_writer(&mut self, path: &PathBuf) -> Result<&mut File, std::io::Error> {
         if !self.open_files.contains(path) {
             if self.open_files.len() == self.open_files.cap().get() {
-                if let Some((_, mut evicted_writer)) = self.open_files.pop_lru() {
-                    let _ = evicted_writer.flush().await;
-                }
+                let _ = self.open_files.pop_lru();
             }
             let file = OpenOptions::new().create(true).append(true).open(path).await?;
-            self.open_files.put(path.clone(), BufWriter::new(file));
+            self.open_files.put(path.clone(), file);
         }
         Ok(self.open_files.get_mut(path).unwrap())
     }
 
-    async fn flush_all(&mut self) {
-        for (_, writer) in self.open_files.iter_mut() {
-            let _ = writer.flush().await;
-        }
+    /// Read messages from segment files at specific byte offsets.
+    async fn read_range(&self, topic_name: &str, offsets: Vec<(u64, u64)>) -> Vec<Message> {
+        if offsets.is_empty() { return Vec::new(); }
 
-        if !self.dirty_topics.is_empty() {
-            let topics_to_flush: Vec<String> = self.dirty_topics.drain().collect();
-            for name in topics_to_flush {
-                if let Some(ctx) = self.topics.get_mut(&name) {
-                    if ctx.highest_pending_seq > 0 {
-                        ctx.persisted_seq.store(ctx.highest_pending_seq, Ordering::Release);
-                        ctx.highest_pending_seq = 0;
+        let base_path = self.base_path.join(topic_name);
+        let segments = find_segments(&base_path).await.unwrap_or_default();
+        if segments.is_empty() { return Vec::new(); }
+
+        // Group offsets by segment
+        let mut result = Vec::with_capacity(offsets.len());
+        for (seq, byte_offset) in offsets {
+            // Find which segment contains this offset
+            // We need to read from the segment file at the given byte offset
+            // Segments are sorted by start_seq, so we find the segment whose start_seq <= seq
+            let segment = segments.iter().rposition(|s| s.start_seq <= seq)
+                .map(|idx| &segments[idx]);
+
+            if let Some(seg) = segment {
+                if let Ok(file) = File::open(&seg.path).await {
+                    let mut reader = BufReader::new(file);
+                    if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
+                        match read_record(&mut reader).await {
+                            ReadOutcome::Record(content_buf) => {
+                                if let Some(msg) = parse_message(&content_buf) {
+                                    if msg.seq == seq {
+                                        result.push(msg);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
         }
-    }
-
-    async fn cold_read(&self, topic_name: &str, from_seq: u64, limit: usize) -> Vec<Message> {
-        let base_path = self.base_path.join(topic_name);
-        let segments = find_segments(&base_path).await.unwrap_or_default();
-        let mut all_msgs = Vec::new();
-        let Some(first_segment) = segments.first() else {
-            return all_msgs;
-        };
-
-        let mut current_from_seq = from_seq.max(first_segment.start_seq);
-        let mut remaining_limit = limit;
-
-        if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= current_from_seq) {
-            for segment in segments.iter().skip(idx) {
-                if remaining_limit == 0 { break; }
-                let msgs = read_log_segment(&segment.path, current_from_seq, remaining_limit).await;
-                if !msgs.is_empty() {
-                    current_from_seq = msgs.last().unwrap().seq + 1;
-                    remaining_limit = remaining_limit.saturating_sub(msgs.len());
-                    all_msgs.extend(msgs);
-                }
-            }
-        }
-        all_msgs
+        result
     }
 
     async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> u64 {
@@ -374,6 +305,12 @@ impl StorageManager {
 // ==========================================
 // HELPERS (Formerly in writer.rs)
 // ==========================================
+
+/// Total on-disk size of a serialized message record: [len: u32][crc: u32][content].
+pub fn record_len(key: Option<&[u8]>, payload: &[u8]) -> u64 {
+    let key_len = key.map_or(0, |k| k.len()) as u64;
+    4 + 4 + 8 + 8 + 2 + key_len + payload.len() as u64
+}
 
 /// Serialize a message into a buffer (does NOT write to disk).
 pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Option<&[u8]>, payload: &[u8]) {
@@ -445,32 +382,39 @@ fn parse_message(content: &[u8]) -> Option<Message> {
     Some(Message { seq, timestamp, key, payload })
 }
 
-/// Read messages from a log segment file starting at a given seq.
-pub async fn read_log_segment(path: &PathBuf, start_seq: u64, limit: usize) -> Vec<Message> {
-    let mut msgs = Vec::new();
-    let file = match File::open(path).await {
-        Ok(f) => f,
-        Err(_) => return msgs,
-    };
+/// Build a seq→byte_offset index by scanning a segment file.
+async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u64>> {
+    let mut index = BTreeMap::new();
+    let file = OpenOptions::new().read(true).write(true).open(path).await?;
     let mut reader = BufReader::new(file);
+    let mut current_offset: u64 = 0;
+    let mut valid_bytes: u64 = 0;
 
     loop {
         match read_record(&mut reader).await {
             ReadOutcome::Record(content_buf) => {
+                let len = 4 + 4 + content_buf.len() as u64;
                 if let Some(msg) = parse_message(&content_buf) {
-                    if msg.seq >= start_seq {
-                        msgs.push(msg);
-                        if msgs.len() >= limit { break; }
-                    }
+                    index.insert(msg.seq, current_offset);
                 }
+                current_offset += len;
+                valid_bytes += len;
             }
-            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
+            ReadOutcome::Corrupted => {
+                error!("Corrupted record at byte {} in {:?}, truncating segment", valid_bytes, path);
+                if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
+                    error!("Failed to truncate segment {:?}: {}", path, e);
+                }
+                break;
+            }
+            ReadOutcome::Eof => break,
         }
     }
-    msgs
+    Ok(index)
 }
 
 /// Recover topic state from filesystem.
+/// Rebuilds the seq→byte_offset index by scanning all segment files.
 pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
     let base_path = base_path.join(topic_name);
     let mut state = RecoveredState::default();
@@ -478,10 +422,23 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
 
     if let Ok(segments) = find_segments(&base_path).await {
         state.head_seq = segments.first().map(|seg| seg.start_seq).unwrap_or(1);
-        if let Some(last_segment) = segments.last() {
-            state.messages = load_segment_file(&last_segment.path).await;
+        state.segments = segments.clone();
+
+        // Rebuild index by scanning all segment files
+        let mut max_seq = 0u64;
+        for seg in &segments {
+            if let Ok(index) = build_segment_index(&seg.path).await {
+                for (seq, offset) in index {
+                    if seq > max_seq { max_seq = seq; }
+                    state.index.insert(seq, offset);
+                }
+            }
         }
-        state.segments = segments;
+        state.next_seq = if max_seq > 0 { max_seq + 1 } else { state.head_seq.max(1) };
+        state.last_segment_size = segments.last()
+            .and_then(|seg| std::fs::metadata(&seg.path).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
     }
 
     let state_path = base_path.join("state.log");
@@ -520,12 +477,10 @@ pub async fn save_state_file(base_path: &Path, groups: &BTreeMap<String, GroupPe
     let final_path = base_path.join("state.log");
 
     {
-        let file = File::create(&tmp_path).await?;
-        let mut writer = BufWriter::new(file);
+        let mut writer = File::create(&tmp_path).await?;
         for (group_id, state) in groups {
             write_state_entry(&mut writer, group_id, state).await?;
         }
-        writer.flush().await?;
     }
 
     tokio::fs::rename(&tmp_path, &final_path).await?;
@@ -641,34 +596,3 @@ async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersist
     }
     Ok(groups)
 }
-
-async fn load_segment_file(path: &PathBuf) -> VecDeque<Message> {
-    let mut msgs = VecDeque::new();
-    let file = match OpenOptions::new().read(true).write(true).open(path).await {
-        Ok(f) => f,
-        Err(_) => return msgs,
-    };
-
-    let mut reader = BufReader::new(file);
-    let mut valid_bytes: u64 = 0;
-    loop {
-        match read_record(&mut reader).await {
-            ReadOutcome::Record(content_buf) => {
-                valid_bytes += 4 + 4 + content_buf.len() as u64;
-                if let Some(msg) = parse_message(&content_buf) {
-                    msgs.push_back(msg);
-                }
-            }
-            ReadOutcome::Corrupted => {
-                error!("Corrupted record at byte {} in {:?}, truncating segment", valid_bytes, path);
-                if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
-                    error!("Failed to truncate segment {:?}: {}", path, e);
-                }
-                break;
-            }
-            ReadOutcome::Eof => break,
-        }
-    }
-    msgs
-}
-
