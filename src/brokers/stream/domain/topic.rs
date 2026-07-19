@@ -1,5 +1,4 @@
-//! Topic: Pure Logic Struct (No Actors, No Channels)
-//! Single append-only log per topic (no partitions).
+//! Topic: Pure domain logic for stream topic configuration.
 
 use crate::brokers::stream::options::{StreamCreateOptions, RetentionOptions};
 use crate::brokers::stream::config::SystemStreamConfig;

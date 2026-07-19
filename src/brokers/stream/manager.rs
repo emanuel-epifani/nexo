@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,7 +20,6 @@ use crate::brokers::stream::domain::persistence::{recover_topic, record_len, Gro
 use crate::brokers::stream::domain::topic::TopicConfig;
 
 struct TopicShared {
-    next_seq: AtomicU64,
     state: Mutex<TopicState>,
     wake_tx: watch::Sender<u64>,
 }
@@ -34,6 +32,7 @@ struct ConsumerBinding {
 
 struct TopicState {
     head_seq: u64,
+    next_seq: u64,
     index: BTreeMap<u64, u64>,
     groups: HashMap<String, ConsumerGroup>,
     client_map: HashMap<String, Vec<ConsumerBinding>>,
@@ -160,7 +159,8 @@ impl StreamManager {
 
         let (seqs, messages, file_path) = {
             let mut state = topic_ref.state.lock();
-            let first_seq = topic_ref.next_seq.fetch_add(n, Ordering::SeqCst);
+            let first_seq = state.next_seq;
+            state.next_seq += n;
             let mut seqs = Vec::with_capacity(items.len());
             let mut messages = Vec::with_capacity(items.len());
             for (i, (key, payload)) in items.into_iter().enumerate() {
@@ -355,7 +355,7 @@ impl StreamManager {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
             let mut state = topic_ref.state.lock();
-            let last_seq = topic_ref.next_seq.load(Ordering::Acquire).saturating_sub(1);
+            let last_seq = state.next_seq.saturating_sub(1);
             let head_seq = state.head_seq;
             let max_ack_pending = state.full_config.max_ack_pending;
             let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
@@ -559,9 +559,9 @@ impl StreamManager {
         }
 
         Arc::new(TopicShared {
-            next_seq: AtomicU64::new(next_seq),
             state: Mutex::new(TopicState {
                 head_seq,
+                next_seq,
                 index: recovered.index,
                 groups,
                 client_map: HashMap::new(),

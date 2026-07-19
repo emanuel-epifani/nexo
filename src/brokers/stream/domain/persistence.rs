@@ -1,10 +1,4 @@
-//! Storage Manager: Dumb writer handling all file I/O for stream topics.
-//! 
-//! Responsibilities:
-//! - Writes directly to File (OS page cache) for immediate pread visibility.
-//! - Manages an LRU Cache of file descriptors to prevent OS limits exhaustion.
-//! - Reads messages from segment files at specific byte offsets.
-//! - Applies retention and saves group state.
+//! Storage Manager: handles all file I/O for stream topics (append, read, retention, state).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -358,22 +352,23 @@ enum ReadOutcome {
     Record(Vec<u8>),
     Corrupted,
     Eof,
+    UnexpectedEof,
 }
 
 /// Read the next record from a framed file.
 /// Format: [len: u32 BE][crc: u32 BE][content: len bytes]
-/// Returns Corrupted on CRC mismatch, Eof at end of file or read error.
+/// Returns Corrupted on CRC mismatch, Eof at clean end of file, UnexpectedEof on partial read.
 async fn read_record(reader: &mut BufReader<File>) -> ReadOutcome {
     let mut len_buf = [0u8; 4];
     if reader.read_exact(&mut len_buf).await.is_err() { return ReadOutcome::Eof; }
     let len = u32::from_be_bytes(len_buf) as usize;
 
     let mut crc_buf = [0u8; 4];
-    if reader.read_exact(&mut crc_buf).await.is_err() { return ReadOutcome::Eof; }
+    if reader.read_exact(&mut crc_buf).await.is_err() { return ReadOutcome::UnexpectedEof; }
     let stored_crc = u32::from_be_bytes(crc_buf);
 
     let mut content_buf = vec![0u8; len];
-    if reader.read_exact(&mut content_buf).await.is_err() { return ReadOutcome::Eof; }
+    if reader.read_exact(&mut content_buf).await.is_err() { return ReadOutcome::UnexpectedEof; }
 
     let mut hasher = Hasher::new();
     hasher.update(&content_buf);
@@ -416,11 +411,19 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
                 let len = 4 + 4 + content_buf.len() as u64;
                 if let Some(msg) = parse_message(&content_buf) {
                     index.insert(msg.seq, current_offset);
+                    current_offset += len;
+                    valid_bytes += len;
+                } else {
+                    // parse_message failed: record is corrupted, truncate
+                    if valid_bytes > 0 {
+                        if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
+                            error!("Failed to truncate segment {:?}: {}", path, e);
+                        }
+                    }
+                    break;
                 }
-                current_offset += len;
-                valid_bytes += len;
             }
-            ReadOutcome::Corrupted | ReadOutcome::Eof => {
+            ReadOutcome::Corrupted | ReadOutcome::UnexpectedEof => {
                 if valid_bytes > 0 {
                     if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
                         error!("Failed to truncate segment {:?}: {}", path, e);
@@ -428,6 +431,7 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
                 }
                 break;
             }
+            ReadOutcome::Eof => break,
         }
     }
     Ok(index)
@@ -611,7 +615,7 @@ async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersist
 
                 groups.insert(group_id, state);
             }
-            ReadOutcome::Corrupted | ReadOutcome::Eof => break,
+            ReadOutcome::Corrupted | ReadOutcome::Eof | ReadOutcome::UnexpectedEof => break,
         }
     }
     Ok(groups)
