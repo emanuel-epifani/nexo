@@ -2,10 +2,10 @@ use nexo::brokers::pub_sub::PubSubManager;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use bytes::Bytes;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common;
-use common::{setup_pubsub_manager, Benchmark};
+use common::setup_pubsub_manager;
 
 
 
@@ -689,99 +689,4 @@ mod pubsub_tests {
         }
     }
 
-    // =========================================================================================
-    // 3. PERFORMANCE BENCHMARKS
-    // =========================================================================================
-
-    mod performance {
-        use super::*;
-
-        const MSG_COUNT: usize = 500_000;
-
-        #[tokio::test]
-        async fn bench_pubsub_throughput_exact_match() {
-            let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = "bench_sub".to_string();
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(&client_id, tx);
-
-            let topic = "bench/speed";
-            manager.subscribe(&client_id, topic).unwrap();
-
-            let payload = Bytes::from("fast_data");
-
-            // Spawn consumer to drain channel
-            tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {}
-            });
-
-            let mut bench = Benchmark::start("PUBSUB - Exact Match Throughput", MSG_COUNT);
-
-            for _ in 0..MSG_COUNT {
-                let start = Instant::now();
-                let _ = manager.publish(topic, payload.clone(), false, false, None);
-                bench.record(start.elapsed());
-            }
-
-            bench.stop();
-        }
-
-        #[tokio::test]
-        async fn bench_pubsub_throughput_wildcard_match() {
-            let (manager, _tmp) = setup_pubsub_manager().await;
-            let client_id = "bench_wild".to_string();
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            manager.connect(&client_id, tx);
-
-            // Subscribe with wildcard
-            manager.subscribe(&client_id, "bench/+/metric").unwrap();
-            let payload = Bytes::from("data");
-
-            tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {}
-            });
-
-            let mut bench = Benchmark::start("PUBSUB - Wildcard Match Throughput", MSG_COUNT);
-
-            for _ in 0..MSG_COUNT {
-                let start = Instant::now();
-                let _ = manager.publish("bench/server1/metric", payload.clone(), false, false, None);
-                bench.record(start.elapsed());
-            }
-
-            bench.stop();
-        }
-
-        #[tokio::test]
-        async fn bench_pubsub_fanout() {
-            let (manager, _tmp) = setup_pubsub_manager().await;
-            let topic = "fanout/global";
-            let num_subs = 100;
-
-            // Create 100 subscribers
-            for i in 0..num_subs {
-                let client_id = format!("sub_{}", i);
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                manager.connect(&client_id, tx);
-                manager.subscribe(&client_id, topic).unwrap();
-
-                tokio::spawn(async move {
-                    while let Some(_) = rx.recv().await {}
-                });
-            }
-
-            let payload = Bytes::from("broadcast");
-            let count = 10_000;
-
-            let mut bench = Benchmark::start(&format!("PUBSUB - Fanout 1->{}", num_subs), count);
-
-            for _ in 0..count {
-                let start = Instant::now();
-                let _ = manager.publish(topic, payload.clone(), false, false, None);
-                bench.record(start.elapsed());
-            }
-
-            bench.stop();
-        }
-    }
 }

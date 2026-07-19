@@ -3,7 +3,6 @@ use nexo::config::Config;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 mod common;
-use common::Benchmark;
 
 #[cfg(test)]
 mod stream_tests {
@@ -775,35 +774,6 @@ mod stream_tests {
             for msg in &msgs {
                 ack_message(&manager, group, topic, &consumer, msg.seq).await;
             }
-        }
-    }
-
-    mod performance {
-        use super::*;
-
-        const COUNT: usize = 500_000;
-
-
-        #[tokio::test]
-        async fn bench_stream_publish() {
-            // cargo test --release bench_stream_publish -- --test-threads=1 --nocapture
-            let temp_dir = tempfile::tempdir().unwrap();
-
-            let mut config = Config::global().stream.clone();
-            config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-
-            let manager = build_manager(config).await;
-            let topic = "bench-async";
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-
-            let mut bench = Benchmark::start("STREAM PUSH (Async Background)", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.publish(topic, None, Bytes::from("data")).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            bench.stop();
         }
     }
 

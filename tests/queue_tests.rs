@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 mod common;
-use common::{setup_queue_manager, Benchmark};
+use common::setup_queue_manager;
 
 
 
@@ -738,39 +738,6 @@ mod queue_tests {
         }
     }
 
-    // =========================================================================================
-    // 3. PERFORMANCE BENCHMARKS
-    // =========================================================================================
-
-    // cargo test --release --test queue_tests performance -- --test-threads=1 --nocapture
-    mod performance {
-        use super::*;
-
-        const COUNT: usize = 500_000;
-
-
-        #[tokio::test]
-        async fn bench_queue_throughput() {
-            // cargo test --release bench_queue_throughput -- --test-threads=1 --nocapture
-            let (manager, _tmp) = setup_queue_manager().await;
-            let q = format!("bench_async_{}", Uuid::new_v4());
-            let config = QueueCreateOptions {
-                ..Default::default()
-            };
-            manager.create_queue(q.clone(), config).await.unwrap();
-
-            let mut bench = Benchmark::start("PUSH - Queue Throughput (Sequential)", COUNT);
-            for _ in 0..COUNT {
-                let start = Instant::now();
-                manager.push(q.clone(), Bytes::from("data"), 0).await.unwrap();
-                bench.record(start.elapsed());
-            }
-            // Wait for flush to happen in background (optional, just to be fair to disk)
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            bench.stop();
-        }
-
-    }
 
     mod batch {
         use super::*;

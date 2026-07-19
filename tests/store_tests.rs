@@ -1,5 +1,5 @@
 mod common;
-use common::{setup_store_manager, Benchmark};
+use common::setup_store_manager;
 use bytes::Bytes;
 use std::time::Duration;
 use uuid::Uuid;
@@ -70,50 +70,6 @@ mod store_tests {
         }
     }
 
-    // =========================================================================================
-    // 2. PERFORMANCE BENCHMARKS
-    // =========================================================================================
-
-    mod performance {
-        use super::*;
-        use std::time::Instant;
-        const COUNT: usize = 200_000;
-
-        #[tokio::test]
-        async fn bench_write_throughput() {
-            let (manager, _tmp) = setup_store_manager().await;
-
-            let mut bench = Benchmark::start("STORE - Write (PUT)", COUNT);
-
-            for i in 0..COUNT {
-                let start = Instant::now();
-                let key = i.to_string();
-                manager.map.set(key, Bytes::from("data"), None);
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
-
-        #[tokio::test]
-        async fn bench_read_throughput() {
-            let (manager, _tmp) = setup_store_manager().await;
-
-            // Pre-fill
-            for i in 0..COUNT {
-                let key = i.to_string();
-                manager.map.set(key, Bytes::from("data"), None);
-            }
-
-            let mut bench = Benchmark::start("STORE - Read (GET)", COUNT);
-            for i in 0..COUNT {
-                let start = Instant::now();
-                let key = i.to_string();
-                let _ = manager.map.get(&key).unwrap();
-                bench.record(start.elapsed());
-            }
-            bench.stop();
-        }
-    }
 
 
 
