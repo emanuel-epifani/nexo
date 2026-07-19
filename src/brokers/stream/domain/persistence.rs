@@ -8,7 +8,7 @@ use std::time::Duration;
 use lru::LruCache;
 use bytes::Bytes;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 use crc32fast::Hasher;
@@ -233,12 +233,11 @@ impl StorageManager {
         for (idx, mut seg_offsets) in by_segment {
             seg_offsets.sort_by_key(|(_, off)| *off);
             let seg = &segments[idx];
-            match self.get_or_open_file(&seg.path).await {
-                Ok(file) => {
+            match File::open(&seg.path).await {
+                Ok(mut file) => {
                     for (seq, byte_offset) in seg_offsets {
                         if file.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
-                            let mut reader = BufReader::new(&mut *file);
-                            match read_record(&mut reader).await {
+                            match read_record(&mut file).await {
                                 ReadOutcome::Record(content_buf) => {
                                     if let Some(msg) = parse_message(&content_buf) {
                                         if msg.seq == seq {
@@ -361,7 +360,7 @@ enum ReadOutcome {
 /// Read the next record from a framed file.
 /// Format: [len: u32 BE][crc: u32 BE][content: len bytes]
 /// Returns Corrupted on CRC mismatch, Eof at clean end of file, UnexpectedEof on partial read.
-async fn read_record<R: AsyncRead + AsyncSeek + Unpin>(reader: &mut BufReader<R>) -> ReadOutcome {
+async fn read_record<R: AsyncRead + Unpin>(reader: &mut R) -> ReadOutcome {
     let mut len_buf = [0u8; 4];
     if reader.read_exact(&mut len_buf).await.is_err() { return ReadOutcome::Eof; }
     let len = u32::from_be_bytes(len_buf) as usize;

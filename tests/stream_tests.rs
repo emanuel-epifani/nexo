@@ -2144,5 +2144,51 @@ mod stream_tests {
             let seqs2: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
             assert_eq!(seqs2, (11..=15).collect::<Vec<_>>());
         }
+
+    mod fd_cache_regression {
+        use super::*;
+
+        // Regression: read-after-write on same fd (O_APPEND + seek + read)
+        // Publish, read, publish more, read again — verify all messages visible.
+        #[tokio::test]
+        async fn read_after_write_same_fd() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "fd-cache-rw";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Round 1: publish 3 messages
+            for i in 1..=3 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            // Read 1: should see all 3
+            let msgs1 = manager.read(topic, 1, 100).await;
+            assert_eq!(msgs1.len(), 3, "first read should see all 3 messages");
+            assert_eq!(msgs1[0].payload, Bytes::from("msg-1"));
+            assert_eq!(msgs1[2].payload, Bytes::from("msg-3"));
+
+            // Round 2: publish 3 more (same segment, same fd in cache)
+            for i in 4..=6 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            // Read 2: should see all 6
+            let msgs2 = manager.read(topic, 1, 100).await;
+            assert_eq!(msgs2.len(), 6, "second read should see all 6 messages");
+            for (i, msg) in msgs2.iter().enumerate() {
+                assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
+                assert_eq!(msg.seq, (i + 1) as u64);
+            }
+
+            // Read 3: partial range
+            let msgs3 = manager.read(topic, 4, 2).await;
+            assert_eq!(msgs3.len(), 2, "partial read should see 2 messages");
+            assert_eq!(msgs3[0].seq, 4);
+            assert_eq!(msgs3[1].seq, 5);
+        }
+    }
     }
 }
