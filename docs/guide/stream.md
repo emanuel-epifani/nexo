@@ -365,8 +365,6 @@ Global, set at server startup.
 | `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
 | `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |
 | `STREAM_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) | Default `maxAgeMs` if SDK omits it |
-| `STREAM_EVICTION_INTERVAL_MS` | `10000` (10s) | RAM eviction task interval |
-| `STREAM_RAM_SOFT_LIMIT` | `10000` | Max messages in RAM per topic before eviction to disk |
 | `STREAM_MAX_ACK_PENDING` | `10000` | Max unacked messages per consumer group |
 | `STREAM_MAX_OPEN_FILES` | `256` | Max open file handles (LRU cache) |
 | `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |

@@ -234,10 +234,11 @@ impl StorageManager {
             seg_offsets.sort_by_key(|(_, off)| *off);
             let seg = &segments[idx];
             match File::open(&seg.path).await {
-                Ok(mut file) => {
+                Ok(file) => {
+                    let mut reader = BufReader::new(file);
                     for (seq, byte_offset) in seg_offsets {
-                        if file.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
-                            match read_record(&mut file).await {
+                        if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
+                            match read_record(&mut reader).await {
                                 ReadOutcome::Record(content_buf) => {
                                     if let Some(msg) = parse_message(&content_buf) {
                                         if msg.seq == seq {
