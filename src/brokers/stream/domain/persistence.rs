@@ -400,14 +400,14 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
                 current_offset += len;
                 valid_bytes += len;
             }
-            ReadOutcome::Corrupted => {
-                error!("Corrupted record at byte {} in {:?}, truncating segment", valid_bytes, path);
-                if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
-                    error!("Failed to truncate segment {:?}: {}", path, e);
+            ReadOutcome::Corrupted | ReadOutcome::Eof => {
+                if valid_bytes > 0 {
+                    if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
+                        error!("Failed to truncate segment {:?}: {}", path, e);
+                    }
                 }
                 break;
             }
-            ReadOutcome::Eof => break,
         }
     }
     Ok(index)

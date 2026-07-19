@@ -430,6 +430,9 @@ impl ConsumerGroup {
     }
 
     fn issue_delivery(&mut self, consumer_id: &str, msg: Message) -> Option<Message> {
+        if self.dlt.contains_key(&msg.seq) {
+            return None;
+        }
         // If this key is poisoned (a previous message with same key was moved to DLT), move to DLT immediately
         if let Some(key) = &msg.key {
             if self.parked_keys.contains(key) {

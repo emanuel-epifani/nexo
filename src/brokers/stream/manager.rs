@@ -157,16 +157,19 @@ impl StreamManager {
             .unwrap()
             .as_millis() as u64;
 
-        let mut seqs = Vec::with_capacity(items.len());
-        let mut messages = Vec::with_capacity(items.len());
-        for (key, payload) in items {
-            let seq = topic_ref.next_seq.fetch_add(1, Ordering::SeqCst);
-            seqs.push(seq);
-            messages.push(Message { seq, timestamp, key, payload });
-        }
+        let n = items.len() as u64;
 
-        let file_path = {
+        let (seqs, messages, file_path) = {
             let mut state = topic_ref.state.lock();
+            let first_seq = topic_ref.next_seq.fetch_add(n, Ordering::SeqCst);
+            let mut seqs = Vec::with_capacity(items.len());
+            let mut messages = Vec::with_capacity(items.len());
+            for (i, (key, payload)) in items.into_iter().enumerate() {
+                let seq = first_seq + i as u64;
+                seqs.push(seq);
+                messages.push(Message { seq, timestamp, key, payload });
+            }
+
             let bytes_len: u64 = messages.iter().map(|m| record_len(m.key.as_deref(), &m.payload)).sum();
 
             if state.file_offset + bytes_len > state.full_config.max_segment_size && state.file_offset > 0 {
@@ -174,7 +177,6 @@ impl StreamManager {
             }
 
             if state.file_offset == 0 {
-                let first_seq = messages.first().unwrap().seq;
                 state.active_segment_start = first_seq;
                 let base_path = PathBuf::from(&self.config.persistence_path).join(topic);
                 state.active_path = base_path.join(format!("{}.log", first_seq));
@@ -186,7 +188,7 @@ impl StreamManager {
                 current_offset += record_len(msg.key.as_deref(), &msg.payload);
             }
             state.file_offset = current_offset;
-            state.active_path.clone()
+            (seqs, messages, state.active_path.clone())
         };
 
         let _ = self.storage_tx.send(StorageCommand::Append {
@@ -241,13 +243,15 @@ impl StreamManager {
 
     pub async fn purge_dlt(&self, topic: &str, group: &str) -> Result<usize, String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        {
+        let count = {
             let mut state = topic_ref.state.lock();
             let group_ref = state.groups.get_mut(group).ok_or("Group not found")?;
             let count = group_ref.purge_dlt();
             state.groups_dirty = true;
-            Ok(count)
-        }
+            count
+        };
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        Ok(count)
     }
 
     pub async fn read(&self, topic: &str, from_seq: u64, limit: usize) -> Vec<Message> {
@@ -329,7 +333,7 @@ impl StreamManager {
 
     pub async fn ack(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seq: u64) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        let key_unblocked = {
+        {
             let mut state = topic_ref.state.lock();
             let head_seq = state.head_seq;
             let Some(group_ref) = state.groups.get_mut(group) else {
@@ -337,13 +341,10 @@ impl StreamManager {
             };
 
             group_ref.clamp_head(head_seq);
-            let key_unblocked = group_ref.ack(consumer_id, generation, seq)?;
+            group_ref.ack(consumer_id, generation, seq)?;
             state.groups_dirty = true;
-            key_unblocked
-        };
-        if key_unblocked {
-            topic_ref.wake_tx.send_modify(|v| *v += 1);
         }
+        topic_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(())
     }
 
