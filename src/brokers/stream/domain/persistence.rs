@@ -8,7 +8,7 @@ use std::time::Duration;
 use lru::LruCache;
 use bytes::Bytes;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
 use crc32fast::Hasher;
@@ -189,7 +189,7 @@ impl StorageManager {
             serialize_message(&mut buffer, msg.seq, msg.timestamp, msg.key.as_deref(), &msg.payload);
         }
 
-        match self.get_or_open_writer(&file_path).await {
+        match self.get_or_open_file(&file_path).await {
             Ok(writer) => {
                 if let Err(e) = writer.write_all(&buffer).await {
                     error!("StorageManager: Failed to write to {:?}: {}", file_path, e);
@@ -202,12 +202,12 @@ impl StorageManager {
         }
     }
 
-    async fn get_or_open_writer(&mut self, path: &PathBuf) -> Result<&mut File, std::io::Error> {
+    async fn get_or_open_file(&mut self, path: &PathBuf) -> Result<&mut File, std::io::Error> {
         if !self.open_files.contains(path) {
             if self.open_files.len() == self.open_files.cap().get() {
                 let _ = self.open_files.pop_lru();
             }
-            let file = OpenOptions::new().create(true).append(true).open(path).await?;
+            let file = OpenOptions::new().read(true).write(true).create(true).append(true).open(path).await?;
             self.open_files.put(path.clone(), file);
         }
         Ok(self.open_files.get_mut(path).unwrap())
@@ -233,22 +233,25 @@ impl StorageManager {
         for (idx, mut seg_offsets) in by_segment {
             seg_offsets.sort_by_key(|(_, off)| *off);
             let seg = &segments[idx];
-            if let Ok(file) = File::open(&seg.path).await {
-                let mut reader = BufReader::new(file);
-                for (seq, byte_offset) in seg_offsets {
-                    if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
-                        match read_record(&mut reader).await {
-                            ReadOutcome::Record(content_buf) => {
-                                if let Some(msg) = parse_message(&content_buf) {
-                                    if msg.seq == seq {
-                                        result.push(msg);
+            match self.get_or_open_file(&seg.path).await {
+                Ok(file) => {
+                    for (seq, byte_offset) in seg_offsets {
+                        if file.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
+                            let mut reader = BufReader::new(&mut *file);
+                            match read_record(&mut reader).await {
+                                ReadOutcome::Record(content_buf) => {
+                                    if let Some(msg) = parse_message(&content_buf) {
+                                        if msg.seq == seq {
+                                            result.push(msg);
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                 }
+                Err(e) => error!("StorageManager: Failed to open segment {:?}: {}", seg.path, e),
             }
         }
         result.sort_by_key(|m| m.seq);
@@ -358,7 +361,7 @@ enum ReadOutcome {
 /// Read the next record from a framed file.
 /// Format: [len: u32 BE][crc: u32 BE][content: len bytes]
 /// Returns Corrupted on CRC mismatch, Eof at clean end of file, UnexpectedEof on partial read.
-async fn read_record(reader: &mut BufReader<File>) -> ReadOutcome {
+async fn read_record<R: AsyncRead + AsyncSeek + Unpin>(reader: &mut BufReader<R>) -> ReadOutcome {
     let mut len_buf = [0u8; 4];
     if reader.read_exact(&mut len_buf).await.is_err() { return ReadOutcome::Eof; }
     let len = u32::from_be_bytes(len_buf) as usize;
