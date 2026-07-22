@@ -78,8 +78,10 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
     match cmd {
         StoreCommand::Map(c) => match c {
             MapCmd::Set { key, ttl, value } => {
-                engine.store.map.set(key, value, ttl);
-                Response::Ok
+                match engine.store.map.set(key, value, ttl) {
+                    Ok(()) => Response::Ok,
+                    Err(msg) => Response::Error(msg),
+                }
             }
             MapCmd::Get { key } => engine
                 .store

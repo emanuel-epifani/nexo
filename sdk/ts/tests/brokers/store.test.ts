@@ -35,4 +35,19 @@ describe('STORE (KV)', () => {
         // Should be gone
         expect(await nexo.store.map.get(key)).toBeNull();
     });
+
+    it('should reject ttl: 0 with an error', async () => {
+        const key = `ttl0:${randomUUID()}`;
+        await expect(nexo.store.map.set(key, 'val', { ttl: 0 })).rejects.toThrow();
+        expect(await nexo.store.map.get(key)).toBeNull();
+    });
+
+    it('should persist keys without TTL', async () => {
+        const key = `persist:${randomUUID()}`;
+        await nexo.store.map.set(key, 'forever');
+
+        // Should still exist after a short wait
+        await new Promise(r => setTimeout(r, 200));
+        expect(await nexo.store.map.get(key)).toBe('forever');
+    });
 });

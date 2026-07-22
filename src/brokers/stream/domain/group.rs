@@ -419,7 +419,7 @@ impl ConsumerGroup {
         }
     }
 
-    fn ensure_active_consumer(&self, consumer_id: &str, generation: u64) -> Result<(), String> {
+    pub fn ensure_active_consumer(&self, consumer_id: &str, generation: u64) -> Result<(), String> {
         if generation != self.generation {
             return Err("FENCED".to_string());
         }

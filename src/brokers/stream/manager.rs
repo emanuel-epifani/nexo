@@ -759,6 +759,8 @@ impl StreamManager {
                 return Err("Group not found".to_string());
             };
 
+            group_ref.ensure_active_consumer(consumer_id, generation)?;
+
             let was_clamped = group_ref.clamp_head(head_seq);
             let backpressured = group_ref.is_backpressured();
             let plan = if backpressured {

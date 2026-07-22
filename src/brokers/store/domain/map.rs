@@ -13,7 +13,6 @@ struct Entry {
 
 pub struct Map {
     inner: Arc<DashMap<String, Entry>>,
-    config: Arc<StoreConfig>,
 }
 
 impl Map {
@@ -47,14 +46,13 @@ impl Map {
             }
         });
 
-        Self { inner, config }
+        Self { inner }
     }
 
-    pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) {
+    pub fn set(&self, key: String, value: Bytes, ttl: Option<u64>) -> Result<(), String> {
         let expires_at = match ttl {
-            Some(0) | None => {
-                Some(Instant::now() + Duration::from_secs(self.config.default_ttl_secs))
-            }
+            None => None,
+            Some(0) => return Err("ttl must be greater than 0".into()),
             Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
         };
 
@@ -62,12 +60,13 @@ impl Map {
             value,
             expires_at,
         });
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<Bytes> {
         if let Some(entry) = self.inner.get(key) {
             if let Some(expiry) = entry.expires_at {
-                if Instant::now() > expiry {
+                if Instant::now() >= expiry {
                     return None;
                 }
             }
