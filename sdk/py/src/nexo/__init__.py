@@ -18,6 +18,7 @@ from .brokers.stream import (
     NexoStream,
     RetentionOptions,
     StreamCreateOptions,
+    StreamMessageMeta,
     StreamSubscribeOptions,
 )
 
@@ -42,5 +43,6 @@ __all__ = [
     "NexoStream",
     "RetentionOptions",
     "StreamCreateOptions",
+    "StreamMessageMeta",
     "StreamSubscribeOptions",
 ]

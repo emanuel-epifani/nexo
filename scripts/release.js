@@ -170,25 +170,39 @@ async function main() {
         return;
     }
 
-    // 1. Update version in all files
+    // 1. Static checks (fail fast before bumping version)
+    console.log("\n🔍 Running static checks...");
+
+    console.log("  • TypeScript type check");
+    run('cd sdk/ts && npx tsc --noEmit');
+
+    console.log("  • Python type check");
+    run('cd sdk/py && mypy src/nexo');
+
+    console.log("  • Docs build");
+    run('cd docs && npm run build');
+
+    console.log("✅ All static checks passed\n");
+
+    // 2. Update version in all files
     updateVersion(newVersion);
 
-    // 1b. Update Cargo.lock (by running cargo check)
+    // 2b. Update Cargo.lock (by running cargo check)
     console.log("crab Updating Cargo.lock...");
     run('cargo check'); // This updates Cargo.lock automatically
 
-    // 2. Stage files
+    // 3. Stage files
     console.log("\n📦 Staging files...");
     const filesToStage = [...FILES.map(f => f.path), 'Cargo.lock'].filter(p => 
         fs.existsSync(path.join(ROOT_DIR, p))
     );
     run(`git add ${filesToStage.join(' ')}`);
 
-    // 3. Commit
+    // 4. Commit
     console.log("💾 Committing...");
     run(`git commit -m "chore: release v${newVersion}"`);
 
-    // 4. Tag
+    // 5. Tag
     console.log(`🏷️  Tagging v${newVersion}...`);
     run(`git tag -a v${newVersion} -m "Release v${newVersion}"`);
 

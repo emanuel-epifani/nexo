@@ -39,7 +39,7 @@ client = await NexoClient.connect(host="localhost", port=7654)
 # Set key
 await client.store.map.set("user:1", {"name": "Max", "role": "admin"})
 # Get key
-user = await client.store.map.get("user:1")
+user: User | None = await client.store.map.get("user:1")
 # Delete key
 await client.store.map.delete("user:1")
 ```
@@ -48,11 +48,11 @@ await client.store.map.delete("user:1")
 
 ```python
 # Create queue
-mail_q = await client.queue("emails").create()
+mail_q: NexoQueue[Email] = await client.queue("emails").create()
 # Push message
 await mail_q.push({"to": "test@test.com"})
 # Subscribe
-async def handle_email(msg):
+async def handle_email(msg: Email) -> None:
     print(msg)
 
 await mail_q.subscribe(handle_email)
@@ -64,9 +64,9 @@ await mail_q.delete()
 
 ```python
 # Define topic (no need to create, auto-created on first publish)
-alerts = client.pubsub("system-alerts")
+alerts: NexoTopic[Alert] = client.pubsub("system-alerts")
 # Subscribe
-async def on_alert(msg):
+async def on_alert(msg: Alert) -> None:
     print(msg)
 
 await alerts.subscribe(on_alert)
@@ -78,11 +78,11 @@ await alerts.publish({"level": "high"})
 
 ```python
 # Create topic
-stream = await client.stream("user-events").create()
+stream: NexoStream[UserEvent] = await client.stream("user-events").create()
 # Publisher
 await stream.publish({"type": "login", "userId": "u1"})
 # Consumer (must specify group)
-async def on_event(msg, meta):
+async def on_event(msg: UserEvent, meta: StreamMessageMeta) -> None:
     print(f"User {msg['userId']} performed {msg['type']}")
 
 await stream.subscribe("analytics", on_event)
@@ -108,13 +108,16 @@ Bypassing JSON serialization drastically reduces Latency, increases Throughput, 
 heavy_payload = b"\x00" * (1024 * 1024)
 
 # 1. STREAM
-await client.stream("cctv-archive").publish(heavy_payload)
+stream: NexoStream[bytes] = client.stream("cctv-archive")
+await stream.publish(heavy_payload)
 # 2. PUBSUB
-await client.pubsub("live-audio-call").publish(heavy_payload)
+audio_topic: NexoTopic[bytes] = client.pubsub("live-audio-call")
+audio_topic.publish(heavy_payload)
 # 3. STORE
 await client.store.map.set("user:avatar:1", heavy_payload)
 # 4. QUEUE
-await client.queue("pdf-processing").push(heavy_payload)
+queue: NexoQueue[bytes] = client.queue("pdf-processing")
+await queue.push(heavy_payload)
 ```
 
 ---

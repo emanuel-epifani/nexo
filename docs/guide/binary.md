@@ -29,16 +29,19 @@ await client.queue('pdf-processing').push(heavyPayload);
 heavy_payload = b"\x00" * (1024 * 1024)  # 1MB raw bytes
 
 # Stream: Replayable Data (e.g. CCTV Recording)
-await client.stream("cctv-archive").publish(heavy_payload)
+stream: NexoStream[bytes] = client.stream("cctv-archive")
+await stream.publish(heavy_payload)
 
 # PubSub: Ephemeral Live Data (e.g. VoIP)
-await client.pubsub("live-audio-call").publish(heavy_payload)
+audio_topic: NexoTopic[bytes] = client.pubsub("live-audio-call")
+await audio_topic.publish(heavy_payload)
 
 # Store: Cache Images
 await client.store.map.set("user:avatar:1", heavy_payload)
 
 # Queue: Process Files
-await client.queue("pdf-processing").push(heavy_payload)
+queue: NexoQueue[bytes] = client.queue("pdf-processing")
+await queue.push(heavy_payload)
 ```
 
 :::

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..connection import NexoConnection
 from ..utils.logger import Logger
+
+
+T = TypeVar("T")
+PubSubHandler = Callable[[T], Any]
 
 
 class PubSubOpcode:
@@ -18,21 +22,21 @@ class PublishOptions(TypedDict, total=False):
     ttl: int
 
 
-Handler = Callable[[Any], Any]
+Handler = Callable[..., Any]
 
 
-class NexoTopic:
+class NexoTopic(Generic[T]):
     def __init__(self, broker: "NexoPubSub", name: str) -> None:
         self._broker = broker
         self.name = name
 
-    async def publish(self, data: Any, options: PublishOptions | None = None) -> None:
+    async def publish(self, data: T, options: PublishOptions | None = None) -> None:
         await self._broker.publish(self.name, data, options)
 
     async def clear(self) -> None:
         await self._broker.clear(self.name)
 
-    async def subscribe(self, cb: Handler) -> None:
+    async def subscribe(self, cb: PubSubHandler[T]) -> None:
         await self._broker.subscribe(self.name, cb)
 
     async def unsubscribe(self) -> None:

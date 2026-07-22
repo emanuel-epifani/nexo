@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError, RequestTimeoutError
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
+
+
+T = TypeVar("T")
+QueueHandler = Callable[[T], Any]
 
 
 class QueueOpcode:
@@ -240,7 +244,7 @@ class NexoDLQ:
         return await QueueCommands.purge_dlq(self._conn, self._queue_name)
 
 
-class NexoQueue:
+class NexoQueue(Generic[T]):
     def __init__(self, conn: NexoConnection, name: str, logger: Logger) -> None:
         self._conn = conn
         self.name = name
@@ -251,7 +255,7 @@ class NexoQueue:
     def dlq(self) -> NexoDLQ:
         return self._dlq
 
-    async def create(self, config: QueueConfig | None = None) -> "NexoQueue":
+    async def create(self, config: QueueConfig | None = None) -> NexoQueue[T]:
         await QueueCommands.create(self._conn, self.name, config or {})
         return self
 
@@ -261,7 +265,7 @@ class NexoQueue:
     async def delete(self) -> None:
         await QueueCommands.delete(self._conn, self.name)
 
-    async def push(self, data: Any, options: QueuePushOptions | None = None) -> None:
+    async def push(self, data: T, options: QueuePushOptions | None = None) -> None:
         await QueueCommands.push(self._conn, self.name, data, options)
 
     async def push_batch(self, items: list[dict[str, Any]]) -> None:
@@ -271,7 +275,7 @@ class NexoQueue:
 
     async def subscribe(
         self,
-        callback: Callable[[Any], Any],
+        callback: QueueHandler[T],
         options: QueueSubscribeOptions | None = None,
     ) -> dict[str, Callable[[], None]]:
         opts = options or {}

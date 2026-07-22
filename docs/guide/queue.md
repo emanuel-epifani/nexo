@@ -22,13 +22,13 @@ await mailQ.delete();
 
 ```python
 # Create queue
-mail_q = await client.queue("emails").create()
+mail_q: NexoQueue[MailJob] = await client.queue("emails").create()
 
 # Push message
 await mail_q.push({"to": "test@test.com"})
 
 # Subscribe (auto-ACK on success)
-async def handle_email(msg):
+async def handle_email(msg: MailJob) -> None:
     print(msg)
 
 await mail_q.subscribe(handle_email)
@@ -60,7 +60,7 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
 ```
 
 ```python
-critical_queue = await client.queue("critical-tasks").create({
+critical_queue: NexoQueue[CriticalTask] = await client.queue("critical-tasks").create({
     # RELIABILITY
     "visibility_timeout_ms": 10000,  # Retry if not ACKed within 10s (default: 30s)
     "max_retries": 5,                # Move to DLQ after 5 failures (default: 5)
@@ -145,7 +145,7 @@ await criticalQueue.subscribe(
 ```
 
 ```python
-async def handle_task(task):
+async def handle_task(task: CriticalTask) -> None:
     print(task)
 
 await critical_queue.subscribe(

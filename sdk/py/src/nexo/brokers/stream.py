@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable, Optional, TypedDict, Union
+from typing import Any, Callable, Generic, Optional, TypeVar, TypedDict, Union
 
 from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
+
+
+T = TypeVar("T")
+
+
+class StreamMessageMeta(TypedDict):
+    seq: int
+    key: bytes | None
+
+
+StreamHandler = Callable[[T, StreamMessageMeta], Any] | Callable[[T], Any]
 
 
 FETCH_TIMEOUT_MARGIN_MS = 5000
@@ -68,14 +79,14 @@ async def _sleep(ms: int) -> None:
     await asyncio.sleep(ms / 1000.0)
 
 
-class StreamSubscription:
+class StreamSubscription(Generic[T]):
     def __init__(
         self,
         conn: NexoConnection,
         stream_name: str,
         group: str,
         logger: Logger,
-        callback: Callable[[Any, dict[str, Any]], Any],
+        callback: Callable[..., Any],
         batch_size: int,
         wait_ms: int,
         concurrency: int,
@@ -217,7 +228,7 @@ class StreamSubscription:
         await run_concurrent(batch, self._concurrency, process)
 
 
-class NexoStream:
+class NexoStream(Generic[T]):
     def __init__(self, conn: NexoConnection, name: str, logger: Logger) -> None:
         self._conn = conn
         self.name = name
@@ -225,7 +236,7 @@ class NexoStream:
 
     async def create(
         self, options: StreamCreateOptions | None = None
-    ) -> "NexoStream":
+    ) -> NexoStream[T]:
         opts = options or {}
         retention = opts.get("retention") or {}
         max_age = retention.get("max_age_ms")
@@ -258,7 +269,7 @@ class NexoStream:
 
     async def publish(
         self,
-        data: Any,
+        data: T,
         options: Optional[dict[str, Union[str, bytes]]] = None,
     ) -> int:
         opts = options or {}
@@ -306,7 +317,7 @@ class NexoStream:
     async def subscribe(
         self,
         group: str,
-        callback: Callable[[Any, dict[str, Any]], Any],
+        callback: StreamHandler[T],
         options: StreamSubscribeOptions | None = None,
     ) -> dict[str, Callable[[], "asyncio.Future[None]"]]:
         if not group:
@@ -324,7 +335,7 @@ class NexoStream:
             concurrency = DEFAULT_CONFIG.stream.concurrency
         concurrency = max(1, concurrency)
 
-        sub = StreamSubscription(
+        sub: StreamSubscription[T] = StreamSubscription(
             self._conn,
             self.name,
             group,

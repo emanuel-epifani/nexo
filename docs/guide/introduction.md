@@ -71,22 +71,24 @@ await stream.publish({ type: 'login', userId: 'u1' });
 ```
 
 ```python
-from nexo import NexoClient
+from nexo import NexoClient, NexoQueue, NexoStream, NexoTopic
 
 client = await NexoClient.connect(host="localhost", port=7654)
 
 # Store
 await client.store.map.set("user:1", {"name": "Max", "role": "admin"})
+user: User | None = await client.store.map.get("user:1")
 
 # Pub/Sub
-await client.pubsub("alerts").publish({"level": "high"})
+alerts: NexoTopic[Alert] = client.pubsub("alerts")
+await alerts.publish({"level": "high"})
 
 # Queue
-q = await client.queue("emails").create()
+q: NexoQueue[Email] = await client.queue("emails").create()
 await q.push({"to": "test@test.com"})
 
 # Stream
-stream = await client.stream("events").create()
+stream: NexoStream[Event] = await client.stream("events").create()
 await stream.publish({"type": "login", "userId": "u1"})
 ```
 

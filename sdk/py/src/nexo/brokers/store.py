@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, TypeVar, TypedDict
 
 from ..connection import NexoConnection
 from ..protocol import ResponseStatus
+
+
+T = TypeVar("T")
 
 
 class StoreOpcode:
@@ -21,7 +24,7 @@ class NexoMap:
         self._conn = conn
 
     async def set(
-        self, key: str, value: Any, options: MapSetOptions | None = None
+        self, key: str, value: T, options: MapSetOptions | None = None
     ) -> None:
         opts = options or {}
         ttl = opts.get("ttl")
@@ -36,7 +39,7 @@ class NexoMap:
 
         await self._conn.send(StoreOpcode.MAP_SET, build)
 
-    async def get(self, key: str) -> Any:
+    async def get(self, key: str) -> T | None:
         status, cursor = await self._conn.send(
             StoreOpcode.MAP_GET, lambda w: w.string(key)
         )

@@ -26,7 +26,7 @@ await stream.subscribe('analytics', (msg, meta) => {
 
 ```python
 # Create stream
-stream = await client.stream("user-events").create()
+stream: NexoStream[UserEvent] = await client.stream("user-events").create()
 
 # Publish event (with key for per-key ordering)
 await stream.publish({"type": "login", "userId": "u1"}, {"key": "u1"})
@@ -35,7 +35,7 @@ await stream.publish({"type": "login", "userId": "u1"}, {"key": "u1"})
 await stream.publish({"type": "heartbeat"})
 
 # Subscribe with consumer group
-async def on_event(msg, meta):
+async def on_event(msg: UserEvent, meta: StreamMessageMeta) -> None:
     print(f"seq={meta['seq']} key={meta['key']} — User {msg['userId']} performed {msg['type']}")
 
 await stream.subscribe("analytics", on_event)
@@ -205,7 +205,9 @@ await orders.subscribe('worker-group', (order, meta) => {
 ```python
 # Process 'orders' stream using 3 parallel workers
 # Run this code in 3 different instances/pods:
-async def on_order(order, meta):
+orders: NexoStream[Order] = await client.stream("orders").create()
+
+async def on_order(order: Order, meta: StreamMessageMeta) -> None:
     print(f"Processing order {order['id']} [seq={meta['seq']}]")
 
 await orders.subscribe("worker-group", on_order)
@@ -229,13 +231,13 @@ await orders.subscribe('metrics-service', (order, meta) => updateGrafana(order))
 
 ```python
 # Instance A: Audit Service
-async def save_to_db(order, meta):
+async def save_to_db(order: Order, meta: StreamMessageMeta) -> None:
     await persist_order(order)
 
 await orders.subscribe("audit-service", save_to_db)
 
 # Instance B: Metrics Service
-async def update_metrics(order, meta):
+async def update_metrics(order: Order, meta: StreamMessageMeta) -> None:
     await update_grafana(order)
 
 await orders.subscribe("metrics-service", update_metrics)
@@ -259,7 +261,7 @@ await stream.subscribe('order-processor', (data, meta) => {
 ```
 
 ```python
-async def on_message(data, meta):
+async def on_message(data: Order, meta: StreamMessageMeta) -> None:
     print(f"seq={meta['seq']}, key={meta['key']}")
     # data is your published payload
     # meta['key'] is the key as bytes (or None if no key was set)
@@ -297,7 +299,9 @@ await stream.subscribe('webhooks', (event, meta) => callExternalApi(event), {
 ```
 
 ```python
-async def call_api(event, meta):
+stream: NexoStream[WebhookEvent] = await client.stream("webhooks").create()
+
+async def call_api(event: WebhookEvent, meta: StreamMessageMeta) -> None:
     await call_external_api(event)
 
 await stream.subscribe("webhooks", call_api, {
@@ -350,7 +354,7 @@ await stream.subscribe('analytics-v2', (msg, meta) => { ... });
 await stream.seek("analytics-v2", "beginning")
 
 # 2. Start (or resume) processing
-async def on_message(msg, meta):
+async def on_message(msg: Order, meta: StreamMessageMeta) -> None:
     pass
 
 await stream.subscribe("analytics-v2", on_message)
@@ -376,7 +380,7 @@ await stream.subscribe('live-dashboard', (msg, meta) => { ... });
 await stream.seek("live-dashboard", "end")
 
 # 2. Process only future messages
-async def on_message(msg, meta):
+async def on_message(msg: Order, meta: StreamMessageMeta) -> None:
     pass
 
 await stream.subscribe("live-dashboard", on_message)
@@ -547,7 +551,7 @@ await client.stream('my-topic').create({
 ```
 
 ```python
-await client.stream("my-topic").create({
+stream: NexoStream[MyEvent] = await client.stream("my-topic").create({
     "retention": {"max_age_ms": 3_600_000, "max_bytes": 100_000_000}  # 1h, 100MB
 })
 ```

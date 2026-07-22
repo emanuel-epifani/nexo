@@ -68,13 +68,13 @@ class NexoClient:
             self._shutdown_handler = None
         self._conn.disconnect()
 
-    def queue(self, name: str) -> NexoQueue:
+    def queue(self, name: str) -> NexoQueue[Any]:
         return NexoQueue(self._conn, name, self._logger)
 
-    def stream(self, name: str) -> NexoStream:
+    def stream(self, name: str) -> NexoStream[Any]:
         return NexoStream(self._conn, name, self._logger)
 
-    def pubsub(self, name: str) -> NexoTopic:
+    def pubsub(self, name: str) -> NexoTopic[Any]:
         return NexoTopic(self._pubsub_broker, name)
 
     def _setup_graceful_shutdown(self) -> None:

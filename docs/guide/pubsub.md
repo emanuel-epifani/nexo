@@ -24,10 +24,10 @@ await alerts.unsubscribe();
 
 ```python
 # Define a topic
-alerts = client.pubsub("system-alerts")
+alerts: NexoTopic[AlertMsg] = client.pubsub("system-alerts")
 
 # Subscribe
-async def on_alert(msg):
+async def on_alert(msg: AlertMsg) -> None:
     print(msg)
 
 await alerts.subscribe(on_alert)
@@ -59,9 +59,9 @@ await roomLights.subscribe((status) => console.log('Light is:', status.state));
 
 ```python
 # Matches: 'home/kitchen/light', 'home/garage/light'
-room_lights = client.pubsub('home/+/light')
+room_lights: NexoTopic[LightStatus] = client.pubsub('home/+/light')
 
-async def on_status(status):
+async def on_status(status: LightStatus) -> None:
     print('Light is:', status["state"])
 
 await room_lights.subscribe(on_status)
@@ -83,9 +83,9 @@ await allSensors.subscribe((data) => console.log('Sensor value:', data.value));
 
 ```python
 # Matches all topics under 'sensors/'
-all_sensors = client.pubsub('sensors/#')
+all_sensors: NexoTopic[SensorData] = client.pubsub('sensors/#')
 
-async def on_data(data):
+async def on_data(data: SensorData) -> None:
     print('Sensor value:', data["value"])
 
 await all_sensors.subscribe(on_data)
@@ -115,13 +115,14 @@ await client.pubsub<string>('config/theme').subscribe((theme) => {
 
 ```python
 # Publish with retain — this value is stored
-await client.pubsub('config/theme').publish('dark', {"retain": True})
+theme_topic: NexoTopic[str] = client.pubsub('config/theme')
+await theme_topic.publish('dark', {"retain": True})
 
 # A new subscriber connecting later instantly receives 'dark'
-async def on_theme(theme):
+async def on_theme(theme: str) -> None:
     print(theme)  # 'dark' — received immediately
 
-await client.pubsub('config/theme').subscribe(on_theme)
+await theme_topic.subscribe(on_theme)
 ```
 
 :::
@@ -137,7 +138,8 @@ await client.pubsub<string>('config/theme').clear();
 ```
 
 ```python
-await client.pubsub('config/theme').clear()
+theme_topic: NexoTopic[str] = client.pubsub('config/theme')
+await theme_topic.clear()
 ```
 
 :::

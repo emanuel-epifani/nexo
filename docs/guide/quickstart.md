@@ -55,38 +55,37 @@ await stream.subscribe('analytics', async (msg) => console.log(msg));
 ```
 
 ```python
-from nexo import NexoClient
+from nexo import NexoClient, NexoQueue, NexoStream, NexoTopic
 
 # Connect once
 client = await NexoClient.connect(host="localhost", port=7654)
 
 # --- Store (Shared state) ---
 await client.store.map.set("user:1", {"name": "Max", "role": "admin"})
-user = await client.store.map.get("user:1")
+user: User | None = await client.store.map.get("user:1")
 
 # --- Pub/Sub (Realtime events) ---
-async def on_alert(msg):
+async def on_alert(msg: Alert) -> None:
     print(msg)
 
-await client.pubsub("alerts").subscribe(on_alert)
-await client.pubsub("alerts").publish({"level": "high"})
+alerts: NexoTopic[Alert] = client.pubsub("alerts")
+await alerts.subscribe(on_alert)
+await alerts.publish({"level": "high"})
 
 # --- Queue (Background jobs) ---
-mail_q = await client.queue("emails").create()
-await mail_q.push({"to": "test@test.com"})
-
-async def handle_email(msg):
+async def handle_email(msg: Email) -> None:
     print(msg)
 
+mail_q: NexoQueue[Email] = await client.queue("emails").create()
+await mail_q.push({"to": "test@test.com"})
 await mail_q.subscribe(handle_email)
 
 # --- Stream (Event log) ---
-stream = await client.stream("user-events").create()
-await stream.publish({"type": "login", "userId": "u1"})
-
-async def on_event(msg):
+async def on_event(msg: UserEvent) -> None:
     print(msg)
 
+stream: NexoStream[UserEvent] = await client.stream("user-events").create()
+await stream.publish({"type": "login", "userId": "u1"})
 await stream.subscribe("analytics", on_event)
 ```
 

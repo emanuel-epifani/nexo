@@ -252,4 +252,4 @@ class FrameWriter:
 
 
 # Type alias for build functions passed to connection.send
-BuildFn = Callable[["FrameWriter"], None]
+BuildFn = Callable[["FrameWriter"], Any]
