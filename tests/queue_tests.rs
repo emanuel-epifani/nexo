@@ -197,7 +197,7 @@ mod queue_tests {
             let path = _tmp.path().to_str().unwrap().to_string();
             let mut sys_config = nexo::config::Config::global().queue.clone();
             sys_config.persistence_path = path;
-            let manager2 = QueueManager::new(std::sync::Arc::new(sys_config));
+            let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)));
 
             // Since we can't easily check if file exists without knowing path logic,
             // we check if declaring it again results in an empty queue (no recovery)
@@ -410,7 +410,7 @@ mod queue_tests {
             let q = format!("persist_crash_{}", Uuid::new_v4());
 
             {
-                let manager1 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager1 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -424,7 +424,7 @@ mod queue_tests {
 
             // Simulating Restart
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 // We must "redeclare" the queue to spawn the actor again,
                 // but the actor should find the DB and recover.
                 let config = QueueCreateOptions {
@@ -446,7 +446,7 @@ mod queue_tests {
             sys_config.persistence_path = path.clone();
 
             {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -465,7 +465,7 @@ mod queue_tests {
 
             // Restart
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -485,7 +485,7 @@ mod queue_tests {
             sys_config.persistence_path = path.clone();
 
             {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500), // Short timeout
                     ..Default::default()
@@ -503,7 +503,7 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
 
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500),
                     ..Default::default()
@@ -532,7 +532,7 @@ mod queue_tests {
 
             // Phase 1: Create queues and add messages
             {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 
                 let config = QueueCreateOptions {
                     ..Default::default()
@@ -555,7 +555,7 @@ mod queue_tests {
             // Phase 2: Restart manager WITHOUT calling create_queue
             // Warm start should automatically discover and restore queues
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
 
                 // Wait a bit for warm start to complete
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -641,7 +641,7 @@ mod queue_tests {
 
             // Phase 1: Trigger DLQ move
             {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 // Create with max_retries = 0 (1st timeout -> DLQ immediately)
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(100),
@@ -674,7 +674,7 @@ mod queue_tests {
 
             // Phase 2: Restart
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 // Queue should be auto-restored with DLQ messages
@@ -701,7 +701,7 @@ mod queue_tests {
             let q = format!("persist_reason_{}", Uuid::new_v4());
 
             {
-                let manager = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
                     max_retries: Some(5),
                     ..Default::default()
@@ -722,7 +722,7 @@ mod queue_tests {
 
             // Restart
             {
-                let manager2 = QueueManager::new(std::sync::Arc::new(sys_config.clone()));
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 assert!(manager2.exists(&q).await, "Queue should survive restart");
@@ -805,6 +805,37 @@ mod queue_tests {
             let (manager, _tmp) = setup_queue_manager().await;
             let result = manager.push_batch("nonexistent".to_string(), vec![(Bytes::from("data"), 0)]).await;
             assert!(result.is_err());
+        }
+    }
+
+    mod shutdown {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_shutdown_flushes_pending_messages() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path;
+
+            let q = format!("shutdown_flush_{}", Uuid::new_v4());
+
+            {
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+                manager.push(q.clone(), Bytes::from("survivor"), 0).await.unwrap();
+
+                // Shutdown immediately — no sleep, no waiting for flush timer
+                manager.shutdown().await;
+            }
+
+            // Recover with a new manager
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)));
+                manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+                let msg = manager2.pop(&q).await.expect("Message should survive shutdown flush");
+                assert_eq!(msg.payload, Bytes::from("survivor"));
+            }
         }
     }
 

@@ -144,8 +144,8 @@ mod stress_tests {
         config
     }
 
-    async fn build_stream_manager(config: SystemStreamConfig) -> StreamManager {
-        StreamManager::new(Arc::new(config)).await
+    async fn build_stream_manager(config: SystemStreamConfig) -> Arc<StreamManager> {
+        Arc::new(StreamManager::new(Arc::new(config)).await)
     }
 
     // =========================================================================================

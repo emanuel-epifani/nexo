@@ -1,5 +1,3 @@
-use std::env;
-
 #[derive(Debug, Clone)]
 pub struct SystemQueueConfig {
     // CREATE config
@@ -32,24 +30,13 @@ impl SystemQueueConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            visibility_timeout_ms: get_env("QUEUE_VISIBILITY_MS", default.visibility_timeout_ms),
-            max_retries:           get_env("QUEUE_MAX_RETRIES", default.max_retries),
-            default_batch_size:    get_env("QUEUE_DEFAULT_BATCH_SIZE", default.default_batch_size),
-            default_wait_ms:       get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
-            persistence_path:      get_env_str("QUEUE_ROOT_PERSISTENCE_PATH", &default.persistence_path),
-            default_flush_ms:      get_env("QUEUE_DEFAULT_FLUSH_MS", default.default_flush_ms),
-            writer_batch_size:     get_env("QUEUE_WRITER_BATCH_SIZE", default.writer_batch_size),
+            visibility_timeout_ms: crate::config::get_env("QUEUE_VISIBILITY_MS", default.visibility_timeout_ms),
+            max_retries:           crate::config::get_env("QUEUE_MAX_RETRIES", default.max_retries),
+            default_batch_size:    crate::config::get_env("QUEUE_DEFAULT_BATCH_SIZE", default.default_batch_size),
+            default_wait_ms:       crate::config::get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
+            persistence_path:      crate::config::get_env("QUEUE_ROOT_PERSISTENCE_PATH", default.persistence_path),
+            default_flush_ms:      crate::config::get_env("QUEUE_DEFAULT_FLUSH_MS", default.default_flush_ms),
+            writer_batch_size:     crate::config::get_env("QUEUE_WRITER_BATCH_SIZE", default.writer_batch_size),
         }
     }
-}
-
-fn get_env<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.parse().ok())
-        .unwrap_or(default)
-}
-
-fn get_env_str(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
 }

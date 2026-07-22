@@ -1,5 +1,3 @@
-use std::env;
-
 #[derive(Debug, Clone)]
 pub struct PubSubConfig {
     pub persistence_path: String,
@@ -23,21 +21,10 @@ impl PubSubConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            persistence_path: get_env_str("PUBSUB_ROOT_PERSISTENCE_PATH", &default.persistence_path),
-            default_retained_ttl_seconds: get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", default.default_retained_ttl_seconds),
-            cleanup_interval_seconds: get_env("PUBSUB_CLEANUP_INTERVAL_SECS", default.cleanup_interval_seconds),
-            retained_flush_ms: get_env("PUBSUB_RETAINED_FLUSH_MS", default.retained_flush_ms),
+            persistence_path: crate::config::get_env("PUBSUB_ROOT_PERSISTENCE_PATH", default.persistence_path),
+            default_retained_ttl_seconds: crate::config::get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", default.default_retained_ttl_seconds),
+            cleanup_interval_seconds: crate::config::get_env("PUBSUB_CLEANUP_INTERVAL_SECS", default.cleanup_interval_seconds),
+            retained_flush_ms: crate::config::get_env("PUBSUB_RETAINED_FLUSH_MS", default.retained_flush_ms),
         }
     }
-}
-
-fn get_env<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.parse().ok())
-        .unwrap_or(default)
-}
-
-fn get_env_str(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
 }

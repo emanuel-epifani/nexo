@@ -86,6 +86,10 @@ pub enum StorageCommand {
     DropTopic {
         topic_name: String,
         reply: oneshot::Sender<()>,
+    },
+
+    Shutdown {
+        reply: oneshot::Sender<()>,
     }
 }
 
@@ -115,6 +119,13 @@ impl StorageManager {
 
         loop {
             match self.rx.recv().await {
+                Some(StorageCommand::Shutdown { reply }) => {
+                    while let Ok(cmd) = self.rx.try_recv() {
+                        self.handle_command(cmd).await;
+                    }
+                    let _ = reply.send(());
+                    break;
+                }
                 Some(cmd) => {
                     self.handle_command(cmd).await;
                     while let Ok(next) = self.rx.try_recv() {
@@ -162,6 +173,9 @@ impl StorageManager {
                     let _ = std::fs::remove_dir_all(&topic_path);
                 }
                 let _ = reply.send(());
+            }
+            StorageCommand::Shutdown { .. } => {
+                // Handled in run() loop directly
             }
         }
     }

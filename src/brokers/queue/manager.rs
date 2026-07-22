@@ -40,7 +40,6 @@ struct QueueInner {
 // QUEUE MANAGER
 // ==========================================
 
-#[derive(Clone)]
 pub struct QueueManager {
     queues: Arc<DashMap<String, Arc<QueueShared>>>,
     config: Arc<SystemQueueConfig>,
@@ -445,6 +444,13 @@ impl QueueManager {
                 _ = notified => {}
                 _ = sleep_until(deadline) => return Ok(vec![]),
             }
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancel.cancel();
+        for entry in self.queues.iter() {
+            entry.value().store.shutdown().await;
         }
     }
 

@@ -5,7 +5,6 @@ pub mod brokers;
 pub mod config;
 
 use std::sync::Arc;
-use std::time::Instant;
 use crate::brokers::store::StoreManager;
 use crate::brokers::queue::QueueManager;
 use crate::brokers::pub_sub::PubSubManager;
@@ -22,7 +21,6 @@ pub struct NexoEngine {
     pub queue: Arc<QueueManager>,
     pub pubsub: Arc<PubSubManager>,
     pub stream: Arc<StreamManager>,
-    pub start_time: Instant,
 }
 
 impl NexoEngine {
@@ -34,9 +32,12 @@ impl NexoEngine {
             queue: Arc::new(QueueManager::new(Arc::new(config.queue.clone()))),
             pubsub,
             stream: Arc::new(StreamManager::new(Arc::new(config.stream.clone())).await),
-            start_time: Instant::now(),
         }
     }
 
-
+    pub async fn shutdown(&self) {
+        self.queue.shutdown().await;
+        self.stream.shutdown().await;
+        self.pubsub.shutdown();
+    }
 }

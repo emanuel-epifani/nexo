@@ -20,8 +20,8 @@ mod stream_tests {
         config
     }
 
-    async fn build_manager(config: nexo::brokers::stream::config::SystemStreamConfig) -> StreamManager {
-        StreamManager::new(Arc::new(config)).await
+    async fn build_manager(config: nexo::brokers::stream::config::SystemStreamConfig) -> Arc<StreamManager> {
+        Arc::new(StreamManager::new(Arc::new(config)).await)
     }
 
     async fn join_session(manager: &StreamManager, group: &str, topic: &str, client: &str) -> JoinGroupResult {
@@ -2188,6 +2188,46 @@ mod stream_tests {
             assert_eq!(msgs3.len(), 2, "partial read should see 2 messages");
             assert_eq!(msgs3[0].seq, 4);
             assert_eq!(msgs3[1].seq, 5);
+        }
+    }
+
+    mod shutdown {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_shutdown_flushes_messages_and_group_state() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+
+            let topic = "shutdown-flush";
+            let group = "g-shutdown";
+
+            {
+                let manager = build_manager(config.clone()).await;
+                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
+                manager.publish(topic, None, Bytes::from("msg2")).await.unwrap();
+
+                let consumer = join_session(&manager, group, topic, "client-A").await;
+                let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
+                assert_eq!(msgs.len(), 2);
+                ack_message(&manager, group, topic, &consumer, msgs[0].seq).await;
+                ack_message(&manager, group, topic, &consumer, msgs[1].seq).await;
+
+                // Shutdown immediately — no sleep, no waiting for flush timer
+                manager.shutdown().await;
+            }
+
+            // Recover with a new manager
+            {
+                let manager = build_manager(config).await;
+
+                let msgs = manager.read(topic, 1, 10).await;
+                assert_eq!(msgs.len(), 2, "Messages should survive shutdown flush");
+
+                let consumer = join_session(&manager, group, topic, "client-A").await;
+                assert_eq!(consumer.ack_floor, 2, "Ack floor should survive shutdown flush");
+            }
         }
     }
     }

@@ -108,6 +108,21 @@ impl PubSubManager {
         }
     }
 
+    pub fn shutdown(&self) {
+        let persistence_path = format!("{}/retained.db", self.config.persistence_path);
+        if let Ok(mut conn) = persistence::init_db(&persistence_path) {
+            let entries = {
+                let root = self.tree.read();
+                let mut results = Vec::new();
+                root.collect_all_retained("", &mut results);
+                results
+            };
+            if let Err(e) = persistence::flush(&mut conn, &entries) {
+                tracing::error!("Failed to flush retained messages during shutdown: {}", e);
+            }
+        }
+    }
+
     pub fn connect(&self, client_id: &str, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
         self.clients.insert(Arc::from(client_id), ClientInfo {
             sender,

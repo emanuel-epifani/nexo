@@ -48,7 +48,6 @@ pub struct JoinGroupResult {
     pub generation: u64,
 }
 
-#[derive(Clone)]
 pub struct StreamManager {
     topics: Arc<DashMap<String, Arc<TopicShared>>>,
     deleted_topics: Arc<DashMap<String, ()>>,
@@ -83,8 +82,28 @@ impl StreamManager {
         manager
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&self) {
         self.cancel.cancel();
+
+        // Final group state flush
+        for (topic_name, topic_ref) in Self::collect_topics(&self.topics) {
+            let groups_data = {
+                let state = topic_ref.state.lock();
+                state.groups.iter().map(|(id, group)| {
+                    (id.clone(), GroupPersistentState {
+                        ack_floor: group.ack_floor,
+                        dlt_entries: group.dlt.clone(),
+                        parked_keys: group.parked_keys.clone(),
+                    })
+                }).collect::<BTreeMap<_, _>>()
+            };
+            let _ = self.storage_tx.send(StorageCommand::SaveState { topic_name, groups: groups_data });
+        }
+
+        // Shutdown storage manager (drains remaining commands then exits)
+        let (tx, rx) = oneshot::channel();
+        let _ = self.storage_tx.send(StorageCommand::Shutdown { reply: tx });
+        let _ = rx.await;
     }
 
     pub async fn create_topic(&self, name: String, options: StreamCreateOptions) -> Result<(), String> {

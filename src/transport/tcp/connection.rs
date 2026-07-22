@@ -9,13 +9,12 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
 use crate::brokers::pub_sub::PubSubMessage;
-use crate::config::Config;
+use crate::config::ServerConfig;
 use crate::transport::tcp::dispatcher::Dispatcher;
 use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
 use crate::NexoEngine;
 
-pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<(), String> {
-    let config = Config::global();
+pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_config: ServerConfig) -> Result<(), String> {
     let engine = Arc::new(engine); // Wrapped in Arc once for all tasks
 
     // ==========================================
@@ -24,8 +23,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine) -> Result<
     let session_id = Uuid::new_v4().to_string();
 
     // Channels to communicate with the raw TCP socket
-    let (inbound_tx, mut inbound_rx) = mpsc::channel(config.server.channel_capacity_socket_write);
-    let (outbound_tx, outbound_rx) = mpsc::channel(config.server.channel_capacity_socket_write);
+    let (inbound_tx, mut inbound_rx) = mpsc::channel(server_config.channel_capacity_socket_write);
+    let (outbound_tx, outbound_rx) = mpsc::channel(server_config.channel_capacity_socket_write);
 
     // Spawn the raw I/O task
     let (reader, writer) = socket.into_split();

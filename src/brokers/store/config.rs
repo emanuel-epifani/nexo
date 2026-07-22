@@ -1,5 +1,3 @@
-use std::env;
-
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
     pub cleanup_interval_secs: u64,
@@ -19,15 +17,8 @@ impl StoreConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            cleanup_interval_secs: get_env("STORE_CLEANUP_INTERVAL_SECS", default.cleanup_interval_secs),
-            default_ttl_secs: get_env("STORE_TTL_SECS", default.default_ttl_secs),
+            cleanup_interval_secs: crate::config::get_env("STORE_CLEANUP_INTERVAL_SECS", default.cleanup_interval_secs),
+            default_ttl_secs: crate::config::get_env("STORE_TTL_SECS", default.default_ttl_secs),
         }
     }
-}
-
-fn get_env<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.parse().ok())
-        .unwrap_or(default)
 }

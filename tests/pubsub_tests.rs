@@ -689,4 +689,43 @@ mod pubsub_tests {
         }
     }
 
+    mod shutdown {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_shutdown_flushes_retained_messages() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+
+            let topic = "shutdown/retained";
+            let payload = Bytes::from("survivor");
+
+            {
+                let mut config = nexo::config::Config::global().pubsub.clone();
+                config.persistence_path = path.clone();
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+
+                manager.publish(topic, payload.clone(), true, false, None).unwrap();
+
+                // Shutdown immediately — no sleep, no waiting for flush timer
+                manager.shutdown();
+            }
+
+            // Recover with a new manager
+            {
+                let mut config = nexo::config::Config::global().pubsub.clone();
+                config.persistence_path = path.clone();
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
+
+                let client_id = "after_shutdown".to_string();
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                manager2.connect(&client_id, tx);
+                manager2.subscribe(&client_id, topic).unwrap();
+
+                let msg = rx.recv().await.expect("Should receive retained after shutdown flush");
+                assert_eq!(msg.payload, payload);
+            }
+        }
+    }
+
 }

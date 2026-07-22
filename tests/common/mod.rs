@@ -11,14 +11,14 @@ use tempfile::TempDir;
 // SETUP HELPERS
 // ==========================================
 
-pub(crate) async fn setup_queue_manager() -> (QueueManager, TempDir) {
+pub(crate) async fn setup_queue_manager() -> (Arc<QueueManager>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let path = temp_dir.path().to_str().unwrap().to_string();
     
     let mut config = Config::global().queue.clone();
     config.persistence_path = path;
     
-    let manager = QueueManager::new(Arc::new(config));
+    let manager = Arc::new(QueueManager::new(Arc::new(config)));
     (manager, temp_dir)
 }
 

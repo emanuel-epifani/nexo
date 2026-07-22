@@ -6,26 +6,22 @@ use crate::brokers::store::config::StoreConfig;
 use bytes::Bytes;
 
 #[derive(Clone, Debug)]
-pub struct Entry {
-    pub value: MapValue,
-    pub expires_at: Option<Instant>,
+struct Entry {
+    value: Bytes,
+    expires_at: Option<Instant>,
 }
 
-#[derive(Clone)]
 pub struct Map {
     inner: Arc<DashMap<String, Entry>>,
     config: Arc<StoreConfig>,
 }
 
-#[derive(Debug, Clone)]
-pub struct MapValue(pub Bytes);
-
 impl Map {
     pub fn new(config: Arc<StoreConfig>) -> Self {
         let inner = Arc::new(DashMap::new());
 
-        // Weak reference for the cleanup thread
-        // This prevents the thread from keeping the store domain alive if the StoreManager is dropped
+        // Weak reference for the cleanup task
+        // This prevents the task from keeping the store domain alive if the StoreManager is dropped
         let weak_inner = Arc::downgrade(&inner);
         let cleanup_interval = config.cleanup_interval_secs;
 
@@ -63,7 +59,7 @@ impl Map {
         };
 
         self.inner.insert(key, Entry {
-            value: MapValue(value),
+            value,
             expires_at,
         });
     }
@@ -75,8 +71,7 @@ impl Map {
                     return None;
                 }
             }
-            let MapValue(val) = &entry.value;
-            return Some(val.clone());
+            return Some(entry.value.clone());
         }
         None
     }
@@ -85,11 +80,4 @@ impl Map {
         self.inner.remove(key).is_some()
     }
 
-    pub fn iter(&self) -> dashmap::iter::Iter<'_, String, Entry> {
-        self.inner.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
 }
