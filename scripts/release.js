@@ -16,6 +16,11 @@ const FILES = [
         type: 'json' 
     },
     { 
+        path: 'sdk/py/pyproject.toml',
+        type: 'toml',
+        regex: /^version = "(.*?)"/m
+    },
+    { 
         path: 'docs/package.json',
         type: 'json' 
     }
