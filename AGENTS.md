@@ -18,7 +18,8 @@ Goal: reduce operational complexity vs multi-system stacks (Redis + Kafka + Rabb
 
 Ships with:
 - **Rust server** (core runtime + binary TCP protocol)
-- **TypeScript SDK** (`@emanuelepifani/nexo-client`)
+- **TypeScript SDK** (`@emanuelepifani/nexo-client` on npm)
+- **Python SDK** (`nexo-client` on PyPI, includes `py.typed` for static type checking)
 
 Default port: TCP `7654` (SDK ↔ server).
 
@@ -28,7 +29,7 @@ Default port: TCP `7654` (SDK ↔ server).
 
 ```
                     ┌─────────────────────┐
-  TS SDK  ──TCP──►  │   transport/tcp     │
+   SDKs   ──TCP──►  │   transport/tcp     │
                     │ (binary protocol)   │──┐
                     └─────────────────────┘  │
                                              ▼
@@ -69,6 +70,7 @@ src/
 
 tests/                         # Rust integration tests, one file per broker
 sdk/ts/src/                    # TypeScript SDK
+sdk/py/src/                    # Python SDK (typed, py.typed marker)
 docs/guide/                    # functional docs (store/queue/pubsub/stream)
 ```
 
@@ -113,9 +115,10 @@ When touching the wire, keep it uniform and unambiguous:
   a shared cross-broker model.
 - **Pushes** are not correlated to a request → `CorrelationID = 0`.
 
-Any wire change must stay symmetric across `src/` (codec + broker `tcp.rs`) and
-`sdk/ts/` (`codec.ts`, `connection.ts`, broker files), and bump
-`PROTOCOL_VERSION` if it breaks the layout.
+Any wire change must stay symmetric across `src/` (codec + broker `tcp.rs`),
+`sdk/ts/` (`codec.ts`, `connection.ts`, broker files), and `sdk/py/`
+(`codec.py`, `connection.py`, broker files), and bump `PROTOCOL_VERSION` if it
+breaks the layout.
 
 ---
 
@@ -126,6 +129,8 @@ cargo test                         # all Rust suites
 cargo test --test queue_tests      # single suite (also: store_/pubsub_/stream_tests)
 cargo test --release bench_<name> -- --test-threads=1 --nocapture
 cd sdk/ts && npm test              # TS SDK (vitest)
+cd sdk/py && pytest                # Python SDK (pytest)
+cd sdk/py && mypy src/nexo         # Python type checks
 ```
 
 ---
@@ -170,13 +175,14 @@ cd sdk/ts && npm test              # TS SDK (vitest)
 **Alignment (always check)**
 For any change touching protocol or behavior, verify:
 - `src/` (server)
-- `sdk/ts/` (SDK)
+- `sdk/ts/` (TypeScript SDK)
+- `sdk/py/` (Python SDK)
 - `docs/` (user docs)
 
 If one area is not impacted, state it explicitly.
 
 **Tests**
-Any behavior/protocol change must update or add tests in `tests/` (Rust) and `sdk/ts/tests/` (TS), then run the relevant suite(s).
+Any behavior/protocol change must update or add tests in `tests/` (Rust), `sdk/ts/tests/` (TS), and `sdk/py/tests/` (Python), then run the relevant suite(s).
 
 ---
 
@@ -197,6 +203,12 @@ Before coding any non-trivial refactor, produce:
 
 Push a `v*` tag → CI builds:
 - Docker → `emanuelepifani/nexo:<tag>` + `latest`
-- SDK → npm `@emanuelepifani/nexo-client`
+- TypeScript SDK → npm `@emanuelepifani/nexo-client`
+- Python SDK → PyPI `nexo-client` (Trusted Publishing)
 - Docs → Vercel
 - GitHub Release created after all jobs succeed
+
+Pre-release static checks (`scripts/release.js`):
+- `tsc --noEmit` in `sdk/ts`
+- `mypy src/nexo` in `sdk/py`
+- `npm run build` in `docs`
