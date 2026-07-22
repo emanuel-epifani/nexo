@@ -4,6 +4,8 @@
 
 ## Basic Usage
 
+::: code-group
+
 ```typescript
 // Create queue
 const mailQ = await client.queue<MailJob>("emails").create();
@@ -18,6 +20,25 @@ await mailQ.subscribe((msg) => console.log(msg));
 await mailQ.delete();
 ```
 
+```python
+# Create queue
+mail_q = await client.queue("emails").create()
+
+# Push message
+await mail_q.push({"to": "test@test.com"})
+
+# Subscribe (auto-ACK on success)
+async def handle_email(msg):
+    print(msg)
+
+await mail_q.subscribe(handle_email)
+
+# Delete queue
+await mail_q.delete()
+```
+
+:::
+
 ## Persistence
 
 All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically.
@@ -28,6 +49,8 @@ By default, the server flushes data to disk every **100ms**. This interval is gl
 
 Configure reliability and timeout settings:
 
+::: code-group
+
 ```typescript
 const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create({
   // RELIABILITY
@@ -36,16 +59,37 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
 });
 ```
 
+```python
+critical_queue = await client.queue("critical-tasks").create({
+    # RELIABILITY
+    "visibility_timeout_ms": 10000,  # Retry if not ACKed within 10s (default: 30s)
+    "max_retries": 5,                # Move to DLQ after 5 failures (default: 5)
+})
+```
+
+:::
+
 ## Priority
+
+::: code-group
 
 ```typescript
 // PRIORITY: Higher value = delivered first (0-255)
 await criticalQueue.push({ type: 'urgent' }, { priority: 255 });
 ```
 
+```python
+# PRIORITY: Higher value = delivered first (0-255)
+await critical_queue.push({"type": "urgent"}, {"priority": 255})
+```
+
+:::
+
 ## Batch Push
 
 Push multiple messages in a single network request. Reduces round-trip overhead and improves throughput when producing bursts of messages.
+
+::: code-group
 
 ```typescript
 await mailQ.pushBatch([
@@ -54,6 +98,16 @@ await mailQ.pushBatch([
   { data: { to: 'user3@example.com' }, options: { priority: 10 } },
 ]);
 ```
+
+```python
+await mail_q.push_batch([
+    {"data": {"to": "user1@example.com"}},
+    {"data": {"to": "user2@example.com"}},
+    {"data": {"to": "user3@example.com"}, "options": {"priority": 10}},
+])
+```
+
+:::
 
 Each item can have its own `priority`. The server processes all items atomically under a single lock, then notifies consumers once.
 
@@ -77,6 +131,8 @@ How many messages are processed **in parallel** within a single batch. This is u
 With `concurrency: 1`, messages are processed **strictly in order** (true FIFO). With `concurrency > 1`, messages are still *fetched* in FIFO order, but since each callback may take a different amount of time, the **completion order is not guaranteed**. Use `concurrency: 1` when ordering matters.
 :::
 
+::: code-group
+
 ```typescript
 await criticalQueue.subscribe(
   async (task) => { await processTask(task); },
@@ -88,6 +144,22 @@ await criticalQueue.subscribe(
 );
 ```
 
+```python
+async def handle_task(task):
+    print(task)
+
+await critical_queue.subscribe(
+    handle_task,
+    {
+        "batch_size": 100,    # Fetch 100 messages per network request
+        "concurrency": 10,    # Process 10 messages concurrently (I/O-bound tasks)
+        "wait_ms": 5000       # If empty, wait 5s (server-side) before responding
+    }
+)
+```
+
+:::
+
 ## Dead Letter Queue (DLQ)
 
 Every queue automatically has a **dedicated DLQ**. When a message exceeds `maxRetries` (default: 5), it's moved to the DLQ automatically — no setup needed.
@@ -95,6 +167,8 @@ Every queue automatically has a **dedicated DLQ**. When a message exceeds `maxRe
 Since DLQs are created alongside their parent queue, you can inspect failed messages at any time via `queue.dlq`.
 
 ### Inspect Failed Messages
+
+::: code-group
 
 ```typescript
 const failedMessages = await criticalQueue.dlq.peek(10);
@@ -106,7 +180,20 @@ for (const msg of failedMessages.items) {
 }
 ```
 
+```python
+failed_messages = await critical_queue.dlq.peek(10)
+print(f"Found {failed_messages['total']} failed messages")
+
+for msg in failed_messages["items"]:
+    print(f"Message {msg['id']}: attempts={msg['attempts']}, reason={msg['failure_reason']}")
+    print(f"Payload: {msg['data']}")
+```
+
+:::
+
 ### Replay or Discard
+
+::: code-group
 
 ```typescript
 // Replay: move back to main queue (resets attempts to 0)
@@ -118,6 +205,19 @@ const deleted = await criticalQueue.dlq.delete(msg.id);
 // Purge: clear all DLQ messages
 const purgedCount = await criticalQueue.dlq.purge();
 ```
+
+```python
+# Replay: move back to main queue (resets attempts to 0)
+moved = await critical_queue.dlq.move_to_queue(msg["id"])
+
+# Discard: permanently delete from DLQ
+deleted = await critical_queue.dlq.delete(msg["id"])
+
+# Purge: clear all DLQ messages
+purged_count = await critical_queue.dlq.purge()
+```
+
+:::
 
 ### API Reference
 

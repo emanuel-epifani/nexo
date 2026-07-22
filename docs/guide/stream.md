@@ -6,6 +6,8 @@ Stream consumers are **pull-based with long-polling**: the SDK polls the server 
 
 ## Basic Usage
 
+::: code-group
+
 ```typescript
 // Create stream
 const stream = await client.stream<UserEvent>('user-events').create();
@@ -22,9 +24,30 @@ await stream.subscribe('analytics', (msg, meta) => {
 });
 ```
 
+```python
+# Create stream
+stream = await client.stream("user-events").create()
+
+# Publish event (with key for per-key ordering)
+await stream.publish({"type": "login", "userId": "u1"}, {"key": "u1"})
+
+# Publish event (no key — no ordering constraint)
+await stream.publish({"type": "heartbeat"})
+
+# Subscribe with consumer group
+async def on_event(msg, meta):
+    print(f"seq={meta['seq']} key={meta['key']} — User {msg['userId']} performed {msg['type']}")
+
+await stream.subscribe("analytics", on_event)
+```
+
+:::
+
 ## Batch Publish
 
 Publish multiple events in a single network request. Returns the sequence numbers assigned to each event.
+
+::: code-group
 
 ```typescript
 const seqs = await stream.publishBatch([
@@ -35,6 +58,18 @@ const seqs = await stream.publishBatch([
 
 // seqs = [1n, 2n, 3n]
 ```
+
+```python
+seqs = await stream.publish_batch([
+    {"data": {"type": "login", "userId": "u1"}, "key": "u1"},
+    {"data": {"type": "login", "userId": "u2"}, "key": "u2"},
+    {"data": {"type": "heartbeat"}},
+])
+
+# seqs = [1, 2, 3]
+```
+
+:::
 
 Each item can have its own `key` for per-key ordering. The server appends all events atomically under a single lock, then notifies consumers once.
 
@@ -109,6 +144,8 @@ This means:
 
 ### Publishing with a Key
 
+::: code-group
+
 ```typescript
 // With key — ordered delivery for same key
 await stream.publish({ action: 'update', userId: 'u1' }, { key: 'u1' });
@@ -118,6 +155,18 @@ await stream.publish({ action: 'update', userId: 'u2' }, { key: 'u2' });
 // Without key — no ordering constraint, full parallelism
 await stream.publish({ action: 'heartbeat' });
 ```
+
+```python
+# With key — ordered delivery for same key
+await stream.publish({"action": "update", "userId": "u1"}, {"key": "u1"})
+await stream.publish({"action": "view", "userId": "u1"}, {"key": "u1"})
+await stream.publish({"action": "update", "userId": "u2"}, {"key": "u2"})
+
+# Without key — no ordering constraint, full parallelism
+await stream.publish({"action": "heartbeat"})
+```
+
+:::
 
 The `key` is an opaque byte string (string or `Uint8Array`). The server treats it as a deduplication lock — it does not interpret or hash it. Keys can be user IDs, order IDs, entity IDs, or any natural partitioning key in your domain.
 
@@ -143,6 +192,8 @@ Every consumer subscribes through a **group name**. This determines how messages
 ### Scaling Service (Same Group)
 To scale horizontally, run multiple instances of your worker using the same group name. Nexo will automatically distribute messages across them.
 
+::: code-group
+
 ```typescript
 // Process 'orders' stream using 3 parallel workers
 // Run this code in 3 different instances/pods:
@@ -151,9 +202,22 @@ await orders.subscribe('worker-group', (order, meta) => {
 });
 ```
 
+```python
+# Process 'orders' stream using 3 parallel workers
+# Run this code in 3 different instances/pods:
+async def on_order(order, meta):
+    print(f"Processing order {order['id']} [seq={meta['seq']}]")
+
+await orders.subscribe("worker-group", on_order)
+```
+
+:::
+
 ### Multiple Services (Different Groups)
 If you have independent services (e.g., Audit and Metrics), give them different group names.
 Each group gets a full copy of every message.
+
+::: code-group
 
 ```typescript
 // Instance A: Audit Service
@@ -163,9 +227,27 @@ await orders.subscribe('audit-service', (order, meta) => saveToDb(order));
 await orders.subscribe('metrics-service', (order, meta) => updateGrafana(order));
 ```
 
+```python
+# Instance A: Audit Service
+async def save_to_db(order, meta):
+    await persist_order(order)
+
+await orders.subscribe("audit-service", save_to_db)
+
+# Instance B: Metrics Service
+async def update_metrics(order, meta):
+    await update_grafana(order)
+
+await orders.subscribe("metrics-service", update_metrics)
+```
+
+:::
+
 ### Subscribing: How the Callback Works
 
 When you subscribe, your callback receives both the message data and metadata:
+
+::: code-group
 
 ```typescript
 await stream.subscribe('order-processor', (data, meta) => {
@@ -175,6 +257,18 @@ await stream.subscribe('order-processor', (data, meta) => {
   // meta.seq is the message sequence number
 });
 ```
+
+```python
+async def on_message(data, meta):
+    print(f"seq={meta['seq']}, key={meta['key']}")
+    # data is your published payload
+    # meta['key'] is the key as bytes (or None if no key was set)
+    # meta['seq'] is the message sequence number
+
+await stream.subscribe("order-processor", on_message)
+```
+
+:::
 
 ## Consumer Tuning
 
@@ -192,6 +286,8 @@ When the stream is **caught up**, the server holds the connection open for up to
 
 Controls how many callbacks run in parallel **within a single batch**.
 
+::: code-group
+
 ```typescript
 await stream.subscribe('webhooks', (event, meta) => callExternalApi(event), {
   batchSize: 200,     // Fetch 200 messages per network request
@@ -199,6 +295,19 @@ await stream.subscribe('webhooks', (event, meta) => callExternalApi(event), {
   concurrency: 10,    // Up to 10 callbacks in flight at the same time
 });
 ```
+
+```python
+async def call_api(event, meta):
+    await call_external_api(event)
+
+await stream.subscribe("webhooks", call_api, {
+    "batch_size": 200,   # Fetch 200 messages per network request
+    "wait_ms": 5000,     # If empty, wait 5s (server-side) before responding
+    "concurrency": 10,   # Up to 10 callbacks in flight at the same time
+})
+```
+
+:::
 
 **How it works**
 
@@ -225,6 +334,9 @@ By default, new consumer groups start reading from the **beginning** of the stre
 
 #### 1. Replay from Beginning
 Use this when you update your processing logic and need to re-scan the entire history.
+
+::: code-group
+
 ```typescript
 // 1. Reset the group position
 await stream.seek('analytics-v2', 'beginning');
@@ -233,8 +345,24 @@ await stream.seek('analytics-v2', 'beginning');
 await stream.subscribe('analytics-v2', (msg, meta) => { ... });
 ```
 
+```python
+# 1. Reset the group position
+await stream.seek("analytics-v2", "beginning")
+
+# 2. Start (or resume) processing
+async def on_message(msg, meta):
+    pass
+
+await stream.subscribe("analytics-v2", on_message)
+```
+
+:::
+
 #### 2. Skip to End
 Best for real-time dashboards or monitors that don't need historical data.
+
+::: code-group
+
 ```typescript
 // 1. Skip all existing history
 await stream.seek('live-dashboard', 'end');
@@ -242,6 +370,19 @@ await stream.seek('live-dashboard', 'end');
 // 2. Process only future messages
 await stream.subscribe('live-dashboard', (msg, meta) => { ... });
 ```
+
+```python
+# 1. Skip all existing history
+await stream.seek("live-dashboard", "end")
+
+# 2. Process only future messages
+async def on_message(msg, meta):
+    pass
+
+await stream.subscribe("live-dashboard", on_message)
+```
+
+:::
 
 ## Acknowledgments & Lifecycle
 
@@ -279,6 +420,8 @@ Moving a message to the DLT also **acks** it — the `ack_floor` advances past i
 
 The DLT is internal to each consumer group. You can inspect and manage it with four operations:
 
+::: code-group
+
 ```typescript
 // List entries in the DLT (paginated)
 const entries = await stream.peekDlt(group, limit?, offset?);
@@ -293,6 +436,23 @@ await stream.deleteDlt(group, seq);
 // Purge all entries from the DLT
 const count = await stream.purgeDlt(group);
 ```
+
+```python
+# List entries in the DLT (paginated)
+entries = await stream.peek_dlt(group, limit=100, offset=0)
+# -> [{"seq": 1, "reason": "max_deliveries exceeded (5)", "attempts": 5, "key": b"..."}]
+
+# Move a message back to the stream for redelivery
+await stream.move_to_stream(group, seq)
+
+# Delete a message from the DLT permanently
+await stream.delete_dlt(group, seq)
+
+# Purge all entries from the DLT
+count = await stream.purge_dlt(group)
+```
+
+:::
 
 #### Auto-Unblock
 
@@ -378,11 +538,21 @@ Fields settable at `create()` time. If omitted, system defaults apply.
 |:---|:---|:---|
 | Retention | `retention: { maxAgeMs, maxBytes }` | 7 days, 1GB (`STREAM_DEFAULT_RETENTION_AGE_MS`, `STREAM_DEFAULT_RETENTION_BYTES`) |
 
+::: code-group
+
 ```typescript
 await client.stream('my-topic').create({
   retention: { maxAgeMs: 3_600_000, maxBytes: 100_000_000 }  // 1h, 100MB
 });
 ```
+
+```python
+await client.stream("my-topic").create({
+    "retention": {"max_age_ms": 3_600_000, "max_bytes": 100_000_000}  # 1h, 100MB
+})
+```
+
+:::
 
 | Setting | Default | Description |
 |:---|:---|:---|

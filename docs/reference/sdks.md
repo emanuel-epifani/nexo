@@ -17,8 +17,16 @@ The Nexo server and all SDKs share the **same version number**. If the server is
 npm install @emanuelepifani/nexo-client
 ```
 
-## Coming Soon
-
 ### Python
 
-`nexo-client` — Stay tuned.
+[`nexo-client`](https://pypi.org/project/nexo-client)
+
+```bash
+pip install nexo-client
+```
+
+Or with uv:
+
+```bash
+uv add nexo-client
+```

@@ -45,7 +45,7 @@ const mailQ = await client.queue<MailJob>("emails").create();
 // Push message
 await mailQ.push({ to: "test@test.com" });
 // Subscribe
-await mailQ.subscribe((msg) => console.log(msg));
+await mailQ.subscribe(async (msg) => console.log(msg));
 // Delete queue 
 await mailQ.delete();
 ```
@@ -57,7 +57,7 @@ await mailQ.delete();
 // Define topic (not need to create, auto-created on first publish)
 const alerts = client.pubsub<AlertMsg>("system-alerts");
 // Subscribe
-await alerts.subscribe((msg) => console.log(msg));
+await alerts.subscribe(async (msg) => console.log(msg));
 // Publish
 await alerts.publish({ level: "high" });
 ```
@@ -71,7 +71,7 @@ const stream = await client.stream<UserEvent>('user-events').create();
 // Publisher
 await stream.publish({ type: 'login', userId: 'u1' });
 // Consumer (must specify group)
-await stream.subscribe('analytics', (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
+await stream.subscribe('analytics', async (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
 // Delete topic
 await stream.delete();
 ```

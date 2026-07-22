@@ -18,7 +18,7 @@ class PublishOptions(TypedDict, total=False):
     ttl: int
 
 
-Handler = Callable[[Any], None]
+Handler = Callable[[Any], Any]
 
 
 class NexoTopic:
@@ -39,14 +39,23 @@ class NexoTopic:
         await self._broker.unsubscribe(self.name)
 
 
+class _Subscription:
+    __slots__ = ("handler", "queue", "task")
+
+    def __init__(self, handler: Handler) -> None:
+        self.handler = handler
+        self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.task: asyncio.Task[None] | None = None
+
+
 class NexoPubSub:
     def __init__(self, conn: NexoConnection, logger: Logger) -> None:
         self._conn = conn
         self._logger = logger
-        self._exact: dict[str, Handler] = {}
-        self._wild: dict[str, tuple[list[str], Handler]] = {}
+        self._exact: dict[str, _Subscription] = {}
+        self._wild: dict[str, tuple[list[str], _Subscription]] = {}
 
-        conn.on_push = self._dispatch
+        conn.on_push = self._enqueue
 
         async def on_reconnect():
             topics = list(self._exact.keys()) + list(self._wild.keys())
@@ -94,11 +103,12 @@ class NexoPubSub:
                 f'[PubSub] Already subscribed to "{topic}". Call unsubscribe() first.'
             )
 
+        sub = _Subscription(callback)
         is_wild = self._is_wildcard(topic)
         if is_wild:
-            self._wild[topic] = (topic.split("/"), callback)
+            self._wild[topic] = (topic.split("/"), sub)
         else:
-            self._exact[topic] = callback
+            self._exact[topic] = sub
 
         try:
             await self._conn.send(PubSubOpcode.SUB, lambda w: w.string(topic))
@@ -109,31 +119,44 @@ class NexoPubSub:
                 self._exact.pop(topic, None)
             raise
 
-    async def unsubscribe(self, topic: str) -> None:
-        if topic not in self._exact and topic not in self._wild:
-            return
-        await self._conn.send(PubSubOpcode.UNSUB, lambda w: w.string(topic))
-        self._exact.pop(topic, None)
-        self._wild.pop(topic, None)
+        sub.task = asyncio.create_task(self._consume(sub))
 
-    def _dispatch(self, topic: str, data: Any) -> None:
-        exact_cb = self._exact.get(topic)
-        if exact_cb is not None:
+    async def unsubscribe(self, topic: str) -> None:
+        sub = self._exact.pop(topic, None) or self._wild.pop(topic, None)
+        if sub is None:
+            return
+        if isinstance(sub, tuple):
+            sub = sub[1]
+        await self._conn.send(PubSubOpcode.UNSUB, lambda w: w.string(topic))
+        if sub.task is not None:
+            sub.task.cancel()
             try:
-                exact_cb(data)
-            except Exception as e:
-                self._logger.error(f"[PubSub] handler error: {e}")
+                await sub.task
+            except asyncio.CancelledError:
+                pass
+
+    def _enqueue(self, topic: str, data: Any) -> None:
+        sub = self._exact.get(topic)
+        if sub is not None:
+            sub.queue.put_nowait(data)
 
         if not self._wild:
             return
 
         t_parts = topic.split("/")
-        for parts, cb in self._wild.values():
+        for parts, sub in self._wild.values():
             if self._matches_parts(parts, t_parts):
-                try:
-                    cb(data)
-                except Exception as e:
-                    self._logger.error(f"[PubSub] handler error: {e}")
+                sub.queue.put_nowait(data)
+
+    async def _consume(self, sub: _Subscription) -> None:
+        while True:
+            data = await sub.queue.get()
+            try:
+                result = sub.handler(data)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                self._logger.error(f"[PubSub] handler error: {e}")
 
     @staticmethod
     def _is_wildcard(topic: str) -> bool:

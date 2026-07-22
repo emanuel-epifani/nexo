@@ -84,3 +84,62 @@ class TestPubSub:
         ids = sorted(r["id"] for r in received)
         assert ids == ["deep", "root"]
         await nexo.pubsub(pattern).unsubscribe()
+
+    async def test_async_callback(self, nexo: NexoClient):
+        topic = f"async-cb-{uuid.uuid4()}"
+        received: list = []
+
+        async def async_handler(data):
+            await asyncio.sleep(0.01)
+            received.append(data)
+
+        await nexo.pubsub(topic).subscribe(async_handler)
+        await nexo.pubsub(topic).publish({"msg": "hello"})
+        await wait_for(lambda: len(received) == 1)
+        assert received[0]["msg"] == "hello"
+        await nexo.pubsub(topic).unsubscribe()
+
+    async def test_slow_callback_does_not_block_store(self, nexo: NexoClient):
+        pubsub_topic = f"slow-cb-{uuid.uuid4()}"
+        store_key = f"store-key-{uuid.uuid4()}"
+        callback_started = asyncio.Event()
+
+        async def slow_handler(data):
+            callback_started.set()
+            await asyncio.sleep(0.5)
+
+        await nexo.pubsub(pubsub_topic).subscribe(slow_handler)
+        await nexo.pubsub(pubsub_topic).publish({"msg": "trigger"})
+
+        await wait_for(callback_started.is_set)
+
+        import time
+        t0 = time.monotonic()
+        await nexo.store.map.set(store_key, "value")
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 0.3, f"Store operation blocked by PubSub callback: {elapsed:.3f}s"
+        await nexo.pubsub(pubsub_topic).unsubscribe()
+
+    async def test_parallel_subscriptions(self, nexo: NexoClient):
+        topic_a = f"par-a-{uuid.uuid4()}"
+        topic_b = f"par-b-{uuid.uuid4()}"
+        order: list[str] = []
+
+        async def handler_a(data):
+            await asyncio.sleep(0.1)
+            order.append("a")
+
+        async def handler_b(data):
+            order.append("b")
+
+        await nexo.pubsub(topic_a).subscribe(handler_a)
+        await nexo.pubsub(topic_b).subscribe(handler_b)
+
+        await nexo.pubsub(topic_a).publish({"msg": "x"})
+        await nexo.pubsub(topic_b).publish({"msg": "y"})
+
+        await wait_for(lambda: len(order) == 2)
+        assert order == ["b", "a"], f"Subscription B should not wait for A: {order}"
+        await nexo.pubsub(topic_a).unsubscribe()
+        await nexo.pubsub(topic_b).unsubscribe()

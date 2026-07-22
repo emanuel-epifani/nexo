@@ -28,7 +28,6 @@ export default defineConfig({
           items: [
             { text: 'Introduction', link: '/guide/introduction' },
             { text: 'Quick Start', link: '/guide/quickstart' },
-            { text: 'Architecture', link: '/guide/architecture' },
           ],
         },
         {

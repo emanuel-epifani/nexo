@@ -52,7 +52,10 @@ mail_q = await client.queue("emails").create()
 # Push message
 await mail_q.push({"to": "test@test.com"})
 # Subscribe
-await mail_q.subscribe(lambda msg: print(msg))
+async def handle_email(msg):
+    print(msg)
+
+await mail_q.subscribe(handle_email)
 # Delete queue
 await mail_q.delete()
 ```
@@ -63,7 +66,10 @@ await mail_q.delete()
 # Define topic (no need to create, auto-created on first publish)
 alerts = client.pubsub("system-alerts")
 # Subscribe
-await alerts.subscribe(lambda msg: print(msg))
+async def on_alert(msg):
+    print(msg)
+
+await alerts.subscribe(on_alert)
 # Publish
 await alerts.publish({"level": "high"})
 ```
@@ -76,10 +82,15 @@ stream = await client.stream("user-events").create()
 # Publisher
 await stream.publish({"type": "login", "userId": "u1"})
 # Consumer (must specify group)
-await stream.subscribe("analytics", lambda msg, meta: print(f"User {msg['userId']} performed {msg['type']}"))
+async def on_event(msg, meta):
+    print(f"User {msg['userId']} performed {msg['type']}")
+
+await stream.subscribe("analytics", on_event)
 # Delete topic
 await stream.delete()
 ```
+
+> Callbacks for Queue, Pub/Sub, and Stream can be sync `def` or async `async def` — the SDK handles both.
 
 
 

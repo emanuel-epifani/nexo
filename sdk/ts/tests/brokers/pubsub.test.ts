@@ -115,4 +115,64 @@ describe('PUBSUB', () => {
 
         await nexo.pubsub(pattern).unsubscribe();
     });
+
+    it('should support async callbacks', async () => {
+        const topic = `async-cb-${randomUUID()}`;
+        const received: any[] = [];
+
+        await nexo.pubsub(topic).subscribe(async (data) => {
+            await new Promise(r => setTimeout(r, 10));
+            received.push(data);
+        });
+
+        await nexo.pubsub(topic).publish({ msg: 'hello' });
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0].msg).toBe('hello');
+
+        await nexo.pubsub(topic).unsubscribe();
+    });
+
+    it('should not block other operations when callback is slow', async () => {
+        const pubsubTopic = `slow-cb-${randomUUID()}`;
+        const storeKey = `store-key-${randomUUID()}`;
+        let callbackStarted = false;
+
+        await nexo.pubsub(pubsubTopic).subscribe(async (data) => {
+            callbackStarted = true;
+            await new Promise(r => setTimeout(r, 500));
+        });
+
+        await nexo.pubsub(pubsubTopic).publish({ msg: 'trigger' });
+        await waitFor(() => expect(callbackStarted).toBe(true));
+
+        const t0 = Date.now();
+        await nexo.store.map.set(storeKey, 'value');
+        const elapsed = Date.now() - t0;
+
+        expect(elapsed).toBeLessThan(300);
+        await nexo.pubsub(pubsubTopic).unsubscribe();
+    });
+
+    it('should run parallel subscriptions independently', async () => {
+        const topicA = `par-a-${randomUUID()}`;
+        const topicB = `par-b-${randomUUID()}`;
+        const order: string[] = [];
+
+        await nexo.pubsub(topicA).subscribe(async (data) => {
+            await new Promise(r => setTimeout(r, 100));
+            order.push('a');
+        });
+        await nexo.pubsub(topicB).subscribe(async (data) => {
+            order.push('b');
+        });
+
+        await nexo.pubsub(topicA).publish({ msg: 'x' });
+        await nexo.pubsub(topicB).publish({ msg: 'y' });
+
+        await waitFor(() => expect(order.length).toBe(2));
+        expect(order).toEqual(['b', 'a']);
+
+        await nexo.pubsub(topicA).unsubscribe();
+        await nexo.pubsub(topicB).unsubscribe();
+    });
 });
