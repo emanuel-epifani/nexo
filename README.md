@@ -8,14 +8,16 @@ One Binary. Four Brokers. Zero Operational Headaches.
 
 ### STORE • PUB/SUB • QUEUE • STREAM
 
-
+[📚 Documentation](https://nexo-docs-hub.vercel.app/) &nbsp;•&nbsp; [npm](https://www.npmjs.com/package/@emanuelepifani/nexo-client) &nbsp;•&nbsp; [PyPI](https://pypi.org/project/nexo-client/) &nbsp;•&nbsp; [Docker](https://hub.docker.com/r/emanuelepifani/nexo)
 
 </div>
 
 ---
 
-## 📑 Table of Contents
-- [The Mission](#the-mission)
+## Table of Contents
+- [What is Nexo?](#what-is-nexo)
+- [Client SDKs](#client-sdks)
+- [How to Run](#how-to-run)
 - [Architecture](#architecture)
 - [Brokers](#brokers)
   - [STORE (Shared State)](#1-store-shared-state)
@@ -27,21 +29,50 @@ One Binary. Four Brokers. Zero Operational Headaches.
 
 ---
 
-## The Mission
+## What is Nexo?
 
 Modern backend architecture suffers from **Infrastructure Fatigue**. A typical stack requires juggling multiple specialized systems—Redis for caching, RabbitMQ for jobs, Kafka for streams—each with its own protocol, configuration, and maintenance overhead.
 
-Nexo is an **all-in-one broker** designed to make project setup, local development, and developer experience as smooth as possible. One binary, one TCP connection, one SDK — four communication models ready to use out of the box.
+Nexo is an **all-in-one broker** that brings four messaging semantics into **one binary, one TCP connection, one SDK**. Same API style across every broker, same connection, same deployment:
 
-Here's the reality: most projects will **never** reach the scale where horizontal distribution becomes necessary. Their backends will bottleneck long before a single Rust-based broker does. Nexo is designed for that 90%—teams that need **high throughput without operational complexity**, and want their local environment to match production without emulators or mocks.
+- **Store** — in-memory key-value with TTL (like Redis)
+- **Pub/Sub** — transient topic broadcast with wildcard matching (like MQTT)
+- **Queue** — durable FIFO with acks, retries, priority, DLQ (like RabbitMQ)
+- **Stream** — append-only event log with consumer groups (like Kafka)
 
-## 🏗️ Architecture
 
-Nexo runs as a **single binary** that exposes 4 distinct brokers.
 
-*   **Zero Dependencies:** No external databases, no JVM, no Erlang VM. Just one executable.
-*   **Thread-Isolated:** Each broker runs on its own dedicated thread pool. Heavy processing on the *Queue* won't block *Pub/Sub* latency.
-*   **Unified Interface:** A single TCP connection handles all protocols, reducing connection overhead.
+### Scaling
+
+Nexo is deliberately designed **not to scale horizontally** — no distributed locks, no consensus protocols, no clustering layer. A single instance handles all four brokers on its own thread pools, scaling vertically.
+
+This goes against the current trend of distributed-everything, but the reality is that **most projects will never need horizontal scaling**. Their backends bottleneck long before a single Rust-based broker does. For the vast majority of teams, this is more than enough.
+
+If you do need to scale out, you can run **multiple Nexo instances**, each dedicated to a single broker (e.g. one for Store, one for Queue, one for Stream). This gives horizontal separation without the complexity of distributed coordination.
+
+## Client SDKs
+
+- [TypeScript SDK](https://www.npmjs.com/package/@emanuelepifani/nexo-client)
+- [Python SDK](https://pypi.org/project/nexo-client/)
+
+## How to Run
+
+Nexo is distributed as a **Docker image**:
+
+```bash
+docker run -d -p 7654:7654 emanuelepifani/nexo
+```
+
+This exposes:
+- **Port 7654 (TCP)** — Main server socket for SDK clients
+
+> Docker image: [`emanuelepifani/nexo`](https://hub.docker.com/r/emanuelepifani/nexo) on Docker Hub.
+>
+> See the [Deployment Guide](https://nexo-docs-hub.vercel.app/guide/deployment.html) for configuration options and production setup.
+
+## Architecture
+
+Nexo runs as a **single binary** with a **single TCP socket**. All four brokers share one connection but run on **isolated thread pools** — heavy processing on the *Queue* won't block *Pub/Sub* latency.
 
 ```
                                           ┌──────────────────────────────────────┐
@@ -67,6 +98,15 @@ Nexo runs as a **single binary** that exposes 4 distinct brokers.
                                           │   └──────────────────────────────┘   │
                                           └──────────────────────────────────────┘
 ```
+
+Each broker uses a different communication model:
+
+| Broker | Communication | How it works |
+|--------|--------------|--------------|
+| **Store** | Request/Response | Client sends a command, server replies synchronously |
+| **Pub/Sub** | Server-side push | Server pushes messages to subscribed clients in real-time |
+| **Queue** | Fetch with server-side wait | Client requests jobs; server holds the request until jobs are available (long poll) |
+| **Stream** | Fetch with server-side wait | Client requests events; server holds the request until new events are available (long poll) |
 
 ## ⚙️ BROKERS
 
