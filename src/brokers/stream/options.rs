@@ -15,7 +15,7 @@ pub struct StreamCreateOptions {
     pub retention: Option<RetentionOptions>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SeekTarget {
     Beginning,

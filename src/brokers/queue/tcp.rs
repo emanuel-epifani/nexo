@@ -38,13 +38,13 @@ pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 // ==========================================
 
 #[derive(Debug)]
-struct PushItem {
-    priority: Option<u8>,
-    payload: Bytes,
+pub struct PushItem {
+    pub priority: Option<u8>,
+    pub payload: Bytes,
 }
 
 #[derive(Debug)]
-enum QueueCommand {
+pub enum QueueCommand {
     Create { q_name: String, options: QueueCreateOptions },
     Push { q_name: String, items: Vec<PushItem> },
     Consume { q_name: String, batch_size: usize, wait_ms: u64 },
@@ -59,7 +59,7 @@ enum QueueCommand {
 }
 
 impl QueueCommand {
-    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_Q_CREATE => {
                 let q_name = cursor.read_string()?;

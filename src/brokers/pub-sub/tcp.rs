@@ -22,14 +22,14 @@ pub const OP_UNSUB: u8 = 0x23;
 // ==========================================
 
 #[derive(Debug)]
-enum PubSubCommand {
+pub enum PubSubCommand {
     Publish { topic: String, retain: bool, clear: bool, ttl: Option<u32>, payload: Bytes },
     Subscribe { topic: String },
     Unsubscribe { topic: String },
 }
 
 impl PubSubCommand {
-    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_PUB => {
                 let topic = cursor.read_string()?;

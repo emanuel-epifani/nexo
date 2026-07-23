@@ -1,0 +1,583 @@
+[
+  {
+    "id": "STORE_MAP_SET_JSON",
+    "broker": "store",
+    "opcode": 2,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "key": "foo",
+      "ttl": null,
+      "value": {
+        "data_type": "json",
+        "payload": "eyJ4IjoxfQ=="
+      }
+    },
+    "expected_bytes": "BAECAAAAAQAAABAAAAADZm9vAAJ7IngiOjF9"
+  },
+  {
+    "id": "STORE_MAP_SET_STRING_TTL",
+    "broker": "store",
+    "opcode": 2,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "key": "foo",
+      "ttl": 60000,
+      "value": {
+        "data_type": "string",
+        "payload": "aGVsbG8="
+      }
+    },
+    "expected_bytes": "BAECAAAAAQAAABYAAAADZm9vAQAAAAAAAOpgAWhlbGxv"
+  },
+  {
+    "id": "STORE_MAP_GET",
+    "broker": "store",
+    "opcode": 3,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "key": "foo"
+    },
+    "expected_bytes": "BAEDAAAAAQAAAAcAAAADZm9v"
+  },
+  {
+    "id": "STORE_MAP_DEL",
+    "broker": "store",
+    "opcode": 4,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "key": "foo"
+    },
+    "expected_bytes": "BAEEAAAAAQAAAAcAAAADZm9v"
+  },
+  {
+    "id": "PUBSUB_PUB_JSON",
+    "broker": "pubsub",
+    "opcode": 33,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/temp",
+      "retain": false,
+      "ttl": null,
+      "data": {
+        "data_type": "json",
+        "payload": "eyJ0IjoyNX0="
+      }
+    },
+    "expected_bytes": "BAEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXAAAnsidCI6MjV9"
+  },
+  {
+    "id": "PUBSUB_PUB_STRING_RETAIN",
+    "broker": "pubsub",
+    "opcode": 33,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/temp",
+      "retain": true,
+      "ttl": null,
+      "data": {
+        "data_type": "string",
+        "payload": "b24="
+      }
+    },
+    "expected_bytes": "BAEhAAAAAQAAABMAAAALc2Vuc29yL3RlbXABAW9u"
+  },
+  {
+    "id": "PUBSUB_PUB_RAW_TTL",
+    "broker": "pubsub",
+    "opcode": 33,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/temp",
+      "retain": false,
+      "ttl": 30,
+      "data": {
+        "data_type": "raw",
+        "payload": "aGVsbG8="
+      }
+    },
+    "expected_bytes": "BAEhAAAAAQAAABoAAAALc2Vuc29yL3RlbXACAAAAHgBoZWxsbw=="
+  },
+  {
+    "id": "PUBSUB_PUB_JSON_RETAIN_TTL",
+    "broker": "pubsub",
+    "opcode": 33,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/temp",
+      "retain": true,
+      "ttl": 60,
+      "data": {
+        "data_type": "json",
+        "payload": "bnVsbA=="
+      }
+    },
+    "expected_bytes": "BAEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXADAAAAPAJudWxs"
+  },
+  {
+    "id": "PUBSUB_CLEAR",
+    "broker": "pubsub",
+    "opcode": 33,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/temp",
+      "retain": false,
+      "ttl": null,
+      "data": {
+        "data_type": "raw",
+        "payload": ""
+      }
+    },
+    "expected_bytes": "BAEhAAAAAQAAABEAAAALc2Vuc29yL3RlbXAEAA=="
+  },
+  {
+    "id": "PUBSUB_SUB",
+    "broker": "pubsub",
+    "opcode": 34,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/+"
+    },
+    "expected_bytes": "BAEiAAAAAQAAAAwAAAAIc2Vuc29yLys="
+  },
+  {
+    "id": "PUBSUB_UNSUB",
+    "broker": "pubsub",
+    "opcode": 35,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "topic": "sensor/+"
+    },
+    "expected_bytes": "BAEjAAAAAQAAAAwAAAAIc2Vuc29yLys="
+  },
+  {
+    "id": "QUEUE_CREATE",
+    "broker": "queue",
+    "opcode": 16,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "visibility_timeout_ms": null,
+      "max_retries": null
+    },
+    "expected_bytes": "BAEQAAAAAQAAAAsAAAAGZW1haWxzAA=="
+  },
+  {
+    "id": "QUEUE_CREATE_FULL",
+    "broker": "queue",
+    "opcode": 16,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "visibility_timeout_ms": 30000,
+      "max_retries": 5
+    },
+    "expected_bytes": "BAEQAAAAAQAAABcAAAAGZW1haWxzAwAAAAAAAHUwAAAABQ=="
+  },
+  {
+    "id": "QUEUE_EXISTS",
+    "broker": "queue",
+    "opcode": 20,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails"
+    },
+    "expected_bytes": "BAEUAAAAAQAAAAoAAAAGZW1haWxz"
+  },
+  {
+    "id": "QUEUE_DELETE",
+    "broker": "queue",
+    "opcode": 21,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails"
+    },
+    "expected_bytes": "BAEVAAAAAQAAAAoAAAAGZW1haWxz"
+  },
+  {
+    "id": "QUEUE_PUSH_JSON",
+    "broker": "queue",
+    "opcode": 17,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "items": [
+        {
+          "data_type": "json",
+          "payload": "eyJ0byI6ImFAYi5jb20ifQ=="
+        }
+      ]
+    },
+    "expected_bytes": "BAERAAAAAQAAACQAAAAGZW1haWxzAAAAAQAAAAARAnsidG8iOiJhQGIuY29tIn0="
+  },
+  {
+    "id": "QUEUE_PUSH_STRING_PRIORITY",
+    "broker": "queue",
+    "opcode": 17,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "items": [
+        {
+          "priority": 5,
+          "data_type": "string",
+          "payload": "aGVsbG8="
+        }
+      ]
+    },
+    "expected_bytes": "BAERAAAAAQAAABoAAAAGZW1haWxzAAAAAQEFAAAABgFoZWxsbw=="
+  },
+  {
+    "id": "QUEUE_PUSH_BATCH",
+    "broker": "queue",
+    "opcode": 17,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "items": [
+        {
+          "priority": 7,
+          "data_type": "json",
+          "payload": "eyJ4IjoxfQ=="
+        },
+        {
+          "data_type": "raw",
+          "payload": "aGVsbG8="
+        }
+      ]
+    },
+    "expected_bytes": "BAERAAAAAQAAACcAAAAGZW1haWxzAAAAAgEHAAAACAJ7IngiOjF9AAAAAAYAaGVsbG8="
+  },
+  {
+    "id": "QUEUE_CONSUME",
+    "broker": "queue",
+    "opcode": 18,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "batch_size": 10,
+      "wait_ms": 5000
+    },
+    "expected_bytes": "BAESAAAAAQAAABIAAAAGZW1haWxzAAAACgAAE4g="
+  },
+  {
+    "id": "QUEUE_ACK",
+    "broker": "queue",
+    "opcode": 19,
+    "frame_type": "REQUEST_NO_RESPONSE",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "message_id": "deadbeefdeadbeefdeadbeefdeadbeef"
+    },
+    "expected_bytes": "BAQTAAAAAQAAABrerb7v3q2+796tvu/erb7vAAAABmVtYWlscw=="
+  },
+  {
+    "id": "QUEUE_NACK",
+    "broker": "queue",
+    "opcode": 26,
+    "frame_type": "REQUEST_NO_RESPONSE",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "message_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "reason": "fail"
+    },
+    "expected_bytes": "BAQaAAAAAQAAACLerb7v3q2+796tvu/erb7vAAAABmVtYWlscwAAAARmYWls"
+  },
+  {
+    "id": "QUEUE_PEEK_DLQ",
+    "broker": "queue",
+    "opcode": 22,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "limit": 10,
+      "offset": 0
+    },
+    "expected_bytes": "BAEWAAAAAQAAABIAAAAGZW1haWxzAAAACgAAAAA="
+  },
+  {
+    "id": "QUEUE_MOVE_TO_QUEUE",
+    "broker": "queue",
+    "opcode": 23,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "message_id": "deadbeefdeadbeefdeadbeefdeadbeef"
+    },
+    "expected_bytes": "BAEXAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
+  },
+  {
+    "id": "QUEUE_DELETE_DLQ",
+    "broker": "queue",
+    "opcode": 24,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails",
+      "message_id": "deadbeefdeadbeefdeadbeefdeadbeef"
+    },
+    "expected_bytes": "BAEYAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
+  },
+  {
+    "id": "QUEUE_PURGE_DLQ",
+    "broker": "queue",
+    "opcode": 25,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails"
+    },
+    "expected_bytes": "BAEZAAAAAQAAAAoAAAAGZW1haWxz"
+  },
+  {
+    "id": "STREAM_CREATE",
+    "broker": "stream",
+    "opcode": 48,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "max_age_ms": null,
+      "max_bytes": null
+    },
+    "expected_bytes": "BAEwAAAAAQAAAAsAAAAGZXZlbnRzAA=="
+  },
+  {
+    "id": "STREAM_CREATE_RETENTION",
+    "broker": "stream",
+    "opcode": 48,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "max_age_ms": 3600000,
+      "max_bytes": 1048576
+    },
+    "expected_bytes": "BAEwAAAAAQAAABsAAAAGZXZlbnRzAwAAAAAANu6AAAAAAAAQAAA="
+  },
+  {
+    "id": "STREAM_EXISTS",
+    "broker": "stream",
+    "opcode": 53,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events"
+    },
+    "expected_bytes": "BAE1AAAAAQAAAAoAAAAGZXZlbnRz"
+  },
+  {
+    "id": "STREAM_DELETE",
+    "broker": "stream",
+    "opcode": 54,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events"
+    },
+    "expected_bytes": "BAE2AAAAAQAAAAoAAAAGZXZlbnRz"
+  },
+  {
+    "id": "STREAM_PUB_JSON",
+    "broker": "stream",
+    "opcode": 49,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "items": [
+        {
+          "key": null,
+          "data_type": "json",
+          "payload": "eyJ4IjoxfQ=="
+        }
+      ]
+    },
+    "expected_bytes": "BAExAAAAAQAAABwAAAAGZXZlbnRzAAAAAQAAAAAACAJ7IngiOjF9"
+  },
+  {
+    "id": "STREAM_PUB_STRING_KEY",
+    "broker": "stream",
+    "opcode": 49,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "items": [
+        {
+          "key": "order-1",
+          "data_type": "string",
+          "payload": "b2s="
+        }
+      ]
+    },
+    "expected_bytes": "BAExAAAAAQAAAB4AAAAGZXZlbnRzAAAAAQAHb3JkZXItMQAAAAMBb2s="
+  },
+  {
+    "id": "STREAM_PUB_BATCH",
+    "broker": "stream",
+    "opcode": 49,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "items": [
+        {
+          "key": null,
+          "data_type": "json",
+          "payload": "eyJ4IjoxfQ=="
+        },
+        {
+          "key": "order-2",
+          "data_type": "raw",
+          "payload": "aGVsbG8="
+        }
+      ]
+    },
+    "expected_bytes": "BAExAAAAAQAAAC8AAAAGZXZlbnRzAAAAAgAAAAAACAJ7IngiOjF9AAdvcmRlci0yAAAABgBoZWxsbw=="
+  },
+  {
+    "id": "STREAM_FETCH",
+    "broker": "stream",
+    "opcode": 50,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "generation": 1,
+      "batch_size": 10,
+      "wait_ms": 5000
+    },
+    "expected_bytes": "BAEyAAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAKAAATiA=="
+  },
+  {
+    "id": "STREAM_JOIN",
+    "broker": "stream",
+    "opcode": 51,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1"
+    },
+    "expected_bytes": "BAEzAAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
+  },
+  {
+    "id": "STREAM_ACK",
+    "broker": "stream",
+    "opcode": 52,
+    "frame_type": "REQUEST_NO_RESPONSE",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "generation": 1,
+      "seq": 42
+    },
+    "expected_bytes": "BAQ0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
+  },
+  {
+    "id": "STREAM_SEEK_END",
+    "broker": "stream",
+    "opcode": 56,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "target": "end"
+    },
+    "expected_bytes": "BAE4AAAAAQAAABEAAAAGZXZlbnRzAAAAAmcxAQ=="
+  },
+  {
+    "id": "STREAM_LEAVE",
+    "broker": "stream",
+    "opcode": 57,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "generation": 1
+    },
+    "expected_bytes": "BAE5AAAAAQAAADwAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAE="
+  },
+  {
+    "id": "STREAM_PEEK_DLT",
+    "broker": "stream",
+    "opcode": 58,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "limit": 10,
+      "offset": 0
+    },
+    "expected_bytes": "BAE6AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAACgAAAAA="
+  },
+  {
+    "id": "STREAM_MOVE_TO_STREAM",
+    "broker": "stream",
+    "opcode": 59,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "seq": 42
+    },
+    "expected_bytes": "BAE7AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
+  },
+  {
+    "id": "STREAM_DELETE_DLT",
+    "broker": "stream",
+    "opcode": 60,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "seq": 42
+    },
+    "expected_bytes": "BAE8AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
+  },
+  {
+    "id": "STREAM_PURGE_DLT",
+    "broker": "stream",
+    "opcode": 61,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1"
+    },
+    "expected_bytes": "BAE9AAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
+  }
+]

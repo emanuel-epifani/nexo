@@ -1,0 +1,108 @@
+# Integration / E2E Test Matrix
+
+Every scenario has a unique ID. Both SDKs (TS, Python) must have a corresponding test.
+Test names are listed as `ts:` and `py:` for easy grep matching.
+
+---
+
+## Store
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| store_basic_crud | Set, get, delete keys — value matches | should perform basic CRUD operations | basic_crud |
+| store_ttl_expiration | Set with TTL, verify expiry after deadline | should expire keys after TTL | ttl_expiration |
+| store_ttl_zero_rejected | TTL=0 is rejected with error | should reject ttl: 0 with an error | ttl_zero_is_error |
+| store_no_ttl_persistent | Key without TTL persists indefinitely | should persist keys without TTL | no_ttl_is_persistent |
+
+## PubSub
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| pubsub_exact_match | Publish on concrete topic, subscriber receives | should handle Exact Matches and ignore noise | exact_match_and_ignore_noise |
+| pubsub_wildcard_plus | Subscribe with `+`, receive from matching single-level | should handle Single-Level Wildcard (+) with strict isolation | single_level_wildcard |
+| pubsub_wildcard_hash | Subscribe with `#`, receive from matching multi-level | should handle Multi-Level Wildcard (#) correctly | multi_level_wildcard |
+| pubsub_clear_retained | Publish empty payload to clear retained message | should clear retained messages | clear_retained |
+| pubsub_reject_invalid_ttl | Invalid TTL values are rejected | should reject invalid ttl values | reject_invalid_ttl |
+| pubsub_async_callbacks | Async callbacks work correctly | should support async callbacks | async_callback |
+| pubsub_slow_callback_no_block | Slow callback doesn't block other operations | should not block other operations when callback is slow | slow_callback_does_not_block_store |
+| pubsub_parallel_subscriptions | Multiple parallel subscriptions on same topic | should run parallel subscriptions independently | parallel_subscriptions |
+
+## Queue
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| queue_full_lifecycle | Create, push, subscribe, consume, ack | should handle full lifecycle: Push -> Subscribe -> Ack | full_lifecycle_push_subscribe_ack |
+| queue_priority | Higher priority message consumed before lower | should respect priority (High before Low) | priority_high_before_low |
+| queue_push_batch | Push batch of messages, verify all consumable | should push batch of messages | push_batch |
+| queue_push_batch_mixed_priority | Batch with mixed priorities, ordering respected | should push batch with mixed priorities | push_batch_mixed_priorities |
+| queue_push_batch_empty | Empty pushBatch handled gracefully | should handle empty pushBatch gracefully | empty_push_batch |
+| queue_nack_dlq | Explicit NACK persists failure reason in DLQ | Should handle explicit NACK and persist failure reason in DLQ | nack_persists_failure_reason |
+| queue_retry_dlq | Message exceeds max_retries, lands in DLQ | should move failed messages to DLQ | move_failed_to_dlq |
+| queue_dlq_workflow | DLQ full workflow: peek, moveToQueue, delete, purge | Should handle DLQ workflow: peek, moveToQueue, delete, purge | dlq_workflow_peek_move_delete_purge |
+| queue_concurrency_serial | concurrency=1 serializes callbacks | should serialize callbacks with concurrency=1 | serialize_callbacks_concurrency_1 |
+| queue_concurrency_parallel | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |
+| queue_multiple_subscribers | Multiple parallel subscribers on same queue | should allow multiple parallel subscribers on the same queue (in-process scaling) | multiple_parallel_subscribers |
+| queue_no_dlq_on_shutdown | Graceful shutdown requeues via visibility timeout | should not DLQ messages on graceful shutdown (requeue via visibility timeout) | no_dlq_on_graceful_shutdown |
+| queue_stop_on_delete | Consumer stops when queue is deleted during subscribe | should stop consumer when queue is deleted during subscribe | stop_consumer_when_queue_deleted |
+| queue_stop_on_nonexistent | Subscribe to non-existent queue fails gracefully | should stop consumer when subscribing to non-existent queue | stop_consumer_nonexistent_queue |
+| queue_reject_batch_size_zero | batchSize=0 in subscribe is rejected | should reject batchSize=0 in subscribe | reject_batch_size_zero |
+| queue_reject_concurrency_zero | concurrency=0 in subscribe is rejected | should reject concurrency=0 in subscribe | reject_concurrency_zero |
+
+## Stream
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| stream_happy_path | Create stream, publish, fetch with consumer group | should support Happy Path (Publish/Subscribe) | happy_path_publish_subscribe |
+| stream_subscribe_nonexistent | Subscribe to non-existent stream fails | should fail subscribe when stream does not exist | subscribe_nonexistent_stream |
+| stream_independent_groups | Two groups each receive all messages independently | Independent CONSUMER GROUPS => should deliver all messages to each group | independent_consumer_groups |
+| stream_same_group_distribution | Same group, multiple consumers, no duplicate deliveries | Same CONSUMER GROUP => should distribute messages without duplicates | same_group_no_duplicates |
+| stream_consumer_disconnect | Consumer disconnect with zero data loss | should handle consumer disconnect with zero data loss | consumer_disconnect_zero_data_loss |
+| stream_history_sync | New groups start from beginning (history sync) | should support History Sync (new groups start from beginning) | history_sync_new_group_from_beginning |
+| stream_stop_quickly | Stop subscription quickly, not wait for long-poll timeout | should stop subscription quickly (not wait for long-poll timeout) | stop_subscription_quickly |
+| stream_ordering_concurrency_1 | Default concurrency=1 preserves ordering | should preserve ordering with default concurrency=1 | preserve_ordering_default_concurrency |
+| stream_parallel_concurrency | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |
+| stream_seek | Seek to beginning and end | should support Seek (Beginning/End) | seek_beginning_and_end |
+| stream_stop_during_long_poll | Stop quickly during long-poll idle (no messages) | should stop quickly during long-poll wait (no messages available) | stop_quickly_during_long_poll_idle |
+| stream_no_delivery_after_stop | No messages delivered after stop() returns | should not deliver messages after stop() returns | no_delivery_after_stop |
+| stream_publish_batch_seq | Publish batch and return seq numbers | should publish batch and return seq numbers | publish_batch_returns_seq_numbers |
+| stream_publish_batch_keys | Publish batch with keys | should publish batch with keys | publish_batch_with_keys |
+| stream_publish_string_key | Publish with string key, verify receipt | should publish with string key and verify receipt | publish_with_string_key |
+| stream_publish_bytes_key | Publish with Uint8Array key, verify receipt | should publish with Uint8Array key and verify receipt | publish_with_bytes_key |
+| stream_publish_bytes_data | Publish Uint8Array data, receive raw bytes | should publish Uint8Array data and receive raw bytes back | publish_bytes_data |
+| stream_publish_batch_empty | Empty publishBatch handled gracefully | should handle empty publishBatch gracefully | empty_publish_batch |
+
+## Connection
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| conn_request_timeout | Request times out when server doesn't respond | should reject with RequestTimeoutError when server does not respond in time | request_timeout |
+| conn_fire_and_forget_disconnected | Fire-and-forget silently dropped when disconnected | sendFireAndForget should silently return when disconnected (no throw) | fire_and_forget_when_disconnected |
+| conn_reject_pending_on_disconnect | Pending requests rejected on disconnect | should reject pending requests on disconnect | reject_pending_requests_on_disconnect |
+| conn_signal_listeners | SIGINT/SIGTERM listeners registered and removed | should register and remove SIGINT/SIGTERM listeners per client | signal_listeners_registered_and_removed |
+| conn_multiple_clients_listeners | Multiple clients register listeners independently | should register listeners for multiple clients independently | multiple_clients_independent_listeners |
+
+## Reconnection
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| conn_pubsub_auto_resubscribe | After reconnect, subscriptions are restored | PUBSUB: Should auto-resubscribe after connection loss | pubsub_auto_resubscribe |
+| conn_queue_resume_consume | After reconnect, consumer loop resumes | QUEUE: Should resume consuming after connection loss | queue_resume_consuming |
+| conn_stream_rejoin_group | After reconnect, consumer rejoins group | STREAM: Should resume consuming after connection loss (Rejoin Group) | stream_resume_consuming |
+| conn_queue_inflight_redelivered | In-flight message redelivered after crash (at-least-once) | QUEUE: In-flight message should be redelivered after crash (at-least-once) | queue_inflight_redelivered |
+| conn_queue_push_during_disconnect | push() during disconnect fails with predictable error | QUEUE: push() during disconnect should fail with predictable error | queue_push_during_disconnect_fails |
+| conn_queue_double_crash | Survive double crash without duplicating consumer loops | QUEUE: Should survive double crash without duplicating consumer loops | queue_survive_double_crash |
+| conn_queue_stop_during_disconnect | stop() during disconnect prevents loop from resuming | QUEUE: stop() during disconnect should prevent loop from resuming | queue_stop_during_disconnect |
+| conn_pubsub_topics_before_after_crash | Receive messages on topics subscribed before AND after crash | PUBSUB: Should receive messages on topics subscribed before AND after crash | pubsub_topics_before_and_after_crash |
+| conn_stream_inflight_redelivered | In-flight stream message redelivered after crash | STREAM: In-flight message should be redelivered after crash (at-least-once) | stream_inflight_redelivered |
+| conn_stream_same_key_serial | Same-key messages delivered serially via TCP | STREAM: Same-key messages should be delivered serially via TCP | stream_same_key_serial_ordering |
+
+## Cross-Broker
+
+| ID | Description | TS test | Python test |
+|---|---|---|---|
+| cross_store_binary | Store and retrieve raw Buffer/bytes | STORE: Should store and retrieve raw Buffer | store_binary_payload |
+| cross_queue_binary | Push and pop raw Buffer/bytes | QUEUE: Should push and pop raw Buffer | queue_binary_payload |
+| cross_pubsub_binary | Publish and subscribe raw Buffer/bytes | PUBSUB: Should publish and subscribe raw Buffer | pubsub_binary_payload |
+| cross_stream_binary | Stream raw Buffer/bytes | STREAM: Should stream raw Buffer | stream_binary_payload |
+| cross_json_special_chars | JSON serialization with special chars and nested objects | should handle JSON serialization with special chars and nested objects | json_special_chars_and_nested |
+| cross_empty_string_vs_null | Distinguish between empty string and null | should distinguish between empty string and null | distinguish_empty_string_and_null |

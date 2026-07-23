@@ -35,13 +35,13 @@ pub const OP_S_PURGE_DLT: u8 = 0x3D;
 // ==========================================
 
 #[derive(Debug)]
-struct PubItem {
-    key: Option<Bytes>,
-    payload: Bytes,
+pub struct PubItem {
+    pub key: Option<Bytes>,
+    pub payload: Bytes,
 }
 
 #[derive(Debug)]
-enum StreamCommand {
+pub enum StreamCommand {
     Create { topic: String, options: StreamCreateOptions },
     Publish { topic: String, items: Vec<PubItem> },
     Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
@@ -58,7 +58,7 @@ enum StreamCommand {
 }
 
 impl StreamCommand {
-    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;

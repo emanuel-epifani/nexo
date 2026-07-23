@@ -195,7 +195,7 @@ class FrameWriter:
                 self._buf[self._offset : self._offset + length] = encoded
             self._offset += length
         else:
-            json_bytes = json.dumps(data if data is not None else None).encode("utf-8")
+            json_bytes = json.dumps(data if data is not None else None, separators=(',', ':')).encode("utf-8")
             length = len(json_bytes)
             self._ensure(1 + length)
             self._buf[self._offset] = DataType.JSON
@@ -228,7 +228,7 @@ class FrameWriter:
                 self._buf[self._offset : self._offset + length] = encoded
             self._offset += length
         else:
-            json_bytes = json.dumps(data if data is not None else None).encode("utf-8")
+            json_bytes = json.dumps(data if data is not None else None, separators=(',', ':')).encode("utf-8")
             length = len(json_bytes)
             self._ensure(4 + 1 + length)
             struct.pack_into(">I", self._buf, self._offset, 1 + length)

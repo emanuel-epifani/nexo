@@ -22,19 +22,19 @@ pub const OP_MAP_DEL: u8 = 0x04;
 // ==========================================
 
 #[derive(Debug)]
-enum StoreCommand {
+pub enum StoreCommand {
     Map(MapCmd),
 }
 
 #[derive(Debug)]
-enum MapCmd {
+pub enum MapCmd {
     Set { key: String, ttl: Option<u64>, value: Bytes },
     Get { key: String },
     Del { key: String },
 }
 
 impl MapCmd {
-    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_MAP_SET => {
                 let key = cursor.read_string()?;
@@ -57,7 +57,7 @@ impl MapCmd {
 }
 
 impl StoreCommand {
-    fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
+    pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_MAP_SET..=OP_MAP_DEL => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
             _ => Err(ParseError::Invalid(format!("Unknown Store opcode: 0x{:02X}", opcode))),
