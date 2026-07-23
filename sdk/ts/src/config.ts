@@ -9,7 +9,6 @@ export interface NexoConnectionConfig {
   port: number;
   requestTimeoutMs: number;
   reconnectDelayMs: number;
-  sweepIntervalMs: number;
   backoff: {
     short: number;
     long: number;
@@ -21,7 +20,6 @@ export const DEFAULT_CONFIG = {
   connection: {
     requestTimeoutMs: 15000,
     reconnectDelayMs: 1500,
-    sweepIntervalMs: 1000,
     backoff: {
       short: 1000,
       long: 2000,

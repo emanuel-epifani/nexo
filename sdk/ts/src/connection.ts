@@ -14,12 +14,10 @@ export class NexoConnection extends EventEmitter {
   private pending = new Map<number, {
     resolve: (res: { status: number, data: Buffer }) => void,
     reject: (err: Error) => void,
-    deadline: number,
-    timeoutMs: number
+    timer: NodeJS.Timeout,
   }>();
   private readonly config: NexoConnectionConfig;
   private readonly logger: Logger;
-  private sweepInterval: NodeJS.Timeout | null = null;
 
   public onPush?: (topic: string, data: any) => void;
 
@@ -47,29 +45,7 @@ export class NexoConnection extends EventEmitter {
 
   async connect(): Promise<void> {
     this.shouldReconnect = true;
-    this.startSweep();
     return this.createSocketAndConnect();
-  }
-
-  private startSweep() {
-    if (this.sweepInterval) return;
-    this.sweepInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [id, req] of this.pending) {
-        if (now > req.deadline) {
-          this.pending.delete(id);
-          req.reject(new RequestTimeoutError(req.timeoutMs));
-        }
-      }
-    }, this.config.sweepIntervalMs);
-    this.sweepInterval.unref();
-  }
-
-  private stopSweep() {
-    if (this.sweepInterval) {
-      clearInterval(this.sweepInterval);
-      this.sweepInterval = null;
-    }
   }
 
   private createSocketAndConnect(): Promise<void> {
@@ -114,6 +90,7 @@ export class NexoConnection extends EventEmitter {
       }
 
       this.pending.forEach(p => {
+        clearTimeout(p.timer);
         p.reject(new ConnectionClosedError());
       });
       this.pending.clear();
@@ -228,8 +205,16 @@ export class NexoConnection extends EventEmitter {
         return reject(new NotConnectedError());
       }
 
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(new RequestTimeoutError(timeoutMs));
+        }
+      }, timeoutMs);
+      timer.unref();
+
       this.pending.set(id, {
         resolve: (res) => {
+          clearTimeout(timer);
           if (res.status === ResponseStatus.ERR) {
             // Error payload is the raw utf8 message (read to end of frame).
             const errMsg = res.data.toString('utf8');
@@ -243,8 +228,7 @@ export class NexoConnection extends EventEmitter {
           resolve({ status: res.status, cursor: new Cursor(res.data) });
         },
         reject,
-        deadline: Date.now() + timeoutMs,
-        timeoutMs
+        timer,
       });
 
       this.socket.write(packet);
@@ -272,8 +256,10 @@ export class NexoConnection extends EventEmitter {
   disconnect() {
     this.shouldReconnect = false;
     this.isReconnecting = false;
-    this.stopSweep();
-    this.pending.forEach(p => p.reject(new ConnectionClosedError()));
+    this.pending.forEach(p => {
+      clearTimeout(p.timer);
+      p.reject(new ConnectionClosedError());
+    });
     this.pending.clear();
     this.socket.destroy();
     this.isConnected = false;
