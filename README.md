@@ -66,10 +66,6 @@ docker run -d -p 7654:7654 emanuelepifani/nexo
 This exposes:
 - **Port 7654 (TCP)** — Main server socket for SDK clients
 
-> Docker image: [`emanuelepifani/nexo`](https://hub.docker.com/r/emanuelepifani/nexo) on Docker Hub.
->
-> See the [Deployment Guide](https://nexo-docs-hub.vercel.app/guide/deployment.html) for configuration options and production setup.
-
 ## Architecture
 
 Nexo runs as a **single binary** with a **single TCP socket**. All four brokers share one connection but run on **isolated thread pools** — heavy processing on the *Queue* won't block *Pub/Sub* latency.
