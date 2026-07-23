@@ -187,15 +187,24 @@ async function main() {
     // 2. Update version in all files
     updateVersion(newVersion);
 
-    // 2b. Update Cargo.lock (by running cargo check)
-    console.log("crab Updating Cargo.lock...");
+    // 2b. Update lockfiles
+    console.log("📦 Updating Cargo.lock...");
     run('cargo check'); // This updates Cargo.lock automatically
+
+    console.log("📦 Updating sdk/ts/package-lock.json...");
+    run('cd sdk/ts && npm install --package-lock-only');
+
+    console.log("📦 Updating sdk/py/uv.lock...");
+    run('cd sdk/py && uv lock');
 
     // 3. Stage files
     console.log("\n📦 Staging files...");
-    const filesToStage = [...FILES.map(f => f.path), 'Cargo.lock'].filter(p => 
-        fs.existsSync(path.join(ROOT_DIR, p))
-    );
+    const filesToStage = [
+        ...FILES.map(f => f.path),
+        'Cargo.lock',
+        'sdk/ts/package-lock.json',
+        'sdk/py/uv.lock'
+    ].filter(p => fs.existsSync(path.join(ROOT_DIR, p)));
     run(`git add ${filesToStage.join(' ')}`);
 
     // 4. Commit

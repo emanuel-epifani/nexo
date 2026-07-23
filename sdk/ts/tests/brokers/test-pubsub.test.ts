@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { nexo } from '../nexo';
+import { NexoClient } from '../../src/client';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
@@ -174,5 +175,176 @@ describe('PUBSUB', () => {
 
         await nexo.pubsub(topicA).unsubscribe();
         await nexo.pubsub(topicB).unsubscribe();
+    });
+
+    // ── Edge cases ──────────────────────────────────────────────
+
+    it('should deliver retained message to new subscriber', async () => {
+        const topic = `retained-new-${randomUUID()}`;
+
+        await nexo.pubsub<string>(topic).publish('retained-value', { retain: true });
+
+        const received: string[] = [];
+        await nexo.pubsub<string>(topic).subscribe((data) => received.push(data));
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0]).toBe('retained-value');
+
+        await nexo.pubsub(topic).unsubscribe();
+        await nexo.pubsub(topic).clear();
+    });
+
+    it('should overwrite retained message on second publish', async () => {
+        const topic = `retained-overwrite-${randomUUID()}`;
+
+        await nexo.pubsub<string>(topic).publish('first', { retain: true });
+        await nexo.pubsub<string>(topic).publish('second', { retain: true });
+
+        const received: string[] = [];
+        await nexo.pubsub<string>(topic).subscribe((data) => received.push(data));
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0]).toBe('second');
+
+        await nexo.pubsub(topic).unsubscribe();
+        await nexo.pubsub(topic).clear();
+    });
+
+    it('should not deliver retained message after TTL expiry', async () => {
+        const topic = `retained-ttl-${randomUUID()}`;
+
+        await nexo.pubsub<string>(topic).publish('temp-retained', { retain: true, ttl: 1 });
+
+        // Wait for TTL to expire
+        await new Promise(r => setTimeout(r, 1200));
+
+        const received: string[] = [];
+        await nexo.pubsub<string>(topic).subscribe((data) => received.push(data));
+        await new Promise(r => setTimeout(r, 300));
+        expect(received).toEqual([]);
+
+        await nexo.pubsub(topic).unsubscribe();
+    });
+
+    it('should stop delivery after unsubscribe', async () => {
+        const topic = `unsub-stop-${randomUUID()}`;
+
+        const received: any[] = [];
+        await nexo.pubsub(topic).subscribe((data) => received.push(data));
+
+        await nexo.pubsub(topic).publish({ msg: 'before' });
+        await waitFor(() => expect(received.length).toBe(1));
+
+        await nexo.pubsub(topic).unsubscribe();
+
+        await nexo.pubsub(topic).publish({ msg: 'after' });
+        await new Promise(r => setTimeout(r, 300));
+        expect(received.length).toBe(1);
+    });
+
+    it('should match combined wildcards a/+/b/#', async () => {
+        const baseId = randomUUID();
+        const pattern = `combo-${baseId}/+/b/#`;
+
+        const received: any[] = [];
+        await nexo.pubsub(pattern).subscribe((data) => received.push(data));
+
+        // Positive: a/x/b/y/z matches
+        await nexo.pubsub(`combo-${baseId}/x/b/y/z`).publish({ id: 'deep-match' });
+        // Positive: a/x/b matches (+ matches x, # matches zero levels)
+        await nexo.pubsub(`combo-${baseId}/x/b`).publish({ id: 'shallow-match' });
+
+        // Negative: a/x/c/y — b is not at position 2
+        await nexo.pubsub(`combo-${baseId}/x/c/y`).publish({ id: 'fail-wrong-segment' });
+
+        await waitFor(() => expect(received.length).toBe(2));
+        const ids = received.map(r => r.id).sort();
+        expect(ids).toEqual(['deep-match', 'shallow-match']);
+
+        await nexo.pubsub(pattern).unsubscribe();
+    });
+
+    it('should broadcast to 3+ subscribers on same topic', async () => {
+        const topic = `broadcast-${randomUUID()}`;
+
+        const client1 = await NexoClient.connect();
+        const client2 = await NexoClient.connect();
+
+        const recv1: any[] = [];
+        const recv2: any[] = [];
+        const recv3: any[] = [];
+
+        await client1.pubsub(topic).subscribe((d) => recv1.push(d));
+        await client2.pubsub(topic).subscribe((d) => recv2.push(d));
+        await nexo.pubsub(topic).subscribe((d) => recv3.push(d));
+
+        await nexo.pubsub(topic).publish({ msg: 'broadcast' });
+
+        await waitFor(() => {
+            expect(recv1.length).toBe(1);
+            expect(recv2.length).toBe(1);
+            expect(recv3.length).toBe(1);
+        });
+        expect(recv1[0].msg).toBe('broadcast');
+        expect(recv2[0].msg).toBe('broadcast');
+        expect(recv3[0].msg).toBe('broadcast');
+
+        await client1.pubsub(topic).unsubscribe();
+        await client2.pubsub(topic).unsubscribe();
+        await nexo.pubsub(topic).unsubscribe();
+        await client1.disconnect();
+        await client2.disconnect();
+    });
+
+    it('should clean up subscriber on disconnect without breaking topic', async () => {
+        const topic = `disconnect-cleanup-${randomUUID()}`;
+
+        const tempClient = await NexoClient.connect();
+        await tempClient.pubsub(topic).subscribe(() => {});
+        await new Promise(r => setTimeout(r, 100));
+
+        // Disconnect temp client — server should clean up its subscription
+        await tempClient.disconnect();
+        await new Promise(r => setTimeout(r, 300));
+
+        // A new subscriber should still receive messages normally
+        const received: any[] = [];
+        await nexo.pubsub(topic).subscribe((d) => received.push(d));
+        await nexo.pubsub(topic).publish({ msg: 'after-disconnect' });
+
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0].msg).toBe('after-disconnect');
+
+        await nexo.pubsub(topic).unsubscribe();
+    });
+
+    it('should deliver retained messages to wildcard + subscriber', async () => {
+        const baseId = randomUUID();
+
+        await nexo.pubsub(`ret-plus-${baseId}/x`).publish('val-x', { retain: true });
+        await nexo.pubsub(`ret-plus-${baseId}/y`).publish('val-y', { retain: true });
+
+        const received: string[] = [];
+        await nexo.pubsub<string>(`ret-plus-${baseId}/+`).subscribe((d) => received.push(d));
+
+        await waitFor(() => expect(received.length).toBe(2));
+        expect(received.sort()).toEqual(['val-x', 'val-y']);
+
+        await nexo.pubsub(`ret-plus-${baseId}/+`).unsubscribe();
+        await nexo.pubsub(`ret-plus-${baseId}/x`).clear();
+        await nexo.pubsub(`ret-plus-${baseId}/y`).clear();
+    });
+
+    it('should deliver retained messages to wildcard # subscriber', async () => {
+        const baseId = randomUUID();
+
+        await nexo.pubsub(`ret-hash-${baseId}/a/b/c`).publish('deep', { retain: true });
+
+        const received: string[] = [];
+        await nexo.pubsub<string>(`ret-hash-${baseId}/#`).subscribe((d) => received.push(d));
+
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0]).toBe('deep');
+
+        await nexo.pubsub(`ret-hash-${baseId}/#`).unsubscribe();
+        await nexo.pubsub(`ret-hash-${baseId}/a/b/c`).clear();
     });
 });

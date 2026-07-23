@@ -435,4 +435,113 @@ describe('STREAM', () => {
         const seqs = await nexo.stream(topic).publishBatch([]);
         expect(seqs.length).toBe(0);
     });
+
+    // ── Edge cases ──────────────────────────────────────────────
+
+    it('should return exists=true after create, false before', async () => {
+        const topic = `stream-exists-${randomUUID()}`;
+        expect(await nexo.stream(topic).exists()).toBe(false);
+        await nexo.stream(topic).create();
+        expect(await nexo.stream(topic).exists()).toBe(true);
+        await nexo.stream(topic).delete();
+        expect(await nexo.stream(topic).exists()).toBe(false);
+    });
+
+    it('should be idempotent on create (create twice succeeds)', async () => {
+        const topic = `stream-idempotent-${randomUUID()}`;
+        await nexo.stream(topic).create();
+        await nexo.stream(topic).create();
+        expect(await nexo.stream(topic).exists()).toBe(true);
+        await nexo.stream(topic).delete();
+    });
+
+    it('should fail publish to non-existent stream', async () => {
+        const topic = `stream-pub-missing-${randomUUID()}`;
+        await expect(nexo.stream(topic).publish({ x: 1 })).rejects.toThrow();
+    });
+
+    it('should fail operations after delete', async () => {
+        const topic = `stream-del-ops-${randomUUID()}`;
+        await nexo.stream(topic).create();
+        await nexo.stream(topic).delete();
+        await expect(nexo.stream(topic).publish({ x: 1 })).rejects.toThrow();
+        await expect(
+            clientA.stream(topic).subscribe('g-del', () => {})
+        ).rejects.toThrow();
+    });
+
+    it('should return empty array from peekDlt when DLT is empty', async () => {
+        const topic = `stream-dlt-empty-${randomUUID()}`;
+        const group = 'g-dlt-empty';
+        await nexo.stream(topic).create();
+        // Create the group by subscribing and immediately stopping
+        const sub = await clientA.stream(topic).subscribe(group, () => {});
+        await sub.stop();
+        const entries = await nexo.stream(topic).peekDlt(group, 10, 0);
+        expect(entries).toEqual([]);
+        await nexo.stream(topic).delete();
+    });
+
+    it('should return 0 from purgeDlt when DLT is empty', async () => {
+        const topic = `stream-dlt-purge-empty-${randomUUID()}`;
+        const group = 'g-dlt-purge';
+        await nexo.stream(topic).create();
+        // Create the group by subscribing and immediately stopping
+        const sub = await clientA.stream(topic).subscribe(group, () => {});
+        await sub.stop();
+        const count = await nexo.stream(topic).purgeDlt(group);
+        expect(count).toBe(0);
+        await nexo.stream(topic).delete();
+    });
+
+    it('should resubscribe same group after stop and receive only new messages', async () => {
+        const topic = `stream-resub-${randomUUID()}`;
+        const group = 'g-resub';
+        await nexo.stream(topic).create();
+
+        const recv1: any[] = [];
+        const sub1 = await clientA.stream(topic).subscribe(group, (d) => recv1.push(d));
+        await nexo.stream(topic).publish({ i: 1 });
+        await nexo.stream(topic).publish({ i: 2 });
+        await waitFor(() => expect(recv1.length).toBe(2));
+        await sub1.stop();
+
+        // Publish while no consumer is active
+        await nexo.stream(topic).publish({ i: 3 });
+
+        // Resubscribe — should receive only msg 3 (msgs 1-2 were acked)
+        const recv2: any[] = [];
+        const sub2 = await clientA.stream(topic).subscribe(group, (d) => recv2.push(d));
+        await waitFor(() => expect(recv2.length).toBe(1));
+        expect(recv2[0].i).toBe(3);
+        await sub2.stop();
+
+        await nexo.stream(topic).delete();
+    });
+
+    it('should deliver messages to multiple independent groups simultaneously', async () => {
+        const topic = `stream-multi-groups-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        const recvA: any[] = [];
+        const recvB: any[] = [];
+        const recvC: any[] = [];
+
+        const subA = await clientA.stream(topic).subscribe('multi-a', (d) => recvA.push(d));
+        const subB = await clientB.stream(topic).subscribe('multi-b', (d) => recvB.push(d));
+        const subC = await clientA.stream(topic).subscribe('multi-c', (d) => recvC.push(d));
+
+        for (let i = 0; i < 5; i++) await nexo.stream(topic).publish({ i });
+
+        await waitFor(() => {
+            expect(recvA.length).toBe(5);
+            expect(recvB.length).toBe(5);
+            expect(recvC.length).toBe(5);
+        });
+
+        await subA.stop();
+        await subB.stop();
+        await subC.stop();
+        await nexo.stream(topic).delete();
+    });
 });

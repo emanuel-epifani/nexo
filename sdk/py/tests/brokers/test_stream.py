@@ -375,3 +375,105 @@ class TestStream:
 
         seqs = await nexo.stream(topic).publish_batch([])
         assert len(seqs) == 0
+
+    # ── Edge cases ──────────────────────────────────────────────
+
+    async def test_exists_true_after_create_false_before(self, nexo: NexoClient):
+        topic = f"stream-exists-{uuid.uuid4()}"
+        assert await nexo.stream(topic).exists() is False
+        await nexo.stream(topic).create()
+        assert await nexo.stream(topic).exists() is True
+        await nexo.stream(topic).delete()
+        assert await nexo.stream(topic).exists() is False
+
+    async def test_create_idempotent(self, nexo: NexoClient):
+        topic = f"stream-idempotent-{uuid.uuid4()}"
+        await nexo.stream(topic).create()
+        await nexo.stream(topic).create()
+        assert await nexo.stream(topic).exists() is True
+        await nexo.stream(topic).delete()
+
+    async def test_publish_nonexistent_stream_fails(self, nexo: NexoClient):
+        topic = f"stream-pub-missing-{uuid.uuid4()}"
+        with pytest.raises(Exception):
+            await nexo.stream(topic).publish({"x": 1})
+
+    async def test_operations_after_delete_fail(self, nexo: NexoClient):
+        topic = f"stream-del-ops-{uuid.uuid4()}"
+        await nexo.stream(topic).create()
+        await nexo.stream(topic).delete()
+        with pytest.raises(Exception):
+            await nexo.stream(topic).publish({"x": 1})
+        with pytest.raises(Exception):
+            await nexo.stream(topic).subscribe("g-del", lambda _: None)
+
+    async def test_peek_dlt_empty_returns_empty(self, nexo: NexoClient):
+        topic = f"stream-dlt-empty-{uuid.uuid4()}"
+        group = "g-dlt-empty"
+        await nexo.stream(topic).create()
+        sub = await nexo.stream(topic).subscribe(group, lambda _: None)
+        await sub["stop"]()
+        entries = await nexo.stream(topic).peek_dlt(group, 10, 0)
+        assert entries == []
+        await nexo.stream(topic).delete()
+
+    async def test_purge_dlt_empty_returns_zero(self, nexo: NexoClient):
+        topic = f"stream-dlt-purge-empty-{uuid.uuid4()}"
+        group = "g-dlt-purge"
+        await nexo.stream(topic).create()
+        sub = await nexo.stream(topic).subscribe(group, lambda _: None)
+        await sub["stop"]()
+        count = await nexo.stream(topic).purge_dlt(group)
+        assert count == 0
+        await nexo.stream(topic).delete()
+
+    async def test_resubscribe_same_group_after_stop(self, nexo: NexoClient):
+        topic = f"stream-resub-{uuid.uuid4()}"
+        group = "g-resub"
+        await nexo.stream(topic).create()
+
+        recv1: list = []
+        sub1 = await nexo.stream(topic).subscribe(group, lambda d: recv1.append(d))
+        await nexo.stream(topic).publish({"i": 1})
+        await nexo.stream(topic).publish({"i": 2})
+        await wait_for(lambda: len(recv1) == 2)
+        await sub1["stop"]()
+
+        await nexo.stream(topic).publish({"i": 3})
+
+        recv2: list = []
+        sub2 = await nexo.stream(topic).subscribe(group, lambda d: recv2.append(d))
+        await wait_for(lambda: len(recv2) == 1)
+        assert recv2[0]["i"] == 3
+        await sub2["stop"]()
+
+        await nexo.stream(topic).delete()
+
+    async def test_multiple_groups_simultaneous_delivery(self, nexo: NexoClient):
+        topic = f"stream-multi-groups-{uuid.uuid4()}"
+        await nexo.stream(topic).create()
+
+        client_a = await NexoClient.connect()
+        client_b = await NexoClient.connect()
+        try:
+            recv_a: list = []
+            recv_b: list = []
+            recv_c: list = []
+
+            sub_a = await client_a.stream(topic).subscribe("multi-a", lambda d: recv_a.append(d))
+            sub_b = await client_b.stream(topic).subscribe("multi-b", lambda d: recv_b.append(d))
+            sub_c = await nexo.stream(topic).subscribe("multi-c", lambda d: recv_c.append(d))
+
+            for i in range(5):
+                await nexo.stream(topic).publish({"i": i})
+
+            await wait_for(lambda: len(recv_a) == 5 and len(recv_b) == 5 and len(recv_c) == 5)
+
+            await sub_a["stop"]()
+            await sub_b["stop"]()
+            await sub_c["stop"]()
+        finally:
+            client_a.disconnect()
+            client_b.disconnect()
+
+        await nexo.stream(topic).delete()

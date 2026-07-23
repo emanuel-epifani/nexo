@@ -298,63 +298,72 @@ class NexoQueue(Generic[T]):
 
         async def loop():
             nonlocal active
-            while active:
-                if not self._conn.is_connected:
-                    await asyncio.sleep(
-                        DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
-                    )
-                    continue
-
-                try:
+            try:
+                while active:
                     if not self._conn.is_connected:
-                        continue
-
-                    messages = await QueueCommands.consume(
-                        self._conn, self.name, batch_size, wait_ms
-                    )
-
-                    if not messages:
-                        continue
-
-                    async def process_msg(msg):
                         if not active:
-                            return
-                        try:
-                            result = callback(msg["data"])
-                            if asyncio.iscoroutine(result):
-                                await result
-                            QueueCommands.ack(self._conn, self.name, msg["id"])
-                        except Exception as e:
-                            if not self._conn.is_connected:
-                                return
-                            reason = str(e)
-                            self._logger.error(
-                                f"[Queue:{self.name}] Consumer error, sending NACK. Reason: {reason}"
-                            )
-                            QueueCommands.nack(self._conn, self.name, msg["id"], reason)
-
-                    await run_concurrent(messages, concurrency, process_msg)
-
-                except Exception as e:
-                    if not active:
-                        break
-                    if (
-                        not self._conn.is_connected
-                        or isinstance(e, (ConnectionClosedError, RequestTimeoutError))
-                    ):
+                            break
                         await asyncio.sleep(
                             DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
                         )
                         continue
-                    self._logger.error(f"[Queue:{self.name}] Consumer stopping: {e}")
-                    break
+
+                    try:
+                        if not self._conn.is_connected:
+                            continue
+
+                        messages = await QueueCommands.consume(
+                            self._conn, self.name, batch_size, wait_ms
+                        )
+
+                        if not messages:
+                            continue
+
+                        async def process_msg(msg):
+                            if not active:
+                                return
+                            try:
+                                result = callback(msg["data"])
+                                if asyncio.iscoroutine(result):
+                                    await result
+                                QueueCommands.ack(self._conn, self.name, msg["id"])
+                            except Exception as e:
+                                if not self._conn.is_connected:
+                                    return
+                                reason = str(e)
+                                self._logger.error(
+                                    f"[Queue:{self.name}] Consumer error, sending NACK. Reason: {reason}"
+                                )
+                                QueueCommands.nack(self._conn, self.name, msg["id"], reason)
+
+                        await run_concurrent(messages, concurrency, process_msg)
+
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        if not active:
+                            break
+                        if (
+                            not self._conn.is_connected
+                            or isinstance(e, (ConnectionClosedError, RequestTimeoutError))
+                        ):
+                            if not active:
+                                break
+                            await asyncio.sleep(
+                                DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
+                            )
+                            continue
+                        self._logger.error(f"[Queue:{self.name}] Consumer stopping: {e}")
+                        break
+            except asyncio.CancelledError:
+                pass
 
         task = asyncio.create_task(loop())
         task.add_done_callback(
             lambda t: self._logger.error(
                 f"[CRITICAL] Queue loop crashed for {self.name}", t.exception()
             )
-            if t.exception()
+            if not t.cancelled() and t.exception()
             else None
         )
 

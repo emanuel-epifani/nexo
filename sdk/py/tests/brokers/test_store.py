@@ -43,3 +43,32 @@ class TestStore:
 
         await asyncio.sleep(0.2)
         assert await nexo.store.map.get(key) == "forever"
+
+    # ── Edge cases ──────────────────────────────────────────────
+
+    async def test_get_nonexistent_returns_none(self, nexo: NexoClient):
+        key = f"missing:{uuid.uuid4()}"
+        assert await nexo.store.map.get(key) is None
+
+    async def test_del_nonexistent_is_idempotent(self, nexo: NexoClient):
+        key = f"del-missing:{uuid.uuid4()}"
+        await nexo.store.map.delete(key)
+        assert await nexo.store.map.get(key) is None
+
+    async def test_overwrite_existing_key(self, nexo: NexoClient):
+        key = f"overwrite:{uuid.uuid4()}"
+        await nexo.store.map.set(key, "first")
+        assert await nexo.store.map.get(key) == "first"
+
+        await nexo.store.map.set(key, "second")
+        assert await nexo.store.map.get(key) == "second"
+
+        await nexo.store.map.delete(key)
+
+    async def test_large_value_1mb(self, nexo: NexoClient):
+        key = f"large:{uuid.uuid4()}"
+        large_value = "x" * (1024 * 1024)
+        await nexo.store.map.set(key, large_value)
+        result = await nexo.store.map.get(key)
+        assert result == large_value
+        await nexo.store.map.delete(key)

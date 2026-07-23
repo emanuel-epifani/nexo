@@ -13,6 +13,10 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | store_ttl_expiration | Set with TTL, verify expiry after deadline | should expire keys after TTL | ttl_expiration |
 | store_ttl_zero_rejected | TTL=0 is rejected with error | should reject ttl: 0 with an error | ttl_zero_is_error |
 | store_no_ttl_persistent | Key without TTL persists indefinitely | should persist keys without TTL | no_ttl_is_persistent |
+| store_get_nonexistent | Get on non-existent key returns null | should return null for get on non-existent key | get_nonexistent_returns_none |
+| store_del_nonexistent | Del on non-existent key is idempotent (no error) | should succeed del on non-existent key (idempotent) | del_nonexistent_is_idempotent |
+| store_overwrite | Overwrite existing key with new value | should overwrite existing key with new value | overwrite_existing_key |
+| store_large_value | Handle large values (1MB round-trip) | should handle large values (1MB) | large_value_1mb |
 
 ## PubSub
 
@@ -26,6 +30,15 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | pubsub_async_callbacks | Async callbacks work correctly | should support async callbacks | async_callback |
 | pubsub_slow_callback_no_block | Slow callback doesn't block other operations | should not block other operations when callback is slow | slow_callback_does_not_block_store |
 | pubsub_parallel_subscriptions | Multiple parallel subscriptions on same topic | should run parallel subscriptions independently | parallel_subscriptions |
+| pubsub_retained_new_subscriber | Retained message delivered to new subscriber | should deliver retained message to new subscriber | retained_delivered_to_new_subscriber |
+| pubsub_retained_overwrite | Second retained publish overwrites first | should overwrite retained message on second publish | retained_overwrite_on_second_publish |
+| pubsub_retained_ttl_expiry | Retained with TTL not delivered after expiry | should not deliver retained message after TTL expiry | retained_not_delivered_after_ttl_expiry |
+| pubsub_unsubscribe_stops_delivery | No messages received after unsubscribe | should stop delivery after unsubscribe | unsubscribe_stops_delivery |
+| pubsub_combined_wildcards | Combined wildcards `a/+/b/#` match correctly | should match combined wildcards a/+/b/# | combined_wildcards_plus_and_hash |
+| pubsub_broadcast_3plus | Broadcast to 3+ subscribers on same topic | should broadcast to 3+ subscribers on same topic | broadcast_to_3_plus_subscribers |
+| pubsub_disconnect_cleanup | Disconnect cleanup doesn't break topic for others | should clean up subscriber on disconnect without breaking topic | disconnect_cleanup_does_not_break_topic |
+| pubsub_retained_wildcard_plus | Retained messages delivered to `+` subscriber | should deliver retained messages to wildcard + subscriber | retained_with_wildcard_plus |
+| pubsub_retained_wildcard_hash | Retained messages delivered to `#` subscriber | should deliver retained messages to wildcard # subscriber | retained_with_wildcard_hash |
 
 ## Queue
 
@@ -47,6 +60,14 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | queue_stop_on_nonexistent | Subscribe to non-existent queue fails gracefully | should stop consumer when subscribing to non-existent queue | stop_consumer_nonexistent_queue |
 | queue_reject_batch_size_zero | batchSize=0 in subscribe is rejected | should reject batchSize=0 in subscribe | reject_batch_size_zero |
 | queue_reject_concurrency_zero | concurrency=0 in subscribe is rejected | should reject concurrency=0 in subscribe | reject_concurrency_zero |
+| queue_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
+| queue_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
+| queue_empty_no_wait | Consume empty queue with short waitMs returns immediately | should consume empty queue without waiting and return immediately | consume_empty_queue_no_wait_returns_immediately |
+| queue_partial_batch | Partial batch when fewer messages than batchSize | should return partial batch when fewer messages than batchSize | partial_batch_when_fewer_than_batch_size |
+| queue_long_poll_wakeup | Long-polling consumer wakes up on push | should wake up long-polling consumer when message is pushed | long_polling_wakeup_on_push |
+| queue_fifo_same_priority | FIFO ordering preserved for same-priority messages | should preserve FIFO ordering for same-priority messages | fifo_ordering_same_priority |
+| queue_push_nonexistent_fails | Push to non-existent queue fails | should fail push to non-existent queue | push_nonexistent_queue_fails |
+| queue_push_deleted_fails | Push to deleted queue fails | should fail push to deleted queue | push_deleted_queue_fails |
 
 ## Stream
 
@@ -70,6 +91,14 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_publish_bytes_key | Publish with Uint8Array key, verify receipt | should publish with Uint8Array key and verify receipt | publish_with_bytes_key |
 | stream_publish_bytes_data | Publish Uint8Array data, receive raw bytes | should publish Uint8Array data and receive raw bytes back | publish_bytes_data |
 | stream_publish_batch_empty | Empty publishBatch handled gracefully | should handle empty publishBatch gracefully | empty_publish_batch |
+| stream_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
+| stream_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
+| stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
+| stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |
+| stream_peek_dlt_empty | peekDlt returns empty array when DLT is empty | should return empty array from peekDlt when DLT is empty | peek_dlt_empty_returns_empty |
+| stream_purge_dlt_empty | purgeDlt returns 0 when DLT is empty | should return 0 from purgeDlt when DLT is empty | purge_dlt_empty_returns_zero |
+| stream_resubscribe_after_stop | Resubscribe same group after stop receives only new messages | should resubscribe same group after stop and receive only new messages | resubscribe_same_group_after_stop |
+| stream_multi_groups_simultaneous | Multiple independent groups receive all messages simultaneously | should deliver messages to multiple independent groups simultaneously | multiple_groups_simultaneous_delivery |
 
 ## Connection
 

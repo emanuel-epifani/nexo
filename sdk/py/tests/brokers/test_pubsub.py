@@ -143,3 +143,155 @@ class TestPubSub:
         assert order == ["b", "a"], f"Subscription B should not wait for A: {order}"
         await nexo.pubsub(topic_a).unsubscribe()
         await nexo.pubsub(topic_b).unsubscribe()
+
+    # ── Edge cases ──────────────────────────────────────────────
+
+    async def test_retained_delivered_to_new_subscriber(self, nexo: NexoClient):
+        topic = f"retained-new-{uuid.uuid4()}"
+
+        await nexo.pubsub(topic).publish("retained-value", {"retain": True})
+
+        received: list[str] = []
+        await nexo.pubsub(topic).subscribe(lambda data: received.append(data))
+        await wait_for(lambda: len(received) == 1)
+        assert received[0] == "retained-value"
+
+        await nexo.pubsub(topic).unsubscribe()
+        await nexo.pubsub(topic).clear()
+
+    async def test_retained_overwrite_on_second_publish(self, nexo: NexoClient):
+        topic = f"retained-overwrite-{uuid.uuid4()}"
+
+        await nexo.pubsub(topic).publish("first", {"retain": True})
+        await nexo.pubsub(topic).publish("second", {"retain": True})
+
+        received: list[str] = []
+        await nexo.pubsub(topic).subscribe(lambda data: received.append(data))
+        await wait_for(lambda: len(received) == 1)
+        assert received[0] == "second"
+
+        await nexo.pubsub(topic).unsubscribe()
+        await nexo.pubsub(topic).clear()
+
+    async def test_retained_not_delivered_after_ttl_expiry(self, nexo: NexoClient):
+        topic = f"retained-ttl-{uuid.uuid4()}"
+
+        await nexo.pubsub(topic).publish("temp-retained", {"retain": True, "ttl": 1})
+
+        await asyncio.sleep(1.2)
+
+        received: list[str] = []
+        await nexo.pubsub(topic).subscribe(lambda data: received.append(data))
+        await asyncio.sleep(0.3)
+        assert received == []
+
+        await nexo.pubsub(topic).unsubscribe()
+
+    async def test_unsubscribe_stops_delivery(self, nexo: NexoClient):
+        topic = f"unsub-stop-{uuid.uuid4()}"
+
+        received: list = []
+        await nexo.pubsub(topic).subscribe(lambda data: received.append(data))
+
+        await nexo.pubsub(topic).publish({"msg": "before"})
+        await wait_for(lambda: len(received) == 1)
+
+        await nexo.pubsub(topic).unsubscribe()
+
+        await nexo.pubsub(topic).publish({"msg": "after"})
+        await asyncio.sleep(0.3)
+        assert len(received) == 1
+
+    async def test_combined_wildcards_plus_and_hash(self, nexo: NexoClient):
+        base_id = uuid.uuid4()
+        pattern = f"combo-{base_id}/+/b/#"
+
+        received: list = []
+        await nexo.pubsub(pattern).subscribe(lambda data: received.append(data))
+
+        await nexo.pubsub(f"combo-{base_id}/x/b/y/z").publish({"id": "deep-match"})
+        await nexo.pubsub(f"combo-{base_id}/x/b").publish({"id": "shallow-match"})
+        await nexo.pubsub(f"combo-{base_id}/x/c/y").publish({"id": "fail-wrong-segment"})
+
+        await wait_for(lambda: len(received) == 2)
+        ids = sorted(r["id"] for r in received)
+        assert ids == ["deep-match", "shallow-match"]
+
+        await nexo.pubsub(pattern).unsubscribe()
+
+    async def test_broadcast_to_3_plus_subscribers(self, nexo: NexoClient):
+        topic = f"broadcast-{uuid.uuid4()}"
+
+        client1 = await NexoClient.connect()
+        client2 = await NexoClient.connect()
+        try:
+            recv1: list = []
+            recv2: list = []
+            recv3: list = []
+
+            await client1.pubsub(topic).subscribe(lambda d: recv1.append(d))
+            await client2.pubsub(topic).subscribe(lambda d: recv2.append(d))
+            await nexo.pubsub(topic).subscribe(lambda d: recv3.append(d))
+
+            await nexo.pubsub(topic).publish({"msg": "broadcast"})
+
+            await wait_for(lambda: len(recv1) == 1 and len(recv2) == 1 and len(recv3) == 1)
+            assert recv1[0]["msg"] == "broadcast"
+            assert recv2[0]["msg"] == "broadcast"
+            assert recv3[0]["msg"] == "broadcast"
+
+            await client1.pubsub(topic).unsubscribe()
+            await client2.pubsub(topic).unsubscribe()
+            await nexo.pubsub(topic).unsubscribe()
+        finally:
+            client1.disconnect()
+            client2.disconnect()
+
+    async def test_disconnect_cleanup_does_not_break_topic(self, nexo: NexoClient):
+        topic = f"disconnect-cleanup-{uuid.uuid4()}"
+
+        temp_client = await NexoClient.connect()
+        await temp_client.pubsub(topic).subscribe(lambda _: None)
+        await asyncio.sleep(0.1)
+
+        temp_client.disconnect()
+        await asyncio.sleep(0.3)
+
+        received: list = []
+        await nexo.pubsub(topic).subscribe(lambda d: received.append(d))
+        await nexo.pubsub(topic).publish({"msg": "after-disconnect"})
+
+        await wait_for(lambda: len(received) == 1)
+        assert received[0]["msg"] == "after-disconnect"
+
+        await nexo.pubsub(topic).unsubscribe()
+
+    async def test_retained_with_wildcard_plus(self, nexo: NexoClient):
+        base_id = uuid.uuid4()
+
+        await nexo.pubsub(f"ret-plus-{base_id}/x").publish("val-x", {"retain": True})
+        await nexo.pubsub(f"ret-plus-{base_id}/y").publish("val-y", {"retain": True})
+
+        received: list[str] = []
+        await nexo.pubsub(f"ret-plus-{base_id}/+").subscribe(lambda d: received.append(d))
+
+        await wait_for(lambda: len(received) == 2)
+        assert sorted(received) == ["val-x", "val-y"]
+
+        await nexo.pubsub(f"ret-plus-{base_id}/+").unsubscribe()
+        await nexo.pubsub(f"ret-plus-{base_id}/x").clear()
+        await nexo.pubsub(f"ret-plus-{base_id}/y").clear()
+
+    async def test_retained_with_wildcard_hash(self, nexo: NexoClient):
+        base_id = uuid.uuid4()
+
+        await nexo.pubsub(f"ret-hash-{base_id}/a/b/c").publish("deep", {"retain": True})
+
+        received: list[str] = []
+        await nexo.pubsub(f"ret-hash-{base_id}/#").subscribe(lambda d: received.append(d))
+
+        await wait_for(lambda: len(received) == 1)
+        assert received[0] == "deep"
+
+        await nexo.pubsub(f"ret-hash-{base_id}/#").unsubscribe()
+        await nexo.pubsub(f"ret-hash-{base_id}/a/b/c").clear()

@@ -50,4 +50,37 @@ describe('STORE (KV)', () => {
         await new Promise(r => setTimeout(r, 200));
         expect(await nexo.store.map.get(key)).toBe('forever');
     });
+
+    // ── Edge cases ──────────────────────────────────────────────
+
+    it('should return null for get on non-existent key', async () => {
+        const key = `missing:${randomUUID()}`;
+        expect(await nexo.store.map.get(key)).toBeNull();
+    });
+
+    it('should succeed del on non-existent key (idempotent)', async () => {
+        const key = `del-missing:${randomUUID()}`;
+        await nexo.store.map.del(key);
+        expect(await nexo.store.map.get(key)).toBeNull();
+    });
+
+    it('should overwrite existing key with new value', async () => {
+        const key = `overwrite:${randomUUID()}`;
+        await nexo.store.map.set(key, 'first');
+        expect(await nexo.store.map.get(key)).toBe('first');
+
+        await nexo.store.map.set(key, 'second');
+        expect(await nexo.store.map.get(key)).toBe('second');
+
+        await nexo.store.map.del(key);
+    });
+
+    it('should handle large values (1MB)', async () => {
+        const key = `large:${randomUUID()}`;
+        const largeValue = 'x'.repeat(1024 * 1024);
+        await nexo.store.map.set(key, largeValue);
+        const result = await nexo.store.map.get(key);
+        expect(result).toBe(largeValue);
+        await nexo.store.map.del(key);
+    });
 });

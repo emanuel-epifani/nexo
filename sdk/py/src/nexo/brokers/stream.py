@@ -115,7 +115,7 @@ class StreamSubscription(Generic[T]):
                 f"[{self._stream_name}:{self._group}] Consumer crashed",
                 t.exception(),
             )
-            if t.exception()
+            if not t.cancelled() and t.exception()
             else None
         )
 
@@ -133,7 +133,14 @@ class StreamSubscription(Generic[T]):
             except Exception:
                 pass
         if self._loop_task is not None:
-            await self._loop_task
+            try:
+                await asyncio.wait_for(asyncio.shield(self._loop_task), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._loop_task.cancel()
+                try:
+                    await self._loop_task
+                except asyncio.CancelledError:
+                    pass
 
     async def _join(self) -> None:
         if not self._conn.is_connected:
@@ -147,28 +154,37 @@ class StreamSubscription(Generic[T]):
         self._consumer_id = cursor.read_string()
 
     async def _loop(self) -> None:
-        while self._active:
-            try:
-                if self._consumer_id is None:
-                    await self._join()
-                await self._poll_once()
-            except Exception as e:
-                if not self._active:
-                    break
-                self._consumer_id = None
+        try:
+            while self._active:
+                try:
+                    if self._consumer_id is None:
+                        await self._join()
+                    await self._poll_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if not self._active:
+                        break
+                    self._consumer_id = None
 
-                if _is_recoverable_membership_error(e):
-                    continue
+                    if _is_recoverable_membership_error(e):
+                        continue
 
-                if not self._conn.is_connected or isinstance(e, ConnectionClosedError):
-                    await _sleep(DEFAULT_CONFIG.connection.backoff_short_ms)
-                    continue
+                    if not self._conn.is_connected or isinstance(e, ConnectionClosedError):
+                        if not self._active:
+                            break
+                        await _sleep(DEFAULT_CONFIG.connection.backoff_short_ms)
+                        continue
 
-                self._logger.error(
-                    f"[{self._stream_name}:{self._group}] Error. "
-                    f"Retrying in {DEFAULT_CONFIG.connection.backoff_long_ms}ms... {e}"
-                )
-                await _sleep(DEFAULT_CONFIG.connection.backoff_long_ms)
+                    self._logger.error(
+                        f"[{self._stream_name}:{self._group}] Error. "
+                        f"Retrying in {DEFAULT_CONFIG.connection.backoff_long_ms}ms... {e}"
+                    )
+                    if not self._active:
+                        break
+                    await _sleep(DEFAULT_CONFIG.connection.backoff_long_ms)
+        except asyncio.CancelledError:
+            pass
 
     async def _poll_once(self) -> None:
         consumer_id = self._consumer_id

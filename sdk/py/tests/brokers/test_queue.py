@@ -384,3 +384,108 @@ class TestQueue:
 
         await q.push_batch([])
         await q.delete()
+
+    # ── Edge cases ──────────────────────────────────────────────
+
+    async def test_exists_true_after_create_false_before(self, nexo: NexoClient):
+        q_name = f"queue-exists-{uuid.uuid4()}"
+        assert await nexo.queue(q_name).exists() is False
+        q = await nexo.queue(q_name).create()
+        assert await q.exists() is True
+        await q.delete()
+        assert await nexo.queue(q_name).exists() is False
+
+    async def test_create_idempotent(self, nexo: NexoClient):
+        q_name = f"queue-idempotent-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+        await nexo.queue(q_name).create()
+        assert await q.exists() is True
+        await q.delete()
+
+    async def test_consume_empty_queue_no_wait_returns_immediately(self, nexo: NexoClient):
+        q_name = f"queue-empty-nowait-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        received: list = []
+        sub = await q.subscribe(
+            lambda data: received.append(data),
+            {"batch_size": 5, "wait_ms": 50, "concurrency": 1},
+        )
+
+        await asyncio.sleep(0.2)
+        assert received == []
+        sub["stop"]()
+        await q.delete()
+
+    async def test_partial_batch_when_fewer_than_batch_size(self, nexo: NexoClient):
+        q_name = f"queue-partial-batch-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        await q.push("a")
+        await q.push("b")
+        await q.push("c")
+
+        received: list[str] = []
+        sub = await q.subscribe(
+            lambda data: received.append(data),
+            {"batch_size": 10, "wait_ms": 100, "concurrency": 1},
+        )
+
+        await wait_for(lambda: len(received) == 3)
+        assert received == ["a", "b", "c"]
+        sub["stop"]()
+        await q.delete()
+
+    async def test_long_polling_wakeup_on_push(self, nexo: NexoClient):
+        q_name = f"queue-longpoll-wake-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        received: list = []
+        sub = await q.subscribe(
+            lambda data: received.append(data),
+            {"batch_size": 1, "wait_ms": 5000, "concurrency": 1},
+        )
+
+        await asyncio.sleep(0.2)
+
+        import time
+        push_start = time.monotonic()
+        await q.push("wakeup")
+        await wait_for(lambda: len(received) == 1)
+        elapsed = time.monotonic() - push_start
+
+        assert elapsed < 2.0
+        assert received[0] == "wakeup"
+        sub["stop"]()
+        await q.delete()
+
+    async def test_fifo_ordering_same_priority(self, nexo: NexoClient):
+        q_name = f"queue-fifo-same-prio-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        for i in range(10):
+            await q.push({"i": i}, {"priority": 5})
+
+        received: list[int] = []
+        sub = await q.subscribe(
+            lambda data: received.append(data["i"]),
+            {"batch_size": 10, "wait_ms": 100, "concurrency": 1},
+        )
+
+        await wait_for(lambda: len(received) == 10)
+        for i in range(10):
+            assert received[i] == i
+        sub["stop"]()
+        await q.delete()
+
+    async def test_push_nonexistent_queue_fails(self, nexo: NexoClient):
+        q_name = f"queue-push-missing-{uuid.uuid4()}"
+        with pytest.raises(Exception):
+            await nexo.queue(q_name).push("data")
+
+    async def test_push_deleted_queue_fails(self, nexo: NexoClient):
+        q_name = f"queue-push-deleted-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+        await q.delete()
+        with pytest.raises(Exception):
+            await q.push("data")
