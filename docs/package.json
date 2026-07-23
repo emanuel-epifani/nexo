@@ -1,6 +1,6 @@
 {
   "name": "nexo-docs",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "private": true,
   "type": "module",
   "scripts": {
