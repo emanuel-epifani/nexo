@@ -175,7 +175,7 @@ describe('SOCKET RECONNECTION', () => {
         await waitFor(() => expect((nexo as any).conn.isConnected).toBe(false));
 
         // Stop consumer WHILE disconnected
-        sub.stop();
+        await sub.stop();
 
         // Wait for reconnect
         await waitFor(() => expect((nexo as any).conn.isConnected).toBe(true), { timeout: 5000 });

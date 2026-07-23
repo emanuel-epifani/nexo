@@ -104,6 +104,14 @@ Nexo is built for vertical deployments and developer experience, not for every s
 
 If none of the above applies to you, Nexo might be exactly what you're looking for.
 
+## Scaling
+
+Nexo is deliberately designed **not to scale horizontally** — no distributed locks, no consensus protocols, no clustering layer. A single instance handles all four brokers on its own thread pools, scaling vertically.
+
+This goes against the current trend of distributed-everything, but the reality is that **most projects will never need horizontal scaling**. Their backends bottleneck long before a single Rust-based broker does. For the vast majority of teams, this is more than enough.
+
+If you do need to scale out, you can run **multiple Nexo instances**, each dedicated to a single broker (e.g. one for Store, one for Queue, one for Stream). This gives horizontal separation without the complexity of distributed coordination.
+
 ## Delivery Model
 
 Each broker has a fundamentally different way of delivering messages to the client:
@@ -152,7 +160,7 @@ Every operation is a request/response round-trip. No background tasks.
 
 **Ideal use case:** email sending, PDF generation, background jobs — work that must not be lost.
 
-**Semantics:** durable FIFO with acks. No ack → retry → dead-letter queue. Configurable `batch_size` and `concurrency`.
+**Semantics:** durable FIFO with acks. If No ack → N retry → after N retry -> dead-letter queue.
 
 ```
 Producer publishes jobs one by one, in this order:
@@ -180,8 +188,6 @@ Producer publishes jobs one by one, in this order:
   j4 stays in the queue, pulled in the next batch.
   Each job is independent: ack/nack decides its fate.
 ```
-
-`concurrency=3` means 3 jobs run in parallel. Each queue has its own consumer task.
 
 ### Stream
 

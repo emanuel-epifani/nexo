@@ -33,7 +33,7 @@ class TestCrossBroker:
         await wait_for(lambda: len(received) == 1)
         assert isinstance(received[0], (bytes, bytearray))
         assert bytes(received[0]) == self.BINARY_PAYLOAD
-        sub["stop"]()
+        await sub.stop()
 
     async def test_pubsub_binary_payload(self, nexo: NexoClient):
         topic = f"bin-pubsub-{uuid.uuid4()}"
@@ -58,7 +58,7 @@ class TestCrossBroker:
         await wait_for(lambda: len(received) == 1)
         assert isinstance(received[0], (bytes, bytearray))
         assert bytes(received[0]) == self.BINARY_PAYLOAD
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_json_special_chars_and_nested(self, nexo: NexoClient):
         complex_data = {

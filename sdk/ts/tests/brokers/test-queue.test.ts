@@ -54,7 +54,7 @@ describe('QUEUE', () => {
         }, { batchSize: 5, waitMs: 500, concurrency: 1 });
 
         await waitFor(() => expect(received).toContain('msg2'));
-        sub2.stop();
+        await sub2.stop();
 
         await q.delete();
     });
@@ -80,7 +80,7 @@ describe('QUEUE', () => {
 
         // Consumer should have stopped — no infinite loop
         // We verify by checking that no errors are thrown (loop exited cleanly)
-        sub.stop();
+        await sub.stop();
     });
 
     it('should stop consumer when subscribing to non-existent queue', async () => {
@@ -94,7 +94,7 @@ describe('QUEUE', () => {
         await new Promise(r => setTimeout(r, 500));
 
         // Consumer should have stopped gracefully
-        sub.stop();
+        await sub.stop();
     });
 
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
@@ -111,7 +111,7 @@ describe('QUEUE', () => {
         await q.push(payload);
 
         await waitFor(() => expect(received).toEqual(payload));
-        sub.stop();
+        await sub.stop();
     });
 
     it('should move failed messages to DLQ', async () => {
@@ -128,7 +128,7 @@ describe('QUEUE', () => {
 
         // Wait for retries to exhaust
         await new Promise(r => setTimeout(r, 1000));
-        sub.stop();
+        await sub.stop();
 
         // Check DLQ using peek
         const dlqResult = await q.dlq.peek(10);
@@ -151,7 +151,7 @@ describe('QUEUE', () => {
         }, { concurrency: 1 });
 
         await waitFor(() => expect(received.length).toBe(2));
-        sub.stop();
+        await sub.stop();
 
         expect(received).toEqual(['high', 'low']);
     });
@@ -179,7 +179,7 @@ describe('QUEUE', () => {
         }, { batchSize: 10, waitMs: OLD_CONSUME_WAIT_MS });
 
         await waitFor(() => expect(received.length).toBe(3));
-        sub.stop();
+        await sub.stop();
 
         // Wait for old consume(waitMs=100) to expire on server before proceeding.
         // Calculated delay: waitMs + margin. Not arbitrary — prevents old waiter from
@@ -218,7 +218,7 @@ describe('QUEUE', () => {
         // 4. Verify it's received
         await waitFor(() => expect(replayed.length).toBe(1));
         expect(replayed[0].order).toBe('order3');
-        sub2.stop();
+        await sub2.stop();
 
         // 3. Delete one specific message from DLQ
         const deleted = await q.dlq.delete(msgToDeleteId);
@@ -261,7 +261,7 @@ describe('QUEUE', () => {
         for (let i = 0; i < COUNT; i++) await q.push({ i });
 
         await waitFor(() => expect(received.length).toBe(COUNT));
-        sub.stop();
+        await sub.stop();
 
         expect(maxInFlight).toBe(1);
         expect(new Set(received).size).toBe(COUNT);
@@ -293,7 +293,7 @@ describe('QUEUE', () => {
         await waitFor(() => expect(received.length).toBe(COUNT), { timeout: 10000 });
         const elapsed = Date.now() - start;
 
-        sub.stop();
+        await sub.stop();
 
         expect(new Set(received).size).toBe(COUNT);
         expect(maxInFlight).toBeGreaterThan(1);
@@ -339,7 +339,7 @@ describe('QUEUE', () => {
         });
 
         await new Promise(r => setTimeout(r, 500));
-        sub.stop();
+        await sub.stop();
 
         // Check DLQ
         const dlqResult = await q.dlq.peek(10);
@@ -363,7 +363,7 @@ describe('QUEUE', () => {
         }, { batchSize: 10, waitMs: 500, concurrency: 1 });
 
         await waitFor(() => expect(received.length).toBe(3));
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 
@@ -386,7 +386,7 @@ describe('QUEUE', () => {
         expect(received[0]).toBe('high');
         expect(received[1]).toBe('mid');
         expect(received[2]).toBe('low');
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 
@@ -429,7 +429,7 @@ describe('QUEUE', () => {
         // Wait beyond the consume waitMs to confirm no messages arrive
         await new Promise(r => setTimeout(r, 200));
         expect(received).toEqual([]);
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 
@@ -448,7 +448,7 @@ describe('QUEUE', () => {
 
         await waitFor(() => expect(received.length).toBe(3));
         expect(received).toEqual(['a', 'b', 'c']);
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 
@@ -472,7 +472,7 @@ describe('QUEUE', () => {
         // Should receive quickly after push, not wait for long-poll timeout
         expect(elapsed).toBeLessThan(2000);
         expect(received[0]).toBe('wakeup');
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 
@@ -493,7 +493,7 @@ describe('QUEUE', () => {
         for (let i = 0; i < 10; i++) {
             expect(received[i]).toBe(i);
         }
-        sub.stop();
+        await sub.stop();
         await q.delete();
     });
 

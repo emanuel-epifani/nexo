@@ -29,7 +29,7 @@ describe('CROSS-BROKER FEATURES', () => {
             await waitFor(() => expect(received.length).toBe(1));
             expect(Buffer.isBuffer(received[0])).toBe(true);
             expect(received[0].equals(binaryPayload)).toBe(true);
-            sub.stop();
+            await sub.stop();
         });
 
         it('PUBSUB: Should publish and subscribe raw Buffer', async () => {
@@ -56,7 +56,7 @@ describe('CROSS-BROKER FEATURES', () => {
             await waitFor(() => expect(received.length).toBe(1));
             expect(Buffer.isBuffer(received[0])).toBe(true);
             expect(received[0].equals(binaryPayload)).toBe(true);
-            sub.stop();
+            await sub.stop();
         });
     });
 

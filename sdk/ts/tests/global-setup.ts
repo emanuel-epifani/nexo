@@ -61,11 +61,15 @@ async function runNexoServer(host: string, port: number): Promise<void> {
   console.log('[TestSetup] Server is ready.');
 }
 
-function killServer(): void {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-    serverProcess = null;
-  }
+async function killServer(): Promise<void> {
+  if (!serverProcess) return;
+  const proc = serverProcess;
+  serverProcess = null;
+  proc.kill('SIGTERM');
+  await new Promise<void>((resolve) => {
+    proc.once('exit', () => resolve());
+    setTimeout(() => { proc.kill('SIGKILL'); resolve(); }, 5000);
+  });
 }
 
 // ============================================================
@@ -91,7 +95,7 @@ export default async function setup() {
   // 5. Teardown: kill server and clean data dir
   return async () => {
     console.log('--- 🛑 Shutting down Nexo Server ---');
-    killServer();
+    await killServer();
     cleanDataDir();
   };
 }

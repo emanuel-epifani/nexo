@@ -116,9 +116,13 @@ async def nexo() -> NexoClient:
     client = await NexoClient.connect()
     yield client
 
-    # Cancel all pending subscription tasks before disconnecting.
-    # Reconnection tests intentionally leave subscriptions alive;
-    # without this, the event loop close hangs on un-cancellable tasks.
+    # Disconnect first: sets _should_reconnect=False, cancels _read_task,
+    # closes socket. This prevents _on_socket_closed from spawning a
+    # reconnect_loop that would outlive the event loop.
+    client.disconnect()
+
+    # Then cancel any remaining subscription/consumer tasks left behind
+    # by reconnection tests that intentionally don't call sub.stop().
     current = asyncio.current_task()
     for task in asyncio.all_tasks():
         if task is not current and not task.done():
@@ -127,5 +131,3 @@ async def nexo() -> NexoClient:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-
-    client.disconnect()

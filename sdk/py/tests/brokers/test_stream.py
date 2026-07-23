@@ -22,7 +22,7 @@ class TestStream:
         await nexo.stream(topic).publish({"id": 2})
 
         await wait_for(lambda: len(received) == 2)
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_subscribe_nonexistent_stream(self, nexo: NexoClient):
         topic = f"stream-missing-{uuid.uuid4()}"
@@ -47,8 +47,8 @@ class TestStream:
 
             await wait_for(lambda: len(recv_a) == 1 and len(recv_b) == 1)
 
-            await sub_a["stop"]()
-            await sub_b["stop"]()
+            await sub_a.stop()
+            await sub_b.stop()
         finally:
             client_a.disconnect()
             client_b.disconnect()
@@ -86,8 +86,8 @@ class TestStream:
             overlap = received_a & received_b
             assert len(overlap) == 0
 
-            await sub_a["stop"]()
-            await sub_b["stop"]()
+            await sub_a.stop()
+            await sub_b.stop()
         finally:
             client_a.disconnect()
             client_b.disconnect()
@@ -123,7 +123,7 @@ class TestStream:
             for i in range(60):
                 assert i in all_received, f"Missing message index {i}"
 
-            await sub_b["stop"]()
+            await sub_b.stop()
             temp_b.disconnect()
         except Exception:
             temp_a.disconnect()
@@ -144,7 +144,7 @@ class TestStream:
         assert received[0]["i"] == 0
         assert received[4]["i"] == 4
 
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_stop_subscription_quickly(self, nexo: NexoClient):
         topic = f"stream-fast-stop-{uuid.uuid4()}"
@@ -153,7 +153,7 @@ class TestStream:
         sub = await nexo.stream(topic).subscribe("fast-stop-group", lambda _: None)
 
         start = asyncio.get_event_loop().time()
-        await sub["stop"]()
+        await sub.stop()
         elapsed = asyncio.get_event_loop().time() - start
 
         assert elapsed < 2.0
@@ -173,7 +173,7 @@ class TestStream:
         for i in range(30):
             assert received[i] == i
 
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_parallel_concurrency_gt_1(self, nexo: NexoClient):
         topic = f"stream-concurrent-{uuid.uuid4()}"
@@ -211,7 +211,7 @@ class TestStream:
         assert max_in_flight > 1
         assert elapsed < COUNT * CALLBACK_DELAY * 0.6
 
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_seek_beginning_and_end(self, nexo: NexoClient):
         topic = f"stream-seek-{uuid.uuid4()}"
@@ -229,7 +229,7 @@ class TestStream:
         await nexo.stream(topic).publish({"i": 10})
         await wait_for(lambda: len(received_end) == 1)
         assert received_end[0]["i"] == 10
-        await sub_end["stop"]()
+        await sub_end.stop()
 
         await nexo.stream(topic).seek(group, "beginning")
 
@@ -240,7 +240,7 @@ class TestStream:
         assert received_start[0]["i"] == 0
         assert received_start[10]["i"] == 10
 
-        await sub_start["stop"]()
+        await sub_start.stop()
 
     async def test_stop_quickly_during_long_poll_idle(self, nexo: NexoClient):
         topic = f"stream-stop-idle-{uuid.uuid4()}"
@@ -251,7 +251,7 @@ class TestStream:
         await asyncio.sleep(0.2)
 
         start = asyncio.get_event_loop().time()
-        await sub["stop"]()
+        await sub.stop()
         elapsed = asyncio.get_event_loop().time() - start
 
         assert elapsed < 2.0
@@ -266,7 +266,7 @@ class TestStream:
         await nexo.stream(topic).publish({"id": 1})
         await wait_for(lambda: len(received) == 1)
 
-        await sub["stop"]()
+        await sub.stop()
 
         await nexo.stream(topic).publish({"id": 2})
         await asyncio.sleep(0.5)
@@ -305,7 +305,7 @@ class TestStream:
         ])
 
         await wait_for(lambda: len(received) == 3)
-        await sub["stop"]()
+        await sub.stop()
 
     async def test_publish_with_string_key(self, nexo: NexoClient):
         topic = f"stream-pub-key-{uuid.uuid4()}"
@@ -321,7 +321,7 @@ class TestStream:
         assert seq > 0
 
         await wait_for(lambda: len(received) == 1)
-        await sub["stop"]()
+        await sub.stop()
 
         assert received[0]["data"] == {"x": 1}
         assert received[0]["key"] is not None
@@ -343,7 +343,7 @@ class TestStream:
         await nexo.stream(topic).publish("payload", {"key": raw_key})
 
         await wait_for(lambda: len(received) == 1)
-        await sub["stop"]()
+        await sub.stop()
 
         assert received[0]["data"] == "payload"
         assert received[0]["key"] is not None
@@ -362,7 +362,7 @@ class TestStream:
         await nexo.stream(topic).publish(payload)
 
         await wait_for(lambda: len(received) == 1)
-        await sub["stop"]()
+        await sub.stop()
 
         assert isinstance(received[0], (bytes, bytearray))
         assert bytes(received[0]) == payload
@@ -412,7 +412,7 @@ class TestStream:
         group = "g-dlt-empty"
         await nexo.stream(topic).create()
         sub = await nexo.stream(topic).subscribe(group, lambda _: None)
-        await sub["stop"]()
+        await sub.stop()
         entries = await nexo.stream(topic).peek_dlt(group, 10, 0)
         assert entries == []
         await nexo.stream(topic).delete()
@@ -422,7 +422,7 @@ class TestStream:
         group = "g-dlt-purge"
         await nexo.stream(topic).create()
         sub = await nexo.stream(topic).subscribe(group, lambda _: None)
-        await sub["stop"]()
+        await sub.stop()
         count = await nexo.stream(topic).purge_dlt(group)
         assert count == 0
         await nexo.stream(topic).delete()
@@ -437,7 +437,7 @@ class TestStream:
         await nexo.stream(topic).publish({"i": 1})
         await nexo.stream(topic).publish({"i": 2})
         await wait_for(lambda: len(recv1) == 2)
-        await sub1["stop"]()
+        await sub1.stop()
 
         await nexo.stream(topic).publish({"i": 3})
 
@@ -445,7 +445,7 @@ class TestStream:
         sub2 = await nexo.stream(topic).subscribe(group, lambda d: recv2.append(d))
         await wait_for(lambda: len(recv2) == 1)
         assert recv2[0]["i"] == 3
-        await sub2["stop"]()
+        await sub2.stop()
 
         await nexo.stream(topic).delete()
 
@@ -469,9 +469,9 @@ class TestStream:
 
             await wait_for(lambda: len(recv_a) == 5 and len(recv_b) == 5 and len(recv_c) == 5)
 
-            await sub_a["stop"]()
-            await sub_b["stop"]()
-            await sub_c["stop"]()
+            await sub_a.stop()
+            await sub_b.stop()
+            await sub_c.stop()
         finally:
             client_a.disconnect()
             client_b.disconnect()

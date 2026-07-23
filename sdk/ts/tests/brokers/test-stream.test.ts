@@ -338,7 +338,7 @@ describe('STREAM', () => {
         ]);
 
         await waitFor(() => expect(received.length).toBe(3));
-        sub.stop();
+        await sub.stop();
     });
 
     it('should publish with string key and verify receipt', async () => {
@@ -354,7 +354,7 @@ describe('STREAM', () => {
         expect(seq).toBeGreaterThan(0n);
 
         await waitFor(() => expect(received.length).toBe(1));
-        sub.stop();
+        await sub.stop();
 
         expect(received[0].data).toEqual({ x: 1 });
         expect(received[0].key).toBeDefined();
@@ -376,7 +376,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).publish('payload', { key: rawKey });
 
         await waitFor(() => expect(received.length).toBe(1));
-        sub.stop();
+        await sub.stop();
 
         expect(received[0].data).toBe('payload');
         expect(received[0].key).toBeDefined();
@@ -398,7 +398,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).publish(payload);
 
         await waitFor(() => expect(received.length).toBe(1));
-        sub.stop();
+        await sub.stop();
 
         expect(received[0]).toBeInstanceOf(Uint8Array);
         expect(Buffer.from(received[0])).toEqual(Buffer.from(payload));
@@ -420,7 +420,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).publish(payload);
 
         await waitFor(() => expect(received.length).toBe(1));
-        sub.stop();
+        await sub.stop();
 
         expect(received[0]).toBeInstanceOf(Uint8Array);
         expect(Buffer.from(received[0])).toEqual(Buffer.from(new Uint8Array(payload)));

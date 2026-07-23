@@ -215,7 +215,7 @@ class TestStressThroughput:
         )
 
         await wait_for(lambda: consumed[0] >= TOTAL, timeout=60.0)
-        sub["stop"]()
+        await sub.stop()
         probe.print_result()
         await q.delete()
 
@@ -241,7 +241,7 @@ class TestStressThroughput:
 
         from tests.utils.wait_for import wait_for
         await wait_for(lambda: consumed[0] >= TOTAL, timeout=60.0)
-        await sub["stop"]()
+        await sub.stop()
         probe.print_result()
         await nexo.stream(topic).delete()
 

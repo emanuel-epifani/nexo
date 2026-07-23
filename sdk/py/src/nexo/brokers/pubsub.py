@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..connection import NexoConnection
+from ..subscription import Subscription
 from ..utils.logger import Logger
 
 
@@ -36,8 +37,8 @@ class NexoTopic(Generic[T]):
     async def clear(self) -> None:
         await self._broker.clear(self.name)
 
-    async def subscribe(self, cb: PubSubHandler[T]) -> None:
-        await self._broker.subscribe(self.name, cb)
+    async def subscribe(self, cb: PubSubHandler[T]) -> Subscription[T]:
+        return await self._broker.subscribe(self.name, cb)
 
     async def unsubscribe(self) -> None:
         await self._broker.unsubscribe(self.name)
@@ -101,7 +102,7 @@ class NexoPubSub:
 
         await self._conn.send(PubSubOpcode.PUB, build)
 
-    async def subscribe(self, topic: str, callback: Handler) -> None:
+    async def subscribe(self, topic: str, callback: Handler) -> Subscription[Any]:
         if topic in self._exact or topic in self._wild:
             raise ValueError(
                 f'[PubSub] Already subscribed to "{topic}". Call unsubscribe() first.'
@@ -124,6 +125,16 @@ class NexoPubSub:
             raise
 
         sub.task = asyncio.create_task(self._consume(sub))
+
+        async def _stop() -> None:
+            await self.unsubscribe(topic)
+
+        def _active() -> bool:
+            if is_wild:
+                return topic in self._wild
+            return topic in self._exact
+
+        return Subscription(stop_fn=_stop, active_fn=_active)
 
     async def unsubscribe(self, topic: str) -> None:
         sub = self._exact.pop(topic, None) or self._wild.pop(topic, None)

@@ -3,6 +3,7 @@ import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
+import { Subscription } from '../subscription';
 
 const FETCH_TIMEOUT_MARGIN_MS = 5000;
 const textEncoder = new TextEncoder();
@@ -61,7 +62,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 class StreamSubscription<T> {
-  private active = false;
+  active = false;
   private loopDone: Promise<void> = Promise.resolve();
   private consumerId: string | null = null;
   private generation: bigint = 0n;
@@ -262,7 +263,7 @@ export class NexoStream<T = any> {
     group: string,
     callback: (data: T, meta: { seq: bigint; key?: Uint8Array }) => Promise<any> | any,
     options: StreamSubscribeOptions = {}
-  ): Promise<{ stop: () => Promise<void> }> {
+  ): Promise<Subscription> {
     if (!group) throw new Error('Consumer Group is required for subscription');
 
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.stream.batchSize;
@@ -272,7 +273,10 @@ export class NexoStream<T = any> {
     const sub = new StreamSubscription<T>(this.conn, this.name, group, this.logger, callback, batchSize, waitMs, concurrency);
     await sub.start();
 
-    return { stop: () => sub.stop() };
+    return new Subscription(
+      () => sub.stop(),
+      () => sub.active,
+    );
   }
 
   /** Seek to beginning or end of the stream for a consumer group. */

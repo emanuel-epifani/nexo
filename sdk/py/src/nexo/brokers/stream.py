@@ -7,6 +7,7 @@ from typing import Any, Callable, Generic, Optional, TypeVar, TypedDict, Union
 from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError
+from ..subscription import Subscription
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
 
@@ -335,7 +336,7 @@ class NexoStream(Generic[T]):
         group: str,
         callback: StreamHandler[T],
         options: StreamSubscribeOptions | None = None,
-    ) -> dict[str, Callable[[], "asyncio.Future[None]"]]:
+    ) -> Subscription[T]:
         if not group:
             raise ValueError("Consumer Group is required for subscription")
 
@@ -363,10 +364,10 @@ class NexoStream(Generic[T]):
         )
         await sub.start()
 
-        def stop():
-            return asyncio.create_task(sub.stop())
-
-        return {"stop": stop}
+        return Subscription(
+            stop_fn=sub.stop,
+            active_fn=lambda: sub._active,
+        )
 
     async def seek(self, group: str, target: str) -> None:
         await self._conn.send(

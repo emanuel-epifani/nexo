@@ -3,6 +3,7 @@ import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
+import { Subscription } from '../subscription';
 
 enum QueueOpcode {
   Q_CREATE = 0x10,
@@ -208,6 +209,72 @@ export class NexoDLQ<T = any> {
   }
 }
 
+class QueueSubscription<T> {
+  active = false;
+  private loopPromise: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly conn: NexoConnection,
+    private readonly queueName: string,
+    private readonly logger: Logger,
+    private readonly callback: (data: T) => Promise<any> | any,
+    private readonly batchSize: number,
+    private readonly waitMs: number,
+    private readonly concurrency: number,
+  ) { }
+
+  start(): void {
+    this.active = true;
+    this.loopPromise = this.loop().catch(err => {
+      this.logger.error(`[CRITICAL] Queue loop crashed for ${this.queueName}`, err);
+    });
+  }
+
+  async stop(): Promise<void> {
+    this.active = false;
+    await this.loopPromise;
+  }
+
+  private async loop(): Promise<void> {
+    while (this.active) {
+      if (!this.conn.isConnected) {
+        await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
+        continue;
+      }
+
+      try {
+        if (!this.conn.isConnected) continue;
+
+        const messages = await QueueCommands.consume<T>(this.conn, this.queueName, this.batchSize, this.waitMs);
+
+        if (messages.length === 0) continue;
+
+        await runConcurrent(messages, this.concurrency, async (msg) => {
+          if (!this.active) return;
+          try {
+            await this.callback(msg.data);
+            QueueCommands.ack(this.conn, this.queueName, msg.id);
+          } catch (e: any) {
+            if (!this.conn.isConnected) return;
+            const reason = e instanceof Error ? e.message : String(e);
+            this.logger.error(`[Queue:${this.queueName}] Consumer error, sending NACK. Reason: ${reason}`);
+            QueueCommands.nack(this.conn, this.queueName, msg.id, reason);
+          }
+        });
+
+      } catch (e: any) {
+        if (!this.active) break;
+        if (!this.conn.isConnected || e instanceof ConnectionClosedError || e instanceof RequestTimeoutError || e.code === 'ECONNRESET') {
+          await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
+          continue;
+        }
+        this.logger.error(`[Queue:${this.queueName}] Consumer stopping:`, e.message);
+        break;
+      }
+    }
+  }
+}
+
 export class NexoQueue<T = any> {
   private _dlq: NexoDLQ<T>;
 
@@ -254,7 +321,7 @@ export class NexoQueue<T = any> {
    * calling subscribe() N times produces N parallel consumers sharing the queue,
    * with messages split between them by the server.
    */
-  async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<{ stop: () => void }> {
+  async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<Subscription> {
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.queue.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
     const concurrency = options.concurrency ?? DEFAULT_CONFIG.queue.concurrency;
@@ -262,67 +329,13 @@ export class NexoQueue<T = any> {
     if (batchSize < 1) throw new Error(`batchSize must be >= 1, got ${batchSize}`);
     if (concurrency < 1) throw new Error(`concurrency must be >= 1, got ${concurrency}`);
 
-    let active = true;
+    const sub = new QueueSubscription<T>(this.conn, this.name, this.logger, callback, batchSize, waitMs, concurrency);
+    sub.start();
 
-    const loop = async () => {
-      while (active) {
-        if (!this.conn.isConnected) {
-          await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
-          continue;
-        }
-
-        try {
-          // Double check before sending
-          if (!this.conn.isConnected) continue;
-
-          const messages = await QueueCommands.consume<T>(this.conn, this.name, batchSize, waitMs);
-
-          if (messages.length === 0) continue;
-
-          await runConcurrent(messages, concurrency, async (msg) => {
-            if (!active) {
-              return;
-            }
-            try {
-              await callback(msg.data);
-              this.ack(msg.id);
-            } catch (e: any) {
-              if (!this.conn.isConnected) return;
-              const reason = e instanceof Error ? e.message : String(e);
-              this.logger.error(`[Queue:${this.name}] Consumer error, sending NACK. Reason: ${reason}`);
-              this.nack(msg.id, reason);
-            }
-          });
-
-        } catch (e: any) {
-          if (!active) break;
-          // Catch-all for connection issues to prevent Unhandled Rejection
-          if (!this.conn.isConnected || e instanceof ConnectionClosedError || e instanceof RequestTimeoutError || e.code === 'ECONNRESET') {
-            await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
-            continue;
-          }
-          this.logger.error(`[Queue:${this.name}] Consumer stopping:`, e.message);
-          break;
-        }
-      }
-    };
-
-    loop().catch(err => {
-      this.logger.error(`[CRITICAL] Queue loop crashed for ${this.name}`, err);
-    });
-
-    return {
-      stop: () => {
-        active = false;
-      }
-    };
+    return new Subscription(
+      () => sub.stop(),
+      () => sub.active,
+    );
   }
 
-  private ack(id: string): void {
-    QueueCommands.ack(this.conn, this.name, id);
-  }
-
-  private nack(id: string, reason: string): void {
-    QueueCommands.nack(this.conn, this.name, id, reason);
-  }
 }

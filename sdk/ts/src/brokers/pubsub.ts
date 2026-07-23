@@ -1,5 +1,6 @@
 import { NexoConnection } from '../connection';
 import { Logger } from '../utils/logger';
+import { Subscription } from '../subscription';
 
 enum PubSubOpcode {
   PUB = 0x21,
@@ -41,13 +42,13 @@ export class NexoTopic<T = any> {
   constructor(private broker: NexoPubSub, public readonly name: string) { }
   async publish(data: T, options?: PublishOptions) { return this.broker.publish(this.name, data, options); }
   async clear() { return this.broker.clear(this.name); }
-  async subscribe(cb: (data: T) => void) { return this.broker.subscribe(this.name, cb); }
+  async subscribe(cb: (data: T) => void): Promise<Subscription> { return this.broker.subscribe(this.name, cb); }
   async unsubscribe() { return this.broker.unsubscribe(this.name); }
 }
 
 type Handler = (data: any) => void | Promise<void>;
 
-class Subscription {
+class _Subscription {
   handler: Handler;
   queue: any[] = [];
   pending: Promise<void> | null = null;
@@ -59,8 +60,8 @@ class Subscription {
 }
 
 export class NexoPubSub {
-  private exact = new Map<string, Subscription>();
-  private wild = new Map<string, { parts: string[], sub: Subscription }>();
+  private exact = new Map<string, _Subscription>();
+  private wild = new Map<string, { parts: string[], sub: _Subscription }>();
 
   constructor(private conn: NexoConnection, private logger: Logger) {
     conn.onPush = (topic, data) => this.dispatch(topic, data);
@@ -88,12 +89,12 @@ export class NexoPubSub {
     await PubSubCommands.clear(this.conn, topic);
   }
 
-  async subscribe(topic: string, callback: Handler): Promise<void> {
+  async subscribe(topic: string, callback: Handler): Promise<Subscription> {
     if (this.exact.has(topic) || this.wild.has(topic)) {
       throw new Error(`[PubSub] Already subscribed to "${topic}". Call unsubscribe() first.`);
     }
 
-    const sub = new Subscription(callback);
+    const sub = new _Subscription(callback);
     const isWild = NexoPubSub.isWildcard(topic);
     if (isWild) {
       this.wild.set(topic, { parts: topic.split('/'), sub });
@@ -108,6 +109,12 @@ export class NexoPubSub {
       else this.exact.delete(topic);
       throw e;
     }
+
+    const self = this;
+    return new Subscription(
+      async () => { await self.unsubscribe(topic); },
+      () => self.exact.has(topic) || self.wild.has(topic),
+    );
   }
 
   async unsubscribe(topic: string): Promise<void> {
@@ -136,7 +143,7 @@ export class NexoPubSub {
     }
   }
 
-  private enqueue(sub: Subscription, data: any): void {
+  private enqueue(sub: _Subscription, data: any): void {
     sub.queue.push(data);
     if (!sub.running) {
       sub.running = true;
@@ -144,7 +151,7 @@ export class NexoPubSub {
     }
   }
 
-  private async consume(sub: Subscription): Promise<void> {
+  private async consume(sub: _Subscription): Promise<void> {
     while (sub.queue.length > 0) {
       const data = sub.queue.shift()!;
       try {

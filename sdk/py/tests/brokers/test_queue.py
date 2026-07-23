@@ -51,7 +51,7 @@ class TestQueue:
         )
 
         await asyncio.sleep(0.2)
-        sub["stop"]()
+        await sub.stop()
 
         dlq_result = await q.dlq.peek(10)
         assert dlq_result["total"] == 0
@@ -63,7 +63,7 @@ class TestQueue:
         )
 
         await wait_for(lambda: "msg2" in received)
-        sub2["stop"]()
+        await sub2.stop()
         await q.delete()
 
     async def test_stop_consumer_when_queue_deleted(self, nexo: NexoClient):
@@ -83,7 +83,7 @@ class TestQueue:
         await asyncio.sleep(0.2)
         await q.delete()
         await asyncio.sleep(2.0)
-        sub["stop"]()
+        await sub.stop()
 
     async def test_stop_consumer_nonexistent_queue(self, nexo: NexoClient):
         q_name = f"queue-nonexist-{uuid.uuid4()}"
@@ -95,7 +95,7 @@ class TestQueue:
         )
 
         await asyncio.sleep(0.5)
-        sub["stop"]()
+        await sub.stop()
 
     async def test_full_lifecycle_push_subscribe_ack(self, nexo: NexoClient):
         q_name = f"queue-life-{uuid.uuid4()}"
@@ -108,7 +108,7 @@ class TestQueue:
         await q.push(payload)
 
         await wait_for(lambda: received == [payload])
-        sub["stop"]()
+        await sub.stop()
 
     async def test_move_failed_to_dlq(self, nexo: NexoClient):
         q_name = f"queue-dlq-{uuid.uuid4()}"
@@ -124,7 +124,7 @@ class TestQueue:
         sub = await q.subscribe(fail_cb)
 
         await asyncio.sleep(1.0)
-        sub["stop"]()
+        await sub.stop()
 
         dlq_result = await q.dlq.peek(10)
         assert dlq_result["total"] == 1
@@ -144,7 +144,7 @@ class TestQueue:
         )
 
         await wait_for(lambda: len(received) == 2)
-        sub["stop"]()
+        await sub.stop()
 
         assert received == ["high", "low"]
 
@@ -171,7 +171,7 @@ class TestQueue:
         )
 
         await wait_for(lambda: len(received) == 3)
-        sub["stop"]()
+        await sub.stop()
 
         await asyncio.sleep((OLD_CONSUME_WAIT_MS + 100) / 1000.0)
 
@@ -202,7 +202,7 @@ class TestQueue:
 
         await wait_for(lambda: len(replayed) == 1)
         assert replayed[0]["order"] == "order3"
-        sub2["stop"]()
+        await sub2.stop()
 
         deleted = await q.dlq.delete(msg_to_delete_id)
         assert deleted is True
@@ -248,7 +248,7 @@ class TestQueue:
             await q.push({"i": i})
 
         await wait_for(lambda: len(received) == COUNT)
-        sub["stop"]()
+        await sub.stop()
 
         assert max_in_flight == 1
         assert len(set(received)) == COUNT
@@ -284,7 +284,7 @@ class TestQueue:
         start = asyncio.get_event_loop().time()
         await wait_for(lambda: len(received) == COUNT, timeout=10.0)
         elapsed = asyncio.get_event_loop().time() - start
-        sub["stop"]()
+        await sub.stop()
 
         assert len(set(received)) == COUNT
         assert max_in_flight > 1
@@ -310,8 +310,8 @@ class TestQueue:
             await q.push({"i": i})
 
         await wait_for(lambda: len(received) == COUNT)
-        sub_a["stop"]()
-        sub_b["stop"]()
+        await sub_a.stop()
+        await sub_b.stop()
 
         assert sorted(received) == list(range(COUNT))
 
@@ -329,7 +329,7 @@ class TestQueue:
         sub = await q.subscribe(fail_cb)
 
         await asyncio.sleep(0.5)
-        sub["stop"]()
+        await sub.stop()
 
         dlq_result = await q.dlq.peek(10)
         assert dlq_result["total"] == 1
@@ -352,7 +352,7 @@ class TestQueue:
         )
 
         await wait_for(lambda: len(received) == 3)
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_push_batch_mixed_priorities(self, nexo: NexoClient):
@@ -375,7 +375,7 @@ class TestQueue:
         assert received[0] == "high"
         assert received[1] == "mid"
         assert received[2] == "low"
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_empty_push_batch(self, nexo: NexoClient):
@@ -414,7 +414,7 @@ class TestQueue:
 
         await asyncio.sleep(0.2)
         assert received == []
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_partial_batch_when_fewer_than_batch_size(self, nexo: NexoClient):
@@ -433,7 +433,7 @@ class TestQueue:
 
         await wait_for(lambda: len(received) == 3)
         assert received == ["a", "b", "c"]
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_long_polling_wakeup_on_push(self, nexo: NexoClient):
@@ -456,7 +456,7 @@ class TestQueue:
 
         assert elapsed < 2.0
         assert received[0] == "wakeup"
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_fifo_ordering_same_priority(self, nexo: NexoClient):
@@ -475,7 +475,7 @@ class TestQueue:
         await wait_for(lambda: len(received) == 10)
         for i in range(10):
             assert received[i] == i
-        sub["stop"]()
+        await sub.stop()
         await q.delete()
 
     async def test_push_nonexistent_queue_fails(self, nexo: NexoClient):

@@ -21,6 +21,7 @@ from .brokers.stream import (
     StreamMessageMeta,
     StreamSubscribeOptions,
 )
+from .subscription import Subscription
 
 __all__ = [
     "NexoClient",
@@ -45,4 +46,5 @@ __all__ = [
     "StreamCreateOptions",
     "StreamMessageMeta",
     "StreamSubscribeOptions",
+    "Subscription",
 ]

@@ -6,6 +6,7 @@ from typing import Any, Callable, Generic, TypeVar, TypedDict
 from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError, RequestTimeoutError
+from ..subscription import Subscription
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
 
@@ -244,6 +245,112 @@ class NexoDLQ:
         return await QueueCommands.purge_dlq(self._conn, self._queue_name)
 
 
+class QueueSubscription(Generic[T]):
+    def __init__(
+        self,
+        conn: NexoConnection,
+        queue_name: str,
+        logger: Logger,
+        callback: QueueHandler[T],
+        batch_size: int,
+        wait_ms: int,
+        concurrency: int,
+    ) -> None:
+        self._conn = conn
+        self._queue_name = queue_name
+        self._logger = logger
+        self._callback = callback
+        self._batch_size = batch_size
+        self._wait_ms = wait_ms
+        self._concurrency = concurrency
+        self._active = False
+        self._loop_task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        self._active = True
+        self._loop_task = asyncio.create_task(self._loop())
+        self._loop_task.add_done_callback(
+            lambda t: self._logger.error(
+                f"[CRITICAL] Queue loop crashed for {self._queue_name}", t.exception()
+            )
+            if not t.cancelled() and t.exception()
+            else None
+        )
+
+    async def stop(self) -> None:
+        self._active = False
+        if self._loop_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._loop_task), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._loop_task.cancel()
+                try:
+                    await self._loop_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _loop(self) -> None:
+        try:
+            while self._active:
+                if not self._conn.is_connected:
+                    if not self._active:
+                        break
+                    await asyncio.sleep(
+                        DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
+                    )
+                    continue
+
+                try:
+                    if not self._conn.is_connected:
+                        continue
+
+                    messages = await QueueCommands.consume(
+                        self._conn, self._queue_name, self._batch_size, self._wait_ms
+                    )
+
+                    if not messages:
+                        continue
+
+                    async def process_msg(msg):
+                        if not self._active:
+                            return
+                        try:
+                            result = self._callback(msg["data"])
+                            if asyncio.iscoroutine(result):
+                                await result
+                            QueueCommands.ack(self._conn, self._queue_name, msg["id"])
+                        except Exception as e:
+                            if not self._conn.is_connected:
+                                return
+                            reason = str(e)
+                            self._logger.error(
+                                f"[Queue:{self._queue_name}] Consumer error, sending NACK. Reason: {reason}"
+                            )
+                            QueueCommands.nack(self._conn, self._queue_name, msg["id"], reason)
+
+                    await run_concurrent(messages, self._concurrency, process_msg)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if not self._active:
+                        break
+                    if (
+                        not self._conn.is_connected
+                        or isinstance(e, (ConnectionClosedError, RequestTimeoutError))
+                    ):
+                        if not self._active:
+                            break
+                        await asyncio.sleep(
+                            DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
+                        )
+                        continue
+                    self._logger.error(f"[Queue:{self._queue_name}] Consumer stopping: {e}")
+                    break
+        except asyncio.CancelledError:
+            pass
+
+
 class NexoQueue(Generic[T]):
     def __init__(self, conn: NexoConnection, name: str, logger: Logger) -> None:
         self._conn = conn
@@ -277,7 +384,7 @@ class NexoQueue(Generic[T]):
         self,
         callback: QueueHandler[T],
         options: QueueSubscribeOptions | None = None,
-    ) -> dict[str, Callable[[], None]]:
+    ) -> Subscription[T]:
         opts = options or {}
         batch_size = opts.get("batch_size")
         if batch_size is None:
@@ -294,81 +401,18 @@ class NexoQueue(Generic[T]):
         if concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
 
-        active = True
-
-        async def loop():
-            nonlocal active
-            try:
-                while active:
-                    if not self._conn.is_connected:
-                        if not active:
-                            break
-                        await asyncio.sleep(
-                            DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
-                        )
-                        continue
-
-                    try:
-                        if not self._conn.is_connected:
-                            continue
-
-                        messages = await QueueCommands.consume(
-                            self._conn, self.name, batch_size, wait_ms
-                        )
-
-                        if not messages:
-                            continue
-
-                        async def process_msg(msg):
-                            if not active:
-                                return
-                            try:
-                                result = callback(msg["data"])
-                                if asyncio.iscoroutine(result):
-                                    await result
-                                QueueCommands.ack(self._conn, self.name, msg["id"])
-                            except Exception as e:
-                                if not self._conn.is_connected:
-                                    return
-                                reason = str(e)
-                                self._logger.error(
-                                    f"[Queue:{self.name}] Consumer error, sending NACK. Reason: {reason}"
-                                )
-                                QueueCommands.nack(self._conn, self.name, msg["id"], reason)
-
-                        await run_concurrent(messages, concurrency, process_msg)
-
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        if not active:
-                            break
-                        if (
-                            not self._conn.is_connected
-                            or isinstance(e, (ConnectionClosedError, RequestTimeoutError))
-                        ):
-                            if not active:
-                                break
-                            await asyncio.sleep(
-                                DEFAULT_CONFIG.connection.backoff_short_ms / 1000.0
-                            )
-                            continue
-                        self._logger.error(f"[Queue:{self.name}] Consumer stopping: {e}")
-                        break
-            except asyncio.CancelledError:
-                pass
-
-        task = asyncio.create_task(loop())
-        task.add_done_callback(
-            lambda t: self._logger.error(
-                f"[CRITICAL] Queue loop crashed for {self.name}", t.exception()
-            )
-            if not t.cancelled() and t.exception()
-            else None
+        sub = QueueSubscription[T](
+            self._conn,
+            self.name,
+            self._logger,
+            callback,
+            batch_size,
+            wait_ms,
+            concurrency,
         )
+        sub.start()
 
-        def stop():
-            nonlocal active
-            active = False
-
-        return {"stop": stop}
+        return Subscription(
+            stop_fn=sub.stop,
+            active_fn=lambda: sub._active,
+        )

@@ -144,7 +144,7 @@ class TestReconnection:
             conn._writer.close()
         await wait_for(lambda: not conn.is_connected)
 
-        sub["stop"]()
+        await sub.stop()
 
         await wait_for(lambda: conn.is_connected, timeout=5.0)
 
@@ -227,4 +227,4 @@ class TestReconnection:
 
         assert received == [1, 2, 3]
 
-        await sub["stop"]()
+        await sub.stop()
