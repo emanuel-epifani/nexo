@@ -461,13 +461,13 @@ impl StreamManager {
         })
     }
 
-    pub async fn disconnect(&self, client_id: String) {
+    pub async fn disconnect(&self, client_id: &str) {
         info!("[StreamManager] Disconnecting client: {}", client_id);
         for (_, topic_ref) in Self::collect_topics(&self.topics) {
             let mut should_notify = false;
             {
                 let mut state = topic_ref.state.lock();
-                if let Some(bindings) = state.client_map.remove(&client_id) {
+                if let Some(bindings) = state.client_map.remove(client_id) {
                     for binding in bindings {
                         if let Some(group_ref) = state.groups.get_mut(&binding.group_id) {
                             if group_ref.remove_member(&binding.consumer_id).is_some() {

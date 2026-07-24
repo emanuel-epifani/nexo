@@ -20,7 +20,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
     // ==========================================
     // ACT 1: SESSION SETUP & SOCKET CHANNELS
     // ==========================================
-    let session_id = Uuid::new_v4().to_string();
+    let session_id: Arc<str> = Arc::from(Uuid::new_v4().to_string());
 
     // Channels to communicate with the raw TCP socket
     let (inbound_tx, mut inbound_rx) = mpsc::channel(server_config.channel_capacity_socket_write);
@@ -61,7 +61,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
             Some(frame) = inbound_rx.recv() => {
                 let tx_clone = outbound_tx.clone();
                 let engine_clone = Arc::clone(&engine);
-                let session_id_clone = session_id.clone();
+                let session_id_clone = Arc::clone(&session_id);
 
                 request_set.spawn(async move {
                     let id = frame.header.id();
@@ -107,7 +107,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
     request_set.abort_all();
     bridge_handle.abort();
     engine.pubsub.disconnect(&session_id);
-    engine.stream.disconnect(session_id).await;
+    engine.stream.disconnect(&*session_id).await;
 
     Ok(())
 }
