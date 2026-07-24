@@ -56,6 +56,11 @@ impl PayloadWriter {
         self
     }
 
+    pub fn put_i64(&mut self, v: i64) -> &mut Self {
+        self.buf.put_i64(v);
+        self
+    }
+
     /// 16-byte UUID, no length prefix.
     pub fn put_uuid(&mut self, bytes: &[u8; 16]) -> &mut Self {
         self.buf.put_slice(bytes);
@@ -135,6 +140,13 @@ impl PayloadCursor {
             return Err(ParseError::Invalid("Payload too short for u64".into()));
         }
         Ok(self.data.get_u64())
+    }
+
+    pub fn read_i64(&mut self) -> Result<i64, ParseError> {
+        if !self.has_remaining(8) {
+            return Err(ParseError::Invalid("Payload too short for i64".into()));
+        }
+        Ok(self.data.get_i64())
     }
 
     pub fn read_string(&mut self) -> Result<String, ParseError> {

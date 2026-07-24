@@ -13,6 +13,7 @@ class StoreOpcode:
     MAP_SET = 0x02
     MAP_GET = 0x03
     MAP_DEL = 0x04
+    MAP_INCR = 0x05
 
 
 class MapSetOptions(TypedDict, total=False):
@@ -49,6 +50,15 @@ class NexoMap:
 
     async def delete(self, key: str) -> None:
         await self._conn.send(StoreOpcode.MAP_DEL, lambda w: w.string(key))
+
+    async def incr(self, key: str, delta: int = 1) -> int:
+        status, cursor = await self._conn.send(
+            StoreOpcode.MAP_INCR, lambda w: w.string(key).i64(delta)
+        )
+        if status == ResponseStatus.DATA:
+            raw = cursor.read_buffer(len(cursor.buf) - cursor.offset)
+            return int(raw.decode("utf-8"))
+        raise Exception(cursor.read_string())
 
 
 class NexoStore:

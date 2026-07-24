@@ -45,6 +45,11 @@ class Cursor:
         self.offset += 8
         return v
 
+    def read_i64(self) -> int:
+        v = struct.unpack_from(">q", self.buf, self.offset)[0]
+        self.offset += 8
+        return v
+
     def read_buffer(self, length: int) -> bytes:
         v = self.buf[self.offset : self.offset + length]
         self.offset += length
@@ -143,6 +148,14 @@ class FrameWriter:
             raise ValueError(f"u64 value out of range: {v}")
         self._ensure(8)
         struct.pack_into(">Q", self._buf, self._offset, v)
+        self._offset += 8
+        return self
+
+    def i64(self, v: int) -> "FrameWriter":
+        if v < -0x8000000000000000 or v > 0x7FFFFFFFFFFFFFFF:
+            raise ValueError(f"i64 value out of range: {v}")
+        self._ensure(8)
+        struct.pack_into(">q", self._buf, self._offset, v)
         self._offset += 8
         return self
 

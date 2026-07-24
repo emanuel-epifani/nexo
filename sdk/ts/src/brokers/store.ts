@@ -5,6 +5,7 @@ enum StoreOpcode {
   MAP_SET = 0x02,
   MAP_GET = 0x03,
   MAP_DEL = 0x04,
+  MAP_INCR = 0x05,
 }
 
 const StoreCommands = {
@@ -26,6 +27,15 @@ const StoreCommands = {
 
   mapDel: (conn: NexoConnection, key: string) =>
     conn.send(StoreOpcode.MAP_DEL, w => w.string(key)),
+
+  mapIncr: async (conn: NexoConnection, key: string, delta: number) => {
+    const res = await conn.send(StoreOpcode.MAP_INCR, w => w.string(key).i64(delta));
+    if (res.status === ResponseStatus.DATA) {
+      const raw = res.cursor.readBuffer(res.cursor.buf.length - res.cursor.offset);
+      return Number(raw.toString('utf8'));
+    }
+    throw new Error(res.cursor.readString());
+  },
 };
 
 export interface MapSetOptions {
@@ -45,6 +55,10 @@ export class NexoMap {
 
   async del(key: string): Promise<void> {
     await StoreCommands.mapDel(this.conn, key);
+  }
+
+  async incr(key: string, delta: number = 1): Promise<number> {
+    return StoreCommands.mapIncr(this.conn, key, delta);
   }
 }
 

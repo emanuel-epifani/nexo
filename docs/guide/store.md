@@ -88,5 +88,40 @@ await client.store.map.set("bad", "val", {"ttl": 0})
 :::
 
 
+### INCR
 
+Atomically increment (or decrement) a key's integer value by `delta`. If the key does not exist, it is initialized to `0` before applying the delta. The existing TTL is preserved.
 
+| Behavior | Description |
+|---|---|
+| `incr(key)` | Increment by 1 (default delta) |
+| `incr(key, delta)` | Increment by `delta` (negative = decrement) |
+| Key doesn't exist | Starts from `0`, result = `delta` |
+| Value is not an integer | **Error** — `value is not an integer or out of range` |
+| Overflow / underflow | **Error** — `increment would overflow` |
+
+::: code-group
+
+```typescript
+// Increment a counter by 1 (default)
+const views = await client.store.map.incr("page:views");
+
+// Increment by a custom amount
+const score = await client.store.map.incr("user:1:score", 10);
+
+// Decrement by 5
+const remaining = await client.store.map.incr("quota:user:1", -5);
+```
+
+```python
+# Increment a counter by 1 (default)
+views = await client.store.map.incr("page:views")
+
+# Increment by a custom amount
+score = await client.store.map.incr("user:1:score", 10)
+
+# Decrement by 5
+remaining = await client.store.map.incr("quota:user:1", -5)
+```
+
+:::

@@ -8,6 +8,7 @@ export class Cursor {
   readU16(): number { const v = this.buf.readUInt16BE(this.offset); this.offset += 2; return v; }
   readU32(): number { const v = this.buf.readUInt32BE(this.offset); this.offset += 4; return v; }
   readU64(): bigint { const v = this.buf.readBigUInt64BE(this.offset); this.offset += 8; return v; }
+  readI64(): bigint { const v = this.buf.readBigInt64BE(this.offset); this.offset += 8; return v; }
 
   readBuffer(len: number): Buffer {
     const v = this.buf.subarray(this.offset, this.offset + len);
@@ -142,6 +143,17 @@ export class FrameWriter {
     }
     this.ensure(8);
     this.buf.writeBigUInt64BE(value, this.offset);
+    this.offset += 8;
+    return this;
+  }
+
+  i64(v: bigint | number): this {
+    const value = typeof v === 'bigint' ? v : BigInt(v);
+    if (value < -0x8000000000000000n || value > 0x7FFFFFFFFFFFFFFFn) {
+      throw new Error(`i64 value out of range: ${v}`);
+    }
+    this.ensure(8);
+    this.buf.writeBigInt64BE(value, this.offset);
     this.offset += 8;
     return this;
   }

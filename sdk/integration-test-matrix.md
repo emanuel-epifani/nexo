@@ -17,6 +17,12 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | store_del_nonexistent | Del on non-existent key is idempotent (no error) | should succeed del on non-existent key (idempotent) | del_nonexistent_is_idempotent |
 | store_overwrite | Overwrite existing key with new value | should overwrite existing key with new value | overwrite_existing_key |
 | store_large_value | Handle large values (1MB round-trip) | should handle large values (1MB) | large_value_1mb |
+| store_incr_new_key | INCR on non-existent key starts from 0 | should increment a new key from 0 | incr_new_key_from_zero |
+| store_incr_existing | INCR on existing integer value | should increment an existing integer value | incr_existing_integer |
+| store_incr_negative | INCR with negative delta (decrement) | should decrement with negative delta | incr_negative_delta |
+| store_incr_non_integer | INCR on non-integer value returns error | should error on non-integer value | incr_non_integer_errors |
+| store_incr_preserves_ttl | INCR preserves existing TTL on key | should preserve TTL after incr | incr_preserves_ttl |
+| store_incr_negative_new | INCR with negative delta on new key | should handle negative delta on new key | incr_negative_on_new_key |
 
 ## PubSub
 

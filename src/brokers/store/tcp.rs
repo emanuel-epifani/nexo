@@ -16,6 +16,7 @@ pub const OPCODE_MAX: u8 = 0x0F;
 pub const OP_MAP_SET: u8 = 0x02;
 pub const OP_MAP_GET: u8 = 0x03;
 pub const OP_MAP_DEL: u8 = 0x04;
+pub const OP_MAP_INCR: u8 = 0x05;
 
 // ==========================================
 // COMMANDS
@@ -31,6 +32,7 @@ pub enum MapCmd {
     Set { key: String, ttl: Option<u64>, value: Bytes },
     Get { key: String },
     Del { key: String },
+    Incr { key: String, delta: i64 },
 }
 
 impl MapCmd {
@@ -51,6 +53,11 @@ impl MapCmd {
                 let key = cursor.read_string()?;
                 Ok(Self::Del { key })
             }
+            OP_MAP_INCR => {
+                let key = cursor.read_string()?;
+                let delta = cursor.read_i64()?;
+                Ok(Self::Incr { key, delta })
+            }
             _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
         }
     }
@@ -59,7 +66,7 @@ impl MapCmd {
 impl StoreCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
-            OP_MAP_SET..=OP_MAP_DEL => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
+            OP_MAP_SET..=OP_MAP_INCR => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
             _ => Err(ParseError::Invalid(format!("Unknown Store opcode: 0x{:02X}", opcode))),
         }
     }
@@ -92,6 +99,12 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
             MapCmd::Del { key } => {
                 engine.store.map.del(&key);
                 Response::Ok
+            }
+            MapCmd::Incr { key, delta } => {
+                match engine.store.map.incr(&key, delta) {
+                    Ok(new_val) => Response::Data(new_val),
+                    Err(msg) => Response::Error(msg),
+                }
             }
         },
     }

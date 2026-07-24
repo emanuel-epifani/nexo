@@ -83,4 +83,53 @@ describe('STORE (KV)', () => {
         expect(result).toBe(largeValue);
         await nexo.store.map.del(key);
     });
+
+    // ── INCR ───────────────────────────────────────────────────
+
+    it('should increment a new key from 0', async () => {
+        const key = `incr:new:${randomUUID()}`;
+        const result = await nexo.store.map.incr(key);
+        expect(result).toBe(1);
+        await nexo.store.map.del(key);
+    });
+
+    it('should increment an existing integer value', async () => {
+        const key = `incr:existing:${randomUUID()}`;
+        await nexo.store.map.set(key, '10');
+        const result = await nexo.store.map.incr(key, 5);
+        expect(result).toBe(15);
+        await nexo.store.map.del(key);
+    });
+
+    it('should decrement with negative delta', async () => {
+        const key = `incr:neg:${randomUUID()}`;
+        await nexo.store.map.set(key, '10');
+        const result = await nexo.store.map.incr(key, -3);
+        expect(result).toBe(7);
+        await nexo.store.map.del(key);
+    });
+
+    it('should error on non-integer value', async () => {
+        const key = `incr:str:${randomUUID()}`;
+        await nexo.store.map.set(key, 'hello');
+        await expect(nexo.store.map.incr(key, 1)).rejects.toThrow();
+        await nexo.store.map.del(key);
+    });
+
+    it('should preserve TTL after incr', async () => {
+        const key = `incr:ttl:${randomUUID()}`;
+        await nexo.store.map.set(key, '5', { ttl: 60 });
+        await nexo.store.map.incr(key, 1);
+        // Should still exist after short wait (TTL=60)
+        await new Promise(r => setTimeout(r, 200));
+        expect(await nexo.store.map.get(key)).toBe('6');
+        await nexo.store.map.del(key);
+    });
+
+    it('should handle negative delta on new key', async () => {
+        const key = `incr:negnew:${randomUUID()}`;
+        const result = await nexo.store.map.incr(key, -5);
+        expect(result).toBe(-5);
+        await nexo.store.map.del(key);
+    });
 });
