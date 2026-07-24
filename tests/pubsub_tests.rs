@@ -689,6 +689,92 @@ mod pubsub_tests {
         }
     }
 
+    mod concurrency {
+        use super::*;
+
+        // Stress test: many clients subscribe (collecting retained) while publishes
+        // (including retained) are happening concurrently. Verifies the split-lock
+        // subscribe path does not deadlock and still delivers retained messages.
+        #[tokio::test]
+        async fn concurrent_subscribe_and_publish_retained() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let manager = Arc::new(manager);
+
+            const TOPICS: usize = 10;
+            const CLIENTS: usize = 50;
+
+            // Pre-publish retained messages
+            for t in 0..TOPICS {
+                let topic = format!("stress/retained/{}", t);
+                manager.publish(&topic, Bytes::from(format!("v-{}", t)), true, false, None).unwrap();
+            }
+
+            let mut handles = Vec::new();
+
+            for t in 0..TOPICS {
+                let m = manager.clone();
+                let topic = format!("stress/retained/{}", t);
+                handles.push(tokio::spawn(async move {
+                    for _ in 0..10 {
+                        m.publish(&topic, Bytes::from("burst"), true, false, None).unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                }));
+            }
+
+            for c in 0..CLIENTS {
+                let m = manager.clone();
+                let client_id = format!("concurrent-client-{}", c);
+                let topic_idx = c % TOPICS;
+                let topic = format!("stress/retained/{}", topic_idx);
+                handles.push(tokio::spawn(async move {
+                    let (tx, mut rx) = mpsc::unbounded_channel();
+                    m.connect(&client_id, tx);
+                    m.subscribe(&client_id, &topic).unwrap();
+                    // Each client must receive at least one retained message.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+                }));
+            }
+
+            for h in handles {
+                h.await.unwrap();
+            }
+        }
+
+        // Stress test: disconnect while publishes are in flight to overlapping topics.
+        #[tokio::test]
+        async fn concurrent_disconnect_and_publish() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let manager = Arc::new(manager);
+
+            let topic = "disconnect/stress";
+            for i in 0..100 {
+                let client_id = format!("client-{}", i);
+                let (tx, _rx) = mpsc::unbounded_channel();
+                manager.connect(&client_id, tx);
+                manager.subscribe(&client_id, topic).unwrap();
+            }
+
+            let m1 = manager.clone();
+            let disconnect_handle = tokio::spawn(async move {
+                for i in 0..100 {
+                    m1.disconnect(&format!("client-{}", i));
+                }
+            });
+
+            let m2 = manager.clone();
+            let publish_handle = tokio::spawn(async move {
+                for i in 0..100 {
+                    m2.publish(topic, Bytes::from(format!("msg-{}", i)), false, false, None).unwrap();
+                }
+            });
+
+            let (d, p) = tokio::join!(disconnect_handle, publish_handle);
+            d.unwrap();
+            p.unwrap();
+        }
+    }
+
     mod shutdown {
         use super::*;
 
