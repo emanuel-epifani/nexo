@@ -213,17 +213,7 @@ impl QueueManager {
         if msgs.is_empty() {
             return;
         }
-        if msgs.len() == 1 {
-            let msg = &msgs[0];
-            shared.store.execute(StorageOp::UpdateState {
-                id: msg.id,
-                visible_at: msg.visible_at,
-                attempts: msg.attempts,
-                failure_reason: msg.failure_reason.clone(),
-            });
-        } else {
-            shared.store.execute(StorageOp::UpdateStateBatch(msgs.to_vec()));
-        }
+        shared.store.execute(StorageOp::UpdateState(msgs.to_vec()));
     }
 
     // ==========================================
@@ -282,27 +272,17 @@ impl QueueManager {
 
         let now = current_time_ms();
 
-        if items.len() == 1 {
-            let (payload, priority) = items.into_iter().next().unwrap();
-            let msg = Message::new(payload, priority, now);
-            {
-                let mut inner = Self::lock(&shared.inner);
+        let mut msgs = Vec::with_capacity(items.len());
+        for (payload, priority) in items {
+            msgs.push(Message::new(payload, priority, now));
+        }
+        {
+            let mut inner = Self::lock(&shared.inner);
+            for msg in &msgs {
                 inner.state.push(msg.clone());
             }
-            shared.store.execute(StorageOp::Insert(msg));
-        } else {
-            let mut msgs = Vec::with_capacity(items.len());
-            for (payload, priority) in items {
-                msgs.push(Message::new(payload, priority, now));
-            }
-            {
-                let mut inner = Self::lock(&shared.inner);
-                for msg in &msgs {
-                    inner.state.push(msg.clone());
-                }
-            }
-            shared.store.execute(StorageOp::InsertBatch(msgs));
         }
+        shared.store.execute(StorageOp::Insert(msgs));
 
         shared.notify.notify_waiters();
 
@@ -324,12 +304,7 @@ impl QueueManager {
         };
 
         if let Some(msg) = &msg_opt {
-            shared.store.execute(StorageOp::UpdateState {
-                id: msg.id,
-                visible_at: msg.visible_at,
-                attempts: msg.attempts,
-                failure_reason: msg.failure_reason.clone(),
-            });
+            shared.store.execute(StorageOp::UpdateState(vec![msg.clone()]));
         }
 
         msg_opt
@@ -372,12 +347,7 @@ impl QueueManager {
         };
 
         if let Some(msg) = requeued {
-            shared.store.execute(StorageOp::UpdateState {
-                id: msg.id,
-                visible_at: msg.visible_at,
-                attempts: msg.attempts,
-                failure_reason: msg.failure_reason.clone(),
-            });
+            shared.store.execute(StorageOp::UpdateState(vec![msg]));
             shared.notify.notify_waiters();
             return true;
         }

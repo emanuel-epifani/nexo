@@ -9,7 +9,7 @@ use hashlink::LinkedHashMap;
 use uuid::Uuid;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use crate::brokers::queue::domain::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queue::domain::queue::{Message, current_time_ms};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlqMessage {
@@ -44,7 +44,6 @@ impl DlqMessage {
             created_at: self.created_at,
             visible_at: 0, // Ready immediately
             failure_reason: None, // Clear reason
-            state: MessageState::Ready,
         }
     }
 }

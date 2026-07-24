@@ -8,7 +8,7 @@ use rusqlite::{params, types::Type, Connection, Result};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::brokers::queue::domain::queue::{Message, MessageState, current_time_ms};
+use crate::brokers::queue::domain::queue::Message;
 use crate::brokers::queue::domain::dlq::DlqMessage;
 
 // ==========================================
@@ -18,22 +18,13 @@ use crate::brokers::queue::domain::dlq::DlqMessage;
 /// Atomic operations that storage can execute
 #[derive(Debug)]
 pub enum StorageOp {
-    /// Insert a new message (Push)
-    Insert(Message),
-    /// Insert multiple messages in one operation (PushBatch)
-    InsertBatch(Vec<Message>),
+    /// Insert messages (Push)
+    Insert(Vec<Message>),
     /// Remove a message (Ack)
     Delete(Uuid),
     /// Update visibility and attempts (Nack / Timeout / In-flight)
-    UpdateState {
-        id: Uuid,
-        visible_at: u64,
-        attempts: u32,
-        failure_reason: Option<String>,
-    },
-    /// Update visibility and attempts for multiple messages in one operation
-    UpdateStateBatch(Vec<Message>),
-    
+    UpdateState(Vec<Message>),
+
     // DLQ Operations
     /// Delete a message from DLQ
     DeleteDLQ(Uuid),
@@ -289,15 +280,6 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let created_at = row.get::<_, i64>(5)? as u64;
         let error: Option<String> = row.get(6)?;
 
-         let now = current_time_ms();
-         
-         // Reconstruct State
-         let state = if visible_at > now && attempts > 0 {
-             MessageState::InFlight
-         } else {
-             MessageState::Ready
-         };
-
          Ok(Message {
              id,
              payload: bytes::Bytes::from(payload),
@@ -306,7 +288,6 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
              created_at,
              visible_at,
              failure_reason: error,
-             state,
          })
     })?;
 
@@ -352,22 +333,7 @@ fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
 
 fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
-        StorageOp::Insert(msg) => {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-            )?;
-            stmt.execute(params![
-                msg.id.as_bytes(),
-                msg.payload.as_ref(),
-                msg.priority,
-                msg.visible_at as i64,
-                msg.attempts,
-                msg.created_at as i64,
-                msg.failure_reason.as_deref()
-            ])?;
-        }
-        StorageOp::InsertBatch(msgs) => {
+        StorageOp::Insert(msgs) => {
             let mut stmt = tx.prepare_cached(
                 "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
@@ -388,13 +354,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
             stmt.execute(params![id.as_bytes()])?;
         }
-        StorageOp::UpdateState { id, visible_at, attempts, failure_reason } => {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE queue SET visible_at = ?1, attempts = ?2, error = ?3 WHERE id = ?4"
-            )?;
-            stmt.execute(params![*visible_at as i64, *attempts, failure_reason.as_deref(), id.as_bytes()])?;
-        }
-        StorageOp::UpdateStateBatch(msgs) => {
+        StorageOp::UpdateState(msgs) => {
             let mut stmt = tx.prepare_cached(
                 "UPDATE queue SET visible_at = ?1, attempts = ?2, error = ?3 WHERE id = ?4"
             )?;

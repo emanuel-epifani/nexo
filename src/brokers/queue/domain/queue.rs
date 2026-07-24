@@ -18,12 +18,6 @@ use crate::brokers::queue::domain::dlq::DlqMessage;
 // MESSAGE & CONFIG
 // ==========================================
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum MessageState {
-    Ready,                  // In waiting_for_dispatch
-    InFlight,               // In waiting_for_ack (timestamp in visible_at)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: Uuid,
@@ -33,7 +27,6 @@ pub struct Message {
     pub created_at: u64,
     pub visible_at: u64,
     pub failure_reason: Option<String>,
-    pub state: MessageState,
 }
 
 impl Message {
@@ -46,8 +39,13 @@ impl Message {
             created_at: now,
             visible_at: 0,
             failure_reason: None,
-            state: MessageState::Ready,
         }
+    }
+
+    /// A message is in-flight if it has a visible_at > 0 (i.e. it has been popped and is waiting for ack).
+    #[inline]
+    pub fn is_in_flight(&self) -> bool {
+        self.visible_at > 0
     }
 
 }
@@ -97,19 +95,15 @@ impl QueueState {
     /// Push a message to the queue.
     pub fn push(&mut self, msg: Message) {
         let id = msg.id;
-        let initial_state = msg.state;
         let priority = msg.priority;
         let visible_at = msg.visible_at;
 
         self.registry.insert(id, msg);
 
-        match initial_state {
-            MessageState::Ready => {
-                self.waiting_for_dispatch.entry(priority).or_default().insert(id);
-            }
-            MessageState::InFlight => {
-                self.waiting_for_ack.entry(visible_at).or_default().insert(id);
-            }
+        if visible_at > 0 {
+            self.waiting_for_ack.entry(visible_at).or_default().insert(id);
+        } else {
+            self.waiting_for_dispatch.entry(priority).or_default().insert(id);
         }
     }
 
@@ -142,9 +136,9 @@ impl QueueState {
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
     pub fn nack(&mut self, id: Uuid, reason: String, max_retries: u32) -> (Option<Message>, Option<DlqMessage>) {
         // 1. Check existence and update fields
-        let (should_dlq, _priority) = if let Some(msg) = self.registry.get_mut(&id) {
+        let (should_dlq, priority, visible_at) = if let Some(msg) = self.registry.get_mut(&id) {
             msg.failure_reason = Some(reason.clone());
-            (msg.attempts >= max_retries, msg.priority)
+            (msg.attempts >= max_retries, msg.priority, msg.visible_at)
         } else {
             return (None, None);
         };
@@ -158,12 +152,12 @@ impl QueueState {
             }
             (None, None)
         } else {
-            // Requeue (Ready)
-            if self.transition_to(id, MessageState::Ready) {
-                if let Some(msg) = self.registry.get_mut(&id) {
-                    msg.visible_at = 0;
-                    return (Some(msg.clone()), None);
-                }
+            // Requeue: remove from in-flight index, reset visible_at, add to ready index
+            self.remove_from_index(id, priority, visible_at);
+            if let Some(msg) = self.registry.get_mut(&id) {
+                msg.visible_at = 0;
+                self.waiting_for_dispatch.entry(priority).or_default().insert(id);
+                return (Some(msg.clone()), None);
             }
             (None, None)
         }
@@ -198,7 +192,6 @@ impl QueueState {
                     }
                 } else {
                     if let Some(msg) = self.registry.get_mut(&id) {
-                        msg.state = MessageState::Ready;
                         msg.visible_at = 0;
                         let priority = msg.priority;
                         requeued_msgs.push(msg.clone());
@@ -228,70 +221,37 @@ impl QueueState {
 
         let timeout = now + visibility_timeout_ms;
 
-        // Update message fields before transition so visible_at is the correct key
-        if let Some(msg) = self.registry.get_mut(&next_id) {
-            msg.visible_at = timeout;
-            msg.attempts += 1;
-        }
+        // Get priority before mutable borrow
+        let priority = self.registry.get(&next_id)?.priority;
 
-        self.transition_to(next_id, MessageState::InFlight);
+        // Remove from ready index
+        self.remove_from_index(next_id, priority, 0);
 
-        if let Some(msg) = self.registry.get(&next_id) {
-            return Some(msg.clone());
-        }
+        // Update to in-flight
+        let msg = self.registry.get_mut(&next_id)?;
+        msg.visible_at = timeout;
+        msg.attempts += 1;
 
-        None
+        // Add to in-flight index
+        self.waiting_for_ack.entry(timeout).or_default().insert(next_id);
+
+        Some(msg.clone())
     }
 
-    /// Remove a message ID from the appropriate index based on its state
-    fn remove_from_index(&mut self, state: &MessageState, id: Uuid, priority: u8, visible_at: u64) {
-        match state {
-            MessageState::Ready => {
-                if let Some(queue) = self.waiting_for_dispatch.get_mut(&priority) {
-                    queue.remove(&id);
-                    if queue.is_empty() { self.waiting_for_dispatch.remove(&priority); }
-                }
+    /// Remove a message ID from the appropriate index based on visible_at.
+    /// visible_at > 0 → in-flight index; visible_at == 0 → ready index.
+    fn remove_from_index(&mut self, id: Uuid, priority: u8, visible_at: u64) {
+        if visible_at > 0 {
+            if let Some(queue) = self.waiting_for_ack.get_mut(&visible_at) {
+                queue.remove(&id);
+                if queue.is_empty() { self.waiting_for_ack.remove(&visible_at); }
             }
-            MessageState::InFlight => {
-                if let Some(queue) = self.waiting_for_ack.get_mut(&visible_at) {
-                    queue.remove(&id);
-                    if queue.is_empty() { self.waiting_for_ack.remove(&visible_at); }
-                }
+        } else {
+            if let Some(queue) = self.waiting_for_dispatch.get_mut(&priority) {
+                queue.remove(&id);
+                if queue.is_empty() { self.waiting_for_dispatch.remove(&priority); }
             }
         }
-    }
-
-    fn transition_to(&mut self, id: Uuid, new_state: MessageState) -> bool {
-        let (old_state, priority, visible_at) = match self.registry.get(&id) {
-            Some(m) => (m.state.clone(), m.priority, m.visible_at),
-            None => return false,
-        };
-
-        if old_state == new_state {
-            return true;
-        }
-
-        // Remove from old index
-        self.remove_from_index(&old_state, id, priority, visible_at);
-
-        // Update state and add to new index
-        if let Some(msg) = self.registry.get_mut(&id) {
-            msg.state = new_state;
-
-            match new_state {
-                MessageState::Ready => {
-                    self.waiting_for_dispatch
-                        .entry(msg.priority)
-                        .or_default()
-                        .insert(id);
-                }
-                MessageState::InFlight => {
-                    self.waiting_for_ack.entry(msg.visible_at).or_default().insert(id);
-                }
-            }
-        }
-
-        true
     }
 
     fn delete_message(&mut self, id: Uuid) -> bool {
@@ -300,10 +260,7 @@ impl QueueState {
 
     fn delete_message_and_return(&mut self, id: Uuid) -> Option<Message> {
         let msg = self.registry.remove(&id)?;
-
-        // Remove from index
-        self.remove_from_index(&msg.state, id, msg.priority, msg.visible_at);
-
+        self.remove_from_index(id, msg.priority, msg.visible_at);
         Some(msg)
     }
 }
