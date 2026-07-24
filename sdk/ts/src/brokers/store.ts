@@ -39,7 +39,7 @@ const StoreCommands = {
   },
 
   mapClearAll: async (conn: NexoConnection) => {
-    const res = await conn.send(StoreOpcode.MAP_CLEAR_ALL, w => {});
+    const res = await conn.send(StoreOpcode.MAP_CLEAR_ALL, () => {});
     if (res.status === ResponseStatus.DATA) {
       return res.cursor.decodeAny() as number;
     }
