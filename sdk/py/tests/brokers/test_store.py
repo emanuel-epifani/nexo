@@ -83,14 +83,14 @@ class TestStore:
 
     async def test_incr_existing_integer(self, nexo: NexoClient):
         key = f"incr:existing:{uuid.uuid4()}"
-        await nexo.store.map.set(key, "10")
+        await nexo.store.map.set(key, 10)
         result = await nexo.store.map.incr(key, 5)
         assert result == 15
         await nexo.store.map.delete(key)
 
     async def test_incr_negative_delta(self, nexo: NexoClient):
         key = f"incr:neg:{uuid.uuid4()}"
-        await nexo.store.map.set(key, "10")
+        await nexo.store.map.set(key, 10)
         result = await nexo.store.map.incr(key, -3)
         assert result == 7
         await nexo.store.map.delete(key)
@@ -104,14 +104,22 @@ class TestStore:
 
     async def test_incr_preserves_ttl(self, nexo: NexoClient):
         key = f"incr:ttl:{uuid.uuid4()}"
-        await nexo.store.map.set(key, "5", {"ttl": 60})
+        await nexo.store.map.set(key, 5, {"ttl": 60})
         await nexo.store.map.incr(key, 1)
         await asyncio.sleep(0.2)
-        assert await nexo.store.map.get(key) == "6"
+        assert await nexo.store.map.get(key) == 6
         await nexo.store.map.delete(key)
 
     async def test_incr_negative_on_new_key(self, nexo: NexoClient):
         key = f"incr:negnew:{uuid.uuid4()}"
         result = await nexo.store.map.incr(key, -5)
         assert result == -5
+        await nexo.store.map.delete(key)
+
+    async def test_incr_get_returns_int(self, nexo: NexoClient):
+        key = f"incr:gettype:{uuid.uuid4()}"
+        await nexo.store.map.incr(key, 42)
+        result = await nexo.store.map.get(key)
+        assert result == 42
+        assert isinstance(result, int)
         await nexo.store.map.delete(key)

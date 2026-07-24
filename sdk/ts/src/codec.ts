@@ -39,6 +39,8 @@ export class Cursor {
     const end = this.buf.length;
     this.offset = end;
     switch (type) {
+      case DataType.INT:
+        return Number(this.buf.readBigInt64BE(start));
       case DataType.JSON:
         return start === end ? null : JSON.parse(this.buf.toString('utf8', start, end));
       case DataType.STRING:
@@ -59,6 +61,8 @@ export class Cursor {
     const end = this.offset + (len - 1);
     this.offset = end;
     switch (type) {
+      case DataType.INT:
+        return Number(this.buf.readBigInt64BE(start));
       case DataType.JSON:
         return start === end ? null : JSON.parse(this.buf.toString('utf8', start, end));
       case DataType.STRING:
@@ -205,6 +209,11 @@ export class FrameWriter {
       this.buf.writeUInt8(DataType.RAW, this.offset++);
       this.buf.set(view, this.offset);
       this.offset += view.length;
+    } else if (typeof data === 'number' && Number.isSafeInteger(data)) {
+      this.ensure(9);
+      this.buf.writeUInt8(DataType.INT, this.offset++);
+      this.buf.writeBigInt64BE(BigInt(data), this.offset);
+      this.offset += 8;
     } else if (typeof data === 'string') {
       const len = Buffer.byteLength(data, 'utf8');
       this.ensure(1 + len);
@@ -242,6 +251,13 @@ export class FrameWriter {
       this.buf.writeUInt8(DataType.RAW, this.offset++);
       this.buf.set(view, this.offset);
       this.offset += view.length;
+    } else if (typeof data === 'number' && Number.isSafeInteger(data)) {
+      this.ensure(4 + 9);
+      this.buf.writeUInt32BE(9, this.offset);
+      this.offset += 4;
+      this.buf.writeUInt8(DataType.INT, this.offset++);
+      this.buf.writeBigInt64BE(BigInt(data), this.offset);
+      this.offset += 8;
     } else if (typeof data === 'string') {
       const len = Buffer.byteLength(data, 'utf8');
       this.ensure(4 + 1 + len);

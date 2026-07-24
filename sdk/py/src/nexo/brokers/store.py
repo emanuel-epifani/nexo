@@ -56,8 +56,7 @@ class NexoMap:
             StoreOpcode.MAP_INCR, lambda w: w.string(key).i64(delta)
         )
         if status == ResponseStatus.DATA:
-            raw = cursor.read_buffer(len(cursor.buf) - cursor.offset)
-            return int(raw.decode("utf-8"))
+            return cursor.decode_any()
         raise Exception(cursor.read_string())
 
 

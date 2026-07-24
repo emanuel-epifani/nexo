@@ -31,8 +31,7 @@ const StoreCommands = {
   mapIncr: async (conn: NexoConnection, key: string, delta: number) => {
     const res = await conn.send(StoreOpcode.MAP_INCR, w => w.string(key).i64(delta));
     if (res.status === ResponseStatus.DATA) {
-      const raw = res.cursor.readBuffer(res.cursor.buf.length - res.cursor.offset);
-      return Number(raw.toString('utf8'));
+      return res.cursor.decodeAny() as number;
     }
     throw new Error(res.cursor.readString());
   },

@@ -72,7 +72,9 @@ class Cursor:
         start = self.offset
         end = len(self.buf)
         self.offset = end
-        if dtype == DataType.JSON:
+        if dtype == DataType.INT:
+            return struct.unpack_from(">q", self.buf, start)[0]
+        elif dtype == DataType.JSON:
             if start == end:
                 return None
             return json.loads(self.buf[start:end].decode("utf-8"))
@@ -87,7 +89,9 @@ class Cursor:
         start = self.offset
         end = self.offset + (length - 1)
         self.offset = end
-        if dtype == DataType.JSON:
+        if dtype == DataType.INT:
+            return struct.unpack_from(">q", self.buf, start)[0]
+        elif dtype == DataType.JSON:
             if start == end:
                 return None
             return json.loads(self.buf[start:end].decode("utf-8"))
@@ -198,6 +202,20 @@ class FrameWriter:
             self._offset += 1
             self._buf[self._offset : self._offset + length] = data
             self._offset += length
+        elif isinstance(data, bool):
+            json_bytes = json.dumps(data, separators=(',', ':')).encode("utf-8")
+            length = len(json_bytes)
+            self._ensure(1 + length)
+            self._buf[self._offset] = DataType.JSON
+            self._offset += 1
+            self._buf[self._offset : self._offset + length] = json_bytes
+            self._offset += length
+        elif isinstance(data, int) and -2**63 <= data <= 2**63 - 1:
+            self._ensure(9)
+            self._buf[self._offset] = DataType.INT
+            self._offset += 1
+            struct.pack_into(">q", self._buf, self._offset, data)
+            self._offset += 8
         elif isinstance(data, str):
             encoded = data.encode("utf-8")
             length = len(encoded)
@@ -229,6 +247,24 @@ class FrameWriter:
             self._offset += 1
             self._buf[self._offset : self._offset + length] = data
             self._offset += length
+        elif isinstance(data, bool):
+            json_bytes = json.dumps(data, separators=(',', ':')).encode("utf-8")
+            length = len(json_bytes)
+            self._ensure(4 + 1 + length)
+            struct.pack_into(">I", self._buf, self._offset, 1 + length)
+            self._offset += 4
+            self._buf[self._offset] = DataType.JSON
+            self._offset += 1
+            self._buf[self._offset : self._offset + length] = json_bytes
+            self._offset += length
+        elif isinstance(data, int) and -2**63 <= data <= 2**63 - 1:
+            self._ensure(4 + 9)
+            struct.pack_into(">I", self._buf, self._offset, 9)
+            self._offset += 4
+            self._buf[self._offset] = DataType.INT
+            self._offset += 1
+            struct.pack_into(">q", self._buf, self._offset, data)
+            self._offset += 8
         elif isinstance(data, str):
             encoded = data.encode("utf-8")
             length = len(encoded)

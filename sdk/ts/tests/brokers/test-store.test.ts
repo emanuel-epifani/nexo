@@ -95,7 +95,7 @@ describe('STORE (KV)', () => {
 
     it('should increment an existing integer value', async () => {
         const key = `incr:existing:${randomUUID()}`;
-        await nexo.store.map.set(key, '10');
+        await nexo.store.map.set(key, 10);
         const result = await nexo.store.map.incr(key, 5);
         expect(result).toBe(15);
         await nexo.store.map.del(key);
@@ -103,7 +103,7 @@ describe('STORE (KV)', () => {
 
     it('should decrement with negative delta', async () => {
         const key = `incr:neg:${randomUUID()}`;
-        await nexo.store.map.set(key, '10');
+        await nexo.store.map.set(key, 10);
         const result = await nexo.store.map.incr(key, -3);
         expect(result).toBe(7);
         await nexo.store.map.del(key);
@@ -118,11 +118,11 @@ describe('STORE (KV)', () => {
 
     it('should preserve TTL after incr', async () => {
         const key = `incr:ttl:${randomUUID()}`;
-        await nexo.store.map.set(key, '5', { ttl: 60 });
+        await nexo.store.map.set(key, 5, { ttl: 60 });
         await nexo.store.map.incr(key, 1);
         // Should still exist after short wait (TTL=60)
         await new Promise(r => setTimeout(r, 200));
-        expect(await nexo.store.map.get(key)).toBe('6');
+        expect(await nexo.store.map.get(key)).toBe(6);
         await nexo.store.map.del(key);
     });
 
@@ -130,6 +130,15 @@ describe('STORE (KV)', () => {
         const key = `incr:negnew:${randomUUID()}`;
         const result = await nexo.store.map.incr(key, -5);
         expect(result).toBe(-5);
+        await nexo.store.map.del(key);
+    });
+
+    it('should return number from get after incr on new key', async () => {
+        const key = `incr:gettype:${randomUUID()}`;
+        await nexo.store.map.incr(key, 42);
+        const result = await nexo.store.map.get(key);
+        expect(result).toBe(42);
+        expect(typeof result).toBe('number');
         await nexo.store.map.del(key);
     });
 });

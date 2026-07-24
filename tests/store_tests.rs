@@ -98,13 +98,19 @@ mod store_tests {
     mod incr {
         use super::*;
 
+        fn encode_int(val: i64) -> Bytes {
+            let mut buf = vec![0x03u8];
+            buf.extend_from_slice(&val.to_be_bytes());
+            Bytes::from(buf)
+        }
+
         #[tokio::test]
         async fn test_incr_new_key_starts_from_zero() {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_new_{}", Uuid::new_v4());
 
             let result = manager.map.incr(&key, 1).unwrap();
-            assert_eq!(result, Bytes::from("1"));
+            assert_eq!(result, encode_int(1));
         }
 
         #[tokio::test]
@@ -112,13 +118,13 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_existing_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("10"), None).unwrap();
+            manager.map.set(key.clone(), encode_int(10), None).unwrap();
             let result = manager.map.incr(&key, 5).unwrap();
-            assert_eq!(result, Bytes::from("15"));
+            assert_eq!(result, encode_int(15));
 
             // Verify the value was actually written
             let stored = manager.map.get(&key).unwrap();
-            assert_eq!(stored, Bytes::from("15"));
+            assert_eq!(stored, encode_int(15));
         }
 
         #[tokio::test]
@@ -126,9 +132,9 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_neg_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("10"), None).unwrap();
+            manager.map.set(key.clone(), encode_int(10), None).unwrap();
             let result = manager.map.incr(&key, -3).unwrap();
-            assert_eq!(result, Bytes::from("7"));
+            assert_eq!(result, encode_int(7));
         }
 
         #[tokio::test]
@@ -147,7 +153,7 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_overflow_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from(i64::MAX.to_string()), None).unwrap();
+            manager.map.set(key.clone(), encode_int(i64::MAX), None).unwrap();
             let result = manager.map.incr(&key, 1);
             assert!(result.is_err());
             assert_eq!(result.unwrap_err(), "increment would overflow");
@@ -158,14 +164,14 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_ttl_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("5"), Some(60)).unwrap();
+            manager.map.set(key.clone(), encode_int(5), Some(60)).unwrap();
             manager.map.incr(&key, 1).unwrap();
 
             // Verify value updated
             let stored = manager.map.get(&key).unwrap();
-            assert_eq!(stored, Bytes::from("6"));
+            assert_eq!(stored, encode_int(6));
 
-            // Verify TTL preserved: wait 1s, should still exist (TTL=60)
+            // Verify TTL preserved: wait 200ms, should still exist (TTL=60)
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(manager.map.get(&key).is_some(), "Key should still exist with TTL=60");
         }
@@ -175,14 +181,14 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_expired_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("99"), Some(1)).unwrap();
+            manager.map.set(key.clone(), encode_int(99), Some(1)).unwrap();
 
             // Wait for expiry
             tokio::time::sleep(Duration::from_millis(1100)).await;
 
             // INCR on expired key should start from 0
             let result = manager.map.incr(&key, 1).unwrap();
-            assert_eq!(result, Bytes::from("1"));
+            assert_eq!(result, encode_int(1));
         }
 
         #[tokio::test]
@@ -191,7 +197,7 @@ mod store_tests {
             let key = format!("incr_neg_new_{}", Uuid::new_v4());
 
             let result = manager.map.incr(&key, -5).unwrap();
-            assert_eq!(result, Bytes::from("-5"));
+            assert_eq!(result, encode_int(-5));
         }
     }
 

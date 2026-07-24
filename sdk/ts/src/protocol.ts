@@ -26,6 +26,7 @@ export enum DataType {
   RAW = 0x00,
   STRING = 0x01,
   JSON = 0x02,
+  INT = 0x03,
 }
 
 /**

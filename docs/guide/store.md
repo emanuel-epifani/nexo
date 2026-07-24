@@ -90,38 +90,57 @@ await client.store.map.set("bad", "val", {"ttl": 0})
 
 ### INCR
 
-Atomically increment (or decrement) a key's integer value by `delta`. If the key does not exist, it is initialized to `0` before applying the delta. The existing TTL is preserved.
+Atomically increment (or decrement) a key's integer value by `delta`.
 
-| Behavior | Description |
+- If the key doesn't exist, it starts from `0`.
+- If the key was set with `set(key, number)`, the value is incremented.
+- If the key was set with a string or other type, `incr` returns an error.
+- TTL is preserved — incrementing doesn't reset or remove an existing TTL.
+- `incr` returns the new value as a number (`number` in TS, `int` in Python).
+- `get` on a key created by `incr` also returns a number, not a string.
+
+| Call | Result |
 |---|---|
-| `incr(key)` | Increment by 1 (default delta) |
+| `incr(key)` | Increment by 1 |
 | `incr(key, delta)` | Increment by `delta` (negative = decrement) |
-| Key doesn't exist | Starts from `0`, result = `delta` |
-| Value is not an integer | **Error** — `value is not an integer or out of range` |
-| Overflow / underflow | **Error** — `increment would overflow` |
+| Key doesn't exist | Starts from `0`, returns `delta` |
+| Key set with `set(key, "hello")` | **Error** — value is not an integer |
+| Overflow / underflow | **Error** — increment would overflow |
 
 ::: code-group
 
 ```typescript
-// Increment a counter by 1 (default)
-const views = await client.store.map.incr("page:views");
+// Create a counter — use a number, not a string
+await client.store.map.set("user:1:score", 10);
+
+// Increment by 1 (default)
+const views = await client.store.map.incr("page:views"); // → 1
 
 // Increment by a custom amount
-const score = await client.store.map.incr("user:1:score", 10);
+const score = await client.store.map.incr("user:1:score", 10); // → 20
 
 // Decrement by 5
-const remaining = await client.store.map.incr("quota:user:1", -5);
+const remaining = await client.store.map.incr("quota:user:1", -5); // → -5
+
+// Reading the value back gives you a number
+const val = await client.store.map.get("page:views"); // → 1 (number)
 ```
 
 ```python
-# Increment a counter by 1 (default)
-views = await client.store.map.incr("page:views")
+# Create a counter — use a number, not a string
+await client.store.map.set("user:1:score", 10)
+
+# Increment by 1 (default)
+views = await client.store.map.incr("page:views")  # → 1
 
 # Increment by a custom amount
-score = await client.store.map.incr("user:1:score", 10)
+score = await client.store.map.incr("user:1:score", 10)  # → 20
 
 # Decrement by 5
-remaining = await client.store.map.incr("quota:user:1", -5)
+remaining = await client.store.map.incr("quota:user:1", -5)  # → -5
+
+# Reading the value back gives you an int
+val = await client.store.map.get("page:views")  # → 1 (int)
 ```
 
 :::
