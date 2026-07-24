@@ -2,8 +2,8 @@
 //!
 //! Each group tracks:
 //! - ack_floor: highest seq such that ALL seqs 1..=ack_floor are acked
-//! - pending: messages delivered but not yet acked
-//! - redeliver: messages that need to be redelivered (nack or timeout)
+//! - msgs: unified state map (Pending / Redeliver / Dlt) replacing separate pending/redeliver/dlt/delivery_attempts
+//! - keys: unified key state (in_flight / blocked / poisoned) replacing keys_in_flight/blocked_by_key/parked_keys
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -14,19 +14,34 @@ use uuid::Uuid;
 
 use crate::brokers::stream::domain::message::Message;
 
-#[derive(Clone)]
-pub struct PendingMsg {
-    pub consumer_id: String,
-    pub delivered_at: Instant,
-    pub delivery_count: u32,
-    pub key: Option<Bytes>,
-}
-
 #[derive(Clone, Debug)]
 pub struct DltEntry {
     pub reason: String,
     pub attempts: u32,
     pub key: Option<Bytes>,
+}
+
+/// Unified message state — replaces PendingMsg + redeliver BTreeSet + DLT BTreeMap + delivery_attempts
+#[derive(Clone, Debug)]
+enum MsgState {
+    Pending {
+        consumer_id: String,
+        delivered_at: Instant,
+        delivery_count: u32,
+        key: Option<Bytes>,
+    },
+    Redeliver {
+        attempts: u32,
+    },
+    Dlt(DltEntry),
+}
+
+/// Unified key state — replaces keys_in_flight + blocked_by_key + parked_keys
+#[derive(Default)]
+struct KeyState {
+    in_flight: Option<u64>,
+    blocked: BTreeSet<u64>,
+    poisoned: bool,
 }
 
 pub struct ConsumerGroup {
@@ -35,13 +50,10 @@ pub struct ConsumerGroup {
     pub ack_floor: u64,
     // === Volatile state (rebuilt on restart) ===
     pub next_deliver_seq: u64,
-    pub pending: BTreeMap<u64, PendingMsg>,
-    pub redeliver: BTreeSet<u64>,
-    pub dlt: BTreeMap<u64, DltEntry>,
-    pub parked_keys: HashSet<Bytes>,
-    pub delivery_attempts: BTreeMap<u64, u32>,
-    pub keys_in_flight: HashMap<Bytes, u64>,
-    pub blocked_by_key: HashMap<Bytes, BTreeSet<u64>>,
+    msgs: BTreeMap<u64, MsgState>,
+    redeliver_idx: BTreeSet<u64>, // O(1) index of Redeliver seqs — avoids O(N) scan of msgs
+    keys: HashMap<Bytes, KeyState>,
+    pending_count: usize,
     // === Config ===
     pub max_ack_pending: usize,
     pub ack_wait: Duration,
@@ -62,13 +74,10 @@ impl ConsumerGroup {
             id,
             ack_floor: head_seq.saturating_sub(1),
             next_deliver_seq: head_seq,
-            pending: BTreeMap::new(),
-            redeliver: BTreeSet::new(),
-            dlt: BTreeMap::new(),
-            parked_keys: HashSet::new(),
-            delivery_attempts: BTreeMap::new(),
-            keys_in_flight: HashMap::new(),
-            blocked_by_key: HashMap::new(),
+            msgs: BTreeMap::new(),
+            redeliver_idx: BTreeSet::new(),
+            keys: HashMap::new(),
+            pending_count: 0,
             max_ack_pending,
             ack_wait,
             max_deliveries,
@@ -81,22 +90,31 @@ impl ConsumerGroup {
     }
 
     pub fn is_backpressured(&self) -> bool {
-        self.pending.len() >= self.max_ack_pending
+        self.pending_count >= self.max_ack_pending
     }
 
     pub fn restore(id: String, ack_floor: u64, head_seq: u64, max_ack_pending: usize, ack_wait: Duration, max_deliveries: u32, dlt_entries: BTreeMap<u64, DltEntry>, parked_keys: HashSet<Bytes>) -> Self {
         let normalized_floor = ack_floor.max(head_seq.saturating_sub(1));
+        let mut msgs = BTreeMap::new();
+        let mut keys: HashMap<Bytes, KeyState> = HashMap::new();
+        let redeliver_idx = BTreeSet::new();
+        for (seq, entry) in &dlt_entries {
+            msgs.insert(*seq, MsgState::Dlt(entry.clone()));
+            if let Some(k) = &entry.key {
+                keys.entry(k.clone()).or_default().poisoned = true;
+            }
+        }
+        for k in &parked_keys {
+            keys.entry(k.clone()).or_default().poisoned = true;
+        }
         Self {
             id,
             ack_floor: normalized_floor,
             next_deliver_seq: normalized_floor.saturating_add(1).max(head_seq.max(1)),
-            pending: BTreeMap::new(),
-            redeliver: BTreeSet::new(),
-            dlt: dlt_entries,
-            parked_keys,
-            delivery_attempts: BTreeMap::new(),
-            keys_in_flight: HashMap::new(),
-            blocked_by_key: HashMap::new(),
+            msgs,
+            redeliver_idx,
+            keys,
+            pending_count: 0,
             max_ack_pending,
             ack_wait,
             max_deliveries,
@@ -114,33 +132,36 @@ impl ConsumerGroup {
         self.ensure_active_consumer(consumer_id, generation)?;
         self.clamp_head(head_seq);
 
-        if self.pending.len() >= self.max_ack_pending {
+        if self.pending_count >= self.max_ack_pending {
             return Ok(vec![]); // backpressure
         }
 
-        let budget = limit.min(self.max_ack_pending - self.pending.len());
+        let budget = limit.min(self.max_ack_pending - self.pending_count);
         let mut result = Vec::with_capacity(budget);
 
-        // 1. Redeliver first
-        while result.len() < budget {
-            if let Some(seq) = self.redeliver.pop_first() {
-                if seq < head_seq {
-                    self.delivery_attempts.remove(&seq);
-                    self.dlt.remove(&seq);
-                    continue;
-                }
+        // Messages from the log are sorted by seq. Use binary search for O(log n) lookup.
+        let find_msg = |seq: u64| -> Option<&Message> {
+            messages.binary_search_by_key(&seq, |m| m.seq).ok().map(|i| &messages[i])
+        };
 
-                if let Some(msg) = messages.iter().find(|m| m.seq == seq) {
-                    if let Some(msg) = self.issue_delivery(consumer_id, msg.clone()) {
-                        result.push(msg);
-                    }
-                } else {
-                    // Message not in this batch — put back and stop
-                    self.redeliver.insert(seq);
-                    break;
+        // 1. Redeliver first — use O(k) index
+        let redeliver_seqs: Vec<u64> = self.redeliver_idx.iter()
+            .copied()
+            .take(budget - result.len())
+            .collect();
+
+        for seq in redeliver_seqs {
+            if seq < head_seq {
+                self.msgs.remove(&seq);
+                self.redeliver_idx.remove(&seq);
+                continue;
+            }
+            if let Some(msg) = find_msg(seq) {
+                if let Some(msg) = self.issue_delivery(consumer_id, msg.clone()) {
+                    result.push(msg);
                 }
             } else {
-                break;
+                break; // message not in this batch — leave as Redeliver, stop
             }
         }
 
@@ -152,7 +173,7 @@ impl ConsumerGroup {
                 self.ack_floor = self.ack_floor.max(head_seq.saturating_sub(1));
             }
 
-            if let Some(msg) = messages.iter().find(|m| m.seq == seq) {
+            if let Some(msg) = find_msg(seq) {
                 self.next_deliver_seq = seq + 1;
                 if let Some(msg) = self.issue_delivery(consumer_id, msg.clone()) {
                     result.push(msg);
@@ -169,25 +190,24 @@ impl ConsumerGroup {
     pub fn ack(&mut self, consumer_id: &str, generation: u64, seq: u64) -> Result<bool, String> {
         self.ensure_active_consumer(consumer_id, generation)?;
 
-        let pending_msg = match self.pending.get(&seq) {
-            Some(msg) if msg.consumer_id == consumer_id => msg.clone(),
-            Some(_) => return Err("NOT_OWNER".to_string()),
-            None => return Err(format!("seq {} not pending", seq)),
+        let key = match self.msgs.get(&seq) {
+            Some(MsgState::Pending { consumer_id: cid, key, .. }) if cid == consumer_id => key.clone(),
+            Some(MsgState::Pending { .. }) => return Err("NOT_OWNER".to_string()),
+            _ => return Err(format!("seq {} not pending", seq)),
         };
 
         self.remove_pending(seq);
-        self.delivery_attempts.remove(&seq);
 
         let mut key_unblocked = false;
-        if let Some(key) = &pending_msg.key {
-            self.keys_in_flight.remove(key);
-            if let Some(blocked) = self.blocked_by_key.get_mut(key) {
-                if let Some(next_seq) = blocked.pop_first() {
-                    self.redeliver.insert(next_seq);
+        if let Some(k) = &key {
+            if let Some(ks) = self.keys.get_mut(k) {
+                ks.in_flight = None;
+                if let Some(next_seq) = ks.blocked.pop_first() {
+                    self.msgs.insert(next_seq, MsgState::Redeliver {
+                        attempts: 0,
+                    });
+                    self.redeliver_idx.insert(next_seq);
                     key_unblocked = true;
-                }
-                if blocked.is_empty() {
-                    self.blocked_by_key.remove(key);
                 }
             }
         }
@@ -218,9 +238,9 @@ impl ConsumerGroup {
         }
 
         for seq in expired {
-            if let Some(msg) = self.remove_pending(seq) {
-                tracing::debug!("[Group:{}] Redelivery timeout seq={} (attempts={})", self.id, seq, msg.delivery_count);
-                self.release_seq(seq, msg.delivery_count, msg.key);
+            if let Some((delivery_count, key)) = self.remove_pending(seq) {
+                tracing::debug!("[Group:{}] Redelivery timeout seq={} (attempts={})", self.id, seq, delivery_count);
+                self.release_seq(seq, delivery_count, key);
             }
         }
 
@@ -257,59 +277,43 @@ impl ConsumerGroup {
             changed = true;
         }
 
-        let stale_pending: Vec<u64> = self.pending.range(..head_seq).map(|(seq, _)| *seq).collect();
-        if !stale_pending.is_empty() {
-            for seq in &stale_pending {
-                self.remove_pending(*seq);
-                self.delivery_attempts.remove(seq);
+        // Remove all msgs below head_seq (unifies pending + redeliver + dlt + delivery_attempts cleanup)
+        let stale: Vec<u64> = self.msgs.range(..head_seq).map(|(s, _)| *s).collect();
+        for seq in &stale {
+            if let Some(state) = self.msgs.remove(seq) {
+                if let MsgState::Pending { delivered_at, .. } = &state {
+                    let deadline = *delivered_at + self.ack_wait;
+                    if let Some(set) = self.deadlines.get_mut(&deadline) {
+                        set.remove(seq);
+                        if set.is_empty() {
+                            self.deadlines.remove(&deadline);
+                        }
+                    }
+                    self.pending_count -= 1;
+                }
+                self.redeliver_idx.remove(seq);
+                changed = true;
             }
-            changed = true;
         }
 
-        let kept_redeliver = self.redeliver.split_off(&head_seq);
-        let removed_redeliver = self.redeliver.len();
-        self.redeliver = kept_redeliver;
-        if removed_redeliver > 0 {
-            changed = true;
-        }
+        // Clean up keys: remove in_flight and blocked below head_seq, un-poison stale keys
+        let dlt_keys: HashSet<Bytes> = self.msgs.values()
+            .filter_map(|s| if let MsgState::Dlt(e) = s { e.key.clone() } else { None })
+            .collect();
 
-        let before_dlt = self.dlt.len();
-        let stale_dlt_keys: Vec<u64> = self.dlt.range(..head_seq).map(|(seq, _)| *seq).collect();
-        for seq in &stale_dlt_keys {
-            self.dlt.remove(seq);
-        }
-        if self.dlt.len() != before_dlt {
-            changed = true;
-        }
-
-        // Clean up parked_keys that no longer have any DLT entries
-        self.parked_keys.retain(|key| {
-            self.dlt.values().any(|e| e.key.as_ref() == Some(key))
+        self.keys.retain(|key, ks| {
+            if let Some(seq) = ks.in_flight {
+                if seq < head_seq { ks.in_flight = None; }
+            }
+            let valid = ks.blocked.split_off(&head_seq);
+            if ks.blocked.len() > 0 { changed = true; }
+            ks.blocked = valid;
+            if ks.poisoned && !dlt_keys.contains(key) {
+                ks.poisoned = false;
+                changed = true;
+            }
+            ks.in_flight.is_some() || !ks.blocked.is_empty() || ks.poisoned
         });
-
-        let kept_attempts = self.delivery_attempts.split_off(&head_seq);
-        let removed_attempts = self.delivery_attempts.len();
-        self.delivery_attempts = kept_attempts;
-        if removed_attempts > 0 {
-            changed = true;
-        }
-
-        let before_keys = self.keys_in_flight.len();
-        self.keys_in_flight.retain(|_, seq| *seq >= head_seq);
-        if self.keys_in_flight.len() != before_keys {
-            changed = true;
-        }
-
-        let before_blocked = self.blocked_by_key.values().map(|v| v.len()).sum::<usize>();
-        self.blocked_by_key.retain(|_, blocked| {
-            let kept = blocked.split_off(&head_seq);
-            *blocked = kept;
-            !blocked.is_empty()
-        });
-        let after_blocked = self.blocked_by_key.values().map(|v| v.len()).sum::<usize>();
-        if after_blocked != before_blocked {
-            changed = true;
-        }
 
         if changed {
             self.try_advance_floor();
@@ -323,13 +327,13 @@ impl ConsumerGroup {
     /// Compute which seqs need to be read from storage for a fetch operation.
     /// Returns redeliver seqs first, then fresh seqs, up to the budget.
     pub fn fetch_plan(&self, head_seq: u64, limit: usize) -> Vec<u64> {
-        let budget = limit.min(self.max_ack_pending.saturating_sub(self.pending.len()));
+        let budget = limit.min(self.max_ack_pending.saturating_sub(self.pending_count));
         if budget == 0 { return Vec::new(); }
 
         let mut seqs = Vec::with_capacity(budget);
 
-        // Redeliver seqs (up to budget)
-        for &seq in self.redeliver.iter() {
+        // Redeliver seqs (up to budget) — O(k) via index
+        for &seq in self.redeliver_idx.iter() {
             if seqs.len() >= budget { break; }
             if seq >= head_seq {
                 seqs.push(seq);
@@ -347,13 +351,10 @@ impl ConsumerGroup {
     }
 
     fn reset_runtime(&mut self) {
-        self.pending.clear();
-        self.redeliver.clear();
-        self.dlt.clear();
-        self.parked_keys.clear();
-        self.delivery_attempts.clear();
-        self.keys_in_flight.clear();
-        self.blocked_by_key.clear();
+        self.msgs.clear();
+        self.redeliver_idx.clear();
+        self.keys.clear();
+        self.pending_count = 0;
         self.members.clear();
         self.generation = self.generation.saturating_add(1);
         self.last_clamped_head = 0;
@@ -361,17 +362,26 @@ impl ConsumerGroup {
         self.invalidate_inflight();
     }
 
-    /// Remove a seq from pending and deadlines atomically.
-    fn remove_pending(&mut self, seq: u64) -> Option<PendingMsg> {
-        let msg = self.pending.remove(&seq)?;
-        let deadline = msg.delivered_at + self.ack_wait;
-        if let Some(set) = self.deadlines.get_mut(&deadline) {
-            set.remove(&seq);
-            if set.is_empty() {
-                self.deadlines.remove(&deadline);
+    /// Remove a seq from pending and deadlines atomically. Returns (delivery_count, key).
+    fn remove_pending(&mut self, seq: u64) -> Option<(u32, Option<Bytes>)> {
+        let state = self.msgs.remove(&seq)?;
+        match state {
+            MsgState::Pending { delivered_at, delivery_count, key, .. } => {
+                let deadline = delivered_at + self.ack_wait;
+                if let Some(set) = self.deadlines.get_mut(&deadline) {
+                    set.remove(&seq);
+                    if set.is_empty() {
+                        self.deadlines.remove(&deadline);
+                    }
+                }
+                self.pending_count -= 1;
+                Some((delivery_count, key))
+            }
+            other => {
+                self.msgs.insert(seq, other);
+                None
             }
         }
-        Some(msg)
     }
 
     fn invalidate_inflight(&mut self) {
@@ -408,14 +418,33 @@ impl ConsumerGroup {
         self.generation
     }
 
+    // --- Accessors for manager.rs (replacing direct field access) ---
+
+    pub fn dlt_snapshot(&self) -> BTreeMap<u64, DltEntry> {
+        self.msgs.iter()
+            .filter_map(|(seq, state)| match state {
+                MsgState::Dlt(e) => Some((*seq, e.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn parked_keys_snapshot(&self) -> HashSet<Bytes> {
+        self.keys.iter()
+            .filter(|(_, ks)| ks.poisoned)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     // --- Internal ---
 
     fn try_advance_floor(&mut self) {
-        while self.ack_floor + 1 < self.next_deliver_seq
-            && !self.pending.contains_key(&(self.ack_floor + 1))
-            && !self.redeliver.contains(&(self.ack_floor + 1))
-        {
-            self.ack_floor += 1;
+        while self.ack_floor + 1 < self.next_deliver_seq {
+            let next = self.ack_floor + 1;
+            match self.msgs.get(&next) {
+                Some(MsgState::Pending { .. }) | Some(MsgState::Redeliver { .. }) => break,
+                _ => self.ack_floor += 1,
+            }
         }
     }
 
@@ -430,71 +459,89 @@ impl ConsumerGroup {
     }
 
     fn issue_delivery(&mut self, consumer_id: &str, msg: Message) -> Option<Message> {
-        if self.dlt.contains_key(&msg.seq) {
+        // Already in DLT — skip
+        if matches!(self.msgs.get(&msg.seq), Some(MsgState::Dlt(_))) {
             return None;
         }
-        // If this key is poisoned (a previous message with same key was moved to DLT), move to DLT immediately
+
+        // Check poisoned key + per-key ordering in a single lookup
         if let Some(key) = &msg.key {
-            if self.parked_keys.contains(key) {
-                self.move_to_dlt(msg.seq, "auto-parked (poisoned key)".to_string(), 0, msg.key.clone());
-                self.try_advance_floor();
-                return None;
+            if let Some(ks) = self.keys.get_mut(key) {
+                if ks.poisoned {
+                    self.move_to_dlt(msg.seq, "auto-parked (poisoned key)".to_string(), 0, msg.key.clone());
+                    self.try_advance_floor();
+                    return None;
+                }
+                // Check in-flight (per-key ordering)
+                if let Some(in_flight_seq) = ks.in_flight {
+                    if in_flight_seq != msg.seq {
+                        ks.blocked.insert(msg.seq);
+                        return None;
+                    }
+                    // Same seq: redelivery of the in-flight message — allow it through.
+                }
             }
         }
 
-        let next_attempt = self.delivery_attempts.get(&msg.seq).copied().unwrap_or(0).saturating_add(1);
+        // Check max deliveries
+        let next_attempt = match self.msgs.get(&msg.seq) {
+            Some(MsgState::Redeliver { attempts, .. }) => *attempts,
+            Some(MsgState::Pending { delivery_count, .. }) => *delivery_count,
+            _ => 0,
+        }.saturating_add(1);
+
         if next_attempt > self.max_deliveries {
             self.park_msg(&msg);
             self.try_advance_floor();
             return None;
         }
 
+        // Claim key in-flight
         if let Some(key) = &msg.key {
-            if let Some(&in_flight_seq) = self.keys_in_flight.get(key) {
-                if in_flight_seq != msg.seq {
-                    self.blocked_by_key.entry(key.clone()).or_default().insert(msg.seq);
-                    return None;
-                }
-                // Same seq: redelivery of the in-flight message — allow it through.
-            } else {
-                self.keys_in_flight.insert(key.clone(), msg.seq);
-            }
+            self.keys.entry(key.clone()).or_default().in_flight = Some(msg.seq);
         }
 
         let delivered_at = Instant::now();
         let deadline = delivered_at + self.ack_wait;
         self.deadlines.entry(deadline).or_default().insert(msg.seq);
-        self.delivery_attempts.insert(msg.seq, next_attempt);
-        self.pending.insert(msg.seq, PendingMsg {
+        self.redeliver_idx.remove(&msg.seq);
+        self.msgs.insert(msg.seq, MsgState::Pending {
             consumer_id: consumer_id.to_string(),
             delivered_at,
             delivery_count: next_attempt,
             key: msg.key.clone(),
         });
+        self.pending_count += 1;
         Some(msg)
     }
 
     fn move_to_dlt(&mut self, seq: u64, reason: String, attempts: u32, key: Option<Bytes>) {
-        self.dlt.insert(seq, DltEntry { reason, attempts, key: key.clone() });
-        self.delivery_attempts.remove(&seq);
+        self.msgs.insert(seq, MsgState::Dlt(DltEntry { reason, attempts, key: key.clone() }));
+        self.redeliver_idx.remove(&seq);
+
         if let Some(k) = &key {
-            self.keys_in_flight.remove(k);
-            self.parked_keys.insert(k.clone());
-            if let Some(blocked) = self.blocked_by_key.remove(k) {
-                for blocked_seq in blocked {
-                    self.dlt.insert(blocked_seq, DltEntry {
+            if let Some(ks) = self.keys.get_mut(k) {
+                ks.in_flight = None;
+                ks.poisoned = true;
+                // Move all blocked messages for this key to DLT
+                for blocked_seq in ks.blocked.iter() {
+                    self.msgs.insert(*blocked_seq, MsgState::Dlt(DltEntry {
                         reason: "auto-parked (poisoned key)".to_string(),
                         attempts: 0,
                         key: key.clone(),
-                    });
-                    self.delivery_attempts.remove(&blocked_seq);
+                    }));
                 }
+                ks.blocked.clear();
             }
         }
     }
 
     fn park_msg(&mut self, msg: &Message) {
-        let attempts = self.delivery_attempts.get(&msg.seq).copied().unwrap_or(0);
+        let attempts = match self.msgs.get(&msg.seq) {
+            Some(MsgState::Redeliver { attempts, .. }) => *attempts,
+            Some(MsgState::Pending { delivery_count, .. }) => *delivery_count,
+            _ => 0,
+        };
         self.move_to_dlt(msg.seq, format!("max_deliveries exceeded ({})", self.max_deliveries), attempts, msg.key.clone());
     }
 
@@ -502,18 +549,22 @@ impl ConsumerGroup {
         if delivery_count >= self.max_deliveries {
             self.move_to_dlt(seq, format!("max_deliveries exceeded ({})", self.max_deliveries), delivery_count, key);
         } else {
-            // Keep key in keys_in_flight to preserve per-key ordering during redelivery.
-            // issue_delivery allows re-delivery of the same seq via keys_in_flight[key] == seq check.
-            if !self.redeliver.contains(&seq) {
-                self.redeliver.insert(seq);
-            }
+            // Keep key in-flight to preserve per-key ordering during redelivery.
+            // issue_delivery allows re-delivery of the same seq via in_flight == seq check.
+            self.msgs.insert(seq, MsgState::Redeliver {
+                attempts: delivery_count,
+            });
+            self.redeliver_idx.insert(seq);
         }
     }
 
     fn release_consumer(&mut self, consumer_id: &str) {
-        let seqs: Vec<(u64, u32, Option<Bytes>)> = self.pending.iter()
-            .filter(|(_, msg)| msg.consumer_id == consumer_id)
-            .map(|(seq, msg)| (*seq, msg.delivery_count, msg.key.clone()))
+        let seqs: Vec<(u64, u32, Option<Bytes>)> = self.msgs.iter()
+            .filter_map(|(seq, state)| match state {
+                MsgState::Pending { consumer_id: cid, delivery_count, key, .. } if cid == consumer_id =>
+                    Some((*seq, *delivery_count, key.clone())),
+                _ => None,
+            })
             .collect();
 
         for (seq, delivery_count, key) in seqs {
@@ -527,42 +578,72 @@ impl ConsumerGroup {
     // --- DLT Operations ---
 
     pub fn peek_dlt(&self, limit: usize, offset: usize) -> Vec<(u64, DltEntry)> {
-        self.dlt.iter().skip(offset).take(limit).map(|(seq, e)| (*seq, e.clone())).collect()
+        self.msgs.iter()
+            .filter_map(|(seq, state)| match state {
+                MsgState::Dlt(e) => Some((*seq, e.clone())),
+                _ => None,
+            })
+            .skip(offset)
+            .take(limit)
+            .collect()
     }
 
     /// Move a message from DLT back to redeliver queue. Returns true if a key was unblocked.
     pub fn move_to_stream(&mut self, seq: u64) -> Result<bool, String> {
-        let entry = self.remove_dlt_entry(seq).ok_or("seq not in DLT")?;
-        self.delivery_attempts.remove(&seq);
-        self.redeliver.insert(seq);
-        let key_unblocked = entry.key.as_ref().map_or(false, |k| !self.parked_keys.contains(k));
+        let entry = match self.msgs.remove(&seq) {
+            Some(MsgState::Dlt(e)) => e,
+            _ => return Err("seq not in DLT".to_string()),
+        };
+
+        self.msgs.insert(seq, MsgState::Redeliver {
+            attempts: 0,
+        });
+        self.redeliver_idx.insert(seq);
+
+        let key_unblocked = self.cleanup_poisoned_key(&entry.key);
         Ok(key_unblocked)
     }
 
     /// Remove a message from DLT permanently. Returns true if a key was unblocked.
     pub fn delete_dlt(&mut self, seq: u64) -> Result<bool, String> {
-        let entry = self.remove_dlt_entry(seq).ok_or("seq not in DLT")?;
-        let key_unblocked = entry.key.as_ref().map_or(false, |k| !self.parked_keys.contains(k));
+        let entry = match self.msgs.remove(&seq) {
+            Some(MsgState::Dlt(e)) => e,
+            _ => return Err("seq not in DLT".to_string()),
+        };
+
+        let key_unblocked = self.cleanup_poisoned_key(&entry.key);
         Ok(key_unblocked)
     }
 
     /// Clear all DLT entries and parked keys. Returns count of removed entries.
     pub fn purge_dlt(&mut self) -> usize {
-        let count = self.dlt.len();
-        self.dlt.clear();
-        self.parked_keys.clear();
+        let dlt_seqs: Vec<u64> = self.msgs.iter()
+            .filter_map(|(seq, s)| if matches!(s, MsgState::Dlt(_)) { Some(*seq) } else { None })
+            .collect();
+        let count = dlt_seqs.len();
+        for seq in dlt_seqs {
+            self.msgs.remove(&seq);
+        }
+        for ks in self.keys.values_mut() {
+            ks.poisoned = false;
+        }
         count
     }
 
-    fn remove_dlt_entry(&mut self, seq: u64) -> Option<DltEntry> {
-        let entry = self.dlt.remove(&seq)?;
-        let key_still_in_dlt = self.dlt.values().any(|e| e.key == entry.key);
-        if !key_still_in_dlt {
-            if let Some(key) = &entry.key {
-                self.parked_keys.remove(key);
+    /// Un-poison a key if no more DLT entries reference it. Returns true if key was un-poisoned.
+    fn cleanup_poisoned_key(&mut self, key: &Option<Bytes>) -> bool {
+        let Some(k) = key else { return false };
+        let still_has_dlt = self.msgs.values().any(|s| {
+            matches!(s, MsgState::Dlt(e) if e.key.as_ref() == Some(k))
+        });
+        if !still_has_dlt {
+            if let Some(ks) = self.keys.get_mut(k) {
+                let was_poisoned = ks.poisoned;
+                ks.poisoned = false;
+                return was_poisoned;
             }
         }
-        Some(entry)
+        false
     }
 }
 
@@ -593,6 +674,54 @@ mod tests {
 
     fn fill_log(count: usize) -> Vec<Message> {
         (1..=count).map(|i| make_msg(i as u64, None)).collect()
+    }
+
+    // Test helpers for unified state
+    fn is_pending(g: &ConsumerGroup, seq: u64) -> bool {
+        matches!(g.msgs.get(&seq), Some(MsgState::Pending { .. }))
+    }
+    fn is_redeliver(g: &ConsumerGroup, seq: u64) -> bool {
+        matches!(g.msgs.get(&seq), Some(MsgState::Redeliver { .. }))
+    }
+    fn is_dlt(g: &ConsumerGroup, seq: u64) -> bool {
+        matches!(g.msgs.get(&seq), Some(MsgState::Dlt(_)))
+    }
+    fn pending_count(g: &ConsumerGroup) -> usize {
+        g.msgs.values().filter(|s| matches!(s, MsgState::Pending { .. })).count()
+    }
+    fn redeliver_count(g: &ConsumerGroup) -> usize {
+        g.redeliver_idx.len()
+    }
+    fn dlt_count(g: &ConsumerGroup) -> usize {
+        g.msgs.values().filter(|s| matches!(s, MsgState::Dlt(_))).count()
+    }
+    fn redeliver_seqs(g: &ConsumerGroup) -> Vec<u64> {
+        g.redeliver_idx.iter().copied().collect()
+    }
+    fn is_key_poisoned(g: &ConsumerGroup, key: &Bytes) -> bool {
+        g.keys.get(key).map_or(false, |ks| ks.poisoned)
+    }
+    fn is_key_blocked(g: &ConsumerGroup, key: &Bytes, seq: u64) -> bool {
+        g.keys.get(key).map_or(false, |ks| ks.blocked.contains(&seq))
+    }
+    fn has_blocked_key(g: &ConsumerGroup, key: &Bytes) -> bool {
+        g.keys.get(key).map_or(false, |ks| !ks.blocked.is_empty())
+    }
+    fn insert_redeliver(g: &mut ConsumerGroup, seq: u64) {
+        g.msgs.insert(seq, MsgState::Redeliver { attempts: 0 });
+        g.redeliver_idx.insert(seq);
+    }
+    fn insert_dlt(g: &mut ConsumerGroup, seq: u64, entry: DltEntry) {
+        if let Some(k) = &entry.key { g.keys.entry(k.clone()).or_default().poisoned = true; }
+        g.msgs.insert(seq, MsgState::Dlt(entry));
+    }
+    fn insert_parked_key(g: &mut ConsumerGroup, key: Bytes) {
+        g.keys.entry(key).or_default().poisoned = true;
+    }
+    fn insert_pending(g: &mut ConsumerGroup, seq: u64, consumer_id: String, delivered_at: Instant, delivery_count: u32, key: Option<Bytes>) {
+        g.deadlines.entry(delivered_at + g.ack_wait).or_default().insert(seq);
+        g.msgs.insert(seq, MsgState::Pending { consumer_id, delivered_at, delivery_count, key });
+        g.pending_count += 1;
     }
 
     // === Basic ack/floor tests ===
@@ -702,8 +831,8 @@ mod tests {
 
         // Simulate redelivery of seq 1 (e.g. from release_consumer)
         g.release_consumer(&consumer);
-        assert!(g.redeliver.contains(&1));
-        assert!(g.redeliver.contains(&2));
+        assert!(is_redeliver(&g, 1));
+        assert!(is_redeliver(&g, 2));
 
         // Next fetch should serve redelivered 1, 2 before fresh 3
         let msgs2 = g.fetch(&consumer, gen, 3, &log, 1).unwrap();
@@ -717,42 +846,30 @@ mod tests {
         let mut g = make_group(100, 30000, 5);
         let consumer = g.add_member("conn1".to_string());
 
-        // Manually insert into pending then release
         let now = Instant::now();
-        g.pending.insert(1, PendingMsg {
-            consumer_id: consumer.clone(),
-            delivered_at: now,
-            delivery_count: 1,
-            key: None,
-        });
-        g.deadlines.entry(now + g.ack_wait).or_default().insert(1);
+        insert_pending(&mut g, 1, consumer.clone(), now, 1, None);
 
         g.release_consumer(&consumer);
-        assert_eq!(g.redeliver.len(), 1);
+        assert_eq!(redeliver_count(&g), 1);
 
         // release_seq again should not duplicate
         g.release_seq(1, 1, None);
-        assert_eq!(g.redeliver.len(), 1);
+        assert_eq!(redeliver_count(&g), 1);
     }
 
     #[test]
     fn test_move_to_stream_inserts_in_order() {
         let mut g = make_group(100, 30000, 5);
 
-        // Populate DLT
-        g.dlt.insert(5, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
-        g.dlt.insert(3, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
-        g.dlt.insert(7, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 5, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 3, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 7, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
 
-        // Move 5 back to stream
         g.move_to_stream(5).unwrap();
-        // Move 3 back
         g.move_to_stream(3).unwrap();
-        // Move 7 back
         g.move_to_stream(7).unwrap();
 
-        // redeliver should be ordered: 3, 5, 7
-        let seqs: Vec<u64> = g.redeliver.iter().copied().collect();
+        let seqs = redeliver_seqs(&g);
         assert_eq!(seqs, vec![3, 5, 7]);
     }
 
@@ -769,7 +886,7 @@ mod tests {
 
         // Immediately check → nothing expired
         assert!(!g.check_redelivery());
-        assert_eq!(g.pending.len(), 3);
+        assert_eq!(pending_count(&g), 3);
     }
 
     #[test]
@@ -780,15 +897,15 @@ mod tests {
         let gen = g.generation();
 
         g.fetch(&consumer, gen, 3, &log, 1).unwrap();
-        assert_eq!(g.pending.len(), 3);
+        assert_eq!(pending_count(&g), 3);
 
         // Wait for timeout
         std::thread::sleep(Duration::from_millis(60));
 
         assert!(g.check_redelivery());
         // Messages should be moved to redeliver
-        assert_eq!(g.pending.len(), 0);
-        assert_eq!(g.redeliver.len(), 3);
+        assert_eq!(pending_count(&g), 0);
+        assert_eq!(redeliver_count(&g), 3);
     }
 
     #[test]
@@ -830,44 +947,44 @@ mod tests {
         let gen = g.generation();
 
         g.fetch(&consumer, gen, 5, &log, 1).unwrap();
-        assert_eq!(g.pending.len(), 5);
+        assert_eq!(pending_count(&g), 5);
 
         // Clamp head to 4 → pending 1,2,3 should be removed
         g.clamp_head(4);
-        assert!(!g.pending.contains_key(&1));
-        assert!(!g.pending.contains_key(&2));
-        assert!(!g.pending.contains_key(&3));
-        assert!(g.pending.contains_key(&4));
-        assert!(g.pending.contains_key(&5));
+        assert!(!is_pending(&g, 1));
+        assert!(!is_pending(&g, 2));
+        assert!(!is_pending(&g, 3));
+        assert!(is_pending(&g, 4));
+        assert!(is_pending(&g, 5));
         assert_eq!(g.ack_floor, 3); // head-1
     }
 
     #[test]
     fn test_clamp_head_removes_stale_redeliver() {
         let mut g = make_group(100, 30000, 5);
-        g.redeliver.insert(1);
-        g.redeliver.insert(2);
-        g.redeliver.insert(5);
-        g.redeliver.insert(8);
+        insert_redeliver(&mut g, 1);
+        insert_redeliver(&mut g, 2);
+        insert_redeliver(&mut g, 5);
+        insert_redeliver(&mut g, 8);
 
         g.clamp_head(5);
-        assert!(!g.redeliver.contains(&1));
-        assert!(!g.redeliver.contains(&2));
-        assert!(g.redeliver.contains(&5));
-        assert!(g.redeliver.contains(&8));
+        assert!(!is_redeliver(&g, 1));
+        assert!(!is_redeliver(&g, 2));
+        assert!(is_redeliver(&g, 5));
+        assert!(is_redeliver(&g, 8));
     }
 
     #[test]
     fn test_clamp_head_removes_stale_dlt() {
         let mut g = make_group(100, 30000, 5);
-        g.dlt.insert(1, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
-        g.dlt.insert(3, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
-        g.dlt.insert(7, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 1, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 3, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 7, DltEntry { reason: "test".to_string(), attempts: 1, key: None });
 
         g.clamp_head(5);
-        assert!(!g.dlt.contains_key(&1));
-        assert!(!g.dlt.contains_key(&3));
-        assert!(g.dlt.contains_key(&7));
+        assert!(!is_dlt(&g, 1));
+        assert!(!is_dlt(&g, 3));
+        assert!(is_dlt(&g, 7));
     }
 
     #[test]
@@ -898,9 +1015,9 @@ mod tests {
     #[test]
     fn test_peek_dlt_returns_sorted() {
         let mut g = make_group(100, 30000, 5);
-        g.dlt.insert(5, DltEntry { reason: "r5".to_string(), attempts: 1, key: None });
-        g.dlt.insert(1, DltEntry { reason: "r1".to_string(), attempts: 1, key: None });
-        g.dlt.insert(3, DltEntry { reason: "r3".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 5, DltEntry { reason: "r5".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 1, DltEntry { reason: "r1".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 3, DltEntry { reason: "r3".to_string(), attempts: 1, key: None });
 
         let entries = g.peek_dlt(10, 0);
         assert_eq!(entries.len(), 3);
@@ -913,7 +1030,7 @@ mod tests {
     fn test_peek_dlt_with_offset_and_limit() {
         let mut g = make_group(100, 30000, 5);
         for i in 1..=10 {
-            g.dlt.insert(i, DltEntry { reason: format!("r{}", i), attempts: 1, key: None });
+            insert_dlt(&mut g, i, DltEntry { reason: format!("r{}", i), attempts: 1, key: None });
         }
 
         let page = g.peek_dlt(3, 2);
@@ -926,25 +1043,25 @@ mod tests {
     #[test]
     fn test_purge_dlt_clears_all() {
         let mut g = make_group(100, 30000, 5);
-        g.dlt.insert(1, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
-        g.dlt.insert(2, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
-        g.parked_keys.insert(Bytes::from("key1"));
+        insert_dlt(&mut g, 1, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 2, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
+        insert_parked_key(&mut g, Bytes::from("key1"));
 
         let count = g.purge_dlt();
         assert_eq!(count, 2);
-        assert!(g.dlt.is_empty());
-        assert!(g.parked_keys.is_empty());
+        assert_eq!(dlt_count(&g), 0);
+        assert!(!g.keys.values().any(|ks| ks.poisoned));
     }
 
     #[test]
     fn test_delete_dlt_removes_entry() {
         let mut g = make_group(100, 30000, 5);
-        g.dlt.insert(1, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
-        g.dlt.insert(2, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 1, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
+        insert_dlt(&mut g, 2, DltEntry { reason: "r".to_string(), attempts: 1, key: None });
 
         assert!(g.delete_dlt(1).is_ok());
-        assert!(!g.dlt.contains_key(&1));
-        assert!(g.dlt.contains_key(&2));
+        assert!(!is_dlt(&g, 1));
+        assert!(is_dlt(&g, 2));
 
         let err = g.delete_dlt(99).unwrap_err();
         assert_eq!(err, "seq not in DLT");
@@ -954,26 +1071,26 @@ mod tests {
     fn test_delete_dlt_unparks_key_when_no_more_entries() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key1");
-        g.dlt.insert(1, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
-        g.parked_keys.insert(key.clone());
+        insert_dlt(&mut g, 1, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
+        insert_parked_key(&mut g, key.clone());
 
         // Delete the only entry with this key → key should be unparked
         let unblocked = g.delete_dlt(1).unwrap();
         assert!(unblocked);
-        assert!(!g.parked_keys.contains(&key));
+        assert!(!is_key_poisoned(&g, &key));
     }
 
     #[test]
     fn test_delete_dlt_keeps_key_when_other_entries_exist() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key1");
-        g.dlt.insert(1, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
-        g.dlt.insert(2, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
-        g.parked_keys.insert(key.clone());
+        insert_dlt(&mut g, 1, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
+        insert_dlt(&mut g, 2, DltEntry { reason: "r".to_string(), attempts: 1, key: Some(key.clone()) });
+        insert_parked_key(&mut g, key.clone());
 
         let unblocked = g.delete_dlt(1).unwrap();
         assert!(!unblocked);
-        assert!(g.parked_keys.contains(&key));
+        assert!(is_key_poisoned(&g, &key));
     }
 
     // === Per-key ordering tests ===
@@ -996,8 +1113,7 @@ mod tests {
         assert_eq!(msgs[0].seq, 1);
 
         // seq 2 should be in blocked_by_key
-        assert!(g.blocked_by_key.get(&key).is_some());
-        assert!(g.blocked_by_key.get(&key).unwrap().contains(&2));
+        assert!(is_key_blocked(&g, &key, 2));
     }
 
     #[test]
@@ -1014,23 +1130,22 @@ mod tests {
         let gen = g.generation();
 
         g.fetch(&consumer, gen, 10, &log, 1).unwrap();
-        assert!(g.blocked_by_key.contains_key(&key));
+        assert!(has_blocked_key(&g, &key));
 
         // Ack seq 1 → seq 2 should be unblocked into redeliver, seq 3 still blocked
         let key_unblocked = g.ack(&consumer, gen, 1).unwrap();
         assert!(key_unblocked);
-        assert!(g.redeliver.contains(&2));
+        assert!(is_redeliver(&g, 2));
         // seq 3 is still blocked
-        assert!(g.blocked_by_key.contains_key(&key));
-        assert!(g.blocked_by_key.get(&key).unwrap().contains(&3));
+        assert!(is_key_blocked(&g, &key, 3));
 
         // Ack seq 2 → seq 3 should be unblocked
         // First re-fetch to deliver seq 2 from redeliver
         g.fetch(&consumer, gen, 10, &log, 1).unwrap();
         let key_unblocked2 = g.ack(&consumer, gen, 2).unwrap();
         assert!(key_unblocked2);
-        assert!(g.redeliver.contains(&3));
-        assert!(!g.blocked_by_key.contains_key(&key));
+        assert!(is_redeliver(&g, 3));
+        assert!(!has_blocked_key(&g, &key));
     }
 
     // === Fencing / generation tests ===
@@ -1075,12 +1190,12 @@ mod tests {
         let gen = g.generation();
 
         g.fetch(&c1, gen, 3, &log, 1).unwrap();
-        assert_eq!(g.pending.len(), 3);
+        assert_eq!(pending_count(&g), 3);
 
         // Remove member → pending should go to redeliver
         g.remove_member(&c1);
-        assert_eq!(g.pending.len(), 0);
-        assert_eq!(g.redeliver.len(), 3);
+        assert_eq!(pending_count(&g), 0);
+        assert_eq!(redeliver_count(&g), 3);
     }
 
     #[test]
@@ -1093,12 +1208,12 @@ mod tests {
 
         g.fetch(&c1, gen, 2, &log, 1).unwrap();
         g.fetch(&c2, gen, 2, &log, 1).unwrap();
-        assert_eq!(g.pending.len(), 4);
+        assert_eq!(pending_count(&g), 4);
 
         // Remove c1 → only c1's messages should be redelivered
         g.remove_member(&c1);
-        assert_eq!(g.pending.len(), 2); // c2's messages still pending
-        assert_eq!(g.redeliver.len(), 2); // c1's messages in redeliver
+        assert_eq!(pending_count(&g), 2); // c2's messages still pending
+        assert_eq!(redeliver_count(&g), 2); // c1's messages in redeliver
     }
 
     // === try_advance_floor edge cases ===
@@ -1162,10 +1277,10 @@ mod tests {
 
         assert_eq!(g.ack_floor, 4); // max(3, 5-1)
         assert_eq!(g.next_deliver_seq, 5);
-        assert!(g.dlt.contains_key(&5));
-        assert!(g.parked_keys.contains(&key));
-        assert!(g.pending.is_empty());
-        assert!(g.redeliver.is_empty());
+        assert!(is_dlt(&g, 5));
+        assert!(is_key_poisoned(&g, &key));
+        assert_eq!(pending_count(&g), 0);
+        assert_eq!(redeliver_count(&g), 0);
         assert!(g.deadlines.is_empty());
     }
 
@@ -1181,20 +1296,20 @@ mod tests {
         // Deliver 5 messages
         g.fetch(&consumer, gen, 5, &log, 1).unwrap();
         let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
-        assert_eq!(g.pending.len(), total_deadlines);
+        assert_eq!(pending_count(&g), total_deadlines);
 
         // Ack some
         g.ack(&consumer, gen, 2).unwrap();
         g.ack(&consumer, gen, 4).unwrap();
         let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
-        assert_eq!(g.pending.len(), total_deadlines);
+        assert_eq!(pending_count(&g), total_deadlines);
 
         // Timeout redelivery
         std::thread::sleep(Duration::from_millis(60));
         g.check_redelivery();
         let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
-        assert_eq!(g.pending.len(), total_deadlines);
-        assert_eq!(g.pending.len(), 0);
+        assert_eq!(pending_count(&g), total_deadlines);
+        assert_eq!(pending_count(&g), 0);
         assert_eq!(total_deadlines, 0);
     }
 
@@ -1203,14 +1318,14 @@ mod tests {
     #[test]
     fn test_invariant_redeliver_no_duplicates_after_clamp() {
         let mut g = make_group(100, 30000, 5);
-        g.redeliver.insert(1);
-        g.redeliver.insert(3);
-        g.redeliver.insert(5);
-        g.redeliver.insert(7);
+        insert_redeliver(&mut g, 1);
+        insert_redeliver(&mut g, 3);
+        insert_redeliver(&mut g, 5);
+        insert_redeliver(&mut g, 7);
 
         g.clamp_head(4);
         // All elements should be unique
-        let seqs: Vec<u64> = g.redeliver.iter().copied().collect();
+        let seqs = redeliver_seqs(&g);
         let unique: std::collections::HashSet<u64> = seqs.iter().copied().collect();
         assert_eq!(seqs.len(), unique.len());
         assert!(seqs.iter().all(|s| *s >= 4));
@@ -1222,7 +1337,7 @@ mod tests {
     fn test_fetch_plan_prefers_redeliver() {
         let mut g = make_group(100, 30000, 5);
         g.next_deliver_seq = 10;
-        g.redeliver.insert(5);
+        insert_redeliver(&mut g, 5);
 
         let plan = g.fetch_plan(1, 10);
         assert_eq!(plan[0], 5); // redeliver first
@@ -1245,5 +1360,167 @@ mod tests {
 
         let plan = g.fetch_plan(5, 3);
         assert_eq!(plan, vec![5, 6, 7]);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::brokers::stream::domain::message::Message;
+    use bytes::Bytes;
+    use std::time::Instant;
+
+    fn make_msg(seq: u64, key: Option<Bytes>) -> Message {
+        Message { seq, timestamp: 0, key, payload: Bytes::from(format!("msg-{}", seq)) }
+    }
+    fn fill_log(count: usize) -> Vec<Message> {
+        (1..=count).map(|i| make_msg(i as u64, None)).collect()
+    }
+    fn fill_log_keyed(count: usize, key: Bytes) -> Vec<Message> {
+        (1..=count).map(|i| make_msg(i as u64, Some(key.clone()))).collect()
+    }
+
+    #[test]
+    fn bench_fetch_and_ack_1000() {
+        let n = 1000;
+        let log = fill_log(n);
+        let mut g = ConsumerGroup::new("bench".into(), 1, 10000, Duration::from_secs(60), 5);
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        let start = Instant::now();
+        for i in (0..n).step_by(100) {
+            let batch = &log[i..(i + 100).min(n)];
+            g.fetch(&consumer, gen, 100, batch, 1).unwrap();
+        }
+        let fetch_dur = start.elapsed();
+
+        let start = Instant::now();
+        for seq in 1..=n as u64 {
+            g.ack(&consumer, gen, seq).unwrap();
+        }
+        let ack_dur = start.elapsed();
+
+        println!("\n=== bench_fetch_and_ack_1000 ===");
+        println!("fetch {n} msgs (batch=100): {:?}", fetch_dur);
+        println!("ack  {n} msgs: {:?}", ack_dur);
+        println!("total: {:?}", fetch_dur + ack_dur);
+    }
+
+    #[test]
+    fn bench_fetch_with_redeliver_500() {
+        let n = 500;
+        let log = fill_log(n);
+        let mut g = ConsumerGroup::new("bench".into(), 1, 10000, Duration::from_secs(60), 5);
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        g.fetch(&consumer, gen, n, &log, 1).unwrap();
+        g.remove_member(&consumer);
+
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        let start = Instant::now();
+        g.fetch(&consumer, gen, n, &log, 1).unwrap();
+        let dur = start.elapsed();
+
+        println!("\n=== bench_fetch_with_redeliver_500 ===");
+        println!("fetch {n} redelivered msgs: {:?}", dur);
+    }
+
+    #[test]
+    fn bench_clamp_head_with_pending() {
+        let n = 5000;
+        let log = fill_log(n);
+        let mut g = ConsumerGroup::new("bench".into(), 1, 100000, Duration::from_secs(60), 5);
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        for i in (0..n).step_by(100) {
+            let batch = &log[i..(i + 100).min(n)];
+            g.fetch(&consumer, gen, 100, batch, 1).unwrap();
+        }
+
+        let start = Instant::now();
+        g.clamp_head(n as u64 / 2);
+        let dur = start.elapsed();
+
+        println!("\n=== bench_clamp_head_with_pending ===");
+        println!("clamp_head {n} pending → {}: {:?}", n / 2, dur);
+    }
+
+    #[test]
+    fn bench_check_redelivery_1000() {
+        let n = 1000;
+        let log = fill_log(n);
+        let mut g = ConsumerGroup::new("bench".into(), 1, 100000, Duration::from_millis(1), 100);
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        for i in (0..n).step_by(100) {
+            let batch = &log[i..(i + 100).min(n)];
+            g.fetch(&consumer, gen, 100, batch, 1).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+
+        let start = Instant::now();
+        g.check_redelivery();
+        let dur = start.elapsed();
+
+        println!("\n=== bench_check_redelivery_1000 ===");
+        println!("check_redelivery {n} expired: {:?}", dur);
+    }
+
+    #[test]
+    fn bench_per_key_ordering_stress() {
+        let n = 1000;
+        let key = Bytes::from("stress-key");
+        let log = fill_log_keyed(n, key);
+        let mut g = ConsumerGroup::new("bench".into(), 1, 100000, Duration::from_secs(60), 100);
+        let consumer = g.add_member("conn".into());
+        let gen = g.generation();
+
+        let start = Instant::now();
+        let mut fetched = 0;
+        while fetched < n {
+            let batch = &log[fetched..(fetched + 100).min(n)];
+            let msgs = g.fetch(&consumer, gen, 100, batch, 1).unwrap();
+            for msg in &msgs {
+                g.ack(&consumer, gen, msg.seq).unwrap();
+                fetched += 1;
+            }
+        }
+        let dur = start.elapsed();
+
+        println!("\n=== bench_per_key_ordering_stress ===");
+        println!("fetch+ack {n} sequential per-key: {:?}", dur);
+    }
+
+    #[test]
+    fn bench_dlt_snapshot_500() {
+        let n = 500;
+        let mut dlt = BTreeMap::new();
+        for i in 1..=n {
+            dlt.insert(i as u64, DltEntry {
+                reason: "test".into(),
+                attempts: 3,
+                key: Some(Bytes::from(format!("key-{}", i))),
+            });
+        }
+        let parked: HashSet<Bytes> = dlt.values().filter_map(|e| e.key.clone()).collect();
+        let g = ConsumerGroup::restore("bench".into(), 0, n as u64 + 1, 100000, Duration::from_secs(60), 5, dlt, parked);
+
+        let start = Instant::now();
+        let _snap = g.dlt_snapshot();
+        let snap_dur = start.elapsed();
+
+        let start = Instant::now();
+        let _parked = g.parked_keys_snapshot();
+        let parked_dur = start.elapsed();
+
+        println!("\n=== bench_dlt_snapshot_500 ===");
+        println!("dlt_snapshot({n} entries): {:?}", snap_dur);
+        println!("parked_keys_snapshot({n} keys): {:?}", parked_dur);
     }
 }

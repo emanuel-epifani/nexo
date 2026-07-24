@@ -41,8 +41,15 @@ Any wire change must stay symmetric across `src/`, `sdk/ts/`, `sdk/py/`, and bum
 
 ## Cross-Cutting Rules
 
-- **Alignment**: any protocol/behavior change must be verified across `src/`, `sdk/ts/`, `sdk/py/`, `docs/`. State if one area is not impacted.
-- **Test parity**: behavior/protocol changes require updates in `tests/`, `sdk/ts/tests/`, `sdk/py/tests/`. `sdk/integration-test-matrix.md` is the source of truth.
+- **Alignment**: any new feature/protocol/behavior change must be verified across `src/`, `sdk/ts/`, `sdk/py/`, `docs/`. State if one area is not impacted.
+- **Test parity**: any new feature/behavior/protocol change requires updates in `tests/`, `sdk/ts/tests/`, `sdk/py/tests/`. `sdk/integration-test-matrix.md` is the source of truth. Every feature should have:
+  - **Rust unit test** if the logic is algorithmically complex or CPU-intensive
+  - **Integration tests** (Rust + all SDKs) covering happy path, edge cases, and error paths
+  - **Fuzz test** when the feature involves parsing/serialization of untrusted input (wire protocol, client payloads)
+- **Regression**: any bug fix must include a regression test in the affected broker/SDK.
+- **Performance**: compare always before/after of test-stress.test.ts, test_stress.py, tests/stress_tests.rs (keep alignes benchmark on docstring)
+- **Algorithm**: only O(1) / O(log n) is acceptable. Never implement O(n)+ solutions — go back to redesign and pick better data structures.
+
 
 ## Commands
 

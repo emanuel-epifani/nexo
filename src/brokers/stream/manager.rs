@@ -92,8 +92,8 @@ impl StreamManager {
                 state.groups.iter().map(|(id, group)| {
                     (id.clone(), GroupPersistentState {
                         ack_floor: group.ack_floor,
-                        dlt_entries: group.dlt.clone(),
-                        parked_keys: group.parked_keys.clone(),
+                        dlt_entries: group.dlt_snapshot(),
+                        parked_keys: group.parked_keys_snapshot(),
                     })
                 }).collect::<BTreeMap<_, _>>()
             };
@@ -624,8 +624,8 @@ impl StreamManager {
                                 Some(state.groups.iter().map(|(id, group)| {
                                     (id.clone(), GroupPersistentState {
                                         ack_floor: group.ack_floor,
-                                        dlt_entries: group.dlt.clone(),
-                                        parked_keys: group.parked_keys.clone(),
+                                        dlt_entries: group.dlt_snapshot(),
+                                        parked_keys: group.parked_keys_snapshot(),
                                     })
                                 }).collect::<BTreeMap<_, _>>())
                             }

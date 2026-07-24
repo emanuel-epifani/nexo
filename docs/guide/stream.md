@@ -480,8 +480,8 @@ DLT state and parked keys are persisted in `state.log` alongside the group's `ac
 
 Nexo uses an **Asynchronous Draining Pattern** to balance high-speed ingestion and durability.
 
-*   **Continuous Batching**: Messages are automatically accumulated in memory buffers and written to disk in optimized batches for maximum throughput.
-*   **Bounded Flush**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) defines your maximum durability window - data is synced to disk at least every 50ms, regardless of traffic.
+*   **Continuous Batching**: Messages are written to the OS page cache in optimized batches for maximum throughput. Data survives process crashes but not power loss.
+*   **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLT entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
 
 ### High-Cardinality: Treat Streams like Keys
 
@@ -524,7 +524,7 @@ Global, set at server startup.
 | Variable | Default | Description |
 |:---|:---|:---|
 | `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Base directory for all stream data |
-| `STREAM_DEFAULT_FLUSH_MS` | `50` | Max durability window (ms) |
+| `STREAM_DEFAULT_FLUSH_MS` | `50` | Group state save interval multiplier (×10 = actual ms) |
 | `STREAM_MAX_SEGMENT_SIZE` | `104857600` (100MB) | Max segment file size before rollover |
 | `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
 | `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |
