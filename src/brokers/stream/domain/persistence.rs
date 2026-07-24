@@ -97,7 +97,6 @@ pub struct StorageManager {
     base_path: PathBuf,
     rx: mpsc::UnboundedReceiver<StorageCommand>,
     open_files: LruCache<PathBuf, File>,
-    segment_cache: HashMap<String, Vec<Segment>>,
 }
 
 impl StorageManager {
@@ -110,7 +109,6 @@ impl StorageManager {
             base_path: PathBuf::from(base_path),
             rx,
             open_files: LruCache::new(NonZeroUsize::new(max_open_files).unwrap()),
-            segment_cache: HashMap::new(),
         }
     }
 
@@ -145,8 +143,11 @@ impl StorageManager {
                 self.handle_append(&topic_name, file_path, messages).await;
             }
             StorageCommand::ReadRange { topic_name, offsets, reply } => {
-                let msgs = self.read_range(&topic_name, offsets).await;
-                let _ = reply.send(msgs);
+                let base_path = self.base_path.join(&topic_name);
+                tokio::spawn(async move {
+                    let msgs = read_range(&base_path, offsets).await;
+                    let _ = reply.send(msgs);
+                });
             }
             StorageCommand::SaveState { topic_name, groups } => {
                 let base_path = self.base_path.join(&topic_name);
@@ -160,7 +161,6 @@ impl StorageManager {
                 let _ = reply.send(outcome);
             }
             StorageCommand::DropTopic { topic_name, reply } => {
-                self.segment_cache.remove(&topic_name);
                 let topic_path = self.base_path.join(&topic_name);
                 let to_remove: Vec<PathBuf> = self.open_files.iter()
                     .filter(|(p, _)| p.starts_with(&topic_path))
@@ -182,12 +182,11 @@ impl StorageManager {
 
     async fn handle_append(
         &mut self,
-        topic_name: &str,
+        _topic_name: &str,
         file_path: PathBuf,
         messages: Vec<Message>,
     ) {
         if messages.is_empty() { return; }
-        self.segment_cache.remove(topic_name);
 
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
@@ -227,62 +226,7 @@ impl StorageManager {
         Ok(self.open_files.get_mut(path).unwrap())
     }
 
-    /// Read messages from segment files at specific byte offsets.
-    async fn read_range(&mut self, topic_name: &str, offsets: Vec<(u64, u64)>) -> Vec<Message> {
-        if offsets.is_empty() { return Vec::new(); }
-
-        let base_path = self.base_path.join(topic_name);
-        let segments = self.get_segments(topic_name, &base_path).await;
-        if segments.is_empty() { return Vec::new(); }
-
-        // Group offsets by segment to open each file once
-        let mut by_segment: HashMap<usize, Vec<(u64, u64)>> = HashMap::new();
-        for (seq, byte_offset) in offsets {
-            if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= seq) {
-                by_segment.entry(idx).or_default().push((seq, byte_offset));
-            }
-        }
-
-        let mut result = Vec::new();
-        for (idx, mut seg_offsets) in by_segment {
-            seg_offsets.sort_by_key(|(_, off)| *off);
-            let seg = &segments[idx];
-            match File::open(&seg.path).await {
-                Ok(file) => {
-                    let mut reader = BufReader::new(file);
-                    for (seq, byte_offset) in seg_offsets {
-                        if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
-                            match read_record(&mut reader).await {
-                                ReadOutcome::Record(content_buf) => {
-                                    if let Some(msg) = parse_message(&content_buf) {
-                                        if msg.seq == seq {
-                                            result.push(msg);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Err(e) => error!("StorageManager: Failed to open segment {:?}: {}", seg.path, e),
-            }
-        }
-        result.sort_by_key(|m| m.seq);
-        result
-    }
-
-    async fn get_segments(&mut self, topic_name: &str, base_path: &Path) -> Vec<Segment> {
-        if let Some(cached) = self.segment_cache.get(topic_name) {
-            return cached.clone();
-        }
-        let segments = find_segments(base_path).await.unwrap_or_default();
-        self.segment_cache.insert(topic_name.to_string(), segments.clone());
-        segments
-    }
-
     async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> u64 {
-        self.segment_cache.remove(_topic_name);
         if retention.max_age_ms.is_none() && retention.max_bytes.is_none() {
             return find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
         }
@@ -331,6 +275,51 @@ impl StorageManager {
 
         find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1)
     }
+}
+
+/// Read messages from segment files at specific byte offsets.
+/// Called from spawned tasks — must not access StorageManager state.
+async fn read_range(base_path: &Path, offsets: Vec<(u64, u64)>) -> Vec<Message> {
+    if offsets.is_empty() { return Vec::new(); }
+
+    let segments = find_segments(base_path).await.unwrap_or_default();
+    if segments.is_empty() { return Vec::new(); }
+
+    // Group offsets by segment to open each file once
+    let mut by_segment: HashMap<usize, Vec<(u64, u64)>> = HashMap::new();
+    for (seq, byte_offset) in offsets {
+        if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= seq) {
+            by_segment.entry(idx).or_default().push((seq, byte_offset));
+        }
+    }
+
+    let mut result = Vec::new();
+    for (idx, mut seg_offsets) in by_segment {
+        seg_offsets.sort_by_key(|(_, off)| *off);
+        let seg = &segments[idx];
+        match File::open(&seg.path).await {
+            Ok(file) => {
+                let mut reader = BufReader::new(file);
+                for (seq, byte_offset) in seg_offsets {
+                    if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
+                        match read_record(&mut reader).await {
+                            ReadOutcome::Record(content_buf) => {
+                                if let Some(msg) = parse_message(&content_buf) {
+                                    if msg.seq == seq {
+                                        result.push(msg);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Err(e) => error!("StorageManager: Failed to open segment {:?}: {}", seg.path, e),
+        }
+    }
+    result.sort_by_key(|m| m.seq);
+    result
 }
 
 // ==========================================

@@ -1581,6 +1581,45 @@ mod stream_tests {
             assert_eq!(msgs.len(), TOTAL, "All messages must be readable after concurrent publish");
         }
 
+        // Regression: concurrent reads from different topics must all return correct data
+        // (verifies that spawning ReadRange as independent tasks is safe)
+        #[tokio::test]
+        async fn concurrent_reads_different_topics() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+
+            const NUM_TOPICS: usize = 5;
+            const MSGS_PER_TOPIC: usize = 20;
+
+            for t in 0..NUM_TOPICS {
+                let topic = format!("topic-{}", t);
+                manager.create_topic(topic.clone(), StreamCreateOptions::default()).await.unwrap();
+                for i in 0..MSGS_PER_TOPIC {
+                    manager.publish(&topic, None, Bytes::from(format!("t{}-m{}", t, i))).await.unwrap();
+                }
+            }
+
+            let manager = Arc::new(manager);
+            let mut handles = Vec::new();
+            for t in 0..NUM_TOPICS {
+                let m = manager.clone();
+                let topic = format!("topic-{}", t);
+                handles.push(tokio::spawn(async move {
+                    let msgs = m.read(&topic, 1, MSGS_PER_TOPIC * 2).await;
+                    assert_eq!(msgs.len(), MSGS_PER_TOPIC, "Topic {} should have {} messages", t, MSGS_PER_TOPIC);
+                    for (i, msg) in msgs.iter().enumerate() {
+                        assert_eq!(msg.seq, (i + 1) as u64);
+                        assert_eq!(msg.payload, Bytes::from(format!("t{}-m{}", t, i)));
+                    }
+                }));
+            }
+
+            for h in handles {
+                h.await.unwrap();
+            }
+        }
+
         // Regression #3: keyless DLT messages must not be redelivered after restart
         #[tokio::test]
         async fn keyless_dlt_not_redelivered_after_restart() {
