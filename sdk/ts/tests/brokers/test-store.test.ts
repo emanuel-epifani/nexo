@@ -141,4 +141,41 @@ describe('STORE (KV)', () => {
         expect(typeof result).toBe('number');
         await nexo.store.map.del(key);
     });
+
+    // ── CLEAR ──────────────────────────────────────────────────
+
+    it('should clear all keys and return count', async () => {
+        const prefix = `clearall:${randomUUID()}:`;
+        await nexo.store.map.set(`${prefix}a`, '1');
+        await nexo.store.map.set(`${prefix}b`, '2');
+        await nexo.store.map.set(`${prefix}c`, '3');
+
+        const count = await nexo.store.map.clearAll();
+        expect(count).toBeGreaterThanOrEqual(3);
+
+        expect(await nexo.store.map.get(`${prefix}a`)).toBeNull();
+        expect(await nexo.store.map.get(`${prefix}b`)).toBeNull();
+        expect(await nexo.store.map.get(`${prefix}c`)).toBeNull();
+    });
+
+    it('should clear only matching prefix and return count', async () => {
+        const prefix = `clearprefix:${randomUUID()}:`;
+        const otherKey = `other:${randomUUID()}`;
+        await nexo.store.map.set(`${prefix}a`, '1');
+        await nexo.store.map.set(`${prefix}b`, '2');
+        await nexo.store.map.set(otherKey, 'keep');
+
+        const count = await nexo.store.map.clearWithPrefix(prefix);
+        expect(count).toBe(2);
+
+        expect(await nexo.store.map.get(`${prefix}a`)).toBeNull();
+        expect(await nexo.store.map.get(`${prefix}b`)).toBeNull();
+        expect(await nexo.store.map.get(otherKey)).toBe('keep');
+        await nexo.store.map.del(otherKey);
+    });
+
+    it('should return 0 when clearWithPrefix matches nothing', async () => {
+        const count = await nexo.store.map.clearWithPrefix(`nomatch:${randomUUID()}`);
+        expect(count).toBe(0);
+    });
 });

@@ -89,6 +89,10 @@ fn store_fixtures() {
                 assert_eq!(key, inp["key"].as_str().unwrap(), "{id}: key");
                 assert_eq!(delta, inp["delta"].as_i64().unwrap(), "{id}: delta");
             }
+            StoreCommand::Map(nexo::brokers::store::tcp::MapCmd::ClearAll) => {}
+            StoreCommand::Map(nexo::brokers::store::tcp::MapCmd::ClearPrefix { prefix }) => {
+                assert_eq!(prefix, inp["prefix"].as_str().unwrap(), "{id}: prefix");
+            }
         }
     }
 }

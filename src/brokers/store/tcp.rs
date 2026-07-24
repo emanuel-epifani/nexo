@@ -17,6 +17,8 @@ pub const OP_MAP_SET: u8 = 0x02;
 pub const OP_MAP_GET: u8 = 0x03;
 pub const OP_MAP_DEL: u8 = 0x04;
 pub const OP_MAP_INCR: u8 = 0x05;
+pub const OP_MAP_CLEAR_ALL: u8 = 0x06;
+pub const OP_MAP_CLEAR_PREFIX: u8 = 0x07;
 
 // ==========================================
 // COMMANDS
@@ -33,6 +35,8 @@ pub enum MapCmd {
     Get { key: String },
     Del { key: String },
     Incr { key: String, delta: i64 },
+    ClearAll,
+    ClearPrefix { prefix: String },
 }
 
 impl MapCmd {
@@ -58,6 +62,11 @@ impl MapCmd {
                 let delta = cursor.read_i64()?;
                 Ok(Self::Incr { key, delta })
             }
+            OP_MAP_CLEAR_ALL => Ok(Self::ClearAll),
+            OP_MAP_CLEAR_PREFIX => {
+                let prefix = cursor.read_string()?;
+                Ok(Self::ClearPrefix { prefix })
+            }
             _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
         }
     }
@@ -66,7 +75,7 @@ impl MapCmd {
 impl StoreCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
-            OP_MAP_SET..=OP_MAP_INCR => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
+            OP_MAP_SET..=OP_MAP_CLEAR_PREFIX => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
             _ => Err(ParseError::Invalid(format!("Unknown Store opcode: 0x{:02X}", opcode))),
         }
     }
@@ -105,6 +114,18 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
                     Ok(new_val) => Response::Data(new_val),
                     Err(msg) => Response::Error(msg),
                 }
+            }
+            MapCmd::ClearAll => {
+                let count = engine.store.map.clear_all();
+                let mut buf = vec![0x03u8];
+                buf.extend_from_slice(&(count as i64).to_be_bytes());
+                Response::Data(Bytes::from(buf))
+            }
+            MapCmd::ClearPrefix { prefix } => {
+                let count = engine.store.map.clear_with_prefix(&prefix);
+                let mut buf = vec![0x03u8];
+                buf.extend_from_slice(&(count as i64).to_be_bytes());
+                Response::Data(Bytes::from(buf))
             }
         },
     }

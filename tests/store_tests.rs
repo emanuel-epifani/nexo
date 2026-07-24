@@ -201,6 +201,76 @@ mod store_tests {
         }
     }
 
+    // =========================================================================================
+    // 3. CLEAR TESTS
+    // =========================================================================================
+
+    mod clear {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_clear_all_removes_everything() {
+            let (manager, _tmp) = setup_store_manager().await;
+            let prefix = format!("clearall_{}_", Uuid::new_v4());
+
+            manager.map.set(format!("{}a", prefix), Bytes::from("1"), None).unwrap();
+            manager.map.set(format!("{}b", prefix), Bytes::from("2"), None).unwrap();
+            manager.map.set(format!("{}c", prefix), Bytes::from("3"), None).unwrap();
+
+            let count = manager.map.clear_all();
+            assert_eq!(count, 3);
+
+            assert!(manager.map.get(&format!("{}a", prefix)).is_none());
+            assert!(manager.map.get(&format!("{}b", prefix)).is_none());
+            assert!(manager.map.get(&format!("{}c", prefix)).is_none());
+        }
+
+        #[tokio::test]
+        async fn test_clear_all_on_empty_returns_zero() {
+            let (manager, _tmp) = setup_store_manager().await;
+            let count = manager.map.clear_all();
+            assert_eq!(count, 0);
+        }
+
+        #[tokio::test]
+        async fn test_clear_with_prefix_removes_only_matching() {
+            let (manager, _tmp) = setup_store_manager().await;
+            let prefix = format!("clearprefix_{}_", Uuid::new_v4());
+
+            manager.map.set(format!("{}a", prefix), Bytes::from("1"), None).unwrap();
+            manager.map.set(format!("{}b", prefix), Bytes::from("2"), None).unwrap();
+            manager.map.set(format!("other_{}", Uuid::new_v4()), Bytes::from("keep"), None).unwrap();
+
+            let count = manager.map.clear_with_prefix(&prefix);
+            assert_eq!(count, 2);
+
+            assert!(manager.map.get(&format!("{}a", prefix)).is_none());
+            assert!(manager.map.get(&format!("{}b", prefix)).is_none());
+        }
+
+        #[tokio::test]
+        async fn test_clear_with_prefix_no_match_returns_zero() {
+            let (manager, _tmp) = setup_store_manager().await;
+            manager.map.set("keepme".to_string(), Bytes::from("val"), None).unwrap();
+
+            let count = manager.map.clear_with_prefix("nonexistent_");
+            assert_eq!(count, 0);
+            assert!(manager.map.get("keepme").is_some());
+        }
+
+        #[tokio::test]
+        async fn test_clear_with_prefix_empty_string_clears_all() {
+            let (manager, _tmp) = setup_store_manager().await;
+            let id = Uuid::new_v4();
+
+            manager.map.set(format!("a_{}", id), Bytes::from("1"), None).unwrap();
+            manager.map.set(format!("b_{}", id), Bytes::from("2"), None).unwrap();
+
+            let count = manager.map.clear_with_prefix("");
+            assert_eq!(count, 2);
+        }
+    }
+
 
 
 

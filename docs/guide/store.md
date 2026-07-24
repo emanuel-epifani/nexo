@@ -144,3 +144,41 @@ val = await client.store.map.get("page:views")  # → 1 (int)
 ```
 
 :::
+
+### CLEAR
+
+Remove keys in bulk. Both methods return the number of keys removed.
+
+- `clearAll()` — remove every key from the store
+- `clearWithPrefix(prefix)` — remove all keys that start with `prefix`
+
+`clearWithPrefix` is O(N) — it scans every key to check the prefix. However, unlike single-threaded databases (e.g. Redis), Nexo is multi-threaded: the scan locks one shard at a time, so other connections, other store operations, and other brokers (queue, stream, pubsub) continue running in parallel while the scan is in progress. It is safe to call in production, even with millions of keys.
+
+| Call | Result |
+|---|---|
+| `clearAll()` | Returns count of all keys removed |
+| `clearWithPrefix("session:")` | Returns count of keys starting with `session:` |
+| `clearWithPrefix("")` | Same as `clearAll()` — every key starts with `""` |
+| No keys match | Returns `0` |
+
+The returned count includes keys that were already expired but not yet cleaned up by the background TTL task. This is intentional — both live and expired entries are removed from memory.
+
+::: code-group
+
+```typescript
+// Remove all keys (e.g. between test runs or on deploy)
+const removed = await client.store.map.clearAll(); // → 347
+
+// Remove only keys for a specific service
+const sessions = await client.store.map.clearWithPrefix("session:"); // → 12
+```
+
+```python
+# Remove all keys (e.g. between test runs or on deploy)
+removed = await client.store.map.clear_all()  # → 347
+
+# Remove only keys for a specific service
+sessions = await client.store.map.clear_with_prefix("session:")  # → 12
+```
+
+:::

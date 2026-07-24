@@ -6,6 +6,8 @@ enum StoreOpcode {
   MAP_GET = 0x03,
   MAP_DEL = 0x04,
   MAP_INCR = 0x05,
+  MAP_CLEAR_ALL = 0x06,
+  MAP_CLEAR_PREFIX = 0x07,
 }
 
 const StoreCommands = {
@@ -35,6 +37,22 @@ const StoreCommands = {
     }
     throw new Error(res.cursor.readString());
   },
+
+  mapClearAll: async (conn: NexoConnection) => {
+    const res = await conn.send(StoreOpcode.MAP_CLEAR_ALL, w => {});
+    if (res.status === ResponseStatus.DATA) {
+      return res.cursor.decodeAny() as number;
+    }
+    throw new Error(res.cursor.readString());
+  },
+
+  mapClearPrefix: async (conn: NexoConnection, prefix: string) => {
+    const res = await conn.send(StoreOpcode.MAP_CLEAR_PREFIX, w => w.string(prefix));
+    if (res.status === ResponseStatus.DATA) {
+      return res.cursor.decodeAny() as number;
+    }
+    throw new Error(res.cursor.readString());
+  },
 };
 
 export interface MapSetOptions {
@@ -58,6 +76,14 @@ export class NexoMap {
 
   async incr(key: string, delta: number = 1): Promise<number> {
     return StoreCommands.mapIncr(this.conn, key, delta);
+  }
+
+  async clearAll(): Promise<number> {
+    return StoreCommands.mapClearAll(this.conn);
+  }
+
+  async clearWithPrefix(prefix: string): Promise<number> {
+    return StoreCommands.mapClearPrefix(this.conn, prefix);
   }
 }
 

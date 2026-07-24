@@ -79,6 +79,25 @@ impl Map {
         self.inner.remove(key).is_some()
     }
 
+    pub fn clear_all(&self) -> usize {
+        let count = self.inner.len();
+        self.inner.clear();
+        count
+    }
+
+    pub fn clear_with_prefix(&self, prefix: &str) -> usize {
+        let mut count = 0;
+        self.inner.retain(|k, _| {
+            if k.starts_with(prefix) {
+                count += 1;
+                false
+            } else {
+                true
+            }
+        });
+        count
+    }
+
     pub fn incr(&self, key: &str, delta: i64) -> Result<Bytes, String> {
         use dashmap::mapref::entry::Entry as DashEntry;
 

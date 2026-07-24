@@ -14,6 +14,8 @@ class StoreOpcode:
     MAP_GET = 0x03
     MAP_DEL = 0x04
     MAP_INCR = 0x05
+    MAP_CLEAR_ALL = 0x06
+    MAP_CLEAR_PREFIX = 0x07
 
 
 class MapSetOptions(TypedDict, total=False):
@@ -54,6 +56,22 @@ class NexoMap:
     async def incr(self, key: str, delta: int = 1) -> int:
         status, cursor = await self._conn.send(
             StoreOpcode.MAP_INCR, lambda w: w.string(key).i64(delta)
+        )
+        if status == ResponseStatus.DATA:
+            return cursor.decode_any()
+        raise Exception(cursor.read_string())
+
+    async def clear_all(self) -> int:
+        status, cursor = await self._conn.send(
+            StoreOpcode.MAP_CLEAR_ALL, lambda w: None
+        )
+        if status == ResponseStatus.DATA:
+            return cursor.decode_any()
+        raise Exception(cursor.read_string())
+
+    async def clear_with_prefix(self, prefix: str) -> int:
+        status, cursor = await self._conn.send(
+            StoreOpcode.MAP_CLEAR_PREFIX, lambda w: w.string(prefix)
         )
         if status == ResponseStatus.DATA:
             return cursor.decode_any()

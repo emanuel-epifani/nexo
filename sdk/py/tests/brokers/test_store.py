@@ -123,3 +123,37 @@ class TestStore:
         assert result == 42
         assert isinstance(result, int)
         await nexo.store.map.delete(key)
+
+    # ── CLEAR ───────────────────────────────────────────────────
+
+    async def test_clear_all_removes_everything(self, nexo: NexoClient):
+        prefix = f"clearall:{uuid.uuid4()}:"
+        await nexo.store.map.set(f"{prefix}a", "1")
+        await nexo.store.map.set(f"{prefix}b", "2")
+        await nexo.store.map.set(f"{prefix}c", "3")
+
+        count = await nexo.store.map.clear_all()
+        assert count >= 3
+
+        assert await nexo.store.map.get(f"{prefix}a") is None
+        assert await nexo.store.map.get(f"{prefix}b") is None
+        assert await nexo.store.map.get(f"{prefix}c") is None
+
+    async def test_clear_with_prefix_removes_only_matching(self, nexo: NexoClient):
+        prefix = f"clearprefix:{uuid.uuid4()}:"
+        other_key = f"other:{uuid.uuid4()}"
+        await nexo.store.map.set(f"{prefix}a", "1")
+        await nexo.store.map.set(f"{prefix}b", "2")
+        await nexo.store.map.set(other_key, "keep")
+
+        count = await nexo.store.map.clear_with_prefix(prefix)
+        assert count == 2
+
+        assert await nexo.store.map.get(f"{prefix}a") is None
+        assert await nexo.store.map.get(f"{prefix}b") is None
+        assert await nexo.store.map.get(other_key) == "keep"
+        await nexo.store.map.delete(other_key)
+
+    async def test_clear_with_prefix_no_match_returns_zero(self, nexo: NexoClient):
+        count = await nexo.store.map.clear_with_prefix(f"nomatch:{uuid.uuid4()}")
+        assert count == 0
