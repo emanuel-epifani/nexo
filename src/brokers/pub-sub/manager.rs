@@ -132,9 +132,9 @@ impl PubSubManager {
 
     pub fn disconnect(&self, client_id: &str) {
         if let Some((_, info)) = self.clients.remove(client_id) {
+            let mut root = self.tree.write();
             for sub in info.subscriptions {
                 let parts: Vec<String> = sub.split('/').map(|s| s.to_string()).collect();
-                let mut root = self.tree.write();
                 root.remove_subscriber(&parts, client_id);
             }
         }
@@ -179,20 +179,11 @@ impl PubSubManager {
         drop(info);
 
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
-        {
-            let mut root = self.tree.write();
-            root.insert_subscriber(&parts, client_id);
-        }
+        let mut root = self.tree.write();
+        root.insert_subscriber(&parts, client_id);
 
         let mut retained = Vec::new();
-        {
-            let root = self.tree.read();
-            root.collect_retained_for_pattern(&parts, "", &mut retained);
-        }
-        // Retained messages are delivered at-least-once: a publish setting a retained
-        // message after the subscriber is inserted but before it is collected below may
-        // be delivered twice (once by that publish, once here). This is acceptable for
-        // pub/sub semantics and avoids holding the write lock during the tree traversal.
+        root.collect_retained_for_pattern(&parts, "", &mut retained);
 
         for (p, b) in retained {
             let msg = Arc::new(PubSubMessage::new(p, b));
