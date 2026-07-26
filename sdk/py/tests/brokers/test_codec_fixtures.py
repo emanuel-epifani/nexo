@@ -220,16 +220,6 @@ def _encode_fixture(fixture: dict) -> bytes:
             .u64(inp["seq"])
         )
 
-    elif fid == "STREAM_ACK_BATCH":
-        (
-            w.string(inp["stream"])
-            .string(inp["group"])
-            .string(inp["consumer_id"])
-            .u64(inp["generation"])
-            .u32(len(inp["seqs"]))
-        )
-        for seq in inp["seqs"]:
-            w.u64(seq)
 
     elif fid == "STREAM_SEEK_END":
         w.string(inp["stream"]).string(inp["group"]).u8(0 if inp["target"] == "beginning" else 1)
@@ -375,20 +365,6 @@ def _decode_fixture(fixture: dict) -> object:
             "seq": c.read_u64(),
         }
 
-    if fid == "STREAM_ACK_BATCH":
-        stream = c.read_string()
-        group = c.read_string()
-        consumer_id = c.read_string()
-        generation = c.read_u64()
-        count = c.read_u32()
-        seqs = [c.read_u64() for _ in range(count)]
-        return {
-            "stream": stream,
-            "group": group,
-            "consumer_id": consumer_id,
-            "generation": generation,
-            "seqs": seqs,
-        }
 
     if fid == "STREAM_SEEK_END":
         return {

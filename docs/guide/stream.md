@@ -326,8 +326,9 @@ await stream.subscribe("webhooks", call_api, {
 *   The SDK fetches a batch of `batchSize` messages.
 *   Up to `concurrency` callbacks run in parallel within that batch.
 *   The next fetch is issued only when the entire batch has been processed.
-*   Successful callbacks are committed with one acknowledged `ACK_BATCH` request. Failed callbacks are omitted and remain eligible for timeout-based redelivery.
-*   `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for them, commits their ACK batch, and only then leaves the consumer group.
+*   Each successful callback sends and awaits its own `ACK` request. Failed callbacks remain eligible for timeout-based redelivery.
+*   With `concurrency > 1`, callbacks and their ACK round-trips remain parallel. A fast callback frees its pending slot and key without waiting for slower callbacks in the same fetch batch.
+*   `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for their ACK responses and only then leaves the consumer group.
 
 **Trade-offs**
 

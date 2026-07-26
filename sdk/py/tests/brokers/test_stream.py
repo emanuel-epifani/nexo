@@ -221,7 +221,7 @@ class TestStream:
 
         await nexo.stream(topic).delete()
 
-    async def test_stop_exposes_ack_batch_failure(self, nexo: NexoClient):
+    async def test_stop_exposes_ack_failure(self, nexo: NexoClient):
         topic = f"stream-stop-ack-failure-{uuid.uuid4()}"
         group = "stop-ack-failure-group"
         stream = nexo.stream(topic)
@@ -300,6 +300,55 @@ class TestStream:
         assert elapsed < COUNT * CALLBACK_DELAY * 0.6
 
         await sub.stop()
+
+    async def test_fast_ack_does_not_wait_for_slow_callback_in_same_batch(self, nexo: NexoClient):
+        topic = f"stream-incremental-ack-{uuid.uuid4()}"
+        group = "incremental-ack-group"
+        stream = nexo.stream(topic)
+        await stream.create()
+        await stream.publish_batch([
+            {"data": {"id": 1}, "key": "A"},
+            {"data": {"id": 2}, "key": "B"},
+            {"data": {"id": 3}, "key": "A"},
+        ])
+
+        fast_finished = asyncio.Event()
+        slow_started = asyncio.Event()
+        release_slow = asyncio.Event()
+
+        async def first_callback(data):
+            if data["id"] == 1:
+                fast_finished.set()
+            elif data["id"] == 2:
+                slow_started.set()
+                await release_slow.wait()
+
+        first = await stream.subscribe(
+            group,
+            first_callback,
+            {"batch_size": 2, "concurrency": 2},
+        )
+        await asyncio.wait_for(
+            asyncio.gather(fast_finished.wait(), slow_started.wait()),
+            timeout=2.0,
+        )
+
+        client_b = await NexoClient.connect()
+        received_by_second: list[int] = []
+        try:
+            second = await client_b.stream(topic).subscribe(
+                group,
+                lambda data: received_by_second.append(data["id"]),
+                {"batch_size": 1},
+            )
+            await wait_for(lambda: received_by_second == [3], timeout=2.0)
+            release_slow.set()
+            await first.stop()
+            await second.stop()
+        finally:
+            client_b.disconnect()
+
+        await stream.delete()
 
     async def test_seek_beginning_and_end(self, nexo: NexoClient):
         topic = f"stream-seek-{uuid.uuid4()}"

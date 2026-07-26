@@ -490,7 +490,7 @@
     "id": "STREAM_ACK",
     "broker": "stream",
     "opcode": 52,
-    "frame_type": "REQUEST_NO_RESPONSE",
+    "frame_type": "REQUEST",
     "correlation_id": 1,
     "input": {
       "stream": "events",
@@ -499,22 +499,7 @@
       "generation": 1,
       "seq": 42
     },
-    "expected_bytes": "BAQ0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
-  },
-  {
-    "id": "STREAM_ACK_BATCH",
-    "broker": "stream",
-    "opcode": 55,
-    "frame_type": "REQUEST",
-    "correlation_id": 1,
-    "input": {
-      "stream": "events",
-      "group": "g1",
-      "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
-      "generation": 1,
-      "seqs": [40, 41, 42]
-    },
-    "expected_bytes": "BAE3AAAAAQAAAFgAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAADAAAAAAAAACgAAAAAAAAAKQAAAAAAAAAq"
+    "expected_bytes": "BAE0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
   },
   {
     "id": "STREAM_SEEK_END",

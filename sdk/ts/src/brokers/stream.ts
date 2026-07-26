@@ -30,7 +30,6 @@ enum StreamOpcode {
   S_ACK = 0x34,
   S_EXISTS = 0x35,
   S_DELETE = 0x36,
-  S_ACK_BATCH = 0x37,
   S_SEEK = 0x38,
   S_LEAVE = 0x39,
   S_PEEK_DLT = 0x3A,
@@ -224,28 +223,31 @@ class StreamSubscription<T> {
     }
 
     this.phase = 'processing';
-    const acknowledged: bigint[] = [];
+    let ackError: unknown = null;
     try {
       await runConcurrent(batch, this.concurrency, async ({ seq, key, data }) => {
-        if (!this.active) return;
+        if (!this.active || ackError !== null) return;
         try {
           await this.callback(data, { seq, key });
-          acknowledged.push(seq);
         } catch (err) {
           this.logger.error(`[${this.streamName}:${this.group}] Processing error at seq=${seq}. Waiting for timeout-based retry.`, err);
+          return;
         }
-      });
 
-      if (acknowledged.length > 0) {
-        await this.conn.send(StreamOpcode.S_ACK_BATCH, w => {
-          w.string(this.streamName)
+        try {
+          await this.conn.send(StreamOpcode.S_ACK, w => w
+            .string(this.streamName)
             .string(this.group)
             .string(consumerId)
             .u64(generation)
-            .u32(acknowledged.length);
-          for (const seq of acknowledged) w.u64(seq);
-        });
-      }
+            .u64(seq)
+          );
+        } catch (err) {
+          if (ackError === null) ackError = err;
+        }
+      });
+
+      if (ackError !== null) throw ackError;
     } finally {
       this.phase = 'idle';
     }

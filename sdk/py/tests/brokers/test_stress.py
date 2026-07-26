@@ -8,17 +8,17 @@ THROUGHPUT (50k ops, 50 concurrent workers):
   STORE GET             86,524 ops/sec | p50: 0.53ms | p99: 1.51ms | MAX: 4.01ms
   QUEUE PUSH            55,476 ops/sec | p50: 0.67ms | p99: 3.14ms | MAX: 14.96ms
   QUEUE PUSH BATCH     522,429 ops/sec | p50: 0.09ms | p99: 0.11ms | MAX: 0.11ms
-    STREAM PUBLISH        54,622 ops/sec | p50: 0.88ms | p99: 1.48ms | MAX: 2.02ms
-    STREAM PUB BATCH     443,754 ops/sec | p50: 0.11ms | p99: 0.11ms | MAX: 0.12ms
+    STREAM PUBLISH        52,751 ops/sec | p50: 0.90ms | p99: 1.54ms | MAX: 2.87ms
+    STREAM PUB BATCH     451,961 ops/sec | p50: 0.11ms | p99: 0.11ms | MAX: 0.11ms
   PUBSUB PUBLISH        69,743 ops/sec | p50: 0.62ms | p99: 2.33ms | MAX: 4.70ms
   QUEUE CONSUME+ACK     65,963 ops/sec
-    STREAM SUB+ACK        39,832 ops/sec
+    STREAM SUB+ACK        26,225 ops/sec
 
 LATENCY (100k sequential ops):
   STORE SET             10,033 ops/sec | p50: 0.06ms | p99: 0.51ms | MAX: 59.02ms
   STORE GET             11,404 ops/sec | p50: 0.07ms | p99: 0.32ms | MAX: 7.92ms
   QUEUE PUSH            10,623 ops/sec | p50: 0.07ms | p99: 0.37ms | MAX: 38.57ms
-    STREAM PUBLISH        12,443 ops/sec | p50: 0.08ms | p99: 0.16ms | MAX: 1.01ms
+    STREAM PUBLISH        12,380 ops/sec | p50: 0.08ms | p99: 0.17ms | MAX: 3.12ms
   PUBSUB PUBLISH        11,296 ops/sec | p50: 0.06ms | p99: 0.36ms | MAX: 31.67ms
 
 UTILS:

@@ -504,26 +504,6 @@ impl StreamManager {
         Ok(())
     }
 
-    pub async fn ack_batch(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seqs: &[u64]) -> Result<(), String> {
-        if seqs.is_empty() {
-            return Ok(());
-        }
-        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
-        {
-            let mut state = topic_ref.state.lock();
-            let head_seq = state.head_seq;
-            let Some(group_ref) = state.groups.get_mut(group) else {
-                return Err("Group not found".to_string());
-            };
-
-            group_ref.clamp_head(head_seq);
-            group_ref.ack_batch(consumer_id, generation, seqs)?;
-            state.groups_dirty = true;
-        }
-        topic_ref.wake_tx.send_modify(|version| *version += 1);
-        Ok(())
-    }
-
     pub async fn seek(&self, group: &str, topic: &str, target: SeekTarget) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {

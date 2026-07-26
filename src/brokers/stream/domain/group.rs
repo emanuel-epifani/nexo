@@ -236,27 +236,6 @@ impl ConsumerGroup {
         Ok(key_unblocked)
     }
 
-    pub fn ack_batch(&mut self, consumer_id: &str, generation: u64, seqs: &[u64]) -> Result<bool, String> {
-        self.ensure_active_consumer(consumer_id, generation)?;
-        let mut unique = BTreeSet::new();
-        for seq in seqs {
-            if !unique.insert(*seq) {
-                return Err(format!("duplicate seq {} in ack batch", seq));
-            }
-            match self.msgs.get(seq) {
-                Some(MsgState::Pending { consumer_id: owner, .. }) if owner == consumer_id => {}
-                Some(MsgState::Pending { .. }) => return Err("NOT_OWNER".to_string()),
-                _ => return Err(format!("seq {} not pending", seq)),
-            }
-        }
-
-        let mut key_unblocked = false;
-        for seq in seqs {
-            key_unblocked |= self.ack_pending(consumer_id, *seq)?;
-        }
-        Ok(key_unblocked)
-    }
-
     /// Negative acknowledge: move message back to redeliver queue.
     pub fn check_redelivery(&mut self) -> bool {
         if self.deadlines.is_empty() {
@@ -842,24 +821,6 @@ mod tests {
         group.ack(&consumer, generation, 1).unwrap();
 
         assert!(!group.keys.contains_key(&key));
-    }
-
-    #[test]
-    fn test_ack_batch_is_validated_before_mutation() {
-        let mut group = make_group(100, 30000, 5);
-        let log = fill_log(3);
-        let consumer = group.add_member("conn1".to_string());
-        let generation = group.generation();
-        group.fetch(&consumer, generation, 3, &log, 1).unwrap();
-
-        let error = group.ack_batch(&consumer, generation, &[1, 99]).unwrap_err();
-
-        assert!(error.contains("seq 99 not pending"));
-        assert!(is_pending(&group, 1));
-        assert_eq!(group.ack_floor, 0);
-
-        group.ack_batch(&consumer, generation, &[1, 2, 3]).unwrap();
-        assert_eq!(group.ack_floor, 3);
     }
 
     #[test]

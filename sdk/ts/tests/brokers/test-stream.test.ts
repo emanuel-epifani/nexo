@@ -236,7 +236,7 @@ describe('STREAM', () => {
         await nexo.stream(topic).delete();
     });
 
-    it('should expose an ACK batch failure during stop', async () => {
+    it('should expose an ACK failure during stop', async () => {
         const topic = `stream-stop-ack-failure-${randomUUID()}`;
         const group = 'stop-ack-failure-group';
         const stream = nexo.stream(topic);
@@ -318,6 +318,49 @@ describe('STREAM', () => {
         expect(elapsed).toBeLessThan(COUNT * CALLBACK_DELAY * 0.6);
 
         await sub.stop();
+    });
+
+    it('should ACK a fast callback without waiting for a slow callback in the same batch', async () => {
+        const topic = `stream-incremental-ack-${randomUUID()}`;
+        const group = 'incremental-ack-group';
+        const stream = nexo.stream(topic);
+        await stream.create();
+        await stream.publishBatch([
+            { data: { id: 1 }, key: 'A' },
+            { data: { id: 2 }, key: 'B' },
+            { data: { id: 3 }, key: 'A' },
+        ]);
+
+        let signalFastFinished!: () => void;
+        let signalSlowStarted!: () => void;
+        let releaseSlow!: () => void;
+        const fastFinished = new Promise<void>(resolve => { signalFastFinished = resolve; });
+        const slowStarted = new Promise<void>(resolve => { signalSlowStarted = resolve; });
+        const slowReleased = new Promise<void>(resolve => { releaseSlow = resolve; });
+
+        const first = await clientA.stream(topic).subscribe(group, async (data: any) => {
+            if (data.id === 1) {
+                signalFastFinished();
+                return;
+            }
+            if (data.id === 2) {
+                signalSlowStarted();
+                await slowReleased;
+            }
+        }, { batchSize: 2, concurrency: 2 });
+
+        await Promise.all([fastFinished, slowStarted]);
+
+        const receivedBySecond: number[] = [];
+        const second = await clientB.stream(topic).subscribe(group, (data: any) => {
+            receivedBySecond.push(data.id);
+        }, { batchSize: 1 });
+
+        await waitFor(() => expect(receivedBySecond).toEqual([3]), { timeout: 2000 });
+        releaseSlow();
+        await first.stop();
+        await second.stop();
+        await stream.delete();
     });
 
     it('should support Seek (Beginning/End)', async () => {

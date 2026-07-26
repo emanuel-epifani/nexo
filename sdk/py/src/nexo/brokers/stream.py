@@ -48,7 +48,6 @@ class StreamOpcode:
     S_ACK = 0x34
     S_EXISTS = 0x35
     S_DELETE = 0x36
-    S_ACK_BATCH = 0x37
     S_SEEK = 0x38
     S_LEAVE = 0x39
     S_PEEK_DLT = 0x3A
@@ -256,10 +255,11 @@ class StreamSubscription(Generic[T]):
             data = cursor.decode_any_from_buffer(payload_len)
             batch.append({"seq": seq, "key": key, "data": data})
 
-        acknowledged: list[int] = []
+        ack_error: Exception | None = None
 
         async def process(msg):
-            if not self._active:
+            nonlocal ack_error
+            if not self._active or ack_error is not None:
                 return
             try:
                 if self._callback_wants_meta:
@@ -268,25 +268,32 @@ class StreamSubscription(Generic[T]):
                     result = self._callback(msg["data"])
                 if asyncio.iscoroutine(result):
                     await result
-                acknowledged.append(msg["seq"])
             except Exception as err:
                 self._logger.error(
                     f"[{self._stream_name}:{self._group}] "
                     f"Processing error at seq={msg['seq']}. "
                     f"Waiting for timeout-based retry. {err}"
                 )
+                return
+
+            try:
+                await self._conn.send(
+                    StreamOpcode.S_ACK,
+                    lambda writer: writer.string(self._stream_name)
+                    .string(self._group)
+                    .string(consumer_id)
+                    .u64(generation)
+                    .u64(msg["seq"]),
+                )
+            except Exception as error:
+                if ack_error is None:
+                    ack_error = error
 
         self._phase = "processing"
         try:
             await run_concurrent(batch, self._concurrency, process)
-            if acknowledged:
-                def build_ack_batch(writer):
-                    writer.string(self._stream_name).string(self._group)
-                    writer.string(consumer_id).u64(generation).u32(len(acknowledged))
-                    for seq in acknowledged:
-                        writer.u64(seq)
-
-                await self._conn.send(StreamOpcode.S_ACK_BATCH, build_ack_batch)
+            if ack_error is not None:
+                raise ack_error
         finally:
             self._phase = "idle"
 
