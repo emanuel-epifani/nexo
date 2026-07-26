@@ -502,6 +502,21 @@
     "expected_bytes": "BAQ0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
   },
   {
+    "id": "STREAM_ACK_BATCH",
+    "broker": "stream",
+    "opcode": 55,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events",
+      "group": "g1",
+      "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
+      "generation": 1,
+      "seqs": [40, 41, 42]
+    },
+    "expected_bytes": "BAE3AAAAAQAAAFgAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAADAAAAAAAAACgAAAAAAAAAKQAAAAAAAAAq"
+  },
+  {
     "id": "STREAM_SEEK_END",
     "broker": "stream",
     "opcode": 56,

@@ -31,6 +31,7 @@ class _StreamDefaults:
     batch_size: int = 100
     wait_ms: int = 20000
     concurrency: int = 1
+    stop_timeout_ms: int = 30000
 
 
 @dataclass(frozen=True)

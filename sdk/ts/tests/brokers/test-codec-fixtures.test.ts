@@ -245,6 +245,14 @@ function encodeFixture(fixture: Fixture): Buffer {
         .u64(BigInt(inp.generation))
         .u64(BigInt(inp.seq));
       break;
+    case 'STREAM_ACK_BATCH':
+      w.string(inp.stream)
+        .string(inp.group)
+        .string(inp.consumer_id)
+        .u64(BigInt(inp.generation))
+        .u32(inp.seqs.length);
+      for (const seq of inp.seqs) w.u64(BigInt(seq));
+      break;
     case 'STREAM_SEEK_END':
       w.string(inp.stream).string(inp.group).u8(inp.target === 'beginning' ? 0 : 1);
       break;
@@ -405,6 +413,16 @@ function decodeFixture(fixture: Fixture): any {
         generation: Number(c.readU64()),
         seq: Number(c.readU64()),
       };
+    case 'STREAM_ACK_BATCH': {
+      const stream = c.readString();
+      const group = c.readString();
+      const consumer_id = c.readString();
+      const generation = Number(c.readU64());
+      const count = c.readU32();
+      const seqs: number[] = [];
+      for (let i = 0; i < count; i++) seqs.push(Number(c.readU64()));
+      return { stream, group, consumer_id, generation, seqs };
+    }
     case 'STREAM_SEEK_END': {
       const stream = c.readString();
       const group = c.readString();

@@ -23,12 +23,17 @@ pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_ACK: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
+pub const OP_S_ACK_BATCH: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
 pub const OP_S_LEAVE: u8 = 0x39;
 pub const OP_S_PEEK_DLT: u8 = 0x3A;
 pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
 pub const OP_S_DELETE_DLT: u8 = 0x3C;
 pub const OP_S_PURGE_DLT: u8 = 0x3D;
+
+const MAX_PUBLISH_BATCH: usize = 65_536;
+const MAX_ACK_BATCH: usize = 65_536;
+const MIN_PUBLISH_ITEM_BYTES: usize = 6;
 
 // ==========================================
 // COMMANDS
@@ -47,6 +52,7 @@ pub enum StreamCommand {
     Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
     Join { topic: String, group: String },
     Ack { topic: String, group: String, consumer_id: String, generation: u64, seq: u64 },
+    AckBatch { topic: String, group: String, consumer_id: String, generation: u64, seqs: Vec<u64> },
     Seek { topic: String, group: String, target: SeekTarget },
     Exists { topic: String },
     Delete { topic: String },
@@ -75,6 +81,18 @@ impl StreamCommand {
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
                 let count = cursor.read_u32()? as usize;
+                if count > MAX_PUBLISH_BATCH {
+                    return Err(ParseError::Invalid(format!(
+                        "Publish batch too large: {} items (max: {})",
+                        count, MAX_PUBLISH_BATCH
+                    )));
+                }
+                if count > cursor.len() / MIN_PUBLISH_ITEM_BYTES {
+                    return Err(ParseError::Invalid(format!(
+                        "Publish batch count {} exceeds remaining payload",
+                        count
+                    )));
+                }
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     let key_len = cursor.read_u16()? as usize;
@@ -106,6 +124,24 @@ impl StreamCommand {
                 let generation = cursor.read_u64()?;
                 let seq = cursor.read_u64()?;
                 Ok(Self::Ack { topic, group, consumer_id, generation, seq })
+            }
+            OP_S_ACK_BATCH => {
+                let topic = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let consumer_id = cursor.read_string()?;
+                let generation = cursor.read_u64()?;
+                let count = cursor.read_u32()? as usize;
+                if count > MAX_ACK_BATCH || count > cursor.len() / 8 {
+                    return Err(ParseError::Invalid(format!(
+                        "Invalid ack batch count: {}",
+                        count
+                    )));
+                }
+                let mut seqs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    seqs.push(cursor.read_u64()?);
+                }
+                Ok(Self::AckBatch { topic, group, consumer_id, generation, seqs })
             }
             OP_S_SEEK => {
                 let topic = cursor.read_string()?;
@@ -159,6 +195,33 @@ impl StreamCommand {
             }
             _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_parser_rejects_huge_count_before_allocation() {
+        let mut writer = PayloadWriter::new();
+        writer.put_str("topic").put_u32(u32::MAX);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+
+        let error = StreamCommand::parse(OP_S_PUB, &mut cursor).unwrap_err();
+
+        assert!(error.to_string().contains("Publish batch too large"));
+    }
+
+    #[test]
+    fn publish_parser_rejects_count_larger_than_payload() {
+        let mut writer = PayloadWriter::new();
+        writer.put_str("topic").put_u32(2);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+
+        let error = StreamCommand::parse(OP_S_PUB, &mut cursor).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds remaining payload"));
     }
 }
 
@@ -271,6 +334,10 @@ pub async fn handle(
             Err(e) => Response::Error(e),
         },
         StreamCommand::Ack { topic, group, consumer_id, generation, seq } => match stream.ack(&group, &topic, &consumer_id, generation, seq).await {
+            Ok(_) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+        StreamCommand::AckBatch { topic, group, consumer_id, generation, seqs } => match stream.ack_batch(&group, &topic, &consumer_id, generation, &seqs).await {
             Ok(_) => Response::Ok,
             Err(e) => Response::Error(e),
         },

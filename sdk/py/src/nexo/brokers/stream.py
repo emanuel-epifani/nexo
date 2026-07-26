@@ -24,6 +24,20 @@ StreamHandler = Callable[[T, StreamMessageMeta], Any] | Callable[[T], Any]
 
 
 FETCH_TIMEOUT_MARGIN_MS = 5000
+MAX_PUBLISH_BATCH = 65_536
+MAX_FETCH_BATCH_SIZE = 65_536
+
+
+def _write_stream_key(writer, key: str | bytes | None) -> None:
+    if key is None:
+        writer.u16(0)
+        return
+    key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
+    if not key_bytes:
+        raise ValueError("Stream key must not be empty")
+    if len(key_bytes) > 0xFFFF:
+        raise ValueError("Stream key exceeds 65535 bytes")
+    writer.u16(len(key_bytes)).raw_bytes(key_bytes)
 
 
 class StreamOpcode:
@@ -34,6 +48,7 @@ class StreamOpcode:
     S_ACK = 0x34
     S_EXISTS = 0x35
     S_DELETE = 0x36
+    S_ACK_BATCH = 0x37
     S_SEEK = 0x38
     S_LEAVE = 0x39
     S_PEEK_DLT = 0x3A
@@ -55,6 +70,7 @@ class StreamSubscribeOptions(TypedDict, total=False):
     batch_size: int
     wait_ms: int
     concurrency: int
+    stop_timeout_ms: int
 
 
 def _callback_accepts_meta(fn: Callable[..., Any]) -> bool:
@@ -91,6 +107,7 @@ class StreamSubscription(Generic[T]):
         batch_size: int,
         wait_ms: int,
         concurrency: int,
+        stop_timeout_ms: int,
     ) -> None:
         self._conn = conn
         self._stream_name = stream_name
@@ -101,11 +118,14 @@ class StreamSubscription(Generic[T]):
         self._batch_size = batch_size
         self._wait_ms = wait_ms
         self._concurrency = concurrency
+        self._stop_timeout_ms = stop_timeout_ms
 
         self._active = False
         self._loop_task: Optional[asyncio.Task] = None
         self._consumer_id: Optional[str] = None
         self._generation: int = 0
+        self._phase = "idle"
+        self._left_to_cancel_fetch = False
 
     async def start(self) -> None:
         self._active = True
@@ -122,6 +142,27 @@ class StreamSubscription(Generic[T]):
 
     async def stop(self) -> None:
         self._active = False
+        left_while_fetching = self._phase == "fetching"
+        if left_while_fetching:
+            self._left_to_cancel_fetch = True
+            await self._leave()
+        try:
+            if self._loop_task is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._loop_task),
+                        timeout=self._stop_timeout_ms / 1000.0,
+                    )
+                except asyncio.TimeoutError as error:
+                    self._loop_task.cancel()
+                    raise TimeoutError(
+                        f"Stream subscription stop timed out after {self._stop_timeout_ms}ms"
+                    ) from error
+        finally:
+            if not left_while_fetching:
+                await self._leave()
+
+    async def _leave(self) -> None:
         if self._consumer_id is not None:
             try:
                 await self._conn.send(
@@ -133,15 +174,6 @@ class StreamSubscription(Generic[T]):
                 )
             except Exception:
                 pass
-        if self._loop_task is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(self._loop_task), timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._loop_task.cancel()
-                try:
-                    await self._loop_task
-                except asyncio.CancelledError:
-                    pass
 
     async def _join(self) -> None:
         if not self._conn.is_connected:
@@ -165,7 +197,9 @@ class StreamSubscription(Generic[T]):
                     raise
                 except Exception as e:
                     if not self._active:
-                        break
+                        if self._left_to_cancel_fetch and _is_recoverable_membership_error(e):
+                            break
+                        raise
                     self._consumer_id = None
 
                     if _is_recoverable_membership_error(e):
@@ -192,16 +226,21 @@ class StreamSubscription(Generic[T]):
         assert consumer_id is not None
         generation = self._generation
 
-        status, cursor = await self._conn.send(
-            StreamOpcode.S_FETCH,
-            lambda w: w.string(self._stream_name)
-            .string(self._group)
-            .string(consumer_id)
-            .u64(generation)
-            .u32(self._batch_size)
-            .u32(self._wait_ms),
-            timeout_ms=self._wait_ms + FETCH_TIMEOUT_MARGIN_MS,
-        )
+        self._phase = "fetching"
+        try:
+            status, cursor = await self._conn.send(
+                StreamOpcode.S_FETCH,
+                lambda w: w.string(self._stream_name)
+                .string(self._group)
+                .string(consumer_id)
+                .u64(generation)
+                .u32(self._batch_size)
+                .u32(self._wait_ms),
+                timeout_ms=self._wait_ms + FETCH_TIMEOUT_MARGIN_MS,
+            )
+        finally:
+            if self._phase == "fetching":
+                self._phase = "idle"
 
         count = cursor.read_u32()
         if count == 0:
@@ -217,6 +256,8 @@ class StreamSubscription(Generic[T]):
             data = cursor.decode_any_from_buffer(payload_len)
             batch.append({"seq": seq, "key": key, "data": data})
 
+        acknowledged: list[int] = []
+
         async def process(msg):
             if not self._active:
                 return
@@ -227,14 +268,7 @@ class StreamSubscription(Generic[T]):
                     result = self._callback(msg["data"])
                 if asyncio.iscoroutine(result):
                     await result
-                self._conn.send_fire_and_forget(
-                    StreamOpcode.S_ACK,
-                    lambda w: w.string(self._stream_name)
-                    .string(self._group)
-                    .string(consumer_id)
-                    .u64(generation)
-                    .u64(msg["seq"]),
-                )
+                acknowledged.append(msg["seq"])
             except Exception as err:
                 self._logger.error(
                     f"[{self._stream_name}:{self._group}] "
@@ -242,7 +276,19 @@ class StreamSubscription(Generic[T]):
                     f"Waiting for timeout-based retry. {err}"
                 )
 
-        await run_concurrent(batch, self._concurrency, process)
+        self._phase = "processing"
+        try:
+            await run_concurrent(batch, self._concurrency, process)
+            if acknowledged:
+                def build_ack_batch(writer):
+                    writer.string(self._stream_name).string(self._group)
+                    writer.string(consumer_id).u64(generation).u32(len(acknowledged))
+                    for seq in acknowledged:
+                        writer.u64(seq)
+
+                await self._conn.send(StreamOpcode.S_ACK_BATCH, build_ack_batch)
+        finally:
+            self._phase = "idle"
 
 
 class NexoStream(Generic[T]):
@@ -294,12 +340,7 @@ class NexoStream(Generic[T]):
 
         def build(w):
             w.string(self.name).u32(1)
-            if key is None:
-                w.u16(0)
-            else:
-                key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
-                w.u16(len(key_bytes))
-                w.raw_bytes(key_bytes)
+            _write_stream_key(w, key)
             w.any_with_len(data)
 
         status, cursor = await self._conn.send(StreamOpcode.S_PUB, build)
@@ -311,17 +352,15 @@ class NexoStream(Generic[T]):
     ) -> list[int]:
         if not items:
             return []
+        if len(items) > MAX_PUBLISH_BATCH:
+            raise ValueError(
+                f"Publish batch too large: {len(items)} items (max: {MAX_PUBLISH_BATCH})"
+            )
 
         def build(w):
             w.string(self.name).u32(len(items))
             for item in items:
-                key = item.get("key")
-                if key is None:
-                    w.u16(0)
-                else:
-                    key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
-                    w.u16(len(key_bytes))
-                    w.raw_bytes(key_bytes)
+                _write_stream_key(w, item.get("key"))
                 w.any_with_len(item["data"])
 
         status, cursor = await self._conn.send(StreamOpcode.S_PUB, build)
@@ -351,6 +390,17 @@ class NexoStream(Generic[T]):
         if concurrency is None:
             concurrency = DEFAULT_CONFIG.stream.concurrency
         concurrency = max(1, concurrency)
+        stop_timeout_ms = opts.get("stop_timeout_ms")
+        if stop_timeout_ms is None:
+            stop_timeout_ms = DEFAULT_CONFIG.stream.stop_timeout_ms
+        if not isinstance(batch_size, int) or batch_size < 1 or batch_size > MAX_FETCH_BATCH_SIZE:
+            raise ValueError(
+                f"batch_size must be an integer between 1 and {MAX_FETCH_BATCH_SIZE}"
+            )
+        if not isinstance(wait_ms, int) or wait_ms < 1:
+            raise ValueError("wait_ms must be a positive integer")
+        if not isinstance(stop_timeout_ms, int) or stop_timeout_ms < 1:
+            raise ValueError("stop_timeout_ms must be a positive integer")
 
         sub: StreamSubscription[T] = StreamSubscription(
             self._conn,
@@ -361,6 +411,7 @@ class NexoStream(Generic[T]):
             batch_size,
             wait_ms,
             concurrency,
+            stop_timeout_ms,
         )
         await sub.start()
 
@@ -370,6 +421,8 @@ class NexoStream(Generic[T]):
         )
 
     async def seek(self, group: str, target: str) -> None:
+        if target not in ("beginning", "end"):
+            raise ValueError(f"Invalid seek target: {target!r}")
         await self._conn.send(
             StreamOpcode.S_SEEK,
             lambda w: w.string(self.name)

@@ -53,6 +53,7 @@ pub struct ConsumerGroup {
     msgs: BTreeMap<u64, MsgState>,
     redeliver_idx: BTreeSet<u64>, // O(1) index of Redeliver seqs — avoids O(N) scan of msgs
     keys: HashMap<Bytes, KeyState>,
+    dlt_key_counts: HashMap<Bytes, usize>,
     pending_count: usize,
     // === Config ===
     pub max_ack_pending: usize,
@@ -77,6 +78,7 @@ impl ConsumerGroup {
             msgs: BTreeMap::new(),
             redeliver_idx: BTreeSet::new(),
             keys: HashMap::new(),
+            dlt_key_counts: HashMap::new(),
             pending_count: 0,
             max_ack_pending,
             ack_wait,
@@ -93,15 +95,24 @@ impl ConsumerGroup {
         self.pending_count >= self.max_ack_pending
     }
 
-    pub fn restore(id: String, ack_floor: u64, head_seq: u64, max_ack_pending: usize, ack_wait: Duration, max_deliveries: u32, dlt_entries: BTreeMap<u64, DltEntry>, parked_keys: HashSet<Bytes>) -> Self {
+    pub fn restore(id: String, ack_floor: u64, head_seq: u64, max_ack_pending: usize, ack_wait: Duration, max_deliveries: u32, dlt_entries: BTreeMap<u64, DltEntry>, parked_keys: HashSet<Bytes>, redeliver_entries: BTreeMap<u64, u32>) -> Self {
         let normalized_floor = ack_floor.max(head_seq.saturating_sub(1));
         let mut msgs = BTreeMap::new();
         let mut keys: HashMap<Bytes, KeyState> = HashMap::new();
-        let redeliver_idx = BTreeSet::new();
+        let mut dlt_key_counts = HashMap::new();
+        let mut redeliver_idx = BTreeSet::new();
+        for (seq, attempts) in redeliver_entries {
+            if seq >= head_seq {
+                msgs.insert(seq, MsgState::Redeliver { attempts });
+                redeliver_idx.insert(seq);
+            }
+        }
         for (seq, entry) in &dlt_entries {
             msgs.insert(*seq, MsgState::Dlt(entry.clone()));
+            redeliver_idx.remove(seq);
             if let Some(k) = &entry.key {
                 keys.entry(k.clone()).or_default().poisoned = true;
+                *dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
             }
         }
         for k in &parked_keys {
@@ -114,6 +125,7 @@ impl ConsumerGroup {
             msgs,
             redeliver_idx,
             keys,
+            dlt_key_counts,
             pending_count: 0,
             max_ack_pending,
             ack_wait,
@@ -189,7 +201,10 @@ impl ConsumerGroup {
     /// Acknowledge a message. Removes from pending and tries to advance ack_floor.
     pub fn ack(&mut self, consumer_id: &str, generation: u64, seq: u64) -> Result<bool, String> {
         self.ensure_active_consumer(consumer_id, generation)?;
+        self.ack_pending(consumer_id, seq)
+    }
 
+    fn ack_pending(&mut self, consumer_id: &str, seq: u64) -> Result<bool, String> {
         let key = match self.msgs.get(&seq) {
             Some(MsgState::Pending { consumer_id: cid, key, .. }) if cid == consumer_id => key.clone(),
             Some(MsgState::Pending { .. }) => return Err("NOT_OWNER".to_string()),
@@ -200,6 +215,7 @@ impl ConsumerGroup {
 
         let mut key_unblocked = false;
         if let Some(k) = &key {
+            let mut remove_key_state = false;
             if let Some(ks) = self.keys.get_mut(k) {
                 ks.in_flight = None;
                 if let Some(next_seq) = ks.blocked.pop_first() {
@@ -209,10 +225,35 @@ impl ConsumerGroup {
                     self.redeliver_idx.insert(next_seq);
                     key_unblocked = true;
                 }
+                remove_key_state = ks.in_flight.is_none() && ks.blocked.is_empty() && !ks.poisoned;
+            }
+            if remove_key_state {
+                self.keys.remove(k);
             }
         }
 
         self.try_advance_floor();
+        Ok(key_unblocked)
+    }
+
+    pub fn ack_batch(&mut self, consumer_id: &str, generation: u64, seqs: &[u64]) -> Result<bool, String> {
+        self.ensure_active_consumer(consumer_id, generation)?;
+        let mut unique = BTreeSet::new();
+        for seq in seqs {
+            if !unique.insert(*seq) {
+                return Err(format!("duplicate seq {} in ack batch", seq));
+            }
+            match self.msgs.get(seq) {
+                Some(MsgState::Pending { consumer_id: owner, .. }) if owner == consumer_id => {}
+                Some(MsgState::Pending { .. }) => return Err("NOT_OWNER".to_string()),
+                _ => return Err(format!("seq {} not pending", seq)),
+            }
+        }
+
+        let mut key_unblocked = false;
+        for seq in seqs {
+            key_unblocked |= self.ack_pending(consumer_id, *seq)?;
+        }
         Ok(key_unblocked)
     }
 
@@ -291,15 +332,24 @@ impl ConsumerGroup {
                     }
                     self.pending_count -= 1;
                 }
+                if let MsgState::Dlt(entry) = &state {
+                    if let Some(key) = &entry.key {
+                        match self.dlt_key_counts.get_mut(key) {
+                            Some(count) if *count > 1 => *count -= 1,
+                            Some(_) => {
+                                self.dlt_key_counts.remove(key);
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 self.redeliver_idx.remove(seq);
                 changed = true;
             }
         }
 
         // Clean up keys: remove in_flight and blocked below head_seq, un-poison stale keys
-        let dlt_keys: HashSet<Bytes> = self.msgs.values()
-            .filter_map(|s| if let MsgState::Dlt(e) = s { e.key.clone() } else { None })
-            .collect();
+        let dlt_key_counts = &self.dlt_key_counts;
 
         self.keys.retain(|key, ks| {
             if let Some(seq) = ks.in_flight {
@@ -308,7 +358,7 @@ impl ConsumerGroup {
             let valid = ks.blocked.split_off(&head_seq);
             if ks.blocked.len() > 0 { changed = true; }
             ks.blocked = valid;
-            if ks.poisoned && !dlt_keys.contains(key) {
+            if ks.poisoned && !dlt_key_counts.contains_key(key) {
                 ks.poisoned = false;
                 changed = true;
             }
@@ -354,6 +404,7 @@ impl ConsumerGroup {
         self.msgs.clear();
         self.redeliver_idx.clear();
         self.keys.clear();
+        self.dlt_key_counts.clear();
         self.pending_count = 0;
         self.members.clear();
         self.generation = self.generation.saturating_add(1);
@@ -424,6 +475,15 @@ impl ConsumerGroup {
         self.msgs.iter()
             .filter_map(|(seq, state)| match state {
                 MsgState::Dlt(e) => Some((*seq, e.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn redeliver_snapshot(&self) -> BTreeMap<u64, u32> {
+        self.msgs.iter()
+            .filter_map(|(seq, state)| match state {
+                MsgState::Redeliver { attempts } => Some((*seq, *attempts)),
                 _ => None,
             })
             .collect()
@@ -520,6 +580,7 @@ impl ConsumerGroup {
         self.redeliver_idx.remove(&seq);
 
         if let Some(k) = &key {
+            *self.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
             if let Some(ks) = self.keys.get_mut(k) {
                 ks.in_flight = None;
                 ks.poisoned = true;
@@ -530,6 +591,7 @@ impl ConsumerGroup {
                         attempts: 0,
                         key: key.clone(),
                     }));
+                    *self.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
                 }
                 ks.blocked.clear();
             }
@@ -600,7 +662,7 @@ impl ConsumerGroup {
         });
         self.redeliver_idx.insert(seq);
 
-        let key_unblocked = self.cleanup_poisoned_key(&entry.key);
+        let key_unblocked = self.release_dlt_key(&entry.key);
         Ok(key_unblocked)
     }
 
@@ -611,7 +673,7 @@ impl ConsumerGroup {
             _ => return Err("seq not in DLT".to_string()),
         };
 
-        let key_unblocked = self.cleanup_poisoned_key(&entry.key);
+        let key_unblocked = self.release_dlt_key(&entry.key);
         Ok(key_unblocked)
     }
 
@@ -624,24 +686,42 @@ impl ConsumerGroup {
         for seq in dlt_seqs {
             self.msgs.remove(&seq);
         }
+        self.dlt_key_counts.clear();
         for ks in self.keys.values_mut() {
             ks.poisoned = false;
         }
+        self.keys.retain(|_, ks| ks.in_flight.is_some() || !ks.blocked.is_empty());
         count
     }
 
-    /// Un-poison a key if no more DLT entries reference it. Returns true if key was un-poisoned.
-    fn cleanup_poisoned_key(&mut self, key: &Option<Bytes>) -> bool {
+    /// Decrement a key's DLT references and un-poison it when the last entry is removed.
+    fn release_dlt_key(&mut self, key: &Option<Bytes>) -> bool {
         let Some(k) = key else { return false };
-        let still_has_dlt = self.msgs.values().any(|s| {
-            matches!(s, MsgState::Dlt(e) if e.key.as_ref() == Some(k))
-        });
-        if !still_has_dlt {
-            if let Some(ks) = self.keys.get_mut(k) {
+        let no_dlt_entries = match self.dlt_key_counts.get_mut(k) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => {
+                self.dlt_key_counts.remove(k);
+                true
+            }
+            None => true,
+        };
+        if no_dlt_entries {
+            let mut remove_key_state = false;
+            let was_poisoned = if let Some(ks) = self.keys.get_mut(k) {
                 let was_poisoned = ks.poisoned;
                 ks.poisoned = false;
-                return was_poisoned;
+                remove_key_state = ks.in_flight.is_none() && ks.blocked.is_empty();
+                was_poisoned
+            } else {
+                false
+            };
+            if remove_key_state {
+                self.keys.remove(k);
             }
+            return was_poisoned;
         }
         false
     }
@@ -712,7 +792,10 @@ mod tests {
         g.redeliver_idx.insert(seq);
     }
     fn insert_dlt(g: &mut ConsumerGroup, seq: u64, entry: DltEntry) {
-        if let Some(k) = &entry.key { g.keys.entry(k.clone()).or_default().poisoned = true; }
+        if let Some(k) = &entry.key {
+            g.keys.entry(k.clone()).or_default().poisoned = true;
+            *g.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
+        }
         g.msgs.insert(seq, MsgState::Dlt(entry));
     }
     fn insert_parked_key(g: &mut ConsumerGroup, key: Bytes) {
@@ -743,6 +826,40 @@ mod tests {
         assert_eq!(g.ack_floor, 2);
         g.ack(&consumer, gen, 3).unwrap();
         assert_eq!(g.ack_floor, 3);
+    }
+
+    #[test]
+    fn test_ack_removes_idle_key_state() {
+        let mut group = make_group(100, 30000, 5);
+        let key = Bytes::from("one-shot-key");
+        let log = vec![make_msg(1, Some(key.clone()))];
+        let consumer = group.add_member("conn1".to_string());
+        let generation = group.generation();
+
+        group.fetch(&consumer, generation, 1, &log, 1).unwrap();
+        assert!(group.keys.contains_key(&key));
+
+        group.ack(&consumer, generation, 1).unwrap();
+
+        assert!(!group.keys.contains_key(&key));
+    }
+
+    #[test]
+    fn test_ack_batch_is_validated_before_mutation() {
+        let mut group = make_group(100, 30000, 5);
+        let log = fill_log(3);
+        let consumer = group.add_member("conn1".to_string());
+        let generation = group.generation();
+        group.fetch(&consumer, generation, 3, &log, 1).unwrap();
+
+        let error = group.ack_batch(&consumer, generation, &[1, 99]).unwrap_err();
+
+        assert!(error.contains("seq 99 not pending"));
+        assert!(is_pending(&group, 1));
+        assert_eq!(group.ack_floor, 0);
+
+        group.ack_batch(&consumer, generation, &[1, 2, 3]).unwrap();
+        assert_eq!(group.ack_floor, 3);
     }
 
     #[test]
@@ -1273,6 +1390,7 @@ mod tests {
             5,
             dlt,
             parked,
+            BTreeMap::new(),
         );
 
         assert_eq!(g.ack_floor, 4); // max(3, 5-1)
@@ -1509,7 +1627,17 @@ mod bench {
             });
         }
         let parked: HashSet<Bytes> = dlt.values().filter_map(|e| e.key.clone()).collect();
-        let g = ConsumerGroup::restore("bench".into(), 0, n as u64 + 1, 100000, Duration::from_secs(60), 5, dlt, parked);
+        let g = ConsumerGroup::restore(
+            "bench".into(),
+            0,
+            n as u64 + 1,
+            100000,
+            Duration::from_secs(60),
+            5,
+            dlt,
+            parked,
+            BTreeMap::new(),
+        );
 
         let start = Instant::now();
         let _snap = g.dlt_snapshot();

@@ -163,6 +163,89 @@ class TestStream:
 
         assert elapsed < 2.0
 
+    async def test_stop_commits_started_callback_before_leave(self, nexo: NexoClient):
+        topic = f"stream-stop-processing-{uuid.uuid4()}"
+        group = "stop-processing-group"
+        await nexo.stream(topic).create()
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        callback_count = 0
+
+        async def callback(_):
+            nonlocal callback_count
+            callback_count += 1
+            started.set()
+            await release.wait()
+
+        sub = await nexo.stream(topic).subscribe(group, callback)
+        await nexo.stream(topic).publish({"id": 1})
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        stopping = asyncio.create_task(sub.stop())
+        await asyncio.sleep(0.1)
+        assert not stopping.done()
+
+        release.set()
+        await stopping
+
+        redelivered: list = []
+        resumed = await nexo.stream(topic).subscribe(group, lambda data: redelivered.append(data))
+        await asyncio.sleep(0.2)
+        await resumed.stop()
+
+        assert callback_count == 1
+        assert redelivered == []
+        await nexo.stream(topic).delete()
+
+    async def test_stop_callback_timeout_is_reported(self, nexo: NexoClient):
+        topic = f"stream-stop-timeout-{uuid.uuid4()}"
+        await nexo.stream(topic).create()
+
+        started = asyncio.Event()
+
+        async def callback(_):
+            started.set()
+            await asyncio.Event().wait()
+
+        sub = await nexo.stream(topic).subscribe(
+            "stop-timeout-group",
+            callback,
+            {"stop_timeout_ms": 100},
+        )
+        await nexo.stream(topic).publish({"id": 1})
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        with pytest.raises(TimeoutError, match="stop timed out"):
+            await sub.stop()
+
+        await nexo.stream(topic).delete()
+
+    async def test_stop_exposes_ack_batch_failure(self, nexo: NexoClient):
+        topic = f"stream-stop-ack-failure-{uuid.uuid4()}"
+        group = "stop-ack-failure-group"
+        stream = nexo.stream(topic)
+        await stream.create()
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_):
+            started.set()
+            await release.wait()
+
+        sub = await stream.subscribe(group, callback)
+        await stream.publish({"id": 1})
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        await stream.seek(group, "beginning")
+
+        stopping = asyncio.create_task(sub.stop())
+        release.set()
+        with pytest.raises(Exception, match="FENCED"):
+            await stopping
+
+        await stream.delete()
+
     async def test_preserve_ordering_default_concurrency(self, nexo: NexoClient):
         topic = f"stream-order-{uuid.uuid4()}"
         await nexo.stream(topic).create()
@@ -381,6 +464,18 @@ class TestStream:
         seqs = await nexo.stream(topic).publish_batch([])
         assert len(seqs) == 0
 
+    async def test_reject_empty_stream_keys(self, nexo: NexoClient):
+        stream = nexo.stream(f"stream-empty-key-{uuid.uuid4()}")
+        with pytest.raises(ValueError, match="must not be empty"):
+            await stream.publish({"x": 1}, {"key": ""})
+        with pytest.raises(ValueError, match="must not be empty"):
+            await stream.publish_batch([{"data": {"x": 1}, "key": b""}])
+
+    async def test_reject_oversized_publish_batch(self, nexo: NexoClient):
+        items = [{"data": None}] * 65_537
+        with pytest.raises(ValueError, match="Publish batch too large"):
+            await nexo.stream("stream-large-batch").publish_batch(items)
+
     # ── Edge cases ──────────────────────────────────────────────
 
     async def test_exists_true_after_create_false_before(self, nexo: NexoClient):
@@ -397,6 +492,21 @@ class TestStream:
         await nexo.stream(topic).create()
         assert await nexo.stream(topic).exists() is True
         await nexo.stream(topic).delete()
+
+    async def test_reject_invalid_topic_name(self, nexo: NexoClient):
+        with pytest.raises(Exception, match="Invalid topic name"):
+            await nexo.stream("../outside").create()
+
+    async def test_reject_invalid_seek_and_subscription_options(self, nexo: NexoClient):
+        stream = nexo.stream("stream-invalid-options")
+        with pytest.raises(ValueError, match="Invalid seek target"):
+            await stream.seek("group", "invalid")
+        with pytest.raises(ValueError, match="batch_size must be an integer between"):
+            await stream.subscribe("group", lambda _: None, {"batch_size": 0})
+        with pytest.raises(ValueError, match="wait_ms must be a positive integer"):
+            await stream.subscribe("group", lambda _: None, {"wait_ms": 0})
+        with pytest.raises(ValueError, match="stop_timeout_ms must be a positive integer"):
+            await stream.subscribe("group", lambda _: None, {"stop_timeout_ms": 0})
 
     async def test_publish_nonexistent_stream_fails(self, nexo: NexoClient):
         topic = f"stream-pub-missing-{uuid.uuid4()}"

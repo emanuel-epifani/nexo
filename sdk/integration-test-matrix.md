@@ -86,6 +86,9 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_consumer_disconnect | Consumer disconnect with zero data loss | should handle consumer disconnect with zero data loss | consumer_disconnect_zero_data_loss |
 | stream_history_sync | New groups start from beginning (history sync) | should support History Sync (new groups start from beginning) | history_sync_new_group_from_beginning |
 | stream_stop_quickly | Stop subscription quickly, not wait for long-poll timeout | should stop subscription quickly (not wait for long-poll timeout) | stop_subscription_quickly |
+| stream_stop_during_callback | Stop waits for callbacks already started, commits ACK batch, then leaves without redelivery | should commit a started callback before leaving the group | stop_commits_started_callback_before_leave |
+| stream_stop_callback_timeout | Stop fails visibly instead of hanging when a callback exceeds its configured grace period | should fail stop when a started callback exceeds the stop timeout | stop_callback_timeout_is_reported |
+| stream_stop_ack_failure | ACK batch failure during stop is returned to the caller | should expose an ACK batch failure during stop | stop_exposes_ack_batch_failure |
 | stream_ordering_concurrency_1 | Default concurrency=1 preserves ordering | should preserve ordering with default concurrency=1 | preserve_ordering_default_concurrency |
 | stream_parallel_concurrency | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |
 | stream_seek | Seek to beginning and end | should support Seek (Beginning/End) | seek_beginning_and_end |
@@ -97,8 +100,12 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_publish_bytes_key | Publish with Uint8Array key, verify receipt | should publish with Uint8Array key and verify receipt | publish_with_bytes_key |
 | stream_publish_bytes_data | Publish Uint8Array data, receive raw bytes | should publish Uint8Array data and receive raw bytes back | publish_bytes_data |
 | stream_publish_batch_empty | Empty publishBatch handled gracefully | should handle empty publishBatch gracefully | empty_publish_batch |
+| stream_empty_key_rejected | Empty keys are rejected instead of silently becoming keyless | should reject empty stream keys | reject_empty_stream_keys |
+| stream_publish_batch_limit | Publish batches above 65,536 items are rejected locally | should reject publish batches above the protocol limit | reject_oversized_publish_batch |
 | stream_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
 | stream_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
+| stream_invalid_topic_name | Topic names cannot escape the persistence directory | should reject topic names that escape the stream directory | reject_invalid_topic_name |
+| stream_invalid_runtime_options | Invalid seek targets and zero polling options are rejected | should reject invalid seek and subscription polling options | reject_invalid_seek_and_subscription_options |
 | stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
 | stream_publish_storage_failure | Storage write failure rejects publish instead of returning a sequence | should fail publish when storage cannot write the message | publish_storage_write_failure |
 | stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |

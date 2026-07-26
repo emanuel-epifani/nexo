@@ -289,6 +289,19 @@ fn stream_fixtures() {
                 assert_eq!(generation, inp["generation"].as_u64().unwrap(), "{id}: generation");
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
+            StreamCommand::AckBatch { topic: t, group, consumer_id, generation, seqs } => {
+                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
+                assert_eq!(consumer_id, inp["consumer_id"].as_str().unwrap(), "{id}: consumer_id");
+                assert_eq!(generation, inp["generation"].as_u64().unwrap(), "{id}: generation");
+                let expected = inp["seqs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seq| seq.as_u64().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(seqs, expected, "{id}: seqs");
+            }
             StreamCommand::Seek { topic: t, group, target } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");

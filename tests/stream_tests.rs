@@ -1701,6 +1701,53 @@ mod stream_tests {
             }
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_delete_and_publish_cannot_resurrect_topic() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+
+            for round in 0..20 {
+                let topic = format!("delete-race-{}", round);
+                manager
+                    .create_topic(topic.clone(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+
+                let deleting_manager = manager.clone();
+                let deleting_topic = topic.clone();
+                let delete = tokio::spawn(async move {
+                    deleting_manager.delete_topic(deleting_topic).await
+                });
+
+                let mut publishers = Vec::new();
+                for publisher in 0..16 {
+                    let publishing_manager = manager.clone();
+                    let publishing_topic = topic.clone();
+                    publishers.push(tokio::spawn(async move {
+                        publishing_manager
+                            .publish(
+                                &publishing_topic,
+                                None,
+                                Bytes::from(format!("publisher-{}", publisher)),
+                            )
+                            .await
+                    }));
+                }
+
+                delete
+                    .await
+                    .unwrap_or_else(|error| panic!("delete task failed in round {round}: {error}"))
+                    .unwrap_or_else(|error| panic!("delete failed in round {round}: {error}"));
+                for publisher in publishers {
+                    let _ = publisher.await.unwrap();
+                }
+
+                assert!(!manager.exists(&topic).await);
+                assert!(!temp_dir.path().join(&topic).exists());
+            }
+        }
+
         // Regression #3: keyless DLT messages must not be redelivered after restart
         #[tokio::test]
         async fn keyless_dlt_not_redelivered_after_restart() {
@@ -1744,6 +1791,45 @@ mod stream_tests {
             }
         }
 
+        #[tokio::test]
+        async fn dlt_move_to_stream_survives_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap();
+            let mut config = get_test_config(Some(path));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            config.default_flush_ms = 50;
+            let topic = "reg-dlt-redrive-restart";
+            let group = "g-reg-dlt-redrive-restart";
+
+            {
+                let manager = build_manager(config.clone()).await;
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+                manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+
+                let consumer = join_session(&manager, group, topic, "client-A").await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                assert_eq!(manager.peek_dlt(topic, group, 10, 0).await.unwrap().len(), 1);
+                manager.move_to_stream(topic, group, 1).await.unwrap();
+                manager.shutdown().await;
+            }
+
+            let recovered = build_manager(config).await;
+            let consumer = join_session(&recovered, group, topic, "client-B").await;
+            let messages = fetch_messages(&recovered, group, topic, &consumer, 1, 0).await;
+
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].seq, 1);
+            assert_eq!(messages[0].payload, Bytes::from("poison"));
+        }
+
         // Regression #4: recovery must truncate partial trailing records
         #[tokio::test]
         async fn recovery_truncates_partial_trailing_record() {
@@ -1780,6 +1866,98 @@ mod stream_tests {
             // Re-read should be clean
             let state2 = recover_topic("reg-partial", tmp.path().to_path_buf()).await;
             assert_eq!(state2.index.len(), 2, "Re-recovery should find no corruption");
+        }
+
+        #[tokio::test]
+        async fn recovery_truncates_partial_length_prefix() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-partial-prefix");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            let mut data = Vec::new();
+            serialize_message(&mut data, 1, 1000, None, b"msg1");
+            let valid_len = data.len() as u64;
+            data.push(0xAB);
+            tokio::fs::write(&seg_path, data).await.unwrap();
+
+            recover_topic("reg-partial-prefix", tmp.path().to_path_buf()).await;
+
+            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), valid_len);
+        }
+
+        #[tokio::test]
+        async fn recovery_truncates_invalid_first_record_to_zero() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-invalid-first");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            let mut data = Vec::new();
+            serialize_message(&mut data, 1, 1000, None, b"msg1");
+            data[4] ^= 0xFF;
+            tokio::fs::write(&seg_path, data).await.unwrap();
+
+            let state = recover_topic("reg-invalid-first", tmp.path().to_path_buf()).await;
+
+            assert!(state.index.is_empty());
+            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn recovery_rejects_oversized_declared_record_without_allocating() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-oversized-record");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            tokio::fs::write(&seg_path, u32::MAX.to_be_bytes()).await.unwrap();
+
+            let state = recover_topic("reg-oversized-record", tmp.path().to_path_buf()).await;
+
+            assert!(state.index.is_empty());
+            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn recovery_quarantines_segments_after_sequence_gap() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-gap");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let mut first = Vec::new();
+            serialize_message(&mut first, 1, 1000, None, b"msg1");
+            tokio::fs::write(topic_dir.join("1.log"), first).await.unwrap();
+
+            let mut later = Vec::new();
+            serialize_message(&mut later, 3, 3000, None, b"msg3");
+            tokio::fs::write(topic_dir.join("3.log"), later).await.unwrap();
+
+            let state = recover_topic("reg-gap", tmp.path().to_path_buf()).await;
+
+            assert_eq!(state.next_seq, 2);
+            assert_eq!(state.segments.len(), 1);
+            assert!(!topic_dir.join("3.log").exists());
+            assert!(topic_dir.join("3.log.corrupt").exists());
+        }
+
+        #[tokio::test]
+        async fn recovery_truncates_non_monotonic_record_order() {
+            let tmp = tempfile::tempdir().unwrap();
+            let topic_dir = tmp.path().join("reg-non-monotonic");
+            tokio::fs::create_dir_all(&topic_dir).await.unwrap();
+
+            let seg_path = topic_dir.join("1.log");
+            let mut data = Vec::new();
+            serialize_message(&mut data, 1, 1000, None, b"msg1");
+            let first_len = data.len() as u64;
+            serialize_message(&mut data, 1, 2000, None, b"duplicate");
+            tokio::fs::write(&seg_path, data).await.unwrap();
+
+            let state = recover_topic("reg-non-monotonic", tmp.path().to_path_buf()).await;
+
+            assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1]);
+            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), first_len);
         }
 
         // Regression #5: ack must wake backpressured long-polling consumers

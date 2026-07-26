@@ -16,7 +16,7 @@ use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, Segment, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, Segment, StorageCommand, StorageManager, MAX_STREAM_RECORD_BYTES};
 use crate::brokers::stream::domain::topic::TopicConfig;
 
 struct TopicShared {
@@ -54,12 +54,33 @@ pub struct JoinGroupResult {
 pub struct StreamManager {
     topics: Arc<DashMap<String, Arc<TopicShared>>>,
     deleted_topics: Arc<DashMap<String, ()>>,
+    lifecycle_gate: AsyncMutex<()>,
     storage_tx: mpsc::Sender<StorageCommand>,
     config: Arc<SystemStreamConfig>,
     cancel: CancellationToken,
 }
 
 impl StreamManager {
+    const MAX_TOPIC_NAME_BYTES: usize = 255;
+
+    fn validate_topic_name(name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > Self::MAX_TOPIC_NAME_BYTES {
+            return Err(format!(
+                "Invalid topic name: length must be between 1 and {} bytes",
+                Self::MAX_TOPIC_NAME_BYTES
+            ));
+        }
+        if name == "." || name == ".." || !name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+        }) {
+            return Err(
+                "Invalid topic name: only ASCII letters, digits, '.', '_' and '-' are allowed"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
         let topics = Arc::new(DashMap::new());
         let deleted_topics = Arc::new(DashMap::new());
@@ -75,6 +96,7 @@ impl StreamManager {
         let manager = Self {
             topics,
             deleted_topics,
+            lifecycle_gate: AsyncMutex::new(()),
             storage_tx,
             config,
             cancel: CancellationToken::new(),
@@ -97,6 +119,7 @@ impl StreamManager {
                         ack_floor: group.ack_floor,
                         dlt_entries: group.dlt_snapshot(),
                         parked_keys: group.parked_keys_snapshot(),
+                        redeliver_entries: group.redeliver_snapshot(),
                     })
                 }).collect::<BTreeMap<_, _>>()
             };
@@ -110,6 +133,8 @@ impl StreamManager {
     }
 
     pub async fn create_topic(&self, name: String, options: StreamCreateOptions) -> Result<(), String> {
+        Self::validate_topic_name(&name)?;
+        let _lifecycle_guard = self.lifecycle_gate.lock().await;
         self.deleted_topics.remove(&name);
 
         if self.topics.contains_key(&name) {
@@ -117,15 +142,22 @@ impl StreamManager {
         }
 
         let base_path = PathBuf::from(&self.config.persistence_path).join(&name);
-        let existed_on_disk = tokio::fs::metadata(&base_path).await.map(|meta| meta.is_dir()).unwrap_or(false);
+        let existed_on_disk = match tokio::fs::symlink_metadata(&base_path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("Invalid topic path: symbolic links are not allowed".to_string());
+            }
+            Ok(metadata) if metadata.is_dir() => true,
+            Ok(_) => return Err("Invalid topic path: expected a directory".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("Failed to inspect topic path: {}", error)),
+        };
         let topic_config = Self::load_topic_config(&base_path, options, &self.config).await;
 
         info!("[StreamManager] Creating topic '{}'", name);
 
         if !existed_on_disk {
-            if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-                tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
-            }
+            tokio::fs::create_dir_all(&base_path).await
+                .map_err(|error| format!("Failed to create topic directory: {}", error))?;
         }
 
         let config_path = base_path.join("config.json");
@@ -136,9 +168,10 @@ impl StreamManager {
             }
         };
         if needs_write {
-            if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
-                let _ = tokio::fs::write(&config_path, data).await;
-            }
+            let data = serde_json::to_string_pretty(&topic_config)
+                .map_err(|error| format!("Failed to serialize topic config: {}", error))?;
+            tokio::fs::write(&config_path, data).await
+                .map_err(|error| format!("Failed to write topic config: {}", error))?;
         }
 
         let shared = Self::build_topic_shared(name.clone(), topic_config, &self.config.persistence_path).await;
@@ -154,24 +187,71 @@ impl StreamManager {
     }
 
     pub async fn delete_topic(&self, name: String) -> Result<(), String> {
+        Self::validate_topic_name(&name)?;
+        let _lifecycle_guard = self.lifecycle_gate.lock().await;
         self.deleted_topics.insert(name.clone(), ());
 
         let topic_path = PathBuf::from(&self.config.persistence_path).join(&name);
-        if self.topics.remove(&name).is_some() || tokio::fs::metadata(&topic_path).await.map(|meta| meta.is_dir()).unwrap_or(false) {
+        let topic_ref = self.get_topic(&name);
+        let _append_guard = match &topic_ref {
+            Some(topic_ref) => Some(topic_ref.append_gate.clone().lock_owned().await),
+            None => None,
+        };
+        let _retention_guard = match &topic_ref {
+            Some(topic_ref) => Some(topic_ref.retention_gate.write().await),
+            None => None,
+        };
+
+        if let Some(topic_ref) = &topic_ref {
+            if self.topics.get(&name).is_some_and(|current| Arc::ptr_eq(current.value(), topic_ref)) {
+                self.topics.remove(&name);
+            }
+        }
+
+        let exists_on_disk = match tokio::fs::symlink_metadata(&topic_path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("Invalid topic path: symbolic links are not allowed".to_string());
+            }
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("Failed to inspect topic path: {}", error)),
+        };
+
+        if topic_ref.is_some() || exists_on_disk {
             let (del_tx, del_rx) = oneshot::channel();
-            let _ = self.storage_tx.send(StorageCommand::DropTopic {
+            self.storage_tx.send(StorageCommand::DropTopic {
                 topic_name: name,
                 reply: del_tx,
-            }).await;
-            let _ = del_rx.await;
+            }).await.map_err(|_| "Storage unavailable".to_string())?;
+            del_rx.await
+                .map_err(|_| "Storage delete failed".to_string())?
+                .map_err(|error| format!("Storage delete failed: {}", error))?;
         }
         Ok(())
     }
 
     pub async fn publish_batch(&self, topic: &str, items: Vec<(Option<Bytes>, Bytes)>) -> Result<Vec<u64>, String> {
         if items.is_empty() { return Ok(Vec::new()); }
+        for (key, payload) in &items {
+            if key.as_ref().is_some_and(Bytes::is_empty) {
+                return Err("Stream key must not be empty".to_string());
+            }
+            if key.as_ref().is_some_and(|key| key.len() > u16::MAX as usize) {
+                return Err(format!("Stream key exceeds {} bytes", u16::MAX));
+            }
+            let size = record_len(key.as_deref(), payload);
+            if size > MAX_STREAM_RECORD_BYTES as u64 {
+                return Err(format!(
+                    "Stream record too large: {} bytes (max: {})",
+                    size, MAX_STREAM_RECORD_BYTES
+                ));
+            }
+        }
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         let append_guard = topic_ref.append_gate.clone().lock_owned().await;
+        if !self.get_topic(topic).is_some_and(|current| Arc::ptr_eq(&current, &topic_ref)) {
+            return Err("Topic not found".to_string());
+        }
         let permit = self.storage_tx.reserve().await
             .map_err(|_| "Storage unavailable".to_string())?;
 
@@ -424,6 +504,26 @@ impl StreamManager {
         Ok(())
     }
 
+    pub async fn ack_batch(&self, group: &str, topic: &str, consumer_id: &str, generation: u64, seqs: &[u64]) -> Result<(), String> {
+        if seqs.is_empty() {
+            return Ok(());
+        }
+        let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        {
+            let mut state = topic_ref.state.lock();
+            let head_seq = state.head_seq;
+            let Some(group_ref) = state.groups.get_mut(group) else {
+                return Err("Group not found".to_string());
+            };
+
+            group_ref.clamp_head(head_seq);
+            group_ref.ack_batch(consumer_id, generation, seqs)?;
+            state.groups_dirty = true;
+        }
+        topic_ref.wake_tx.send_modify(|version| *version += 1);
+        Ok(())
+    }
+
     pub async fn seek(&self, group: &str, topic: &str, target: SeekTarget) -> Result<(), String> {
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
         {
@@ -539,12 +639,18 @@ impl StreamManager {
     }
 
     pub async fn exists(&self, name: &str) -> bool {
+        if Self::validate_topic_name(name).is_err() {
+            return false;
+        }
         if self.topics.contains_key(name) {
             return true;
         }
 
         let path = PathBuf::from(&self.config.persistence_path).join(name);
-        tokio::fs::metadata(path).await.map(|meta| meta.is_dir()).unwrap_or(false)
+        tokio::fs::symlink_metadata(path)
+            .await
+            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            .unwrap_or(false)
     }
 
     fn get_topic(&self, topic: &str) -> Option<Arc<TopicShared>> {
@@ -577,7 +683,10 @@ impl StreamManager {
 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if !path.is_dir() {
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_dir() || file_type.is_symlink() {
                 continue;
             }
 
@@ -586,7 +695,7 @@ impl StreamManager {
             };
 
             let name = topic_name.to_string();
-            if self.deleted_topics.contains_key(&name) {
+            if Self::validate_topic_name(&name).is_err() || self.deleted_topics.contains_key(&name) {
                 continue;
             }
 
@@ -627,7 +736,17 @@ impl StreamManager {
         for (group_id, group_state) in recovered.groups_data {
             groups.insert(
                 group_id.clone(),
-                ConsumerGroup::restore(group_id, group_state.ack_floor, head_seq, config.max_ack_pending, ack_wait, config.max_deliveries, group_state.dlt_entries, group_state.parked_keys),
+                ConsumerGroup::restore(
+                    group_id,
+                    group_state.ack_floor,
+                    head_seq,
+                    config.max_ack_pending,
+                    ack_wait,
+                    config.max_deliveries,
+                    group_state.dlt_entries,
+                    group_state.parked_keys,
+                    group_state.redeliver_entries,
+                ),
             );
         }
 
@@ -684,6 +803,7 @@ impl StreamManager {
                                         ack_floor: group.ack_floor,
                                         dlt_entries: group.dlt_snapshot(),
                                         parked_keys: group.parked_keys_snapshot(),
+                                        redeliver_entries: group.redeliver_snapshot(),
                                     })
                                 }).collect::<BTreeMap<_, _>>())
                             }
@@ -919,6 +1039,7 @@ mod tests {
         let manager = Arc::new(StreamManager {
             topics,
             deleted_topics: Arc::new(DashMap::new()),
+            lifecycle_gate: AsyncMutex::new(()),
             storage_tx,
             config,
             cancel: CancellationToken::new(),
@@ -955,5 +1076,35 @@ mod tests {
         let state = topic_ref.state.lock();
         assert_eq!(state.next_seq, 3);
         assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn topic_names_cannot_escape_the_persistence_directory() {
+        for invalid in ["", ".", "..", "../outside", "nested/topic", "nested\\topic", "/tmp/topic", "topic name"] {
+            assert!(StreamManager::validate_topic_name(invalid).is_err(), "{invalid:?} must be rejected");
+        }
+        assert!(StreamManager::validate_topic_name("topic_42-chat.events").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn topic_directory_symlinks_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), temp_dir.path().join("linked-topic")).unwrap();
+
+        let mut config = SystemStreamConfig::default();
+        config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+        let manager = StreamManager::new(Arc::new(config)).await;
+
+        let error = manager
+            .create_topic("linked-topic".to_string(), StreamCreateOptions::default())
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("symbolic links"));
+        manager.shutdown().await;
     }
 }

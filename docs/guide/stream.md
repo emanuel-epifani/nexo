@@ -168,7 +168,7 @@ await stream.publish({"action": "heartbeat"})
 
 :::
 
-The `key` is an opaque byte string (string or `Uint8Array`). The server treats it as a deduplication lock — it does not interpret or hash it. Keys can be user IDs, order IDs, entity IDs, or any natural partitioning key in your domain.
+The `key` is a non-empty opaque byte string (string or `Uint8Array`, at most 65,535 bytes). The server treats it as an ordering lock — it does not interpret or hash it. Keys can be user IDs, order IDs, entity IDs, or any natural partitioning key in your domain. Omit the key for unordered delivery; empty keys are rejected because the wire format reserves length zero for "no key".
 
 ### When to Use Per-Key Ordering
 
@@ -280,13 +280,21 @@ Three parameters control fetch and processing behavior:
 
 How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more memory per cycle.
 
+The value must be an integer between 1 and 65,536.
+
 ### `waitMs` (default: 20000)
 
 When the stream is **caught up**, the server holds the connection open for up to `waitMs` milliseconds waiting for new messages. If a message arrives during the wait, the server responds immediately. Lowering this reduces max latency for new messages at the cost of more idle round-trips.
 
+The value must be a positive integer. Zero is rejected to prevent a tight polling loop.
+
 ### `concurrency` (default: 1)
 
 Controls how many callbacks run in parallel **within a single batch**.
+
+### `stopTimeoutMs` / `stop_timeout_ms` (default: 30000)
+
+Maximum time `stop()` waits for callbacks that have already started and for their ACK batch to be confirmed. On timeout, `stop()` fails visibly instead of pretending the group committed successfully.
 
 ::: code-group
 
@@ -318,7 +326,8 @@ await stream.subscribe("webhooks", call_api, {
 *   The SDK fetches a batch of `batchSize` messages.
 *   Up to `concurrency` callbacks run in parallel within that batch.
 *   The next fetch is issued only when the entire batch has been processed.
-*   `ack` is sent per-message as soon as that message's callback resolves; the server natively handles out-of-order acks.
+*   Successful callbacks are committed with one acknowledged `ACK_BATCH` request. Failed callbacks are omitted and remain eligible for timeout-based redelivery.
+*   `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for them, commits their ACK batch, and only then leaves the consumer group.
 
 **Trade-offs**
 
@@ -471,7 +480,7 @@ DLT contains: msg-1 (key=A), msg-2 (key=A), msg-3 (key=A)
 
 #### Persistence
 
-DLT state and parked keys are persisted in `state.log` alongside the group's `ack_floor`. They survive broker restarts, ensuring that poisoned keys remain blocked even after a crash or planned downtime.
+DLT state, redelivery entries, and parked keys are persisted in `state.log` alongside the group's `ack_floor`. They survive broker restarts, ensuring that poisoned keys remain blocked and `moveToStream` redrives remain deliverable after a crash or planned downtime.
 
 > [!NOTE]
 > `seek` clears all DLT entries and parked keys for the group, in addition to resetting the consumer position. It is a full reset.
@@ -483,11 +492,15 @@ Nexo uses a single ordered storage writer backed by the operating system page ca
 *   **Publish acknowledgment**: `publish` and `publishBatch` return only after `write_all` succeeds. At that point the message is accepted by the OS page cache and visible to consumers. Nexo does not run `fsync` per message, so recently acknowledged data may still be lost after an OS crash or power loss.
 *   **Automatic backpressure**: Storage commands use a bounded queue. When it fills, publish requests wait for capacity; no message is dropped and no overload retry policy is exposed to the SDK.
 *   **Batching**: `publishBatch` writes multiple messages as one storage operation and is the preferred API for high-throughput ingestion.
+*   **Limits**: A publish batch may contain at most 65,536 messages and each encoded record may be at most 64 MiB. Limits are checked before allocation.
+*   **Recovery**: Nexo recovers only a contiguous sequence prefix. Partial or invalid tails are truncated; segment files after a sequence gap are renamed with `.corrupt` so they remain available for diagnosis but cannot be appended again.
 *   **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLT entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
 
 ### High-Cardinality: Treat Streams like Keys
 
 In Nexo, creating a stream is as cheap and safe as writing a key in a database. You can generate thousands of streams dynamically at runtime (e.g., `ai_chat_{id}` or `sensor_{id}`) without worrying about server stability.
+
+Stream names are 1–255 ASCII bytes and may contain letters, digits, `.`, `_`, and `-`. Path separators, whitespace, `.` and `..` are rejected.
 
 *   **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used writer handles open, evicting and closing the least-recently-used ones when the cap is reached.
 *   **Controlled by `STREAM_MAX_OPEN_FILES`** (Default: 256): only the most active streams hold an open handle at any given moment.

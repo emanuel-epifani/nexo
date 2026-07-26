@@ -177,6 +177,90 @@ describe('STREAM', () => {
         expect(elapsed).toBeLessThan(2000);
     });
 
+    it('should commit a started callback before leaving the group', async () => {
+        const topic = `stream-stop-processing-${randomUUID()}`;
+        const group = 'stop-processing-group';
+        await nexo.stream(topic).create();
+
+        let callbackCount = 0;
+        let signalStarted!: () => void;
+        let releaseCallback!: () => void;
+        const started = new Promise<void>(resolve => { signalStarted = resolve; });
+        const released = new Promise<void>(resolve => { releaseCallback = resolve; });
+        const sub = await clientA.stream(topic).subscribe(group, async () => {
+            callbackCount++;
+            signalStarted();
+            await released;
+        });
+
+        await nexo.stream(topic).publish({ id: 1 });
+        await started;
+
+        let stopCompleted = false;
+        const stopping = sub.stop().then(() => { stopCompleted = true; });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        expect(stopCompleted).toBe(false);
+
+        releaseCallback();
+        await stopping;
+
+        const redelivered: any[] = [];
+        const resumed = await clientA.stream(topic).subscribe(group, data => redelivered.push(data));
+        await new Promise(resolve => setTimeout(resolve, 200));
+        await resumed.stop();
+
+        expect(callbackCount).toBe(1);
+        expect(redelivered).toEqual([]);
+        await nexo.stream(topic).delete();
+    });
+
+    it('should fail stop when a started callback exceeds the stop timeout', async () => {
+        const topic = `stream-stop-timeout-${randomUUID()}`;
+        await nexo.stream(topic).create();
+
+        let signalStarted!: () => void;
+        let releaseCallback!: () => void;
+        const started = new Promise<void>(resolve => { signalStarted = resolve; });
+        const released = new Promise<void>(resolve => { releaseCallback = resolve; });
+        const sub = await clientA.stream(topic).subscribe('stop-timeout-group', async () => {
+            signalStarted();
+            await released;
+        }, { stopTimeoutMs: 100 });
+
+        await nexo.stream(topic).publish({ id: 1 });
+        await started;
+
+        await expect(sub.stop()).rejects.toThrow('stop timed out');
+        releaseCallback();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        await nexo.stream(topic).delete();
+    });
+
+    it('should expose an ACK batch failure during stop', async () => {
+        const topic = `stream-stop-ack-failure-${randomUUID()}`;
+        const group = 'stop-ack-failure-group';
+        const stream = nexo.stream(topic);
+        await stream.create();
+
+        let signalStarted!: () => void;
+        let releaseCallback!: () => void;
+        const started = new Promise<void>(resolve => { signalStarted = resolve; });
+        const released = new Promise<void>(resolve => { releaseCallback = resolve; });
+        const sub = await clientA.stream(topic).subscribe(group, async () => {
+            signalStarted();
+            await released;
+        });
+
+        await stream.publish({ id: 1 });
+        await started;
+        await stream.seek(group, 'beginning');
+
+        const stopping = sub.stop();
+        releaseCallback();
+        await expect(stopping).rejects.toThrow('FENCED');
+        await stream.delete();
+    });
+
     it('should preserve ordering with default concurrency=1', async () => {
         const topic = `stream-order-${randomUUID()}`;
         await nexo.stream(topic).create();
@@ -440,6 +524,19 @@ describe('STREAM', () => {
         expect(seqs.length).toBe(0);
     });
 
+    it('should reject empty stream keys', async () => {
+        const stream = nexo.stream(`stream-empty-key-${randomUUID()}`);
+        await expect(stream.publish({ x: 1 }, { key: '' })).rejects.toThrow('must not be empty');
+        await expect(stream.publishBatch([{ data: { x: 1 }, key: new Uint8Array() }]))
+            .rejects.toThrow('must not be empty');
+    });
+
+    it('should reject publish batches above the protocol limit', async () => {
+        const items = Array.from({ length: 65_537 }, () => ({ data: null }));
+        await expect(nexo.stream('stream-large-batch').publishBatch(items))
+            .rejects.toThrow('Publish batch too large');
+    });
+
     // ── Edge cases ──────────────────────────────────────────────
 
     it('should return exists=true after create, false before', async () => {
@@ -457,6 +554,21 @@ describe('STREAM', () => {
         await nexo.stream(topic).create();
         expect(await nexo.stream(topic).exists()).toBe(true);
         await nexo.stream(topic).delete();
+    });
+
+    it('should reject topic names that escape the stream directory', async () => {
+        await expect(nexo.stream('../outside').create()).rejects.toThrow('Invalid topic name');
+    });
+
+    it('should reject invalid seek and subscription polling options', async () => {
+        const stream = nexo.stream('stream-invalid-options');
+        await expect(stream.seek('group', 'invalid' as any)).rejects.toThrow('Invalid seek target');
+        await expect(stream.subscribe('group', () => { }, { batchSize: 0 }))
+            .rejects.toThrow('batchSize must be an integer between');
+        await expect(stream.subscribe('group', () => { }, { waitMs: 0 }))
+            .rejects.toThrow('waitMs must be a positive integer');
+        await expect(stream.subscribe('group', () => { }, { stopTimeoutMs: 0 }))
+            .rejects.toThrow('stopTimeoutMs must be a positive integer');
     });
 
     it('should fail publish to non-existent stream', async () => {

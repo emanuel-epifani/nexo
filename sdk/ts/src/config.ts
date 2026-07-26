@@ -38,6 +38,7 @@ export const DEFAULT_CONFIG = {
     batchSize: 100,
     waitMs: 20000,
     concurrency: 1,
+    stopTimeoutMs: 30000,
   },
   logger: {
     level: 'ERROR',
