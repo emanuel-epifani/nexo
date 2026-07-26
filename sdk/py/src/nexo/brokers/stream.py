@@ -86,7 +86,15 @@ def _callback_accepts_meta(fn: Callable[..., Any]) -> bool:
     return positional >= 2
 
 
+class StreamAckError(Exception):
+    def __init__(self, errors: list[Exception]) -> None:
+        super().__init__(f"{len(errors)} stream ACK request(s) failed")
+        self.errors = errors
+
+
 def _is_recoverable_membership_error(e: Exception) -> bool:
+    if isinstance(e, StreamAckError):
+        return any(_is_recoverable_membership_error(error) for error in e.errors)
     msg = str(e)
     return "FENCED" in msg or "NOT_MEMBER" in msg
 
@@ -255,11 +263,10 @@ class StreamSubscription(Generic[T]):
             data = cursor.decode_any_from_buffer(payload_len)
             batch.append({"seq": seq, "key": key, "data": data})
 
-        ack_error: Exception | None = None
+        ack_errors: list[Exception] = []
 
         async def process(msg):
-            nonlocal ack_error
-            if not self._active or ack_error is not None:
+            if not self._active or ack_errors:
                 return
             try:
                 if self._callback_wants_meta:
@@ -286,14 +293,17 @@ class StreamSubscription(Generic[T]):
                     .u64(msg["seq"]),
                 )
             except Exception as error:
-                if ack_error is None:
-                    ack_error = error
+                ack_errors.append(error)
+                self._logger.error(
+                    f"[{self._stream_name}:{self._group}] "
+                    f"ACK failed at seq={msg['seq']}. {error}"
+                )
 
         self._phase = "processing"
         try:
             await run_concurrent(batch, self._concurrency, process)
-            if ack_error is not None:
-                raise ack_error
+            if ack_errors:
+                raise StreamAckError(ack_errors) from ack_errors[0]
         finally:
             self._phase = "idle"
 

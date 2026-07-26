@@ -257,7 +257,36 @@ describe('STREAM', () => {
 
         const stopping = sub.stop();
         releaseCallback();
-        await expect(stopping).rejects.toThrow('FENCED');
+        await expect(stopping).rejects.toThrow('stream ACK request(s) failed');
+        await stream.delete();
+    });
+
+    it('should rejoin and redeliver after an ACK failure while active', async () => {
+        const topic = `stream-active-ack-failure-${randomUUID()}`;
+        const group = 'active-ack-failure-group';
+        const stream = nexo.stream(topic);
+        await stream.create();
+
+        let attempts = 0;
+        let signalFirstStarted!: () => void;
+        let releaseFirst!: () => void;
+        const firstStarted = new Promise<void>(resolve => { signalFirstStarted = resolve; });
+        const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
+        const sub = await clientA.stream(topic).subscribe(group, async () => {
+            attempts++;
+            if (attempts === 1) {
+                signalFirstStarted();
+                await firstReleased;
+            }
+        });
+
+        await stream.publish({ id: 1 });
+        await firstStarted;
+        await stream.seek(group, 'beginning');
+        releaseFirst();
+
+        await waitFor(() => expect(attempts).toBe(2), { timeout: 5000 });
+        await sub.stop();
         await stream.delete();
     });
 

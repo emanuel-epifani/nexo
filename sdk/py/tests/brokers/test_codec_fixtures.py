@@ -6,7 +6,7 @@ import time
 import pytest
 
 from nexo.codec import Cursor, FrameWriter
-from nexo.protocol import DataType, FrameType
+from nexo.protocol import DataType, FrameType, PROTOCOL_VERSION
 
 _FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "../..", "..", "codec-fixtures.json")
 FIXTURES = json.load(open(_FIXTURES_PATH))
@@ -248,7 +248,7 @@ def _decode_fixture(fixture: dict) -> object:
     corr_id = c.read_u32()
     payload_len = c.read_u32()
 
-    assert version == 0x04
+    assert version == PROTOCOL_VERSION
     assert frame_type == _frame_type_number(fixture["frame_type"])
     assert opcode == fixture["opcode"]
     assert corr_id == fixture["correlation_id"]

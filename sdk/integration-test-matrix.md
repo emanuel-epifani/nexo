@@ -89,6 +89,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_stop_during_callback | Stop waits for callbacks already started and their ACK responses before leaving | should commit a started callback before leaving the group | stop_commits_started_callback_before_leave |
 | stream_stop_callback_timeout | Stop fails visibly instead of hanging when a callback exceeds its configured grace period | should fail stop when a started callback exceeds the stop timeout | stop_callback_timeout_is_reported |
 | stream_stop_ack_failure | ACK failure during stop is returned to the caller | should expose an ACK failure during stop | stop_exposes_ack_failure |
+| stream_active_ack_failure | ACK failure while active triggers immediate rejoin and redelivery | should rejoin and redeliver after an ACK failure while active | active_subscription_rejoins_after_ack_failure |
 | stream_ordering_concurrency_1 | Default concurrency=1 preserves ordering | should preserve ordering with default concurrency=1 | preserve_ordering_default_concurrency |
 | stream_parallel_concurrency | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |
 | stream_incremental_ack | A fast callback ACKs and frees its key without waiting for a slow callback in the same fetch batch | should ACK a fast callback without waiting for a slow callback in the same batch | fast_ack_does_not_wait_for_slow_callback_in_same_batch |

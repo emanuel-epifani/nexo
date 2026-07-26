@@ -328,11 +328,13 @@ await stream.subscribe("webhooks", call_api, {
 *   The next fetch is issued only when the entire batch has been processed.
 *   Each successful callback sends and awaits its own `ACK` request. Failed callbacks remain eligible for timeout-based redelivery.
 *   With `concurrency > 1`, callbacks and their ACK round-trips remain parallel. A fast callback frees its pending slot and key without waiting for slower callbacks in the same fetch batch.
+*   If an ACK fails, the SDK stops starting new callbacks from that fetched batch, reports every concurrent ACK failure, and rejoins the group. Uncommitted messages are then redelivered.
 *   `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for their ACK responses and only then leaves the consumer group.
 
 **Trade-offs**
 
 *   With `concurrency: 1` (default), messages are processed one at a time. This is the right default for event sourcing, audit logs, and any logic where order matters.
+*   With `concurrency: 1`, each message adds one network round-trip for its confirmed ACK. Increase `concurrency` for order-independent workloads to overlap ACK latency and recover throughput.
 *   With `concurrency > 1`, callback invocations within the same batch are **not ordered**. Use this only when your handler is order-independent.
 *   When using **per-key ordering**, the broker guarantees that no two messages with the same key appear in the same batch — so `concurrency > 1` is safe even with keys.
 *   For ordered scaling, run **multiple consumers in the same group** instead — Nexo distributes messages dynamically across them.

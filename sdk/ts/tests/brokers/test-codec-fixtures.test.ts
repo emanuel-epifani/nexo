@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FrameWriter, Cursor } from '../../src/codec';
-import { FrameType, DataType, HEADER_SIZE } from '../../src/protocol';
+import { FrameType, DataType, HEADER_SIZE, PROTOCOL_VERSION } from '../../src/protocol';
 
 interface PayloadValue {
   data_type: 'raw' | 'string' | 'json';
@@ -274,7 +274,7 @@ function decodeFixture(fixture: Fixture): any {
   const opcode = cursor.readU8();
   const corrId = cursor.readU32();
   const payloadLen = cursor.readU32();
-  expect(version).toBe(0x04);
+  expect(version).toBe(PROTOCOL_VERSION);
   expect(frameType).toBe(frameTypeNumber(fixture.frame_type));
   expect(opcode).toBe(fixture.opcode);
   expect(corrId).toBe(fixture.correlation_id);

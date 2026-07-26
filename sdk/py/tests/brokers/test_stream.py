@@ -241,9 +241,36 @@ class TestStream:
 
         stopping = asyncio.create_task(sub.stop())
         release.set()
-        with pytest.raises(Exception, match="FENCED"):
+        with pytest.raises(Exception, match=r"stream ACK request\(s\) failed"):
             await stopping
 
+        await stream.delete()
+
+    async def test_active_subscription_rejoins_after_ack_failure(self, nexo: NexoClient):
+        topic = f"stream-active-ack-failure-{uuid.uuid4()}"
+        group = "active-ack-failure-group"
+        stream = nexo.stream(topic)
+        await stream.create()
+
+        attempts = 0
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def callback(_):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                first_started.set()
+                await release_first.wait()
+
+        sub = await stream.subscribe(group, callback)
+        await stream.publish({"id": 1})
+        await asyncio.wait_for(first_started.wait(), timeout=2.0)
+        await stream.seek(group, "beginning")
+        release_first.set()
+
+        await wait_for(lambda: attempts == 2, timeout=5.0)
+        await sub.stop()
         await stream.delete()
 
     async def test_preserve_ordering_default_concurrency(self, nexo: NexoClient):

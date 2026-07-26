@@ -9,7 +9,7 @@
 //!   - Version : PROTOCOL_VERSION; mismatched frames are rejected.
 //!   - Meta    : opcode (Request / NoResponse) / status (Response) / push-type (Push).
 //!   - FrameType 0x04 (NoResponse): server processes the request but sends no
-//!     response frame. Used for fire-and-forget commands (ack, nack).
+//!     response frame. Used only by explicitly best-effort commands.
 //!
 //! Request payload : [binary typed fields per broker] [Data (if applicable)]
 //! Response payload: STATUS_DATA -> [Data...]; STATUS_ERR -> [utf8 message...]
@@ -27,7 +27,7 @@ use bytemuck::{Pod, Zeroable};
 // ========================================
 /// Bumped on any breaking change to the framing or payload layout. Peers must
 /// reject frames whose first byte does not match.
-pub const PROTOCOL_VERSION: u8 = 0x04;
+pub const PROTOCOL_VERSION: u8 = 0x05;
 
 // ========================================
 // FRAME TYPES

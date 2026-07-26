@@ -68,12 +68,20 @@ export interface DltEntry {
 }
 
 function isRecoverableMembershipError(e: any): boolean {
+  if (e instanceof StreamAckError) return e.errors.some(isRecoverableMembershipError);
   const msg = e instanceof Error ? e.message : String(e);
   return msg.includes('FENCED') || msg.includes('NOT_MEMBER');
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+class StreamAckError extends Error {
+  constructor(readonly errors: unknown[]) {
+    super(`${errors.length} stream ACK request(s) failed`);
+    this.name = 'StreamAckError';
+  }
 }
 
 class StreamSubscription<T> {
@@ -223,10 +231,10 @@ class StreamSubscription<T> {
     }
 
     this.phase = 'processing';
-    let ackError: unknown = null;
+    const ackErrors: unknown[] = [];
     try {
       await runConcurrent(batch, this.concurrency, async ({ seq, key, data }) => {
-        if (!this.active || ackError !== null) return;
+        if (!this.active || ackErrors.length > 0) return;
         try {
           await this.callback(data, { seq, key });
         } catch (err) {
@@ -243,11 +251,12 @@ class StreamSubscription<T> {
             .u64(seq)
           );
         } catch (err) {
-          if (ackError === null) ackError = err;
+          ackErrors.push(err);
+          this.logger.error(`[${this.streamName}:${this.group}] ACK failed at seq=${seq}.`, err);
         }
       });
 
-      if (ackError !== null) throw ackError;
+      if (ackErrors.length > 0) throw new StreamAckError(ackErrors);
     } finally {
       this.phase = 'idle';
     }
