@@ -54,7 +54,7 @@ mod stream_tests {
             let seq = manager.publish(topic, None, payload.clone()).await.unwrap();
             assert_eq!(seq, 1);
 
-            let msgs = manager.read(topic, 1, 100).await;
+            let msgs = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs.len(), 1);
             assert_eq!(msgs[0].payload, payload);
             assert_eq!(msgs[0].seq, 1);
@@ -74,7 +74,7 @@ mod stream_tests {
                 manager.publish(topic, None, payload).await.unwrap();
             }
 
-            let msgs = manager.read(topic, 1, 10).await;
+            let msgs = manager.read(topic, 1, 10).await.unwrap();
             assert_eq!(msgs.len(), 3);
             assert_eq!(msgs[0].payload, Bytes::from("msg-1"));
             assert_eq!(msgs[1].payload, Bytes::from("msg-2"));
@@ -378,7 +378,7 @@ mod stream_tests {
             assert!(!manager.exists(topic).await);
             assert!(!topic_path.exists());
 
-            let msgs = manager.read(topic, 1, 10).await;
+            let msgs = manager.read(topic, 1, 10).await.unwrap();
             assert!(msgs.is_empty());
         }
 
@@ -479,7 +479,7 @@ mod stream_tests {
             {
                 let manager = build_manager(config.clone()).await;
 
-                let msgs = manager.read(topic, 1, 10).await;
+                let msgs = manager.read(topic, 1, 10).await.unwrap();
                 assert_eq!(msgs.len(), 2);
                 assert_eq!(msgs[0].payload, Bytes::from("msg1"));
                 assert_eq!(msgs[1].payload, Bytes::from("msg2"));
@@ -549,7 +549,7 @@ mod stream_tests {
             {
                 let manager = build_manager(config.clone()).await;
 
-                let msgs = manager.read(topic, 1, 10).await;
+                let msgs = manager.read(topic, 1, 10).await.unwrap();
                 assert_eq!(msgs.len(), 2);
                 assert_eq!(msgs[0].payload, Bytes::from("valid1"));
                 assert_eq!(msgs[1].payload, Bytes::from("valid2"));
@@ -601,7 +601,7 @@ mod stream_tests {
             let mut next_seq = 1;
 
             while all_msgs.len() < 4 {
-                let batch = recovered_manager.read(topic, next_seq, 10).await;
+                let batch = recovered_manager.read(topic, next_seq, 10).await.unwrap();
                 if batch.is_empty() { break; }
 
                 for msg in batch {
@@ -649,7 +649,7 @@ mod stream_tests {
 
             assert!(!files.contains(&"1.log".to_string()), "Oldest segment should be deleted");
 
-            let retained = manager.read(topic, 1, 20).await;
+            let retained = manager.read(topic, 1, 20).await.unwrap();
             assert!(!retained.is_empty());
             assert!(retained[0].seq > 1);
 
@@ -698,7 +698,7 @@ mod stream_tests {
                 assert!(manager2.exists(topic1).await, "Topic 1 should be auto-restored");
                 assert!(manager2.exists(topic2).await, "Topic 2 should be auto-restored");
 
-                let msgs2 = manager2.read(topic2, 1, 10).await;
+                let msgs2 = manager2.read(topic2, 1, 10).await.unwrap();
                 assert_eq!(msgs2.len(), 1, "Should recover 1 message from topic2");
                 assert_eq!(msgs2[0].payload, Bytes::from("msg1_t2"));
             }
@@ -726,12 +726,12 @@ mod stream_tests {
 
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            let old_msgs = manager.read(topic, 1, 10).await;
+            let old_msgs = manager.read(topic, 1, 10).await.unwrap();
             assert_eq!(old_msgs.len(), 10, "Cold read should work for evicted messages");
             assert_eq!(old_msgs[0].payload, Bytes::from("msg_0000"));
             assert_eq!(old_msgs[9].payload, Bytes::from("msg_0009"));
 
-            let recent_msgs = manager.read(topic, 491, 10).await;
+            let recent_msgs = manager.read(topic, 491, 10).await.unwrap();
             assert_eq!(recent_msgs.len(), 10, "Hot read should work for recent messages");
             assert_eq!(recent_msgs[0].payload, Bytes::from("msg_0490"));
             assert_eq!(recent_msgs[9].payload, Bytes::from("msg_0499"));
@@ -805,11 +805,11 @@ mod stream_tests {
             }
             
             // Read seq 1000 (beyond) → should return empty
-            let msgs = manager.read("test_topic", 1000, 10).await;
+            let msgs = manager.read("test_topic", 1000, 10).await.unwrap();
             assert!(msgs.is_empty(), "Reading beyond high watermark should return empty");
             
             // Read seq 1 (valid) → should return messages
-            let msgs = manager.read("test_topic", 1, 100).await;
+            let msgs = manager.read("test_topic", 1, 100).await.unwrap();
             assert!(!msgs.is_empty(), "Should read messages from RAM");
             assert_eq!(msgs[0].seq, 1, "First message should have seq 1");
             
@@ -1394,7 +1394,6 @@ mod stream_tests {
 
     mod persistence_crc {
         use nexo::brokers::stream::{serialize_message, recover_topic};
-        use std::path::PathBuf;
 
         #[tokio::test]
         async fn recover_topic_truncates_at_corrupted_record() {
@@ -1450,7 +1449,7 @@ mod stream_tests {
             assert_eq!(seqs.len(), 1);
             assert_eq!(seqs[0], 1);
 
-            let msgs = manager.read(topic, 1, 100).await;
+            let msgs = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs.len(), 1);
             assert_eq!(msgs[0].payload, Bytes::from("hello"));
         }
@@ -1471,7 +1470,7 @@ mod stream_tests {
             assert_eq!(seqs.len(), 5);
             assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
 
-            let msgs = manager.read(topic, 1, 100).await;
+            let msgs = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs.len(), 5);
             for (i, msg) in msgs.iter().enumerate() {
                 assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
@@ -1495,7 +1494,7 @@ mod stream_tests {
             let seqs = manager.publish_batch(topic, items).await.unwrap();
             assert_eq!(seqs.len(), 3);
 
-            let msgs = manager.read(topic, 1, 100).await;
+            let msgs = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs[0].key, Some(Bytes::from("key-A")));
             assert_eq!(msgs[1].key, Some(Bytes::from("key-B")));
             assert_eq!(msgs[2].key, None);
@@ -1513,7 +1512,7 @@ mod stream_tests {
             let seqs = manager.publish_batch(topic, vec![]).await.unwrap();
             assert!(seqs.is_empty());
 
-            let msgs = manager.read(topic, 1, 100).await;
+            let msgs = manager.read(topic, 1, 100).await.unwrap();
             assert!(msgs.is_empty());
         }
 
@@ -1531,7 +1530,6 @@ mod stream_tests {
     mod regression {
         use super::*;
         use nexo::brokers::stream::{serialize_message, recover_topic};
-        use std::path::PathBuf;
 
         // Regression #2: concurrent publish must preserve contiguous seqs and segment invariant
         #[tokio::test]
@@ -1577,7 +1575,7 @@ mod stream_tests {
             }
 
             // Verify all messages are readable via read()
-            let msgs = manager.read(topic, 1, TOTAL as usize * 2).await;
+            let msgs = manager.read(topic, 1, TOTAL as usize * 2).await.unwrap();
             assert_eq!(msgs.len(), TOTAL, "All messages must be readable after concurrent publish");
         }
 
@@ -1606,7 +1604,7 @@ mod stream_tests {
                 let m = manager.clone();
                 let topic = format!("topic-{}", t);
                 handles.push(tokio::spawn(async move {
-                    let msgs = m.read(&topic, 1, MSGS_PER_TOPIC * 2).await;
+                    let msgs = m.read(&topic, 1, MSGS_PER_TOPIC * 2).await.unwrap();
                     assert_eq!(msgs.len(), MSGS_PER_TOPIC, "Topic {} should have {} messages", t, MSGS_PER_TOPIC);
                     for (i, msg) in msgs.iter().enumerate() {
                         assert_eq!(msg.seq, (i + 1) as u64);
@@ -1617,6 +1615,89 @@ mod stream_tests {
 
             for h in handles {
                 h.await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn failed_append_does_not_commit_sequence() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "reg-append-failure";
+            let topic_path = temp_dir.path().join(topic);
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            tokio::fs::remove_dir_all(&topic_path).await.unwrap();
+            tokio::fs::write(&topic_path, b"not-a-directory").await.unwrap();
+
+            let error = manager.publish(topic, None, Bytes::from("failed")).await.unwrap_err();
+            assert!(error.contains("Storage append failed"));
+
+            tokio::fs::remove_file(&topic_path).await.unwrap();
+            tokio::fs::create_dir_all(&topic_path).await.unwrap();
+
+            let seq = manager.publish(topic, None, Bytes::from("committed")).await.unwrap();
+            assert_eq!(seq, 1, "a failed append must not consume a sequence");
+            let messages = manager.read(topic, 1, 10).await.unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].payload, Bytes::from("committed"));
+        }
+
+        #[tokio::test]
+        async fn missing_segment_is_reported_as_read_error() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.max_open_files = 1;
+            let manager = build_manager(config).await;
+
+            manager.create_topic("read-error-a".to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish("read-error-a", None, Bytes::from("a")).await.unwrap();
+            manager.create_topic("read-error-b".to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish("read-error-b", None, Bytes::from("b")).await.unwrap();
+
+            tokio::fs::remove_file(temp_dir.path().join("read-error-a/1.log")).await.unwrap();
+
+            let error = manager.read("read-error-a", 1, 10).await.unwrap_err();
+            assert!(error.contains("Storage read failed"));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn bounded_storage_queue_waits_without_dropping_publishes() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.storage_queue_capacity = 1;
+            let manager = build_manager(config).await;
+
+            const TOPICS: usize = 32;
+            let start = Arc::new(tokio::sync::Barrier::new(TOPICS));
+            for topic in 0..TOPICS {
+                manager
+                    .create_topic(format!("bounded-{}", topic), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+            }
+
+            let mut handles = Vec::with_capacity(TOPICS);
+            for topic in 0..TOPICS {
+                let manager = manager.clone();
+                let start = start.clone();
+                handles.push(tokio::spawn(async move {
+                    start.wait().await;
+                    let topic_name = format!("bounded-{}", topic);
+                    manager
+                        .publish(&topic_name, None, Bytes::from(format!("message-{}", topic)))
+                        .await
+                }));
+            }
+
+            for handle in handles {
+                assert_eq!(handle.await.unwrap().unwrap(), 1);
+            }
+
+            for topic in 0..TOPICS {
+                let messages = manager.read(&format!("bounded-{}", topic), 1, 10).await.unwrap();
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].payload, Bytes::from(format!("message-{}", topic)));
             }
         }
 
@@ -1923,7 +2004,7 @@ mod stream_tests {
             // Now seek to beginning which resets runtime, then re-fetch
             // This tests clamp_head indirectly through the retention path
             // Verify we can still read messages
-            let read_msgs = manager.read(topic, 1, 100).await;
+            let read_msgs = manager.read(topic, 1, 100).await.unwrap();
             assert!(!read_msgs.is_empty());
         }
 
@@ -2204,7 +2285,7 @@ mod stream_tests {
             }
 
             // Read 1: should see all 3
-            let msgs1 = manager.read(topic, 1, 100).await;
+            let msgs1 = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs1.len(), 3, "first read should see all 3 messages");
             assert_eq!(msgs1[0].payload, Bytes::from("msg-1"));
             assert_eq!(msgs1[2].payload, Bytes::from("msg-3"));
@@ -2215,7 +2296,7 @@ mod stream_tests {
             }
 
             // Read 2: should see all 6
-            let msgs2 = manager.read(topic, 1, 100).await;
+            let msgs2 = manager.read(topic, 1, 100).await.unwrap();
             assert_eq!(msgs2.len(), 6, "second read should see all 6 messages");
             for (i, msg) in msgs2.iter().enumerate() {
                 assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
@@ -2223,7 +2304,7 @@ mod stream_tests {
             }
 
             // Read 3: partial range
-            let msgs3 = manager.read(topic, 4, 2).await;
+            let msgs3 = manager.read(topic, 4, 2).await.unwrap();
             assert_eq!(msgs3.len(), 2, "partial read should see 2 messages");
             assert_eq!(msgs3[0].seq, 4);
             assert_eq!(msgs3[1].seq, 5);
@@ -2261,7 +2342,7 @@ mod stream_tests {
             {
                 let manager = build_manager(config).await;
 
-                let msgs = manager.read(topic, 1, 10).await;
+                let msgs = manager.read(topic, 1, 10).await.unwrap();
                 assert_eq!(msgs.len(), 2, "Messages should survive shutdown flush");
 
                 let consumer = join_session(&manager, group, topic, "client-A").await;

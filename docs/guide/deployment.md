@@ -65,4 +65,5 @@ docker run -p 7654:7654 -e MAX_PAYLOAD_SIZE=52428800 emanuelepifani/nexo  # 50MB
 | `MAX_PAYLOAD_SIZE` | `10485760` | Max frame payload in bytes (10 MB) |
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Queue data directory |
 | `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Stream data directory |
+| `STREAM_STORAGE_QUEUE_CAPACITY` | `16384` | Pending storage commands before publish backpressure |
 | `PUBSUB_ROOT_PERSISTENCE_PATH` | `./data/pubsub` | Pub/Sub data directory |

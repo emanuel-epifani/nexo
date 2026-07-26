@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, RwLock};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -16,11 +16,13 @@ use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, StorageCommand, StorageManager};
+use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, Segment, StorageCommand, StorageManager};
 use crate::brokers::stream::domain::topic::TopicConfig;
 
 struct TopicShared {
     state: Mutex<TopicState>,
+    append_gate: Arc<AsyncMutex<()>>,
+    retention_gate: Arc<RwLock<()>>,
     wake_tx: watch::Sender<u64>,
 }
 
@@ -40,6 +42,7 @@ struct TopicState {
     full_config: TopicConfig,
     file_offset: u64,
     active_path: PathBuf,
+    segments: Arc<Vec<Segment>>,
 }
 
 pub struct JoinGroupResult {
@@ -51,7 +54,7 @@ pub struct JoinGroupResult {
 pub struct StreamManager {
     topics: Arc<DashMap<String, Arc<TopicShared>>>,
     deleted_topics: Arc<DashMap<String, ()>>,
-    storage_tx: mpsc::UnboundedSender<StorageCommand>,
+    storage_tx: mpsc::Sender<StorageCommand>,
     config: Arc<SystemStreamConfig>,
     cancel: CancellationToken,
 }
@@ -60,7 +63,7 @@ impl StreamManager {
     pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
         let topics = Arc::new(DashMap::new());
         let deleted_topics = Arc::new(DashMap::new());
-        let (storage_tx, storage_rx) = mpsc::unbounded_channel();
+        let (storage_tx, storage_rx) = mpsc::channel(config.storage_queue_capacity.max(1));
 
         let storage_manager = StorageManager::new(
             config.persistence_path.clone(),
@@ -97,12 +100,12 @@ impl StreamManager {
                     })
                 }).collect::<BTreeMap<_, _>>()
             };
-            let _ = self.storage_tx.send(StorageCommand::SaveState { topic_name, groups: groups_data });
+            let _ = self.storage_tx.send(StorageCommand::SaveState { topic_name, groups: groups_data }).await;
         }
 
         // Shutdown storage manager (drains remaining commands then exits)
         let (tx, rx) = oneshot::channel();
-        let _ = self.storage_tx.send(StorageCommand::Shutdown { reply: tx });
+        let _ = self.storage_tx.send(StorageCommand::Shutdown { reply: tx }).await;
         let _ = rx.await;
     }
 
@@ -159,7 +162,7 @@ impl StreamManager {
             let _ = self.storage_tx.send(StorageCommand::DropTopic {
                 topic_name: name,
                 reply: del_tx,
-            });
+            }).await;
             let _ = del_rx.await;
         }
         Ok(())
@@ -168,6 +171,9 @@ impl StreamManager {
     pub async fn publish_batch(&self, topic: &str, items: Vec<(Option<Bytes>, Bytes)>) -> Result<Vec<u64>, String> {
         if items.is_empty() { return Ok(Vec::new()); }
         let topic_ref = self.get_topic(topic).ok_or("Topic not found")?;
+        let append_guard = topic_ref.append_gate.clone().lock_owned().await;
+        let permit = self.storage_tx.reserve().await
+            .map_err(|_| "Storage unavailable".to_string())?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -176,10 +182,9 @@ impl StreamManager {
 
         let n = items.len() as u64;
 
-        let (seqs, messages, file_path) = {
-            let mut state = topic_ref.state.lock();
+        let (first_seq, seqs, messages, file_path, offsets, file_offset_after, starts_new_segment) = {
+            let state = topic_ref.state.lock();
             let first_seq = state.next_seq;
-            state.next_seq += n;
             let mut seqs = Vec::with_capacity(items.len());
             let mut messages = Vec::with_capacity(items.len());
             for (i, (key, payload)) in items.into_iter().enumerate() {
@@ -190,37 +195,81 @@ impl StreamManager {
 
             let bytes_len: u64 = messages.iter().map(|m| record_len(m.key.as_deref(), &m.payload)).sum();
 
-            if state.file_offset + bytes_len > state.full_config.max_segment_size && state.file_offset > 0 {
-                state.file_offset = 0;
-            }
-
-            if state.file_offset == 0 {
+            let write_offset = if state.file_offset > 0
+                && state.file_offset + bytes_len > state.full_config.max_segment_size
+            {
+                0
+            } else {
+                state.file_offset
+            };
+            let starts_new_segment = write_offset == 0;
+            let file_path = if starts_new_segment {
                 let base_path = PathBuf::from(&self.config.persistence_path).join(topic);
-                state.active_path = base_path.join(format!("{}.log", first_seq));
-            }
+                base_path.join(format!("{}.log", first_seq))
+            } else {
+                state.active_path.clone()
+            };
 
-            let mut current_offset = state.file_offset;
+            let mut current_offset = write_offset;
+            let mut offsets = Vec::with_capacity(messages.len());
             for msg in &messages {
-                state.index.insert(msg.seq, current_offset);
+                offsets.push((msg.seq, current_offset));
                 current_offset += record_len(msg.key.as_deref(), &msg.payload);
             }
-            state.file_offset = current_offset;
-
-            // Post-write rollover: if the segment now exceeds max_segment_size,
-            // force a new segment on the next publish
-            if state.file_offset >= state.full_config.max_segment_size {
-                state.file_offset = 0;
-            }
-            (seqs, messages, state.active_path.clone())
+            let file_offset_after = if current_offset >= state.full_config.max_segment_size {
+                0
+            } else {
+                current_offset
+            };
+            (
+                first_seq,
+                seqs,
+                messages,
+                file_path,
+                offsets,
+                file_offset_after,
+                starts_new_segment,
+            )
         };
 
-        let _ = self.storage_tx.send(StorageCommand::Append {
-            topic_name: topic.to_string(),
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let commit_topic = topic_ref.clone();
+        let commit_path = file_path.clone();
+        permit.send(StorageCommand::Append {
             file_path,
             messages,
+            complete: Box::new(move |result| {
+                let response = match result {
+                    Ok(()) => {
+                        {
+                            let mut state = commit_topic.state.lock();
+                            state.next_seq = first_seq + n;
+                            state.file_offset = file_offset_after;
+                            state.active_path = commit_path.clone();
+                            if starts_new_segment {
+                                let segments = Arc::make_mut(&mut state.segments);
+                                if segments.last().map(|segment| &segment.path) != Some(&commit_path) {
+                                    segments.push(Segment {
+                                        path: commit_path,
+                                        start_seq: first_seq,
+                                    });
+                                }
+                            }
+                            for (seq, offset) in offsets {
+                                state.index.insert(seq, offset);
+                            }
+                        }
+                        commit_topic.wake_tx.send_modify(|version| *version += 1);
+                        Ok(())
+                    }
+                    Err(error) => Err(format!("Storage append failed: {}", error)),
+                };
+                let _ = reply_tx.send(response);
+                drop(append_guard);
+            }),
         });
-
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        reply_rx.await
+            .map_err(|_| "Storage append failed".to_string())??;
         Ok(seqs)
     }
 
@@ -276,30 +325,35 @@ impl StreamManager {
         Ok(count)
     }
 
-    pub async fn read(&self, topic: &str, from_seq: u64, limit: usize) -> Vec<Message> {
+    pub async fn read(&self, topic: &str, from_seq: u64, limit: usize) -> Result<Vec<Message>, String> {
         let Some(topic_ref) = self.get_topic(topic) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
+        let retention_guard = topic_ref.retention_gate.clone().read_owned().await;
 
-        let offsets = {
+        let (offsets, segments) = {
             let state = topic_ref.state.lock();
-            state.index.range(from_seq..)
+            let offsets = state.index.range(from_seq..)
                 .take(limit)
                 .map(|(seq, offset)| (*seq, *offset))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (offsets, state.segments.clone())
         };
 
         if offsets.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let (tx, rx) = oneshot::channel();
-        let _ = self.storage_tx.send(StorageCommand::ReadRange {
-            topic_name: topic.to_string(),
+        self.storage_tx.send(StorageCommand::ReadRange {
+            segments,
+            retention_guard,
             offsets,
             reply: tx,
-        });
-        rx.await.unwrap_or_default()
+        }).await.map_err(|_| "Storage unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "Storage read failed".to_string())?
+            .map_err(|error| format!("Storage read failed: {}", error))
     }
 
     pub async fn fetch(&self, group: &str, consumer_id: &str, generation: u64, limit: usize, topic: &str, wait_ms: u64) -> Result<Vec<Message>, String> {
@@ -314,7 +368,7 @@ impl StreamManager {
         };
 
         if wait_ms == 0 {
-            return self.try_fetch_once(&topic_ref, topic, group, consumer_id, generation, limit, &group_cancel).await;
+            return self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit, &group_cancel).await;
         }
 
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
@@ -323,7 +377,7 @@ impl StreamManager {
         loop {
             let wake_ver = *wake_rx.borrow();
 
-            match self.try_fetch_once(&topic_ref, topic, group, consumer_id, generation, limit, &group_cancel).await {
+            match self.try_fetch_once(&topic_ref, group, consumer_id, generation, limit, &group_cancel).await {
                 Ok(messages) if !messages.is_empty() => return Ok(messages),
                 Ok(_) => {}
                 Err(e) if (e == "NOT_MEMBER" || e == "FENCED") && !self.is_active_member(&topic_ref, group, consumer_id) => {
@@ -577,6 +631,11 @@ impl StreamManager {
             );
         }
 
+        let active_path = recovered.segments.last()
+            .map(|segment| segment.path.clone())
+            .unwrap_or_else(|| PathBuf::from(persistence_path).join(&name).join("1.log"));
+        let segments = Arc::new(recovered.segments);
+
         Arc::new(TopicShared {
             state: Mutex::new(TopicState {
                 head_seq,
@@ -587,12 +646,11 @@ impl StreamManager {
                 groups_dirty: false,
                 full_config: config,
                 file_offset: recovered.last_segment_size,
-                active_path: recovered.segments.last()
-                    .map(|s| s.path.clone())
-                    .unwrap_or_else(|| {
-                        PathBuf::from(persistence_path).join(&name).join("1.log")
-                    }),
+                active_path,
+                segments,
             }),
+            append_gate: Arc::new(AsyncMutex::new(())),
+            retention_gate: Arc::new(RwLock::new(())),
             wake_tx: watch::channel(0u64).0,
         })
     }
@@ -635,7 +693,7 @@ impl StreamManager {
                             let _ = storage_tx.send(StorageCommand::SaveState {
                                 topic_name,
                                 groups: groups_data,
-                            });
+                            }).await;
                         }
                     }
                 }
@@ -657,6 +715,7 @@ impl StreamManager {
                         _ = timer.tick() => {}
                     }
                     for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
+                        let _retention_guard = topic_ref.retention_gate.write().await;
                         let retention = {
                             let state = topic_ref.state.lock();
                             state.full_config.retention.clone()
@@ -667,7 +726,7 @@ impl StreamManager {
                             topic_name,
                             retention,
                             reply: reply_tx,
-                        }).is_err() {
+                        }).await.is_err() {
                             continue;
                         }
 
@@ -685,6 +744,8 @@ impl StreamManager {
                                 for k in to_remove {
                                     state.index.remove(&k);
                                 }
+                                Arc::make_mut(&mut state.segments)
+                                    .retain(|segment| segment.start_seq >= new_head_seq);
                                 let mut groups_changed = false;
                                 for group in state.groups.values_mut() {
                                     if group.clamp_head(new_head_seq) {
@@ -744,13 +805,14 @@ impl StreamManager {
     async fn try_fetch_once(
         &self,
         topic_ref: &Arc<TopicShared>,
-        topic: &str,
         group: &str,
         consumer_id: &str,
         generation: u64,
         limit: usize,
         group_cancel: &CancellationToken,
     ) -> Result<Vec<Message>, String> {
+        let retention_guard = topic_ref.retention_gate.clone().read_owned().await;
+
         // 1. Compute fetch plan under lock (which seqs to read)
         let (plan, was_clamped) = {
             let mut state = topic_ref.state.lock();
@@ -780,11 +842,12 @@ impl StreamManager {
         }
 
         // 2. Look up offsets in index (under lock, then released)
-        let offsets = {
+        let (offsets, segments) = {
             let state = topic_ref.state.lock();
-            plan.iter()
+            let offsets = plan.iter()
                 .filter_map(|seq| state.index.get(seq).map(|off| (*seq, *off)))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (offsets, state.segments.clone())
         };
 
         if offsets.is_empty() {
@@ -798,14 +861,17 @@ impl StreamManager {
 
         let (tx, rx) = oneshot::channel();
         if self.storage_tx.send(StorageCommand::ReadRange {
-            topic_name: topic.to_string(),
+            segments,
+            retention_guard,
             offsets,
             reply: tx,
-        }).is_err() {
+        }).await.is_err() {
             return Err("Storage read failed".to_string());
         }
 
-        let messages = rx.await.map_err(|_| "Storage read failed".to_string())?;
+        let messages = rx.await
+            .map_err(|_| "Storage read failed".to_string())?
+            .map_err(|error| format!("Storage read failed: {}", error))?;
         if messages.is_empty() {
             return Ok(Vec::new());
         }
@@ -825,5 +891,69 @@ impl StreamManager {
         let result = group_ref.fetch(consumer_id, generation, limit, &messages, head_seq)?;
         state.groups_dirty = true;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_append_commits_after_publisher_is_cancelled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut stream_config = SystemStreamConfig::default();
+        stream_config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
+        let config = Arc::new(stream_config);
+        let (storage_tx, mut storage_rx) = mpsc::channel(1);
+        let topics = Arc::new(DashMap::new());
+        let topic_name = "cancelled-publisher";
+        let topic_config = TopicConfig::from_options(StreamCreateOptions::default(), &config);
+        let topic_ref = StreamManager::build_topic_shared(
+            topic_name.to_string(),
+            topic_config,
+            &config.persistence_path,
+        )
+        .await;
+        topics.insert(topic_name.to_string(), topic_ref.clone());
+
+        let manager = Arc::new(StreamManager {
+            topics,
+            deleted_topics: Arc::new(DashMap::new()),
+            storage_tx,
+            config,
+            cancel: CancellationToken::new(),
+        });
+
+        let first_manager = manager.clone();
+        let first_publish = tokio::spawn(async move {
+            first_manager
+                .publish(topic_name, None, Bytes::from_static(b"first"))
+                .await
+        });
+
+        let first_command = storage_rx.recv().await.unwrap();
+        first_publish.abort();
+        assert!(first_publish.await.unwrap_err().is_cancelled());
+        match first_command {
+            StorageCommand::Append { complete, .. } => complete(Ok(())),
+            _ => panic!("expected append command"),
+        }
+
+        let second_manager = manager.clone();
+        let second_publish = tokio::spawn(async move {
+            second_manager
+                .publish(topic_name, None, Bytes::from_static(b"second"))
+                .await
+        });
+        let second_command = storage_rx.recv().await.unwrap();
+        match second_command {
+            StorageCommand::Append { complete, .. } => complete(Ok(())),
+            _ => panic!("expected append command"),
+        }
+
+        assert_eq!(second_publish.await.unwrap().unwrap(), 2);
+        let state = topic_ref.state.lock();
+        assert_eq!(state.next_seq, 3);
+        assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
     }
 }

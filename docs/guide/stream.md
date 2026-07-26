@@ -478,17 +478,20 @@ DLT state and parked keys are persisted in `state.log` alongside the group's `ac
 
 ## Persistence
 
-Nexo uses an **Asynchronous Draining Pattern** to balance high-speed ingestion and durability.
+Nexo uses a single ordered storage writer backed by the operating system page cache.
 
-*   **Continuous Batching**: Messages are written to the OS page cache in optimized batches for maximum throughput. Data survives process crashes but not power loss.
+*   **Publish acknowledgment**: `publish` and `publishBatch` return only after `write_all` succeeds. At that point the message is accepted by the OS page cache and visible to consumers. Nexo does not run `fsync` per message, so recently acknowledged data may still be lost after an OS crash or power loss.
+*   **Automatic backpressure**: Storage commands use a bounded queue. When it fills, publish requests wait for capacity; no message is dropped and no overload retry policy is exposed to the SDK.
+*   **Batching**: `publishBatch` writes multiple messages as one storage operation and is the preferred API for high-throughput ingestion.
 *   **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLT entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
 
 ### High-Cardinality: Treat Streams like Keys
 
 In Nexo, creating a stream is as cheap and safe as writing a key in a database. You can generate thousands of streams dynamically at runtime (e.g., `ai_chat_{id}` or `sensor_{id}`) without worrying about server stability.
 
-*   **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used file handles open, automatically flushing and closing the least-recently-used ones when the cap is reached.
+*   **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used writer handles open, evicting and closing the least-recently-used ones when the cap is reached.
 *   **Controlled by `STREAM_MAX_OPEN_FILES`** (Default: 256): only the most active streams hold an open handle at any given moment.
+*   **Reads**: Readers use independent temporary handles so concurrent seeks cannot interfere with the append cursor. Segment locations come from the in-memory topic catalog; read handles close when the request completes.
 
 ::: tip BEST PERFORMANCE
 Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active* topics to limit unnecessary rotation overhead.
@@ -525,6 +528,7 @@ Global, set at server startup.
 |:---|:---|:---|
 | `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Base directory for all stream data |
 | `STREAM_DEFAULT_FLUSH_MS` | `50` | Group state save interval multiplier (×10 = actual ms) |
+| `STREAM_STORAGE_QUEUE_CAPACITY` | `16384` | Pending storage commands before publishers wait for capacity |
 | `STREAM_MAX_SEGMENT_SIZE` | `104857600` (100MB) | Max segment file size before rollover |
 | `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
 | `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |

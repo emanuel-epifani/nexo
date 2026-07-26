@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import shutil
 import uuid
 
 import pytest
 
 from nexo import NexoClient
 from tests.utils.wait_for import wait_for
+
+
+STREAM_DATA_DIR = Path(__file__).resolve().parents[4] / "data" / "streams"
 
 
 @pytest.mark.asyncio
@@ -397,6 +402,21 @@ class TestStream:
         topic = f"stream-pub-missing-{uuid.uuid4()}"
         with pytest.raises(Exception):
             await nexo.stream(topic).publish({"x": 1})
+
+    async def test_publish_storage_write_failure(self, nexo: NexoClient):
+        topic = f"stream-write-failure-{uuid.uuid4()}"
+        stream = nexo.stream(topic)
+        topic_path = STREAM_DATA_DIR / topic
+        await stream.create()
+        shutil.rmtree(topic_path)
+        topic_path.write_text("not-a-directory")
+
+        try:
+            with pytest.raises(Exception, match="Storage append failed"):
+                await stream.publish({"x": 1})
+        finally:
+            topic_path.unlink(missing_ok=True)
+            await stream.delete()
 
     async def test_operations_after_delete_fail(self, nexo: NexoClient):
         topic = f"stream-del-ops-{uuid.uuid4()}"

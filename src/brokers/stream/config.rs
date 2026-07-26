@@ -2,6 +2,7 @@
 pub struct SystemStreamConfig {
     pub persistence_path: String,
     pub default_flush_ms: u64,
+    pub storage_queue_capacity: usize,
     pub max_segment_size: u64,
     pub retention_check_interval_ms: u64,
     pub default_retention_bytes: u64,
@@ -17,6 +18,7 @@ impl Default for SystemStreamConfig {
         Self {
             persistence_path: "./data/streams".to_string(),
             default_flush_ms: 50,
+            storage_queue_capacity: 16384,
             max_segment_size: 104857600, // 100MB
             retention_check_interval_ms: 600000,  // 10 minutes
             default_retention_bytes: 1073741824, // 1GB
@@ -35,6 +37,7 @@ impl SystemStreamConfig {
         Self {
             persistence_path:            crate::config::get_env("STREAM_ROOT_PERSISTENCE_PATH", default.persistence_path),
             default_flush_ms:            crate::config::get_env("STREAM_DEFAULT_FLUSH_MS", default.default_flush_ms),
+            storage_queue_capacity:      crate::config::get_env("STREAM_STORAGE_QUEUE_CAPACITY", default.storage_queue_capacity),
             max_segment_size:            crate::config::get_env("STREAM_MAX_SEGMENT_SIZE", default.max_segment_size),
             retention_check_interval_ms: crate::config::get_env("STREAM_RETENTION_CHECK_MS", default.retention_check_interval_ms),
             default_retention_bytes:     crate::config::get_env("STREAM_DEFAULT_RETENTION_BYTES", default.default_retention_bytes),

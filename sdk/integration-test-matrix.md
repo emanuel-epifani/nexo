@@ -100,6 +100,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
 | stream_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
 | stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
+| stream_publish_storage_failure | Storage write failure rejects publish instead of returning a sequence | should fail publish when storage cannot write the message | publish_storage_write_failure |
 | stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |
 | stream_peek_dlt_empty | peekDlt returns empty array when DLT is empty | should return empty array from peekDlt when DLT is empty | peek_dlt_empty_returns_empty |
 | stream_purge_dlt_empty | purgeDlt returns 0 when DLT is empty | should return 0 from purgeDlt when DLT is empty | purge_dlt_empty_returns_zero |

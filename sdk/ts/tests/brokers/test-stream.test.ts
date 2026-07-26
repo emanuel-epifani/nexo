@@ -3,6 +3,10 @@ import { NexoClient } from '../../src/client';
 import { nexo } from '../nexo';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
+import { rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
+const STREAM_DATA_DIR = path.resolve(__dirname, '../../../../data/streams');
 
 describe('STREAM', () => {
     let clientA: NexoClient;
@@ -164,7 +168,7 @@ describe('STREAM', () => {
         const topic = `stream-fast-stop-${randomUUID()}`;
         await nexo.stream(topic).create();
 
-        const sub = await clientA.stream(topic).subscribe('fast-stop-group', () => {});
+        const sub = await clientA.stream(topic).subscribe('fast-stop-group', () => { });
 
         const start = Date.now();
         await sub.stop();
@@ -242,7 +246,7 @@ describe('STREAM', () => {
 
         // 2. Scenario: Group joins and skips to END
         await clientA.stream(topic).seek(group, 'end');
-        
+
         const receivedEnd: any[] = [];
         const subEnd = await clientA.stream(topic).subscribe(group, (d) => receivedEnd.push(d));
 
@@ -254,7 +258,7 @@ describe('STREAM', () => {
 
         // 4. Scenario: Seek back to BEGINNING
         await clientA.stream(topic).seek(group, 'beginning');
-        
+
         const receivedStart: any[] = [];
         const subStart = await clientA.stream(topic).subscribe(group, (d) => receivedStart.push(d));
 
@@ -262,7 +266,7 @@ describe('STREAM', () => {
         await waitFor(() => expect(receivedStart.length).toBe(11));
         expect(receivedStart[0].i).toBe(0);
         expect(receivedStart[10].i).toBe(10);
-        
+
         await subStart.stop();
     });
 
@@ -274,7 +278,7 @@ describe('STREAM', () => {
         const topic = `stream-stop-idle-${randomUUID()}`;
         await nexo.stream(topic).create();
 
-        const sub = await clientA.stream(topic).subscribe('idle-stop-group', () => {});
+        const sub = await clientA.stream(topic).subscribe('idle-stop-group', () => { });
 
         // Let the consumer enter long-poll (no messages published)
         await new Promise(r => setTimeout(r, 200));
@@ -460,13 +464,29 @@ describe('STREAM', () => {
         await expect(nexo.stream(topic).publish({ x: 1 })).rejects.toThrow();
     });
 
+    it('should fail publish when storage cannot write the message', async () => {
+        const topic = `stream-write-failure-${randomUUID()}`;
+        const stream = nexo.stream(topic);
+        const topicPath = path.join(STREAM_DATA_DIR, topic);
+        await stream.create();
+        await rm(topicPath, { recursive: true, force: true });
+        await writeFile(topicPath, 'not-a-directory');
+
+        try {
+            await expect(stream.publish({ x: 1 })).rejects.toThrow('Storage append failed');
+        } finally {
+            await rm(topicPath, { force: true });
+            await stream.delete();
+        }
+    });
+
     it('should fail operations after delete', async () => {
         const topic = `stream-del-ops-${randomUUID()}`;
         await nexo.stream(topic).create();
         await nexo.stream(topic).delete();
         await expect(nexo.stream(topic).publish({ x: 1 })).rejects.toThrow();
         await expect(
-            clientA.stream(topic).subscribe('g-del', () => {})
+            clientA.stream(topic).subscribe('g-del', () => { })
         ).rejects.toThrow();
     });
 
@@ -475,7 +495,7 @@ describe('STREAM', () => {
         const group = 'g-dlt-empty';
         await nexo.stream(topic).create();
         // Create the group by subscribing and immediately stopping
-        const sub = await clientA.stream(topic).subscribe(group, () => {});
+        const sub = await clientA.stream(topic).subscribe(group, () => { });
         await sub.stop();
         const entries = await nexo.stream(topic).peekDlt(group, 10, 0);
         expect(entries).toEqual([]);
@@ -487,7 +507,7 @@ describe('STREAM', () => {
         const group = 'g-dlt-purge';
         await nexo.stream(topic).create();
         // Create the group by subscribing and immediately stopping
-        const sub = await clientA.stream(topic).subscribe(group, () => {});
+        const sub = await clientA.stream(topic).subscribe(group, () => { });
         await sub.stop();
         const count = await nexo.stream(topic).purgeDlt(group);
         expect(count).toBe(0);

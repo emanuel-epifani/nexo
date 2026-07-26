@@ -58,10 +58,10 @@
 //!
 //! ok
 //! test stress_tests::stream::bench_stream_publish ...
-//! 📊 STREAM PUSH (Async Background)
-//!    Throughput:  1813030 ops/sec
-//!    Total Time:  275.78ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 118µs
+//! 📊 STREAM PUBLISH (Write Confirmed)
+//!    Throughput:  78091 ops/sec
+//!    Total Time:  6.40s
+//!    Latency:     Avg: 12µs | p50: 13µs | p95: 15µs | p99: 21µs | Max: 5807µs
 //!    Count:       500000
 //!
 //! ok
@@ -331,16 +331,15 @@ mod stress_tests {
             let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
 
             let manager = build_stream_manager(config).await;
-            let topic = "bench-async";
+            let topic = "bench-write-confirmed";
             manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
 
-            let mut bench = Benchmark::start("STREAM PUSH (Async Background)", COUNT);
+            let mut bench = Benchmark::start("STREAM PUBLISH (Write Confirmed)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager.publish(topic, None, Bytes::from("data")).await.unwrap();
                 bench.record(start.elapsed());
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
             bench.stop();
         }
     }

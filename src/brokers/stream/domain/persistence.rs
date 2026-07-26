@@ -1,15 +1,17 @@
 //! Storage Manager: handles all file I/O for stream topics (append, read, retention, state).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use lru::LruCache;
 use bytes::Bytes;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedRwLockReadGuard};
 use tracing::{error, info};
 use crc32fast::Hasher;
 
@@ -56,20 +58,20 @@ pub struct Segment {
 // ==========================================
 
 pub enum StorageCommand {
-    /// Append messages to a topic's log file. Fire-and-forget.
-    /// Manager computes the file_path and offsets.
+    /// Append messages to a topic's log file and report when write_all completes.
     Append {
-        topic_name: String,
         file_path: PathBuf,
         messages: Vec<Message>,
+        complete: Box<dyn FnOnce(io::Result<()>) + Send>,
     },
     
     /// Read messages from a topic by reading specific byte offsets from segment files.
     ReadRange {
-        topic_name: String,
+        segments: Arc<Vec<Segment>>,
+        retention_guard: OwnedRwLockReadGuard<()>,
         /// (seq, byte_offset) pairs to read
         offsets: Vec<(u64, u64)>,
-        reply: oneshot::Sender<Vec<Message>>,
+        reply: oneshot::Sender<io::Result<Vec<Message>>>,
     },
 
     SaveState {
@@ -95,14 +97,14 @@ pub enum StorageCommand {
 
 pub struct StorageManager {
     base_path: PathBuf,
-    rx: mpsc::UnboundedReceiver<StorageCommand>,
+    rx: mpsc::Receiver<StorageCommand>,
     open_files: LruCache<PathBuf, File>,
 }
 
 impl StorageManager {
     pub fn new(
         base_path: String,
-        rx: mpsc::UnboundedReceiver<StorageCommand>,
+        rx: mpsc::Receiver<StorageCommand>,
         max_open_files: usize,
     ) -> Self {
         Self {
@@ -139,14 +141,18 @@ impl StorageManager {
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { topic_name, file_path, messages } => {
-                self.handle_append(&topic_name, file_path, messages).await;
+            StorageCommand::Append { file_path, messages, complete } => {
+                let result = self.handle_append(file_path.clone(), messages).await;
+                if let Err(error) = &result {
+                    error!("StorageManager: Failed to append to {:?}: {}", file_path, error);
+                }
+                complete(result);
             }
-            StorageCommand::ReadRange { topic_name, offsets, reply } => {
-                let base_path = self.base_path.join(&topic_name);
+            StorageCommand::ReadRange { segments, retention_guard, offsets, reply } => {
                 tokio::spawn(async move {
-                    let msgs = read_range(&base_path, offsets).await;
-                    let _ = reply.send(msgs);
+                    let _retention_guard = retention_guard;
+                    let result = read_range(&segments, offsets).await;
+                    let _ = reply.send(result);
                 });
             }
             StorageCommand::SaveState { topic_name, groups } => {
@@ -182,18 +188,14 @@ impl StorageManager {
 
     async fn handle_append(
         &mut self,
-        _topic_name: &str,
         file_path: PathBuf,
         messages: Vec<Message>,
-    ) {
-        if messages.is_empty() { return; }
+    ) -> io::Result<()> {
+        if messages.is_empty() { return Ok(()); }
 
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    error!("FATAL: Failed to create topic dir {:?}: {}", parent, e);
-                    return;
-                }
+                tokio::fs::create_dir_all(parent).await?;
             }
         }
 
@@ -202,17 +204,30 @@ impl StorageManager {
             serialize_message(&mut buffer, msg.seq, msg.timestamp, msg.key.as_deref(), &msg.payload);
         }
 
-        match self.get_or_open_file(&file_path).await {
-            Ok(writer) => {
-                if let Err(e) = writer.write_all(&buffer).await {
-                    error!("StorageManager: Failed to write to {:?}: {}", file_path, e);
-                    self.open_files.pop(&file_path);
+        let result = {
+            let writer = self.get_or_open_file(&file_path).await?;
+            let original_len = writer.metadata().await?.len();
+            match writer.write_all(&buffer).await {
+                Ok(()) => Ok(()),
+                Err(write_error) => {
+                    match writer.set_len(original_len).await {
+                        Ok(()) => Err(write_error),
+                        Err(rollback_error) => Err(io::Error::new(
+                            write_error.kind(),
+                            format!(
+                                "write failed: {}; rollback to {} bytes failed: {}",
+                                write_error, original_len, rollback_error
+                            ),
+                        )),
+                    }
                 }
             }
-            Err(e) => {
-                error!("StorageManager: Failed to open file {:?}: {}", file_path, e);
-            }
+        };
+
+        if result.is_err() {
+            self.open_files.pop(&file_path);
         }
+        result
     }
 
     async fn get_or_open_file(&mut self, path: &PathBuf) -> Result<&mut File, std::io::Error> {
@@ -279,47 +294,60 @@ impl StorageManager {
 
 /// Read messages from segment files at specific byte offsets.
 /// Called from spawned tasks — must not access StorageManager state.
-async fn read_range(base_path: &Path, offsets: Vec<(u64, u64)>) -> Vec<Message> {
-    if offsets.is_empty() { return Vec::new(); }
-
-    let segments = find_segments(base_path).await.unwrap_or_default();
-    if segments.is_empty() { return Vec::new(); }
+async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Result<Vec<Message>> {
+    if offsets.is_empty() { return Ok(Vec::new()); }
+    if segments.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "stream segment catalog is empty"));
+    }
 
     // Group offsets by segment to open each file once
     let mut by_segment: HashMap<usize, Vec<(u64, u64)>> = HashMap::new();
     for (seq, byte_offset) in offsets {
-        if let Some(idx) = segments.iter().rposition(|s| s.start_seq <= seq) {
-            by_segment.entry(idx).or_default().push((seq, byte_offset));
-        }
+        let idx = segments
+            .partition_point(|segment| segment.start_seq <= seq)
+            .checked_sub(1)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("no segment found for sequence {}", seq),
+            ))?;
+        by_segment.entry(idx).or_default().push((seq, byte_offset));
     }
 
     let mut result = Vec::new();
     for (idx, mut seg_offsets) in by_segment {
         seg_offsets.sort_by_key(|(_, off)| *off);
         let seg = &segments[idx];
-        match File::open(&seg.path).await {
-            Ok(file) => {
-                let mut reader = BufReader::new(file);
-                for (seq, byte_offset) in seg_offsets {
-                    if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_ok() {
-                        match read_record(&mut reader).await {
-                            ReadOutcome::Record(content_buf) => {
-                                if let Some(msg) = parse_message(&content_buf) {
-                                    if msg.seq == seq {
-                                        result.push(msg);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+        let file = File::open(&seg.path).await?;
+        let mut reader = BufReader::new(file);
+        for (seq, byte_offset) in seg_offsets {
+            reader.seek(std::io::SeekFrom::Start(byte_offset)).await?;
+            match read_record(&mut reader).await {
+                ReadOutcome::Record(content_buf) => {
+                    let msg = parse_message(&content_buf).ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid record at sequence {}", seq),
+                    ))?;
+                    if msg.seq != seq {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("expected sequence {}, found {}", seq, msg.seq),
+                        ));
                     }
+                    result.push(msg);
                 }
+                ReadOutcome::Corrupted => return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("CRC mismatch at sequence {}", seq),
+                )),
+                ReadOutcome::Eof | ReadOutcome::UnexpectedEof => return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("incomplete record at sequence {}", seq),
+                )),
             }
-            Err(e) => error!("StorageManager: Failed to open segment {:?}: {}", seg.path, e),
         }
     }
     result.sort_by_key(|m| m.seq);
-    result
+    Ok(result)
 }
 
 // ==========================================
