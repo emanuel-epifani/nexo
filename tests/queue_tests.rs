@@ -438,6 +438,42 @@ mod queue_tests {
         }
 
         #[tokio::test]
+        async fn test_fifo_order_survives_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("persist_fifo_{}", Uuid::new_v4());
+
+            {
+                let manager1 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                manager1.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                // Push 5 messages in order
+                for i in 0..5 {
+                    manager1.push(q.clone(), Bytes::from(format!("msg{}", i)), 0).await.unwrap();
+                }
+
+                // Wait for async flush
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Restart - messages should come out in the same FIFO order
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                for i in 0..5 {
+                    let msg = manager2.pop(&q).await.expect("Should have message");
+                    assert_eq!(msg.payload, Bytes::from(format!("msg{}", i)),
+                        "FIFO order must survive restart: expected msg{}, got {:?}", i, msg.payload);
+                    manager2.ack(&q, msg.id).await;
+                }
+            }
+        }
+
+        #[tokio::test]
         async fn test_acked_persistence() {
             let q = format!("persist_acked_{}", Uuid::new_v4());
             let temp_dir = tempfile::tempdir().unwrap();

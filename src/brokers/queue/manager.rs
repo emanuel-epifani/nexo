@@ -149,10 +149,10 @@ impl QueueManager {
                 let dlq_count = dlq_messages.len();
 
                 for msg in main_messages {
-                    main_state.push(msg);
+                    main_state.restore(msg);
                 }
                 for msg in dlq_messages {
-                    dlq_state.push(msg);
+                    dlq_state.restore(msg);
                 }
 
                 if main_count > 0 || dlq_count > 0 {

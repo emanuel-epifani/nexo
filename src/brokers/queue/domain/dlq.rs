@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! DLQ State: Specialized state management for Dead Letter Queue
 //! 
 //! Optimized for:
@@ -19,6 +20,7 @@ pub struct DlqMessage {
     pub attempts: u32,
     pub created_at: u64,
     pub failed_at: u64,
+    pub dlq_seq: u64,
     pub failure_reason: String,
 }
 
@@ -31,6 +33,7 @@ impl DlqMessage {
             attempts: msg.attempts,
             created_at: msg.created_at,
             failed_at: current_time_ms(),
+            dlq_seq: 0,
             failure_reason: reason,
         }
     }
@@ -43,6 +46,7 @@ impl DlqMessage {
             attempts: 0, // Reset attempts on replay
             created_at: self.created_at,
             visible_at: 0, // Ready immediately
+            ready_seq: 0, // Will be assigned by QueueState::push
             failure_reason: None, // Clear reason
         }
     }
@@ -52,17 +56,31 @@ pub struct DlqState {
     /// Ordered map of failed messages.
     /// Order is FIFO (insertion order).
     messages: LinkedHashMap<Uuid, DlqMessage>,
+    /// Monotonic counter for dlq_seq (ordering that survives restart)
+    dlq_seq_counter: u64,
 }
 
 impl DlqState {
     pub fn new() -> Self {
         Self {
             messages: LinkedHashMap::new(),
+            dlq_seq_counter: 0,
         }
     }
 
-    pub fn push(&mut self, msg: DlqMessage) {
+    pub fn push(&mut self, mut msg: DlqMessage) {
+        self.dlq_seq_counter += 1;
+        msg.dlq_seq = self.dlq_seq_counter;
         // Updates position to end if already exists (which shouldn't happen usually)
+        self.messages.insert(msg.id, msg);
+    }
+
+    /// Restore a message from persistence without reassigning dlq_seq.
+    /// Syncs the dlq_seq_counter to max(current, msg.dlq_seq).
+    pub fn restore(&mut self, msg: DlqMessage) {
+        if msg.dlq_seq > self.dlq_seq_counter {
+            self.dlq_seq_counter = msg.dlq_seq;
+        }
         self.messages.insert(msg.id, msg);
     }
 

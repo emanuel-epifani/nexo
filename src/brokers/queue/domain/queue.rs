@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 //! Queue State: Internal state management for queue broker
 //! 
 //! This module contains the pure state logic without any concurrency primitives.
@@ -26,6 +27,7 @@ pub struct Message {
     pub attempts: u32,
     pub created_at: u64,
     pub visible_at: u64,
+    pub ready_seq: u64,
     pub failure_reason: Option<String>,
 }
 
@@ -38,6 +40,7 @@ impl Message {
             attempts: 0,
             created_at: now,
             visible_at: 0,
+            ready_seq: 0,
             failure_reason: None,
         }
     }
@@ -76,6 +79,8 @@ pub struct QueueState {
     waiting_for_dispatch: BTreeMap<u8, LinkedHashSet<Uuid>>,
     /// In-flight messages by timeout time
     waiting_for_ack: BTreeMap<u64, LinkedHashSet<Uuid>>,
+    /// Monotonic counter for ready_seq (FIFO ordering that survives restart)
+    ready_seq_counter: u64,
 }
 
 impl QueueState {
@@ -89,14 +94,18 @@ impl QueueState {
             registry: HashMap::new(),
             waiting_for_dispatch: BTreeMap::new(),
             waiting_for_ack: BTreeMap::new(),
+            ready_seq_counter: 0,
         }
     }
 
     /// Push a message to the queue.
-    pub fn push(&mut self, msg: Message) {
+    /// Assigns a new ready_seq from the monotonic counter.
+    pub fn push(&mut self, mut msg: Message) {
         let id = msg.id;
         let priority = msg.priority;
         let visible_at = msg.visible_at;
+
+        msg.ready_seq = self.next_ready_seq();
 
         self.registry.insert(id, msg);
 
@@ -105,6 +114,32 @@ impl QueueState {
         } else {
             self.waiting_for_dispatch.entry(priority).or_default().insert(id);
         }
+    }
+
+    /// Restore a message from persistence without reassigning ready_seq.
+    /// Syncs the ready_seq_counter to max(current, msg.ready_seq).
+    pub fn restore(&mut self, msg: Message) {
+        let id = msg.id;
+        let priority = msg.priority;
+        let visible_at = msg.visible_at;
+
+        if msg.ready_seq > self.ready_seq_counter {
+            self.ready_seq_counter = msg.ready_seq;
+        }
+
+        self.registry.insert(id, msg);
+
+        if visible_at > 0 {
+            self.waiting_for_ack.entry(visible_at).or_default().insert(id);
+        } else {
+            self.waiting_for_dispatch.entry(priority).or_default().insert(id);
+        }
+    }
+
+    #[inline]
+    fn next_ready_seq(&mut self) -> u64 {
+        self.ready_seq_counter += 1;
+        self.ready_seq_counter
     }
 
     /// Pop the highest priority message.
@@ -152,10 +187,12 @@ impl QueueState {
             }
             (None, None)
         } else {
-            // Requeue: remove from in-flight index, reset visible_at, add to ready index
+            // Requeue: remove from in-flight index, reset visible_at, assign new ready_seq, add to ready index
             self.remove_from_index(id, priority, visible_at);
+            let new_seq = self.next_ready_seq();
             if let Some(msg) = self.registry.get_mut(&id) {
                 msg.visible_at = 0;
+                msg.ready_seq = new_seq;
                 self.waiting_for_dispatch.entry(priority).or_default().insert(id);
                 return (Some(msg.clone()), None);
             }
@@ -191,8 +228,10 @@ impl QueueState {
                         dlq_msgs.push(DlqMessage::from_message(msg, "Timeout".to_string()));
                     }
                 } else {
+                    let new_seq = self.next_ready_seq();
                     if let Some(msg) = self.registry.get_mut(&id) {
                         msg.visible_at = 0;
+                        msg.ready_seq = new_seq;
                         let priority = msg.priority;
                         requeued_msgs.push(msg.clone());
                         self.waiting_for_dispatch.entry(priority).or_default().insert(id);
