@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::{Mutex, MutexGuard};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Mutex as TokioMutex};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 use bytes::Bytes;
@@ -44,6 +44,8 @@ pub struct QueueManager {
     queues: Arc<DashMap<String, Arc<QueueShared>>>,
     config: Arc<SystemQueueConfig>,
     cancel: CancellationToken,
+    /// Serializes create/delete lifecycle operations to prevent interleaving
+    lifecycle_mutex: TokioMutex<()>,
 }
 
 impl QueueManager {
@@ -81,6 +83,7 @@ impl QueueManager {
             queues: queues.clone(),
             config: system_config.clone(),
             cancel: cancel.clone(),
+            lifecycle_mutex: TokioMutex::new(()),
         };
 
         // WARM START: Discover and restore queues from filesystem
@@ -249,6 +252,8 @@ impl QueueManager {
     pub async fn create_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
         Self::validate_queue_name(&name)?;
 
+        let _guard = self.lifecycle_mutex.lock().await;
+
         // Reject if the DB path is a symlink (path traversal protection)
         let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
         let db_path = persistence_path.join(format!("{}.db", name));
@@ -282,6 +287,8 @@ impl QueueManager {
     pub async fn delete_queue(&self, name: String) -> Result<(), String> {
         Self::validate_queue_name(&name)?;
 
+        let _guard = self.lifecycle_mutex.lock().await;
+
         if let Some((_, shared)) = self.queues.remove(&name) {
             shared.store.shutdown().await;
         }
@@ -293,9 +300,15 @@ impl QueueManager {
         let shm_path = base_path.join(format!("{}.db-shm", name));
         let config_path = base_path.join(format!("{}.config.json", name));
 
-        let _ = std::fs::remove_file(db_path);
+        // Remove main DB file - error if it exists but cannot be removed
+        if db_path.exists() {
+            std::fs::remove_file(&db_path)
+                .map_err(|e| format!("Failed to delete queue DB file: {}", e))?;
+        }
+        // WAL/SHM may not exist, ignore errors
         let _ = std::fs::remove_file(wal_path);
         let _ = std::fs::remove_file(shm_path);
+        // Config may not exist, ignore errors
         let _ = std::fs::remove_file(config_path);
 
         Ok(())
