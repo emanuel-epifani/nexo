@@ -47,10 +47,11 @@ impl Message {
         }
     }
 
-    /// A message is in-flight if it has a visible_at > 0 (i.e. it has been popped and is waiting for ack).
+    /// A message is in-flight if its visibility lease has not expired.
+    /// `visible_at == 0` means it has never been popped or has been requeued.
     #[inline]
     pub fn is_in_flight(&self) -> bool {
-        self.visible_at > 0
+        self.visible_at > 0 && self.visible_at > current_time_ms()
     }
 
 }
@@ -156,10 +157,12 @@ impl QueueState {
     }
 
     /// Acknowledge a message (remove from system).
-    /// Returns false if the delivery_token doesn't match (stale ACK).
+    /// Returns false if the delivery is not active or the delivery_token doesn't match (stale ACK).
     pub fn ack(&mut self, id: Uuid, delivery_token: u64) -> bool {
+        let now = current_time_ms();
         if let Some(msg) = self.registry.get(&id) {
-            if msg.delivery_token != delivery_token {
+            // Must be an active in-flight delivery with a matching token.
+            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
                 return false;
             }
         } else {
@@ -185,11 +188,14 @@ impl QueueState {
 
     /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
-    /// Returns (None, None) if the delivery_token doesn't match (stale NACK).
+    /// Returns (None, None) if the delivery is not active or the delivery_token doesn't match (stale NACK).
     pub fn nack(&mut self, id: Uuid, delivery_token: u64, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
-        // 1. Check existence and verify token
+        let now = current_time_ms();
+
+        // 1. Check existence, token and active lease
         let (should_dlq, priority, visible_at) = if let Some(msg) = self.registry.get_mut(&id) {
-            if msg.delivery_token != delivery_token {
+            // Must be an active in-flight delivery with a matching token.
+            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
                 return (None, None);
             }
             msg.failure_reason = Some(reason.clone());
@@ -207,12 +213,13 @@ impl QueueState {
             }
             (None, None)
         } else {
-            // Requeue: remove from in-flight index, reset visible_at, assign new ready_seq, add to ready index
+            // Requeue: remove from in-flight index, reset visible_at/delivery_token, assign new ready_seq, add to ready index
             self.remove_from_index(id, priority, visible_at);
             let new_seq = self.next_ready_seq();
             if let Some(msg) = self.registry.get_mut(&id) {
                 msg.visible_at = 0;
                 msg.ready_seq = new_seq;
+                msg.delivery_token = 0;
                 self.waiting_for_dispatch.entry(priority).or_default().insert(id);
                 return (Some(msg.clone()), None);
             }
@@ -252,6 +259,7 @@ impl QueueState {
                     if let Some(msg) = self.registry.get_mut(&id) {
                         msg.visible_at = 0;
                         msg.ready_seq = new_seq;
+                        msg.delivery_token = 0;
                         let priority = msg.priority;
                         requeued_msgs.push(msg.clone());
                         self.waiting_for_dispatch.entry(priority).or_default().insert(id);
@@ -337,3 +345,146 @@ pub fn current_time_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn b(data: &str) -> Bytes {
+        Bytes::copy_from_slice(data.as_bytes())
+    }
+
+    #[test]
+    fn ack_accepts_active_delivery_and_rejects_wrong_token() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1000, now).unwrap();
+        assert_eq!(msg.delivery_token, 1);
+
+        assert!(!state.ack(msg.id, msg.delivery_token + 999), "wrong token must be rejected");
+        assert!(state.ack(msg.id, msg.delivery_token), "active delivery with correct token must be accepted");
+    }
+
+    #[test]
+    fn ack_rejects_ready_message_and_token_zero() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        let msg = Message::new(b("x"), 0, now);
+        let id = msg.id;
+        state.push(msg);
+
+        // Token 0 on a never-popped (ready) message must be stale.
+        assert!(!state.ack(id, 0), "ack with token 0 on a ready message must be rejected");
+        // Any token on a ready message must be rejected.
+        assert!(!state.ack(id, 123), "ack on a ready message must be rejected");
+    }
+
+    #[test]
+    fn ack_rejects_expired_lease() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1, now).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(!state.ack(msg.id, msg.delivery_token), "ack after lease expiration must be rejected");
+    }
+
+    #[test]
+    fn nack_rejects_wrong_token_and_ready_message() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1000, now).unwrap();
+        let (requeued, dlq) = state.nack(msg.id, msg.delivery_token + 999, "fail".to_string(), 5);
+        assert!(requeued.is_none() && dlq.is_none(), "wrong token nack must be a no-op");
+
+        let (requeued, dlq) = state.nack(msg.id, 0, "fail".to_string(), 5);
+        assert!(requeued.is_none() && dlq.is_none(), "nack with token 0 on in-flight must be rejected");
+    }
+
+    #[test]
+    fn nack_rejects_expired_lease() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1, now).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let (requeued, dlq) = state.nack(msg.id, msg.delivery_token, "fail".to_string(), 5);
+        assert!(requeued.is_none() && dlq.is_none(), "nack after lease expiration must be rejected");
+    }
+
+    #[test]
+    fn nack_resets_delivery_token_on_requeue() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1000, now).unwrap();
+        let token1 = msg.delivery_token;
+
+        let (requeued, dlq) = state.nack(msg.id, token1, "fail".to_string(), 5);
+        assert!(requeued.is_some() && dlq.is_none(), "nack should requeue");
+
+        // Old token on the requeued message must be stale.
+        assert!(!state.ack(msg.id, token1), "ack with old token after nack requeue must fail");
+
+        let msg2 = state.pop(1000, current_time_ms()).unwrap();
+        assert_eq!(msg2.delivery_token, 2, "second delivery should have a new token");
+        assert!(state.ack(msg2.id, msg2.delivery_token), "ack with current token should succeed");
+    }
+
+    #[test]
+    fn process_expired_resets_delivery_token_on_requeue() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1, now).unwrap();
+        let token1 = msg.delivery_token;
+
+        std::thread::sleep(Duration::from_millis(5));
+        let (requeued, dlq) = state.process_expired(5);
+        assert_eq!(requeued.len(), 1);
+        assert!(dlq.is_empty());
+
+        // Old token on the requeued message must be stale.
+        assert!(!state.ack(msg.id, token1), "ack with old token after timeout requeue must fail");
+
+        let msg2 = state.pop(1000, current_time_ms()).unwrap();
+        assert_eq!(msg2.delivery_token, 2, "second delivery should have a new token");
+        assert!(state.ack(msg2.id, msg2.delivery_token), "ack with current token should succeed");
+    }
+
+    #[test]
+    fn nack_moves_to_dlq_when_max_deliveries_reached() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1000, now).unwrap();
+        let (requeued, dlq) = state.nack(msg.id, msg.delivery_token, "fail".to_string(), 1);
+        assert!(requeued.is_none() && dlq.is_some(), "first delivery at max_deliveries=1 should go to DLQ");
+        assert_eq!(dlq.unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn process_expired_moves_to_dlq_when_max_deliveries_reached() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+        state.push(Message::new(b("x"), 0, now));
+
+        let msg = state.pop(1, now).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let (requeued, dlq) = state.process_expired(1);
+        assert!(requeued.is_empty());
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq[0].id, msg.id);
+    }
+}

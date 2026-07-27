@@ -1024,6 +1024,91 @@ mod queue_tests {
             // Token 0 means "never delivered" — should be stale for an in-flight message
             assert!(!manager.ack(&q, msg.id, 0).await, "ACK with token=0 on in-flight message should be stale");
         }
+
+        #[tokio::test]
+        async fn test_ack_with_old_token_after_timeout_fails_before_repop() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_stale_ack_{}", Uuid::new_v4());
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(50),
+                max_deliveries: Some(5),
+                ..Default::default()
+            };
+            manager.create_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+
+            let msg1 = manager.pop(&q).await.unwrap();
+            let token1 = msg1.delivery_token;
+
+            // Wait for timeout → process_expired requeues the message
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            // ACK with the old token must fail before the message is repopped
+            assert!(!manager.ack(&q, msg1.id, token1).await, "ACK with old token after requeue should fail");
+
+            // A new pop assigns a new token; ACK with that token must succeed
+            let msg2 = manager.pop(&q).await.unwrap();
+            assert_eq!(msg2.delivery_token, 2, "Second delivery token should be 2");
+            assert!(manager.ack(&q, msg2.id, msg2.delivery_token).await, "ACK with current token should succeed");
+        }
+
+        #[tokio::test]
+        async fn test_nack_with_old_token_after_timeout_fails_before_repop() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_stale_nack_{}", Uuid::new_v4());
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(50),
+                max_deliveries: Some(5),
+                ..Default::default()
+            };
+            manager.create_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+
+            let msg1 = manager.pop(&q).await.unwrap();
+            let token1 = msg1.delivery_token;
+
+            // Wait for timeout → process_expired requeues the message
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            // NACK with the old token must fail before the message is repopped
+            assert!(!manager.nack(&q, msg1.id, token1, "stale".to_string()).await, "NACK with old token after requeue should fail");
+
+            // A new pop assigns a new token; NACK with that token must succeed
+            let msg2 = manager.pop(&q).await.unwrap();
+            assert_eq!(msg2.delivery_token, 2, "Second delivery token should be 2");
+            assert!(manager.nack(&q, msg2.id, msg2.delivery_token, "valid".to_string()).await, "NACK with current token should succeed");
+        }
+
+        #[tokio::test]
+        async fn test_ack_after_expired_lease_fails() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_expired_ack_{}", Uuid::new_v4());
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(1),
+                max_deliveries: Some(5),
+                ..Default::default()
+            };
+            manager.create_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+
+            let msg1 = manager.pop(&q).await.unwrap();
+            let token1 = msg1.delivery_token;
+
+            // Wait just enough for the lease to expire but before the timeout task requeues it
+            tokio::time::sleep(Duration::from_millis(5)).await;
+
+            assert!(!manager.ack(&q, msg1.id, token1).await, "ACK after lease expiration should fail");
+
+            // Give the timeout task time to requeue and redeliver
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let msg2 = manager.pop(&q).await.unwrap();
+            assert_eq!(msg2.delivery_token, 2, "Redelivery should have a new token");
+            assert!(manager.ack(&q, msg2.id, msg2.delivery_token).await, "ACK with new token should succeed");
+        }
     }
 
 }
