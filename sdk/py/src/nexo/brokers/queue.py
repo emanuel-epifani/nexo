@@ -34,7 +34,7 @@ CONSUME_TIMEOUT_MARGIN_MS = 5000
 
 class QueueConfig(TypedDict, total=False):
     visibility_timeout_ms: int
-    max_retries: int
+    max_deliveries: int
 
 
 class QueueSubscribeOptions(TypedDict, total=False):
@@ -53,7 +53,7 @@ class QueueCommands:
         conn: NexoConnection, name: str, config: QueueConfig
     ) -> None:
         vto = config.get("visibility_timeout_ms")
-        retries = config.get("max_retries")
+        retries = config.get("max_deliveries")
         has_vto = vto is not None
         has_retries = retries is not None
         flags = (0x01 if has_vto else 0x00) | (0x02 if has_retries else 0x00)

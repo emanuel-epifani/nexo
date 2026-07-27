@@ -55,7 +55,7 @@ Configure reliability and timeout settings:
 const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create({
   // RELIABILITY
   visibilityTimeoutMs: 10000,  // Retry if not ACKed within 10s (default: 30s)
-  maxRetries: 5,               // Move to DLQ after 5 failures (default: 5)
+  maxDeliveries: 5,            // Move to DLQ after 5 failed deliveries (default: 5)
 });
 ```
 
@@ -63,7 +63,7 @@ const criticalQueue = await client.queue<CriticalTask>('critical-tasks').create(
 critical_queue: NexoQueue[CriticalTask] = await client.queue("critical-tasks").create({
     # RELIABILITY
     "visibility_timeout_ms": 10000,  # Retry if not ACKed within 10s (default: 30s)
-    "max_retries": 5,                # Move to DLQ after 5 failures (default: 5)
+    "max_deliveries": 5,             # Move to DLQ after 5 failed deliveries (default: 5)
 })
 ```
 
@@ -162,7 +162,7 @@ await critical_queue.subscribe(
 
 ## Dead Letter Queue (DLQ)
 
-Every queue automatically has a **dedicated DLQ**. When a message exceeds `maxRetries` (default: 5), it's moved to the DLQ automatically — no setup needed.
+Every queue automatically has a **dedicated DLQ**. When a message exceeds `maxDeliveries` (default: 5), it's moved to the DLQ automatically — no setup needed.
 
 Since DLQs are created alongside their parent queue, you can inspect failed messages at any time via `queue.dlq`.
 
@@ -234,7 +234,7 @@ purged_count = await critical_queue.dlq.purge()
 
 1. Server starts → reads env vars (global defaults)
 2. Queue created → server snapshots defaults into `config.json` (per-queue)
-3. SDK can override `visibilityTimeoutMs` and `maxRetries` at creation — everything else uses system defaults
+3. SDK can override `visibilityTimeoutMs` and `maxDeliveries` at creation — everything else uses system defaults
 4. On restart → each queue reads its own `config.json` (ignores current env vars)
 
 > **Existing queues are not affected by env var changes.** Only new queues pick up new defaults.
@@ -247,7 +247,7 @@ Global, set at server startup.
 |:---|:---|:---|
 | `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Base directory for all queue SQLite DBs |
 | `QUEUE_VISIBILITY_MS` | `30000` (30s) | Default visibility timeout — how long before an unacked message is redelivered |
-| `QUEUE_MAX_RETRIES` | `5` | Default max delivery attempts before moving to DLQ |
+| `QUEUE_MAX_DELIVERIES` | `5` | Default max delivery attempts before moving to DLQ |
 | `QUEUE_DEFAULT_BATCH_SIZE` | `10` | Default batch size for server-side consume |
 | `QUEUE_DEFAULT_WAIT_MS` | `0` | Default long-polling wait (ms) when queue is empty |
 | `QUEUE_DEFAULT_FLUSH_MS` | `100` | Max durability window (ms) — how often writes are flushed to disk |
@@ -260,4 +260,4 @@ Fields settable at `create()` time. If omitted, system defaults apply.
 | Field | SDK option | System default (env var) |
 |:---|:---|:---|
 | Visibility timeout | `visibilityTimeoutMs` | `30000` (`QUEUE_VISIBILITY_MS`) |
-| Max retries | `maxRetries` | `5` (`QUEUE_MAX_RETRIES`) |
+| Max deliveries | `maxDeliveries` | `5` (`QUEUE_MAX_DELIVERIES`) |

@@ -121,9 +121,9 @@ mod queue_tests {
             let visibility_timeout = 100;
             let config = QueueCreateOptions {
                 visibility_timeout_ms: Some(visibility_timeout),
-                max_retries: Some(3), // 3 Retries allow 3 attempts before failure? No.
-                // Logic: attempts >= max_retries -> DLQ.
-                // If max_retries = 3:
+                max_deliveries: Some(3), // 3 deliveries: pop→timeout→requeue, pop→timeout→requeue, pop→timeout→DLQ
+                // Logic: attempts >= max_deliveries -> DLQ.
+                // If max_deliveries = 3:
                 // Pop 1 (att=1). Timeout. 1 < 3 -> Requeue.
                 // Pop 2 (att=2). Timeout. 2 < 3 -> Requeue.
                 // Pop 3 (att=3). Timeout. 3 >= 3 -> DLQ.
@@ -623,7 +623,7 @@ mod queue_tests {
 
             let config = QueueCreateOptions {
                 visibility_timeout_ms: Some(100),
-                max_retries: Some(0), // Immediate DLQ
+                max_deliveries: Some(0), // Immediate DLQ
                 ..Default::default()
             };
             manager.create_queue(q.clone(), config).await.unwrap();
@@ -678,10 +678,10 @@ mod queue_tests {
             // Phase 1: Trigger DLQ move
             {
                 let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
-                // Create with max_retries = 0 (1st timeout -> DLQ immediately)
+                // Create with max_deliveries = 0 (1st timeout -> DLQ immediately)
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(100),
-                    max_retries: Some(0),
+                    max_deliveries: Some(0),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
@@ -739,7 +739,7 @@ mod queue_tests {
             {
                 let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
                 let config = QueueCreateOptions {
-                    max_retries: Some(5),
+                    max_deliveries: Some(5),
                     ..Default::default()
                 };
                 manager.create_queue(q.clone(), config).await.unwrap();
@@ -749,7 +749,7 @@ mod queue_tests {
                 // Pop → InFlight
                 let msg = manager.pop(&q).await.unwrap();
 
-                // Nack with a reason (requeue, not DLQ since attempts < max_retries)
+                // Nack with a reason (requeue, not DLQ since attempts < max_deliveries)
                 manager.nack(&q, msg.id, "bad_payload".to_string()).await;
 
                 // Wait for flush

@@ -56,7 +56,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | queue_push_batch_mixed_priority | Batch with mixed priorities, ordering respected | should push batch with mixed priorities | push_batch_mixed_priorities |
 | queue_push_batch_empty | Empty pushBatch handled gracefully | should handle empty pushBatch gracefully | empty_push_batch |
 | queue_nack_dlq | Explicit NACK persists failure reason in DLQ | Should handle explicit NACK and persist failure reason in DLQ | nack_persists_failure_reason |
-| queue_retry_dlq | Message exceeds max_retries, lands in DLQ | should move failed messages to DLQ | move_failed_to_dlq |
+| queue_retry_dlq | Message exceeds max_deliveries, lands in DLQ | should move failed messages to DLQ | move_failed_to_dlq |
 | queue_dlq_workflow | DLQ full workflow: peek, moveToQueue, delete, purge | Should handle DLQ workflow: peek, moveToQueue, delete, purge | dlq_workflow_peek_move_delete_purge |
 | queue_concurrency_serial | concurrency=1 serializes callbacks | should serialize callbacks with concurrency=1 | serialize_callbacks_concurrency_1 |
 | queue_concurrency_parallel | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |

@@ -2,7 +2,7 @@
 pub struct SystemQueueConfig {
     // CREATE config
     pub visibility_timeout_ms: u64,
-    pub max_retries: u32,
+    pub max_deliveries: u32,
     // PUSH config
     pub default_batch_size: usize,
     pub default_wait_ms: u64,
@@ -16,7 +16,7 @@ impl Default for SystemQueueConfig {
     fn default() -> Self {
         Self {
             visibility_timeout_ms: 30000,
-            max_retries: 5,
+            max_deliveries: 5,
             default_batch_size: 10,
             default_wait_ms: 0,
             persistence_path: "./data/queues".to_string(),
@@ -31,7 +31,7 @@ impl SystemQueueConfig {
         let default = Self::default();
         Self {
             visibility_timeout_ms: crate::config::get_env("QUEUE_VISIBILITY_MS", default.visibility_timeout_ms),
-            max_retries:           crate::config::get_env("QUEUE_MAX_RETRIES", default.max_retries),
+            max_deliveries:       crate::config::get_env("QUEUE_MAX_DELIVERIES", default.max_deliveries),
             default_batch_size:    crate::config::get_env("QUEUE_DEFAULT_BATCH_SIZE", default.default_batch_size),
             default_wait_ms:       crate::config::get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
             persistence_path:      crate::config::get_env("QUEUE_ROOT_PERSISTENCE_PATH", default.persistence_path),

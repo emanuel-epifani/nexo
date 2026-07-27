@@ -5,5 +5,5 @@
 #[derive(Debug, Default, Clone)]
 pub struct QueueCreateOptions {
     pub visibility_timeout_ms: Option<u64>,
-    pub max_retries: Option<u32>,
+    pub max_deliveries: Option<u32>,
 }

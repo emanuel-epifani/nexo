@@ -158,9 +158,9 @@ fn queue_fixtures() {
                     "{id}: vis_timeout",
                 );
                 assert_eq!(
-                    options.max_retries,
-                    inp["max_retries"].as_u64().map(|v| v as u32),
-                    "{id}: max_retries",
+                    options.max_deliveries,
+                    inp["max_deliveries"].as_u64().map(|v| v as u32),
+                    "{id}: max_deliveries",
                 );
             }
             QueueCommand::Push { q_name, items } => {

@@ -169,7 +169,7 @@
     "input": {
       "queue": "emails",
       "visibility_timeout_ms": null,
-      "max_retries": null
+      "max_deliveries": null
     },
     "expected_bytes": "BQEQAAAAAQAAAAsAAAAGZW1haWxzAA=="
   },
@@ -182,7 +182,7 @@
     "input": {
       "queue": "emails",
       "visibility_timeout_ms": 30000,
-      "max_retries": 5
+      "max_deliveries": 5
     },
     "expected_bytes": "BQEQAAAAAQAAABcAAAAGZW1haWxzAwAAAAAAAHUwAAAABQ=="
   },

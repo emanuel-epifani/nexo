@@ -56,14 +56,14 @@ impl Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueConfig {
     pub visibility_timeout_ms: u64,
-    pub max_retries: u32,
+    pub max_deliveries: u32,
 }
 
 impl QueueConfig {
     pub fn from_options(opts: QueueCreateOptions, sys: &SystemQueueConfig) -> Self {
         Self {
             visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
-            max_retries: opts.max_retries.unwrap_or(sys.max_retries),
+            max_deliveries: opts.max_deliveries.unwrap_or(sys.max_deliveries),
         }
     }
 }
@@ -169,11 +169,11 @@ impl QueueState {
 
     /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
-    pub fn nack(&mut self, id: Uuid, reason: String, max_retries: u32) -> (Option<Message>, Option<DlqMessage>) {
+    pub fn nack(&mut self, id: Uuid, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
         // 1. Check existence and update fields
         let (should_dlq, priority, visible_at) = if let Some(msg) = self.registry.get_mut(&id) {
             msg.failure_reason = Some(reason.clone());
-            (msg.attempts >= max_retries, msg.priority, msg.visible_at)
+            (msg.attempts >= max_deliveries, msg.priority, msg.visible_at)
         } else {
             return (None, None);
         };
@@ -204,7 +204,7 @@ impl QueueState {
     /// Returns (requeued_messages, dlq_messages).
     /// requeued_messages: messages that transitioned to Ready (need UpdateState in DB)
     /// dlq_messages: messages moved to DLQ (need MoveToDlq in DB)
-    pub fn process_expired(&mut self, max_retries: u32) -> (Vec<Message>, Vec<DlqMessage>) {
+    pub fn process_expired(&mut self, max_deliveries: u32) -> (Vec<Message>, Vec<DlqMessage>) {
         let now = current_time_ms();
         let mut requeued_msgs = Vec::new();
         let mut dlq_msgs = Vec::new();
@@ -220,7 +220,7 @@ impl QueueState {
             let ids = self.waiting_for_ack.remove(&ts).unwrap_or_default();
             for id in ids {
                 let should_dlq = self.registry.get(&id)
-                    .map(|m| m.attempts >= max_retries)
+                    .map(|m| m.attempts >= max_deliveries)
                     .unwrap_or(false);
 
                 if should_dlq {

@@ -205,8 +205,8 @@ impl QueueManager {
                             continue;
                         }
 
-                        let max_retries = inner.config.max_retries;
-                        let (requeued, dlq_msgs) = inner.state.process_expired(max_retries);
+                        let max_deliveries = inner.config.max_deliveries;
+                        let (requeued, dlq_msgs) = inner.state.process_expired(max_deliveries);
 
                         for ref dlq_msg in &dlq_msgs {
                             inner.dlq.push((*dlq_msg).clone());
@@ -388,8 +388,8 @@ impl QueueManager {
 
         let (requeued, dlq_msg) = {
             let mut inner = Self::lock(&shared.inner);
-            let max_retries = inner.config.max_retries;
-            let (requeued, dlq_msg) = inner.state.nack(id, reason, max_retries);
+            let max_deliveries = inner.config.max_deliveries;
+            let (requeued, dlq_msg) = inner.state.nack(id, reason, max_deliveries);
 
             if let Some(ref dlq_message) = dlq_msg {
                 inner.dlq.push(dlq_message.clone());

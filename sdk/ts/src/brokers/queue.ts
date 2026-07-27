@@ -24,12 +24,12 @@ const CONSUME_TIMEOUT_MARGIN_MS = 5000;
 const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) => {
     const hasVto = config?.visibilityTimeoutMs !== undefined;
-    const hasRetries = config?.maxRetries !== undefined;
+    const hasRetries = config?.maxDeliveries !== undefined;
     const flags = (hasVto ? 0x01 : 0x00) | (hasRetries ? 0x02 : 0x00);
     return conn.send(QueueOpcode.Q_CREATE, w => {
       w.string(name).u8(flags);
       if (hasVto) w.u64(config!.visibilityTimeoutMs!);
-      if (hasRetries) w.u32(config!.maxRetries!);
+      if (hasRetries) w.u32(config!.maxDeliveries!);
     });
   },
 
@@ -143,7 +143,7 @@ const QueueCommands = {
 
 export interface QueueConfig {
   visibilityTimeoutMs?: number;
-  maxRetries?: number;
+  maxDeliveries?: number;
 }
 
 export interface QueueSubscribeOptions {

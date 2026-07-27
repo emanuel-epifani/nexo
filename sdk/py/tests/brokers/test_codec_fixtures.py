@@ -140,13 +140,13 @@ def _encode_fixture(fixture: dict) -> bytes:
 
     elif fid in ("QUEUE_CREATE", "QUEUE_CREATE_FULL"):
         has_vto = inp.get("visibility_timeout_ms") is not None
-        has_retries = inp.get("max_retries") is not None
+        has_retries = inp.get("max_deliveries") is not None
         flags = (0x01 if has_vto else 0x00) | (0x02 if has_retries else 0x00)
         w.string(inp["queue"]).u8(flags)
         if has_vto:
             w.u64(inp["visibility_timeout_ms"])
         if has_retries:
-            w.u32(inp["max_retries"])
+            w.u32(inp["max_deliveries"])
 
     elif fid in ("QUEUE_EXISTS", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
         w.string(inp["queue"])
@@ -289,7 +289,7 @@ def _decode_fixture(fixture: dict) -> object:
         flags = c.read_u8()
         vto = c.read_u64() if flags & 0x01 else None
         retries = c.read_u32() if flags & 0x02 else None
-        return {"queue": queue, "visibility_timeout_ms": vto, "max_retries": retries}
+        return {"queue": queue, "visibility_timeout_ms": vto, "max_deliveries": retries}
 
     if fid in ("QUEUE_EXISTS", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
         return {"queue": c.read_string()}

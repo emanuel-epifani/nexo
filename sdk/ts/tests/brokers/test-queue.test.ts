@@ -24,7 +24,7 @@ describe('QUEUE', () => {
         const qName = `queue-shutdown-${randomUUID()}`;
         const q = await nexo.queue(qName).create({
             visibilityTimeoutMs: 500,
-            maxRetries: 3,
+            maxDeliveries: 3,
         });
 
         await q.push('msg1');
@@ -43,7 +43,7 @@ describe('QUEUE', () => {
         await sub.stop();
 
         // By now visibility timeout (500ms) has expired for msg2, server requeued it
-        // maxRetries=3, attempts=1 → 1 < 3 → requeue, NOT DLQ
+        // maxDeliveries=3, attempts=1 → 1 < 3 → requeue, NOT DLQ
         const dlqResult = await q.dlq.peek(10);
         expect(dlqResult.total).toBe(0);
 
@@ -117,7 +117,7 @@ describe('QUEUE', () => {
     it('should move failed messages to DLQ', async () => {
         const qName = `queue-dlq-${randomUUID()}`;
         // Max 1 retry (2 attempts total)
-        const q = await nexo.queue(qName).create({ maxRetries: 1, visibilityTimeoutMs: 100 });
+        const q = await nexo.queue(qName).create({ maxDeliveries: 1, visibilityTimeoutMs: 100 });
 
         await q.push('fail_payload');
 
@@ -161,7 +161,7 @@ describe('QUEUE', () => {
 
         const q = await nexo.queue(qName).create({
             visibilityTimeoutMs: 5000, 
-            maxRetries: 1,
+            maxDeliveries: 1,
         });
 
         // Push 3 messages
@@ -327,7 +327,7 @@ describe('QUEUE', () => {
     it('Should handle explicit NACK and persist failure reason in DLQ', async () => {
         const qName = `nack-reason-${randomUUID()}`;
         const q = await nexo.queue(qName).create({
-            maxRetries: 0,
+            maxDeliveries: 0,
             visibilityTimeoutMs: 10000
         });
 

@@ -36,7 +36,7 @@ class TestQueue:
     async def test_no_dlq_on_graceful_shutdown(self, nexo: NexoClient):
         q_name = f"queue-shutdown-{uuid.uuid4()}"
         q = await nexo.queue(q_name).create(
-            {"visibility_timeout_ms": 500, "max_retries": 3}
+            {"visibility_timeout_ms": 500, "max_deliveries": 3}
         )
 
         await q.push("msg1")
@@ -113,7 +113,7 @@ class TestQueue:
     async def test_move_failed_to_dlq(self, nexo: NexoClient):
         q_name = f"queue-dlq-{uuid.uuid4()}"
         q = await nexo.queue(q_name).create(
-            {"max_retries": 1, "visibility_timeout_ms": 100}
+            {"max_deliveries": 1, "visibility_timeout_ms": 100}
         )
 
         await q.push("fail_payload")
@@ -151,7 +151,7 @@ class TestQueue:
     async def test_dlq_workflow_peek_move_delete_purge(self, nexo: NexoClient):
         q_name = f"dlq-test-{uuid.uuid4()}"
         q = await nexo.queue(q_name).create(
-            {"visibility_timeout_ms": 5000, "max_retries": 1}
+            {"visibility_timeout_ms": 5000, "max_deliveries": 1}
         )
 
         await q.push({"order": "order1"})
@@ -318,7 +318,7 @@ class TestQueue:
     async def test_nack_persists_failure_reason(self, nexo: NexoClient):
         q_name = f"nack-reason-{uuid.uuid4()}"
         q = await nexo.queue(q_name).create(
-            {"max_retries": 0, "visibility_timeout_ms": 10000}
+            {"max_deliveries": 0, "visibility_timeout_ms": 10000}
         )
 
         await q.push({"task": "fail_me"})

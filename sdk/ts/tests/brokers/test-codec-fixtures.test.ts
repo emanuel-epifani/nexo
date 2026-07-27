@@ -154,13 +154,13 @@ function encodeFixture(fixture: Fixture): Buffer {
     case 'QUEUE_CREATE':
     case 'QUEUE_CREATE_FULL': {
       const hasVto = inp.visibility_timeout_ms !== null && inp.visibility_timeout_ms !== undefined;
-      const hasRetries = inp.max_retries !== null && inp.max_retries !== undefined;
+      const hasRetries = inp.max_deliveries !== null && inp.max_deliveries !== undefined;
       let flags = 0;
       if (hasVto) flags |= 0x01;
       if (hasRetries) flags |= 0x02;
       w.string(inp.queue).u8(flags);
       if (hasVto) w.u64(BigInt(inp.visibility_timeout_ms));
-      if (hasRetries) w.u32(inp.max_retries);
+      if (hasRetries) w.u32(inp.max_deliveries);
       break;
     }
     case 'QUEUE_EXISTS':
@@ -320,8 +320,8 @@ function decodeFixture(fixture: Fixture): any {
       const queue = c.readString();
       const flags = c.readU8();
       const visibilityTimeoutMs = flags & 0x01 ? Number(c.readU64()) : null;
-      const maxRetries = flags & 0x02 ? c.readU32() : null;
-      return { queue, visibility_timeout_ms: visibilityTimeoutMs, max_retries: maxRetries };
+      const maxDeliveries = flags & 0x02 ? c.readU32() : null;
+      return { queue, visibility_timeout_ms: visibilityTimeoutMs, max_deliveries: maxDeliveries };
     }
     case 'QUEUE_EXISTS':
     case 'QUEUE_DELETE':

@@ -65,8 +65,8 @@ impl QueueCommand {
                 let q_name = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
                 let visibility_timeout_ms = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
-                let max_retries = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
-                Ok(Self::Create { q_name, options: QueueCreateOptions { visibility_timeout_ms, max_retries } })
+                let max_deliveries = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
+                Ok(Self::Create { q_name, options: QueueCreateOptions { visibility_timeout_ms, max_deliveries } })
             }
             OP_Q_PUSH => {
                 let q_name = cursor.read_string()?;
