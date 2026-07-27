@@ -170,7 +170,30 @@ async fn run_writer(
                     None => {
                         // Sender dropped — flush remaining and exit
                         if !batch.is_empty() {
-                            flush_batch(&mut conn, &mut batch);
+                            for attempt in 1..=5 {
+                                let prev_len = batch.len();
+                                flush_batch(&mut conn, &mut batch);
+                                if batch.is_empty() {
+                                    break;
+                                }
+                                if batch.len() != prev_len {
+                                    // Partial progress (constraint discard), keep retrying remainder
+                                    continue;
+                                }
+                                if attempt < 5 {
+                                    error!(
+                                        "Shutdown flush attempt {}/5 failed ({} ops retained), retrying in 1s",
+                                        attempt, batch.len()
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                }
+                            }
+                            if !batch.is_empty() {
+                                error!(
+                                    "Shutdown flush failed after 5 attempts, discarding {} ops — data loss possible",
+                                    batch.len()
+                                );
+                            }
                         }
                         if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
                             error!("Failed to checkpoint WAL on shutdown: {}", e);
@@ -636,5 +659,28 @@ mod tests {
             .query_row("SELECT payload FROM queue", [], |row| row.get(0))
             .unwrap();
         assert_eq!(payload, b"valid", "Only the valid message should be persisted");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_flush_retries_on_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_shutdown_retry.db");
+
+        let store = QueueStore::new(db_path.clone(), 10_000, 100, 1024).unwrap();
+
+        // Push a message — it will be in the batch when shutdown is called
+        let msg = Message::new(Bytes::from("shutdown_survivor"), 0, 0);
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+
+        // Shutdown immediately — batch hasn't been flushed by timer yet (10s flush_ms)
+        // The shutdown retry loop should flush it successfully
+        store.shutdown().await;
+
+        // Verify the message was persisted despite no timer flush
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "Message must survive shutdown flush");
     }
 }
