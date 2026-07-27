@@ -200,7 +200,9 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
 
     for op in batch.iter() {
         if let Err(e) = exec_op(&tx, op) {
-            error!("Failed to exec op {:?}: {}", op, e);
+            error!("Failed to exec op {:?}: {} — rolling back entire batch", op, e);
+            drop(tx); // explicit rollback
+            return;
         }
     }
 
@@ -416,4 +418,62 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[tokio::test]
+    async fn test_flush_batch_rolls_back_on_duplicate_pk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_rollback.db");
+
+        let store = QueueStore::new(db_path.clone(), 10, 100);
+
+        let msg = Message::new(Bytes::from("payload"), 0, 0);
+
+        // Send two inserts with the same ID — second will fail with PK violation.
+        // Both ops land in the same batch (unbounded channel + try_recv drain).
+        store.execute(StorageOp::Insert(vec![msg.clone()]));
+        store.execute(StorageOp::Insert(vec![msg.clone()]));
+
+        // Wait for flush timer (10ms) to fire
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.shutdown().await;
+
+        // Recover: neither insert should have persisted (rollback)
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "Batch with duplicate PK must be rolled back entirely, found {} rows",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_commits_when_all_ops_succeed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_commit.db");
+
+        let store = QueueStore::new(db_path.clone(), 10, 100);
+
+        let msg1 = Message::new(Bytes::from("a"), 0, 0);
+        let msg2 = Message::new(Bytes::from("b"), 0, 0);
+
+        store.execute(StorageOp::Insert(vec![msg1.clone(), msg2.clone()]));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.shutdown().await;
+
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "Both messages should be persisted");
+    }
 }
