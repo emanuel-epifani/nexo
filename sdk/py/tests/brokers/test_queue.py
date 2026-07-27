@@ -489,3 +489,38 @@ class TestQueue:
         await q.delete()
         with pytest.raises(Exception):
             await q.push("data")
+
+    # ── Delivery Token (QUE-001) ─────────────────────────────────
+
+    async def test_delivery_token_in_subscribe_lifecycle(self, nexo: NexoClient):
+        q_name = f"queue-token-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        received: list = []
+        sub = await q.subscribe(lambda data: received.append(data))
+        await q.push("token_test")
+        await wait_for(lambda: len(received) >= 1)
+        assert received[0] == "token_test"
+        await sub.stop()
+        await q.delete()
+
+    async def test_redelivery_after_nack_uses_new_token(self, nexo: NexoClient):
+        q_name = f"queue-redeliver-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create(
+            {"visibility_timeout_ms": 100, "max_deliveries": 5}
+        )
+
+        await q.push("stale_test")
+
+        delivery_count = 0
+
+        async def cb(data):
+            nonlocal delivery_count
+            delivery_count += 1
+            if delivery_count == 1:
+                raise Exception("fail first")
+
+        sub = await q.subscribe(cb, batch_size=1, wait_ms=200, concurrency=1)
+        await wait_for(lambda: delivery_count >= 2)
+        await sub.stop()
+        await q.delete()

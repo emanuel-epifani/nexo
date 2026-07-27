@@ -3,7 +3,7 @@
  * PROTOCOL_VERSION; mismatched frames are rejected on both ends.
  * @internal
  */
-export const PROTOCOL_VERSION = 0x05;
+export const PROTOCOL_VERSION = 0x06;
 
 /** @internal */
 export enum FrameType {

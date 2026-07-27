@@ -166,10 +166,10 @@ def _encode_fixture(fixture: dict) -> bytes:
         w.string(inp["queue"]).u32(inp["batch_size"]).u32(inp["wait_ms"])
 
     elif fid == "QUEUE_ACK":
-        w.uuid(inp["message_id"]).string(inp["queue"])
+        w.uuid(inp["message_id"]).u64(inp["delivery_token"]).string(inp["queue"])
 
     elif fid == "QUEUE_NACK":
-        w.uuid(inp["message_id"]).string(inp["queue"]).string(inp["reason"])
+        w.uuid(inp["message_id"]).u64(inp["delivery_token"]).string(inp["queue"]).string(inp["reason"])
 
     elif fid == "QUEUE_PEEK_DLQ":
         w.string(inp["queue"]).u32(inp["limit"]).u32(inp["offset"])

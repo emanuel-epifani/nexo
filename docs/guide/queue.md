@@ -228,6 +228,20 @@ purged_count = await critical_queue.dlq.purge()
 | `delete(messageId)` | Permanently remove a single message | `boolean` |
 | `purge()` | Remove all messages from DLQ | `number` (count) |
 
+## Delivery Tokens
+
+Each time a message is delivered to a consumer (via `consume` or `subscribe`), the server assigns a unique **delivery token** (`u64`). This token is included in the consume response alongside the message ID and payload.
+
+When a consumer sends `ACK` or `NACK`, it must include the delivery token. The server verifies that the token matches the **current** delivery. If the token is stale (from a previous delivery that already timed out and was requeued), the ACK/NACK is silently ignored — the message is not deleted or requeued.
+
+This prevents a critical race condition:
+1. Consumer A receives message M (token 1, visibility timeout 30s)
+2. Timeout expires → M is requeued and redelivered to Consumer B (token 2)
+3. Consumer A sends `ACK(M.id, token=1)` — server rejects it (stale)
+4. Consumer B sends `ACK(M.id, token=2)` — server accepts it
+
+The SDK handles this automatically: `subscribe` passes the delivery token to `ack`/`nack` internally. If you use `consume` directly, you must pass the `deliveryToken` field from the consumed message to `ack`/`nack`.
+
 ## Configuration
 
 ### How it works

@@ -47,6 +47,7 @@ impl DlqMessage {
             created_at: self.created_at,
             visible_at: 0, // Ready immediately
             ready_seq: 0, // Will be assigned by QueueState::push
+            delivery_token: 0, // Will be assigned on next pop
             failure_reason: None, // Clear reason
         }
     }

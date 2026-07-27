@@ -139,22 +139,23 @@ class QueueCommands:
         messages: list[dict[str, Any]] = []
         for _ in range(count):
             id_hex = cursor.read_uuid()
+            delivery_token = cursor.read_u64()
             payload_len = cursor.read_u32()
             data = cursor.decode_any_from_buffer(payload_len)
-            messages.append({"id": id_hex, "data": data})
+            messages.append({"id": id_hex, "delivery_token": delivery_token, "data": data})
         return messages
 
     @staticmethod
-    def ack(conn: NexoConnection, name: str, id: str) -> None:
+    def ack(conn: NexoConnection, name: str, id: str, delivery_token: int) -> None:
         conn.send_fire_and_forget(
-            QueueOpcode.Q_ACK, lambda w: w.uuid(id).string(name)
+            QueueOpcode.Q_ACK, lambda w: w.uuid(id).u64(delivery_token).string(name)
         )
 
     @staticmethod
-    def nack(conn: NexoConnection, name: str, id: str, reason: str) -> None:
+    def nack(conn: NexoConnection, name: str, id: str, delivery_token: int, reason: str) -> None:
         conn.send_fire_and_forget(
             QueueOpcode.Q_NACK,
-            lambda w: w.uuid(id).string(name).string(reason),
+            lambda w: w.uuid(id).u64(delivery_token).string(name).string(reason),
         )
 
     @staticmethod
@@ -318,7 +319,7 @@ class QueueSubscription(Generic[T]):
                             result = self._callback(msg["data"])
                             if asyncio.iscoroutine(result):
                                 await result
-                            QueueCommands.ack(self._conn, self._queue_name, msg["id"])
+                            QueueCommands.ack(self._conn, self._queue_name, msg["id"], msg["delivery_token"])
                         except Exception as e:
                             if not self._conn.is_connected:
                                 return
@@ -326,7 +327,7 @@ class QueueSubscription(Generic[T]):
                             self._logger.error(
                                 f"[Queue:{self._queue_name}] Consumer error, sending NACK. Reason: {reason}"
                             )
-                            QueueCommands.nack(self._conn, self._queue_name, msg["id"], reason)
+                            QueueCommands.nack(self._conn, self._queue_name, msg["id"], msg["delivery_token"], reason)
 
                     await run_concurrent(messages, self._concurrency, process_msg)
 

@@ -49,8 +49,8 @@ pub enum QueueCommand {
     Push { q_name: String, items: Vec<PushItem> },
     Consume { q_name: String, batch_size: usize, wait_ms: u64 },
     Delete { q_name: String },
-    Ack { id: Uuid, q_name: String },
-    Nack { id: Uuid, q_name: String, reason: String },
+    Ack { id: Uuid, delivery_token: u64, q_name: String },
+    Nack { id: Uuid, delivery_token: u64, q_name: String, reason: String },
     Exists { q_name: String },
     PeekDLQ { q_name: String, limit: usize, offset: usize },
     MoveToQueue { q_name: String, message_id: Uuid },
@@ -89,14 +89,16 @@ impl QueueCommand {
             }
             OP_Q_ACK => {
                 let id = Uuid::from_bytes(cursor.read_uuid_bytes()?);
+                let delivery_token = cursor.read_u64()?;
                 let q_name = cursor.read_string()?;
-                Ok(Self::Ack { id, q_name })
+                Ok(Self::Ack { id, delivery_token, q_name })
             }
             OP_Q_NACK => {
                 let id = Uuid::from_bytes(cursor.read_uuid_bytes()?);
+                let delivery_token = cursor.read_u64()?;
                 let q_name = cursor.read_string()?;
                 let reason = cursor.read_string()?;
-                Ok(Self::Nack { id, q_name, reason })
+                Ok(Self::Nack { id, delivery_token, q_name, reason })
             }
             OP_Q_EXISTS => {
                 let q_name = cursor.read_string()?;
@@ -140,6 +142,7 @@ fn encode_consume_batch(messages: &[Message]) -> Bytes {
     w.put_u32(messages.len() as u32);
     for msg in messages {
         w.put_uuid(msg.id.as_bytes());
+        w.put_u64(msg.delivery_token);
         w.put_bytes(&msg.payload);
     }
     w.into_bytes()
@@ -203,12 +206,12 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
                 Err(e) => Response::Error(e),
             }
         }
-        QueueCommand::Ack { id, q_name } => {
-            let found = queue.ack(&q_name, id).await;
+        QueueCommand::Ack { id, delivery_token, q_name } => {
+            let found = queue.ack(&q_name, id, delivery_token).await;
             Response::Data(encode_bool(found))
         }
-        QueueCommand::Nack { id, q_name, reason } => {
-            let found = queue.nack(&q_name, id, reason).await;
+        QueueCommand::Nack { id, delivery_token, q_name, reason } => {
+            let found = queue.nack(&q_name, id, delivery_token, reason).await;
             Response::Data(encode_bool(found))
         }
         QueueCommand::Exists { q_name } => {

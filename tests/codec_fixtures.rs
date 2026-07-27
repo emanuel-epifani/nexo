@@ -185,13 +185,15 @@ fn queue_fixtures() {
                 assert_eq!(batch_size, inp["batch_size"].as_u64().unwrap() as usize, "{id}: batch_size");
                 assert_eq!(wait_ms, inp["wait_ms"].as_u64().unwrap(), "{id}: wait_ms");
             }
-            QueueCommand::Ack { id: uid, q_name } => {
+            QueueCommand::Ack { id: uid, delivery_token, q_name } => {
                 assert_eq!(q_name, q, "{id}: queue");
                 assert_eq!(uid, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
+                assert_eq!(delivery_token, inp["delivery_token"].as_u64().unwrap(), "{id}: delivery_token");
             }
-            QueueCommand::Nack { id: uid, q_name, reason } => {
+            QueueCommand::Nack { id: uid, delivery_token, q_name, reason } => {
                 assert_eq!(q_name, q, "{id}: queue");
                 assert_eq!(uid, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
+                assert_eq!(delivery_token, inp["delivery_token"].as_u64().unwrap(), "{id}: delivery_token");
                 assert_eq!(reason, inp["reason"].as_str().unwrap(), "{id}: reason");
             }
             QueueCommand::Exists { q_name } => {

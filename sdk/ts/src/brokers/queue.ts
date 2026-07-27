@@ -68,7 +68,7 @@ const QueueCommands = {
     });
   },
 
-  consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, data: T }[]> => {
+  consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, deliveryToken: bigint, data: T }[]> => {
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => {
       w.string(name).u32(batchSize).u32(waitMs);
     }, { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
@@ -76,22 +76,24 @@ const QueueCommands = {
     const count = res.cursor.readU32();
     if (count === 0) return [];
 
-    const messages: { id: string; data: T }[] = [];
+    const messages: { id: string; deliveryToken: bigint; data: T }[] = [];
     for (let i = 0; i < count; i++) {
       const idHex = res.cursor.readUUID();
+      const deliveryToken = res.cursor.readU64();
       const payloadLen = res.cursor.readU32();
       const data = res.cursor.decodeAnyFromBuffer(payloadLen);
-      messages.push({ id: idHex, data });
+      messages.push({ id: idHex, deliveryToken, data });
     }
     return messages;
   },
 
-  ack: (conn: NexoConnection, name: string, id: string) =>
-    conn.sendFireAndForget(QueueOpcode.Q_ACK, w => w.uuid(id).string(name)),
+  ack: (conn: NexoConnection, name: string, id: string, deliveryToken: bigint) =>
+    conn.sendFireAndForget(QueueOpcode.Q_ACK, w => w.uuid(id).u64(deliveryToken).string(name)),
 
-  nack: (conn: NexoConnection, name: string, id: string, reason: string) =>
+  nack: (conn: NexoConnection, name: string, id: string, deliveryToken: bigint, reason: string) =>
     conn.sendFireAndForget(QueueOpcode.Q_NACK, w => w
       .uuid(id)
+      .u64(deliveryToken)
       .string(name)
       .string(reason)
     ),
@@ -253,12 +255,12 @@ class QueueSubscription<T> {
           if (!this.active) return;
           try {
             await this.callback(msg.data);
-            QueueCommands.ack(this.conn, this.queueName, msg.id);
+            QueueCommands.ack(this.conn, this.queueName, msg.id, msg.deliveryToken);
           } catch (e: any) {
             if (!this.conn.isConnected) return;
             const reason = e instanceof Error ? e.message : String(e);
             this.logger.error(`[Queue:${this.queueName}] Consumer error, sending NACK. Reason: ${reason}`);
-            QueueCommands.nack(this.conn, this.queueName, msg.id, reason);
+            QueueCommands.nack(this.conn, this.queueName, msg.id, msg.deliveryToken, reason);
           }
         });
 

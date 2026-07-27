@@ -362,7 +362,7 @@ impl QueueManager {
         msg_opt
     }
 
-    pub async fn ack(&self, queue_name: &str, id: Uuid) -> bool {
+    pub async fn ack(&self, queue_name: &str, id: Uuid, delivery_token: u64) -> bool {
         let shared = match self.get_queue(queue_name) {
             Some(s) => s,
             None => return false,
@@ -370,7 +370,7 @@ impl QueueManager {
 
         let result = {
             let mut inner = Self::lock(&shared.inner);
-            let ok = inner.state.ack(id);
+            let ok = inner.state.ack(id, delivery_token);
             if ok {
                 shared.store.execute(StorageOp::Delete(id));
             }
@@ -380,7 +380,7 @@ impl QueueManager {
         result
     }
 
-    pub async fn nack(&self, queue_name: &str, id: Uuid, reason: String) -> bool {
+    pub async fn nack(&self, queue_name: &str, id: Uuid, delivery_token: u64, reason: String) -> bool {
         let shared = match self.get_queue(queue_name) {
             Some(s) => s,
             None => return false,
@@ -389,7 +389,7 @@ impl QueueManager {
         let (requeued, dlq_msg) = {
             let mut inner = Self::lock(&shared.inner);
             let max_deliveries = inner.config.max_deliveries;
-            let (requeued, dlq_msg) = inner.state.nack(id, reason, max_deliveries);
+            let (requeued, dlq_msg) = inner.state.nack(id, delivery_token, reason, max_deliveries);
 
             if let Some(ref dlq_message) = dlq_msg {
                 inner.dlq.push(dlq_message.clone());

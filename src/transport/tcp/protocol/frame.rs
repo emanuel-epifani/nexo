@@ -27,7 +27,7 @@ use bytemuck::{Pod, Zeroable};
 // ========================================
 /// Bumped on any breaking change to the framing or payload layout. Peers must
 /// reject frames whose first byte does not match.
-pub const PROTOCOL_VERSION: u8 = 0x05;
+pub const PROTOCOL_VERSION: u8 = 0x06;
 
 // ========================================
 // FRAME TYPES

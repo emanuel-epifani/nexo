@@ -243,6 +243,7 @@ fn init_db(conn: &Connection) -> Result<()> {
             attempts INTEGER NOT NULL,
             created_at INTEGER NOT NULL,
             ready_seq INTEGER NOT NULL DEFAULT 0,
+            delivery_token INTEGER NOT NULL DEFAULT 0,
             error TEXT
         )",
         [],
@@ -250,6 +251,8 @@ fn init_db(conn: &Connection) -> Result<()> {
 
     // Migration: add ready_seq column if it doesn't exist (for existing DBs)
     let _ = conn.execute("ALTER TABLE queue ADD COLUMN ready_seq INTEGER NOT NULL DEFAULT 0", []);
+    // Migration: add delivery_token column if it doesn't exist (for existing DBs)
+    let _ = conn.execute("ALTER TABLE queue ADD COLUMN delivery_token INTEGER NOT NULL DEFAULT 0", []);
 
     // DLQ Table
     conn.execute(
@@ -274,7 +277,7 @@ fn init_db(conn: &Connection) -> Result<()> {
 
 fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT id, payload, priority, visible_at, attempts, created_at, ready_seq, error FROM queue ORDER BY ready_seq ASC"
+        "SELECT id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error FROM queue ORDER BY ready_seq ASC"
     )?;
 
     let message_iter = stmt.query_map([], |row| {
@@ -286,7 +289,8 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let attempts: u32 = row.get(4)?;
         let created_at = row.get::<_, i64>(5)? as u64;
         let ready_seq = row.get::<_, i64>(6)? as u64;
-        let error: Option<String> = row.get(7)?;
+        let delivery_token = row.get::<_, i64>(7)? as u64;
+        let error: Option<String> = row.get(8)?;
 
          Ok(Message {
              id,
@@ -296,6 +300,7 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
              created_at,
              visible_at,
              ready_seq,
+             delivery_token,
              failure_reason: error,
          })
     })?;
@@ -346,8 +351,8 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
         StorageOp::Insert(msgs) => {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             )?;
             for msg in msgs {
                 stmt.execute(params![
@@ -358,6 +363,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                     msg.attempts,
                     msg.created_at as i64,
                     msg.ready_seq as i64,
+                    msg.delivery_token as i64,
                     msg.failure_reason.as_deref()
                 ])?;
             }
@@ -368,13 +374,14 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
         }
         StorageOp::UpdateState(msgs) => {
             let mut stmt = tx.prepare_cached(
-                "UPDATE queue SET visible_at = ?1, attempts = ?2, ready_seq = ?3, error = ?4 WHERE id = ?5"
+                "UPDATE queue SET visible_at = ?1, attempts = ?2, ready_seq = ?3, delivery_token = ?4, error = ?5 WHERE id = ?6"
             )?;
             for msg in msgs {
                 stmt.execute(params![
                     msg.visible_at as i64,
                     msg.attempts,
                     msg.ready_seq as i64,
+                    msg.delivery_token as i64,
                     msg.failure_reason.as_deref(),
                     msg.id.as_bytes()
                 ])?;
@@ -412,8 +419,8 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             )?;
             stmt.execute(params![
                 msg.id.as_bytes(),
@@ -423,6 +430,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 0u32, // reset attempts
                 msg.created_at as i64,
                 msg.ready_seq as i64,
+                msg.delivery_token as i64,
                 msg.failure_reason.as_deref()
             ])?;
         }

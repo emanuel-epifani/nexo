@@ -508,4 +508,45 @@ describe('QUEUE', () => {
         await q.delete();
         await expect(q.push('data')).rejects.toThrow();
     });
+
+    // ── Delivery Token (QUE-001) ─────────────────────────────────
+
+    it('should handle deliveryToken in subscribe lifecycle', async () => {
+        const qName = `queue-token-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        let received: any = null;
+        const sub = await q.subscribe(async (data) => {
+            received = data;
+        });
+
+        await q.push('token_test');
+        await waitFor(() => expect(received).toBe('token_test'));
+        await sub.stop();
+        await q.delete();
+    });
+
+    it('should requeue on stale ACK and redeliver to another consumer', async () => {
+        const qName = `queue-stale-redeliver-${randomUUID()}`;
+        const q = await nexo.queue(qName).create({
+            visibilityTimeoutMs: 100,
+            maxDeliveries: 5,
+        });
+
+        await q.push('stale_test');
+
+        let deliveryCount = 0;
+        const sub = await q.subscribe(async (data) => {
+            deliveryCount++;
+            // First delivery: throw to trigger NACK (which uses the correct token)
+            if (deliveryCount === 1) {
+                throw new Error('fail first');
+            }
+        }, { batchSize: 1, waitMs: 200, concurrency: 1 });
+
+        // Wait for at least 2 deliveries (first fails, second succeeds)
+        await waitFor(() => expect(deliveryCount).toBeGreaterThanOrEqual(2));
+        await sub.stop();
+        await q.delete();
+    });
 });

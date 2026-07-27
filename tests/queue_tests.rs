@@ -35,7 +35,7 @@ mod queue_tests {
             assert_eq!(msg.payload, Bytes::from("payload"));
 
             // Ack
-            assert!(manager.ack(&q, msg.id).await, "Ack should succeed");
+            assert!(manager.ack(&q, msg.id, msg.delivery_token).await, "Ack should succeed");
 
             // Check Empty
             assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
@@ -174,7 +174,7 @@ mod queue_tests {
             assert_eq!(replayed.attempts, 1, "Attempts should be 1 after replay and pop");
 
             // Ack it to clean up
-            manager.ack(&q, replayed.id).await;
+            manager.ack(&q, replayed.id, replayed.delivery_token).await;
         }
 
         #[tokio::test]
@@ -387,8 +387,8 @@ mod queue_tests {
             payloads.sort();
             assert_eq!(payloads, vec![Bytes::from("msg_x"), Bytes::from("msg_y")]);
 
-            assert!(manager.ack(&q, batch_a[0].id).await);
-            assert!(manager.ack(&q, batch_b[0].id).await);
+            assert!(manager.ack(&q, batch_a[0].id, batch_a[0].delivery_token).await);
+            assert!(manager.ack(&q, batch_b[0].id, batch_b[0].delivery_token).await);
         }
 
     }
@@ -468,7 +468,7 @@ mod queue_tests {
                     let msg = manager2.pop(&q).await.expect("Should have message");
                     assert_eq!(msg.payload, Bytes::from(format!("msg{}", i)),
                         "FIFO order must survive restart: expected msg{}, got {:?}", i, msg.payload);
-                    manager2.ack(&q, msg.id).await;
+                    manager2.ack(&q, msg.id, msg.delivery_token).await;
                 }
             }
         }
@@ -493,7 +493,7 @@ mod queue_tests {
                 let msg = manager.pop(&q).await.unwrap();
 
                 // Ack it (Should delete from DB)
-                manager.ack(&q, msg.id).await;
+                manager.ack(&q, msg.id, msg.delivery_token).await;
 
                 // Wait for the async writer to flush (using double the default max flush time just to be safe)
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -750,7 +750,7 @@ mod queue_tests {
                 let msg = manager.pop(&q).await.unwrap();
 
                 // Nack with a reason (requeue, not DLQ since attempts < max_deliveries)
-                manager.nack(&q, msg.id, "bad_payload".to_string()).await;
+                manager.nack(&q, msg.id, msg.delivery_token, "bad_payload".to_string()).await;
 
                 // Wait for flush
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -919,6 +919,110 @@ mod queue_tests {
 
             let result = manager.create_queue("queue name".to_string(), QueueCreateOptions::default()).await;
             assert!(result.is_err());
+        }
+    }
+
+    // =========================================================================================
+    // 5. DELIVERY TOKEN
+    // =========================================================================================
+
+    mod delivery_token {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ack_with_valid_token_succeeds() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_ack_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap();
+
+            assert!(manager.ack(&q, msg.id, msg.delivery_token).await, "Valid token ACK should succeed");
+            assert!(manager.pop(&q).await.is_none(), "Queue should be empty after ACK");
+        }
+
+        #[tokio::test]
+        async fn test_ack_with_stale_token_returns_false() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_stale_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap();
+
+            // ACK with wrong token should fail and NOT delete the message
+            let stale_token = msg.delivery_token + 999;
+            assert!(!manager.ack(&q, msg.id, stale_token).await, "Stale token ACK should return false");
+
+            // Message should still be in-flight (not deleted)
+            // Pop should return None (message is in-flight, not ready)
+            assert!(manager.pop(&q).await.is_none(), "Message should still be in-flight");
+        }
+
+        #[tokio::test]
+        async fn test_nack_with_stale_token_returns_false() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_nack_stale_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap();
+
+            // NACK with wrong token should fail and NOT requeue
+            let stale_token = msg.delivery_token + 999;
+            let result = manager.nack(&q, msg.id, stale_token, "reason".to_string()).await;
+            assert!(!result, "Stale token NACK should return false");
+
+            // Message should still be in-flight (not requeued to ready)
+            assert!(manager.pop(&q).await.is_none(), "Message should still be in-flight after stale NACK");
+        }
+
+        #[tokio::test]
+        async fn test_token_changes_on_requeue() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_change_{}", Uuid::new_v4());
+            let config = QueueCreateOptions {
+                visibility_timeout_ms: Some(50),
+                max_deliveries: Some(5),
+                ..Default::default()
+            };
+            manager.create_queue(q.clone(), config).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+
+            // First pop: token = 1
+            let msg1 = manager.pop(&q).await.unwrap();
+            let token1 = msg1.delivery_token;
+            assert_eq!(token1, 1, "First delivery token should be 1");
+
+            // Wait for visibility timeout → message gets requeued
+            tokio::time::sleep(Duration::from_millis(150)).await;
+
+            // Second pop: token should be different (2)
+            let msg2 = manager.pop(&q).await.unwrap();
+            let token2 = msg2.delivery_token;
+            assert_eq!(token2, 2, "Second delivery token should be 2");
+            assert_ne!(token1, token2, "Tokens must differ across deliveries");
+
+            // ACK with old token should fail
+            assert!(!manager.ack(&q, msg1.id, token1).await, "ACK with old token should fail");
+
+            // ACK with current token should succeed
+            assert!(manager.ack(&q, msg2.id, token2).await, "ACK with current token should succeed");
+        }
+
+        #[tokio::test]
+        async fn test_ack_with_zero_token_on_inflight_is_stale() {
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("token_zero_{}", Uuid::new_v4());
+            manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+            manager.push(q.clone(), Bytes::from("msg1"), 0).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap();
+
+            // Token 0 means "never delivered" — should be stale for an in-flight message
+            assert!(!manager.ack(&q, msg.id, 0).await, "ACK with token=0 on in-flight message should be stale");
         }
     }
 

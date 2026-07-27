@@ -74,6 +74,8 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | queue_fifo_same_priority | FIFO ordering preserved for same-priority messages | should preserve FIFO ordering for same-priority messages | fifo_ordering_same_priority |
 | queue_push_nonexistent_fails | Push to non-existent queue fails | should fail push to non-existent queue | push_nonexistent_queue_fails |
 | queue_push_deleted_fails | Push to deleted queue fails | should fail push to deleted queue | push_deleted_queue_fails |
+| queue_delivery_token_lifecycle | deliveryToken flows through subscribe lifecycle | should handle deliveryToken in subscribe lifecycle | delivery_token_in_subscribe_lifecycle |
+| queue_redelivery_new_token | NACK triggers redelivery with new token | should requeue on stale ACK and redeliver to another consumer | redelivery_after_nack_uses_new_token |
 
 ## Stream
 

@@ -186,10 +186,10 @@ function encodeFixture(fixture: Fixture): Buffer {
       w.string(inp.queue).u32(inp.batch_size).u32(inp.wait_ms);
       break;
     case 'QUEUE_ACK':
-      w.uuid(inp.message_id).string(inp.queue);
+      w.uuid(inp.message_id).u64(BigInt(inp.delivery_token)).string(inp.queue);
       break;
     case 'QUEUE_NACK':
-      w.uuid(inp.message_id).string(inp.queue).string(inp.reason);
+      w.uuid(inp.message_id).u64(BigInt(inp.delivery_token)).string(inp.queue).string(inp.reason);
       break;
     case 'QUEUE_PEEK_DLQ':
       w.string(inp.queue).u32(inp.limit).u32(inp.offset);

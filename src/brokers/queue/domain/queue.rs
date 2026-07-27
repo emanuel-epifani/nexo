@@ -28,6 +28,7 @@ pub struct Message {
     pub created_at: u64,
     pub visible_at: u64,
     pub ready_seq: u64,
+    pub delivery_token: u64,
     pub failure_reason: Option<String>,
 }
 
@@ -41,6 +42,7 @@ impl Message {
             created_at: now,
             visible_at: 0,
             ready_seq: 0,
+            delivery_token: 0,
             failure_reason: None,
         }
     }
@@ -81,6 +83,8 @@ pub struct QueueState {
     waiting_for_ack: BTreeMap<u64, LinkedHashSet<Uuid>>,
     /// Monotonic counter for ready_seq (FIFO ordering that survives restart)
     ready_seq_counter: u64,
+    /// Monotonic counter for delivery_token (identifies a specific delivery)
+    delivery_counter: u64,
 }
 
 impl QueueState {
@@ -95,6 +99,7 @@ impl QueueState {
             waiting_for_dispatch: BTreeMap::new(),
             waiting_for_ack: BTreeMap::new(),
             ready_seq_counter: 0,
+            delivery_counter: 0,
         }
     }
 
@@ -117,7 +122,7 @@ impl QueueState {
     }
 
     /// Restore a message from persistence without reassigning ready_seq.
-    /// Syncs the ready_seq_counter to max(current, msg.ready_seq).
+    /// Syncs the ready_seq_counter and delivery_counter to max(current, msg.*).
     pub fn restore(&mut self, msg: Message) {
         let id = msg.id;
         let priority = msg.priority;
@@ -125,6 +130,9 @@ impl QueueState {
 
         if msg.ready_seq > self.ready_seq_counter {
             self.ready_seq_counter = msg.ready_seq;
+        }
+        if msg.delivery_token > self.delivery_counter {
+            self.delivery_counter = msg.delivery_token;
         }
 
         self.registry.insert(id, msg);
@@ -148,7 +156,15 @@ impl QueueState {
     }
 
     /// Acknowledge a message (remove from system).
-    pub fn ack(&mut self, id: Uuid) -> bool {
+    /// Returns false if the delivery_token doesn't match (stale ACK).
+    pub fn ack(&mut self, id: Uuid, delivery_token: u64) -> bool {
+        if let Some(msg) = self.registry.get(&id) {
+            if msg.delivery_token != delivery_token {
+                return false;
+            }
+        } else {
+            return false;
+        }
         self.delete_message(id)
     }
 
@@ -169,9 +185,13 @@ impl QueueState {
 
     /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
-    pub fn nack(&mut self, id: Uuid, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
-        // 1. Check existence and update fields
+    /// Returns (None, None) if the delivery_token doesn't match (stale NACK).
+    pub fn nack(&mut self, id: Uuid, delivery_token: u64, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
+        // 1. Check existence and verify token
         let (should_dlq, priority, visible_at) = if let Some(msg) = self.registry.get_mut(&id) {
+            if msg.delivery_token != delivery_token {
+                return (None, None);
+            }
             msg.failure_reason = Some(reason.clone());
             (msg.attempts >= max_deliveries, msg.priority, msg.visible_at)
         } else {
@@ -270,6 +290,8 @@ impl QueueState {
         let msg = self.registry.get_mut(&next_id)?;
         msg.visible_at = timeout;
         msg.attempts += 1;
+        self.delivery_counter += 1;
+        msg.delivery_token = self.delivery_counter;
 
         // Add to in-flight index
         self.waiting_for_ack.entry(timeout).or_default().insert(next_id);
