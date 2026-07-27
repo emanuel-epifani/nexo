@@ -8,9 +8,10 @@ use bytes::Bytes;
 
 pub const OP_DEBUG_ECHO: u8 = 0x00;
 
-/// Opcodes that mutate group/queue state and must be processed in TCP arrival
-/// order to prevent races (e.g. ACK processed after LEAVE).
-/// These are all O(1) lock+mutate operations — safe to run inline without spawning.
+/// Opcodes that mutate state and must be processed in TCP arrival order to
+/// prevent races (e.g. ACK processed after LEAVE, SUB processed after PUBLISH).
+/// These are fast, in-memory state mutations that do not perform I/O,
+/// long-polling, or large fan-out — safe to run inline.
 pub fn is_inline_opcode(opcode: u8) -> bool {
     matches!(
         opcode,
@@ -18,8 +19,12 @@ pub fn is_inline_opcode(opcode: u8) -> bool {
             | stream::tcp::OP_S_SEEK
             | stream::tcp::OP_S_LEAVE
             | stream::tcp::OP_S_JOIN
-            | queue::tcp::OP_Q_ACK
-            | queue::tcp::OP_Q_NACK
+            | store::tcp::OP_MAP_SET
+            | store::tcp::OP_MAP_GET
+            | store::tcp::OP_MAP_DEL
+            | store::tcp::OP_MAP_INCR
+            | pub_sub::tcp::OP_SUB
+            | pub_sub::tcp::OP_UNSUB
     )
 }
 
@@ -71,18 +76,31 @@ mod tests {
         assert!(is_inline_opcode(stream::tcp::OP_S_LEAVE));
         assert!(is_inline_opcode(stream::tcp::OP_S_JOIN));
 
-        // Queue opcodes that must be inline
-        assert!(is_inline_opcode(queue::tcp::OP_Q_ACK));
-        assert!(is_inline_opcode(queue::tcp::OP_Q_NACK));
+        // Store opcodes that are O(1) in-memory
+        assert!(is_inline_opcode(store::tcp::OP_MAP_SET));
+        assert!(is_inline_opcode(store::tcp::OP_MAP_GET));
+        assert!(is_inline_opcode(store::tcp::OP_MAP_DEL));
+        assert!(is_inline_opcode(store::tcp::OP_MAP_INCR));
+
+        // PubSub opcodes that must be ordered with publish
+        assert!(is_inline_opcode(pub_sub::tcp::OP_SUB));
+        assert!(is_inline_opcode(pub_sub::tcp::OP_UNSUB));
     }
 
     #[test]
     fn test_blocking_opcodes_are_not_inline() {
-        // These must NOT be inline — they can block (long-poll, I/O, etc.)
+        // These must NOT be inline — they can block (long-poll, I/O, fan-out, etc.)
         assert!(!is_inline_opcode(stream::tcp::OP_S_FETCH));
         assert!(!is_inline_opcode(stream::tcp::OP_S_PUB));
         assert!(!is_inline_opcode(stream::tcp::OP_S_CREATE));
         assert!(!is_inline_opcode(stream::tcp::OP_S_DELETE));
+        assert!(!is_inline_opcode(store::tcp::OP_MAP_CLEAR_ALL));
+        assert!(!is_inline_opcode(store::tcp::OP_MAP_CLEAR_PREFIX));
+        assert!(!is_inline_opcode(pub_sub::tcp::OP_PUB));
+
+        // Queue ack/nack now await on the bounded store writer channel
+        assert!(!is_inline_opcode(queue::tcp::OP_Q_ACK));
+        assert!(!is_inline_opcode(queue::tcp::OP_Q_NACK));
     }
 
     #[test]
