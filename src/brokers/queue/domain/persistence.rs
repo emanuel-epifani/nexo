@@ -4,7 +4,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use rusqlite::{params, types::Type, Connection, Result};
+use rusqlite::{params, types::Type, Connection, Result, ErrorCode};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -190,6 +190,15 @@ async fn run_writer(
     }
 }
 
+/// Returns true if the error is a SQLite constraint violation (permanent, not transient).
+/// These errors (duplicate PK, FK violation, NOT NULL, etc.) will never succeed on retry.
+fn is_constraint_error(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(ref sqlite_err, _) if sqlite_err.code == ErrorCode::ConstraintViolation
+    )
+}
+
 fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
     let tx = match conn.transaction() {
         Ok(t) => t,
@@ -201,6 +210,15 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
 
     for op in batch.iter() {
         if let Err(e) = exec_op(&tx, op) {
+            if is_constraint_error(&e) {
+                error!(
+                    "Fatal constraint error in batch ({} ops), discarding batch to avoid infinite retry: {} — op: {:?}",
+                    batch.len(), e, op
+                );
+                drop(tx); // explicit rollback
+                batch.clear();
+                return;
+            }
             error!("Failed to exec op {:?}: {} — rolling back entire batch", op, e);
             drop(tx); // explicit rollback
             return;
@@ -208,6 +226,14 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
     }
 
     if let Err(e) = tx.commit() {
+        if is_constraint_error(&e) {
+            error!(
+                "Fatal constraint error on commit ({} ops), discarding batch: {}",
+                batch.len(), e
+            );
+            batch.clear();
+            return;
+        }
         error!("Failed to commit batch ({} ops retained for retry): {}", batch.len(), e);
         return;
     }
@@ -403,7 +429,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, dlq_seq, error)
+                "INSERT OR REPLACE INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, dlq_seq, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             )?;
             stmt.execute(params![
@@ -423,7 +449,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             stmt.execute(params![msg.id.as_bytes()])?;
             
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
+                "INSERT OR REPLACE INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             )?;
             stmt.execute(params![
@@ -507,5 +533,108 @@ mod tests {
         // A path inside /dev/null should fail to open as a SQLite DB
         let result = QueueStore::new(PathBuf::from("/dev/null/cannot_create.db"), 10, 100, 1024);
         assert!(result.is_err(), "QueueStore::new should fail on invalid path");
+    }
+
+    #[tokio::test]
+    async fn test_move_to_dlq_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_dlq_idem.db");
+
+        let store = QueueStore::new(db_path.clone(), 10, 100, 1024).unwrap();
+
+        let msg = Message::new(Bytes::from("dlq_payload"), 0, 0);
+        // First insert the message into queue so MoveToDLQ can delete it
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let dlq_msg = DlqMessage::from_message(msg, "test_reason".to_string());
+        // Send MoveToDLQ twice — second should not fail (INSERT OR REPLACE)
+        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
+        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.shutdown().await;
+
+        let conn = Connection::open(&db_path).unwrap();
+        let dlq_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dlq_messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dlq_count, 1, "Duplicate MoveToDLQ should result in exactly 1 DLQ row");
+
+        let queue_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queue_count, 0, "Message should have been removed from main queue");
+    }
+
+    #[tokio::test]
+    async fn test_move_to_main_is_idempotent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_main_idem.db");
+
+        let store = QueueStore::new(db_path.clone(), 10, 100, 1024).unwrap();
+
+        // Insert a message into DLQ first
+        let msg = Message::new(Bytes::from("replay"), 0, 0);
+        let dlq_msg = DlqMessage::from_message(msg.clone(), "reason".to_string());
+        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Now MoveToMain twice — second should not fail (INSERT OR REPLACE)
+        let mut new_msg = dlq_msg.to_message();
+        new_msg.ready_seq = 1;
+        store.execute(StorageOp::MoveToMain(new_msg.clone())).await.unwrap();
+        store.execute(StorageOp::MoveToMain(new_msg.clone())).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.shutdown().await;
+
+        let conn = Connection::open(&db_path).unwrap();
+        let queue_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queue_count, 1, "Duplicate MoveToMain should result in exactly 1 queue row");
+
+        let dlq_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dlq_messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dlq_count, 0, "Message should have been removed from DLQ");
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_discards_on_constraint_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_constraint_discard.db");
+
+        let store = QueueStore::new(db_path.clone(), 10, 100, 1024).unwrap();
+
+        let msg = Message::new(Bytes::from("payload"), 0, 0);
+
+        // Send two inserts with the same ID — second will fail with PK violation.
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+
+        // Wait for flush — constraint error should cause batch discard
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Send a valid insert — it should succeed (writer not stuck)
+        let msg2 = Message::new(Bytes::from("valid"), 0, 0);
+        store.execute(StorageOp::Insert(vec![msg2.clone()])).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.shutdown().await;
+
+        let conn = Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "Constraint batch should be discarded, subsequent valid insert should succeed"
+        );
+
+        let payload: Vec<u8> = conn
+            .query_row("SELECT payload FROM queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(payload, b"valid", "Only the valid message should be persisted");
     }
 }
