@@ -105,15 +105,16 @@ impl QueueState {
     }
 
     /// Push a message to the queue.
-    /// Assigns a new ready_seq from the monotonic counter.
-    pub fn push(&mut self, mut msg: Message) {
+    /// Assigns a new ready_seq from the monotonic counter in-place on `msg`.
+    /// The caller can then persist `msg` with its assigned `ready_seq`.
+    pub fn push(&mut self, msg: &mut Message) {
         let id = msg.id;
         let priority = msg.priority;
         let visible_at = msg.visible_at;
 
         msg.ready_seq = self.next_ready_seq();
 
-        self.registry.insert(id, msg);
+        self.registry.insert(id, msg.clone());
 
         if visible_at > 0 {
             self.waiting_for_ack.entry(visible_at).or_default().insert(id);
@@ -358,7 +359,8 @@ mod tests {
     fn ack_accepts_active_delivery_and_rejects_wrong_token() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1000, now).unwrap();
         assert_eq!(msg.delivery_token, 1);
@@ -371,9 +373,9 @@ mod tests {
     fn ack_rejects_ready_message_and_token_zero() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        let msg = Message::new(b("x"), 0, now);
+        let mut msg = Message::new(b("x"), 0, now);
         let id = msg.id;
-        state.push(msg);
+        state.push(&mut msg);
 
         // Token 0 on a never-popped (ready) message must be stale.
         assert!(!state.ack(id, 0), "ack with token 0 on a ready message must be rejected");
@@ -385,7 +387,8 @@ mod tests {
     fn ack_rejects_expired_lease() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1, now).unwrap();
         std::thread::sleep(Duration::from_millis(5));
@@ -397,7 +400,8 @@ mod tests {
     fn nack_rejects_wrong_token_and_ready_message() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1000, now).unwrap();
         let (requeued, dlq) = state.nack(msg.id, msg.delivery_token + 999, "fail".to_string(), 5);
@@ -411,7 +415,8 @@ mod tests {
     fn nack_rejects_expired_lease() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1, now).unwrap();
         std::thread::sleep(Duration::from_millis(5));
@@ -424,7 +429,8 @@ mod tests {
     fn nack_resets_delivery_token_on_requeue() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1000, now).unwrap();
         let token1 = msg.delivery_token;
@@ -444,7 +450,8 @@ mod tests {
     fn process_expired_resets_delivery_token_on_requeue() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1, now).unwrap();
         let token1 = msg.delivery_token;
@@ -466,7 +473,8 @@ mod tests {
     fn nack_moves_to_dlq_when_max_deliveries_reached() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1000, now).unwrap();
         let (requeued, dlq) = state.nack(msg.id, msg.delivery_token, "fail".to_string(), 1);
@@ -478,7 +486,8 @@ mod tests {
     fn process_expired_moves_to_dlq_when_max_deliveries_reached() {
         let mut state = QueueState::new();
         let now = current_time_ms();
-        state.push(Message::new(b("x"), 0, now));
+        let mut msg = Message::new(b("x"), 0, now);
+        state.push(&mut msg);
 
         let msg = state.pop(1, now).unwrap();
         std::thread::sleep(Duration::from_millis(5));
@@ -486,5 +495,41 @@ mod tests {
         assert!(requeued.is_empty());
         assert_eq!(dlq.len(), 1);
         assert_eq!(dlq[0].id, msg.id);
+    }
+
+    #[test]
+    fn push_assigns_monotonic_ready_seq() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+
+        let mut msg1 = Message::new(b("a"), 0, now);
+        state.push(&mut msg1);
+        assert_eq!(msg1.ready_seq, 1);
+
+        let mut msg2 = Message::new(b("b"), 0, now);
+        state.push(&mut msg2);
+        assert_eq!(msg2.ready_seq, 2);
+    }
+
+    #[test]
+    fn ready_seq_order_preserved_after_requeue() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+
+        let mut first = Message::new(b("first"), 0, now);
+        state.push(&mut first);
+        let mut second = Message::new(b("second"), 0, now);
+        state.push(&mut second);
+
+        // Pop first, let it timeout and get requeued.
+        let m1 = state.pop(1, now).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let (requeued, _) = state.process_expired(5);
+        assert_eq!(requeued.len(), 1);
+
+        // New push should have a higher ready_seq than the requeued message.
+        let mut third = Message::new(b("third"), 0, current_time_ms());
+        state.push(&mut third);
+        assert!(third.ready_seq > m1.ready_seq, "new push must have higher ready_seq than requeued message");
     }
 }

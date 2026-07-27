@@ -206,17 +206,16 @@ impl QueueManager {
                         }
 
                         let max_deliveries = inner.config.max_deliveries;
-                        let (requeued, dlq_msgs) = inner.state.process_expired(max_deliveries);
-
-                        for ref dlq_msg in &dlq_msgs {
-                            inner.dlq.push((*dlq_msg).clone());
-                        }
+                        let (requeued, mut dlq_msgs) = inner.state.process_expired(max_deliveries);
 
                         if !requeued.is_empty() {
                             shared.store.execute(StorageOp::UpdateState(requeued.clone()));
                         }
-                        for ref dlq_msg in &dlq_msgs {
-                            shared.store.execute(StorageOp::MoveToDLQ((*dlq_msg).clone()));
+                        for ref mut dlq_msg in &mut dlq_msgs {
+                            inner.dlq.push(dlq_msg);
+                        }
+                        for dlq_msg in &dlq_msgs {
+                            shared.store.execute(StorageOp::MoveToDLQ(dlq_msg.clone()));
                         }
 
                         (requeued, dlq_msgs)
@@ -330,8 +329,8 @@ impl QueueManager {
         }
         {
             let mut inner = Self::lock(&shared.inner);
-            for msg in &msgs {
-                inner.state.push(msg.clone());
+            for msg in &mut msgs {
+                inner.state.push(msg);
             }
             shared.store.execute(StorageOp::Insert(msgs));
         }
@@ -389,16 +388,13 @@ impl QueueManager {
         let (requeued, dlq_msg) = {
             let mut inner = Self::lock(&shared.inner);
             let max_deliveries = inner.config.max_deliveries;
-            let (requeued, dlq_msg) = inner.state.nack(id, delivery_token, reason, max_deliveries);
-
-            if let Some(ref dlq_message) = dlq_msg {
-                inner.dlq.push(dlq_message.clone());
-            }
+            let (requeued, mut dlq_msg) = inner.state.nack(id, delivery_token, reason, max_deliveries);
 
             if let Some(ref msg) = requeued {
                 shared.store.execute(StorageOp::UpdateState(vec![msg.clone()]));
             }
-            if let Some(ref dlq_message) = dlq_msg {
+            if let Some(ref mut dlq_message) = dlq_msg {
+                inner.dlq.push(dlq_message);
                 shared.store.execute(StorageOp::MoveToDLQ(dlq_message.clone()));
             }
 
@@ -508,8 +504,8 @@ impl QueueManager {
         let new_msg = {
             let mut inner = Self::lock(&shared.inner);
             if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
-                let new_msg = dlq_msg.clone().to_message();
-                inner.state.push(new_msg.clone());
+                let mut new_msg = dlq_msg.to_message();
+                inner.state.push(&mut new_msg);
                 shared.store.execute(StorageOp::MoveToMain(new_msg.clone()));
                 Some(new_msg)
             } else {

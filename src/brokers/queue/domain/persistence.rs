@@ -314,7 +314,7 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
 
 fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, payload, priority, attempts, created_at, failed_at, dlq_seq, error FROM dlq_messages ORDER BY dlq_seq DESC"
+        "SELECT id, payload, priority, attempts, created_at, failed_at, dlq_seq, error FROM dlq_messages ORDER BY dlq_seq ASC"
     )?;
 
     let message_iter = stmt.query_map([], |row| {

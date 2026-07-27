@@ -772,6 +772,146 @@ mod queue_tests {
                 );
             }
         }
+
+        #[tokio::test]
+        async fn test_ready_seq_persists_for_new_pushes() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("persist_ready_seq_{}", Uuid::new_v4());
+
+            {
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                for i in 1..=3 {
+                    manager.push(q.clone(), Bytes::from(format!("msg{}", i)), 0).await.unwrap();
+                }
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Restart - new pushes must come out in original FIFO order
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                for i in 1..=3 {
+                    let msg = manager2.pop(&q).await.expect("Message should be recovered");
+                    assert_eq!(
+                        msg.payload,
+                        Bytes::from(format!("msg{}", i)),
+                        "FIFO order must survive restart for new pushes"
+                    );
+                    assert!(msg.ready_seq > 0, "ready_seq must be persisted");
+                    manager2.ack(&q, msg.id, msg.delivery_token).await;
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_ready_seq_order_with_timeout_requeue_after_restart() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("persist_ready_seq_requeue_{}", Uuid::new_v4());
+
+            {
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                let config = QueueCreateOptions {
+                    visibility_timeout_ms: Some(50),
+                    max_deliveries: Some(5),
+                    ..Default::default()
+                };
+                manager.create_queue(q.clone(), config).await.unwrap();
+
+                manager.push(q.clone(), Bytes::from("first"), 0).await.unwrap();
+                let msg = manager.pop(&q).await.unwrap();
+                assert_eq!(msg.payload, Bytes::from("first"));
+
+                // Wait for timeout so the message is requeued with a new ready_seq
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                // Push a second message after the requeue
+                manager.push(q.clone(), Bytes::from("second"), 0).await.unwrap();
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Restart - requeued message must still come before the newer push
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                let first = manager2.pop(&q).await.expect("First message should be first after restart");
+                assert_eq!(first.payload, Bytes::from("first"), "Requeued message must come before newer push after restart");
+                manager2.ack(&q, first.id, first.delivery_token).await;
+
+                let second = manager2.pop(&q).await.expect("Second message should follow");
+                assert_eq!(second.payload, Bytes::from("second"));
+            }
+        }
+
+        #[tokio::test]
+        async fn test_dlq_seq_persists_and_peek_order() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("persist_dlq_seq_{}", Uuid::new_v4());
+
+            {
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                let config = QueueCreateOptions {
+                    visibility_timeout_ms: Some(50),
+                    max_deliveries: Some(1),
+                    ..Default::default()
+                };
+                manager.create_queue(q.clone(), config).await.unwrap();
+
+                manager.push(q.clone(), Bytes::from("first"), 0).await.unwrap();
+                manager.push(q.clone(), Bytes::from("second"), 0).await.unwrap();
+
+                // Pop both: each has attempts=1 >= max_deliveries=1, so timeout moves them to DLQ
+                let _ = manager.pop(&q).await.unwrap();
+                let _ = manager.pop(&q).await.unwrap();
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                // Verify peek order before restart (most recent first)
+                let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
+                assert_eq!(total, 2);
+                assert_eq!(dlq_msgs[0].payload, Bytes::from("second"));
+                assert_eq!(dlq_msgs[1].payload, Bytes::from("first"));
+
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Restart - DLQ ordering and dlq_seq must survive
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                manager2.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+
+                let (total, dlq_msgs) = manager2.peek_dlq(&q, 10, 0).await.unwrap();
+                assert_eq!(total, 2);
+                assert!(dlq_msgs[0].dlq_seq > 0, "dlq_seq must be persisted");
+                assert!(dlq_msgs[1].dlq_seq > 0, "dlq_seq must be persisted");
+                assert!(dlq_msgs[0].dlq_seq > dlq_msgs[1].dlq_seq, "DLQ peek must remain most-recent first");
+                assert_eq!(dlq_msgs[0].payload, Bytes::from("second"));
+                assert_eq!(dlq_msgs[1].payload, Bytes::from("first"));
+            }
+        }
     }
 
 

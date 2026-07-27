@@ -69,11 +69,11 @@ impl DlqState {
         }
     }
 
-    pub fn push(&mut self, mut msg: DlqMessage) {
+    pub fn push(&mut self, msg: &mut DlqMessage) {
         self.dlq_seq_counter += 1;
         msg.dlq_seq = self.dlq_seq_counter;
         // Updates position to end if already exists (which shouldn't happen usually)
-        self.messages.insert(msg.id, msg);
+        self.messages.insert(msg.id, msg.clone());
     }
 
     /// Restore a message from persistence without reassigning dlq_seq.
@@ -111,5 +111,42 @@ impl DlqState {
             .collect();
             
         (total, items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dlq_msg(id: u8) -> DlqMessage {
+        DlqMessage {
+            id: Uuid::from_u128(id as u128),
+            payload: Bytes::from(format!("msg{}", id)),
+            priority: 0,
+            attempts: 1,
+            created_at: 0,
+            failed_at: 0,
+            dlq_seq: 0,
+            failure_reason: "fail".to_string(),
+        }
+    }
+
+    #[test]
+    fn push_assigns_monotonic_dlq_seq() {
+        let mut state = DlqState::new();
+
+        let mut m1 = dlq_msg(1);
+        state.push(&mut m1);
+        assert_eq!(m1.dlq_seq, 1);
+
+        let mut m2 = dlq_msg(2);
+        state.push(&mut m2);
+        assert_eq!(m2.dlq_seq, 2);
+
+        let (_, peeked) = state.peek(0, 2);
+        assert_eq!(peeked.len(), 2);
+        // peek is most-recent first, so m2 (seq 2) then m1 (seq 1)
+        assert_eq!(peeked[0].dlq_seq, 2);
+        assert_eq!(peeked[1].dlq_seq, 1);
     }
 }
