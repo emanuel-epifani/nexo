@@ -34,6 +34,15 @@ pub const OP_Q_DELETE_DLQ: u8 = 0x18;
 pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 
 // ==========================================
+// WIRE LIMITS (server-side caps before allocation)
+// ==========================================
+
+/// Maximum number of items in a single PUSH request.
+const MAX_PUSH_ITEMS: usize = 10_000;
+/// Minimum bytes per push item (flags:1 + payload_len:4).
+const MIN_PUSH_ITEM_BYTES: usize = 5;
+
+// ==========================================
 // COMMANDS
 // ==========================================
 
@@ -71,6 +80,12 @@ impl QueueCommand {
             OP_Q_PUSH => {
                 let q_name = cursor.read_string()?;
                 let count = cursor.read_u32()? as usize;
+                if count > MAX_PUSH_ITEMS {
+                    return Err(ParseError::Invalid(format!("Push count too large: {} (max {})", count, MAX_PUSH_ITEMS)));
+                }
+                if count > cursor.len() / MIN_PUSH_ITEM_BYTES {
+                    return Err(ParseError::Invalid(format!("Push count {} exceeds remaining payload", count)));
+                }
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     let flags = cursor.read_u8()?;
@@ -244,5 +259,45 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
             Ok(count) => Response::Data(encode_count(count)),
             Err(e) => Response::Error(e),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::tcp::protocol::wire::{PayloadWriter, PayloadCursor};
+
+    fn make_cursor(op: u8, payload: bytes::Bytes) -> (u8, PayloadCursor) {
+        (op, PayloadCursor::new(payload))
+    }
+
+    #[test]
+    fn push_rejects_count_exceeding_max() {
+        let mut w = PayloadWriter::new();
+        w.put_str("test_queue");
+        w.put_u32((MAX_PUSH_ITEMS + 1) as u32);
+        let (op, mut cursor) = make_cursor(OP_Q_PUSH, w.into_bytes());
+        let result = QueueCommand::parse(op, &mut cursor);
+        assert!(result.is_err(), "Push with count > MAX_PUSH_ITEMS must fail");
+    }
+
+    #[test]
+    fn push_rejects_huge_count_before_allocation() {
+        let mut w = PayloadWriter::new();
+        w.put_str("test_queue");
+        w.put_u32(u32::MAX);
+        let (op, mut cursor) = make_cursor(OP_Q_PUSH, w.into_bytes());
+        let result = QueueCommand::parse(op, &mut cursor);
+        assert!(result.is_err(), "Push with u32::MAX count must fail before allocation");
+    }
+
+    #[test]
+    fn push_rejects_count_exceeding_remaining_payload() {
+        let mut w = PayloadWriter::new();
+        w.put_str("test_queue");
+        w.put_u32(100);
+        let (op, mut cursor) = make_cursor(OP_Q_PUSH, w.into_bytes());
+        let result = QueueCommand::parse(op, &mut cursor);
+        assert!(result.is_err(), "Push with count > remaining payload must fail");
     }
 }
