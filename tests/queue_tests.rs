@@ -617,6 +617,39 @@ mod queue_tests {
         }
 
         #[tokio::test]
+        async fn test_corrupted_db_prevents_queue_registration() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().to_str().unwrap().to_string();
+            let mut sys_config = nexo::config::Config::global().queue.clone();
+            sys_config.persistence_path = path.clone();
+
+            let q = format!("corrupt_{}", Uuid::new_v4());
+
+            // Phase 1: Create queue and push a message
+            {
+                let manager = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                manager.create_queue(q.clone(), QueueCreateOptions::default()).await.unwrap();
+                manager.push(q.clone(), Bytes::from("survivor"), 0).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Corrupt the DB file
+            let db_path = std::path::PathBuf::from(&path).join(format!("{}.db", q));
+            std::fs::write(&db_path, b"corrupted garbage data").unwrap();
+
+            // Phase 2: Restart — queue should NOT be registered (fail-fast)
+            {
+                let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+
+                assert!(
+                    !manager2.exists(&q).await,
+                    "Queue with corrupted DB must NOT be registered — fail-fast prevents silent data loss"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn test_dlq_delete_and_purge() {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("dlq_ops_{}", Uuid::new_v4());

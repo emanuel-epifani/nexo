@@ -164,7 +164,7 @@ impl QueueManager {
                 }
             }
             Err(e) => {
-                error!("Queue '{}': Persistence recovery failed: {}", name, e);
+                return Err(format!("Queue '{}': Persistence recovery failed: {}", name, e));
             }
         }
 
