@@ -41,7 +41,7 @@ pub enum StorageOp {
 // ==========================================
 
 pub struct QueueStore {
-    sender: Mutex<Option<mpsc::UnboundedSender<StorageOp>>>,
+    sender: Mutex<Option<mpsc::Sender<StorageOp>>>,
     writer_handle: Mutex<Option<JoinHandle<()>>>,
     db_path: PathBuf,
 }
@@ -51,6 +51,7 @@ impl QueueStore {
         db_path: PathBuf,
         flush_ms: u64,
         batch_size: usize,
+        storage_channel_capacity: usize,
     ) -> Result<Self, String> {
         // SYNCHRONOUS INIT: Ensure DB schema exists before anything else
         // This prevents race conditions where recover() runs before Writer creates tables.
@@ -59,7 +60,7 @@ impl QueueStore {
         init_db(&conn)
             .map_err(|e| format!("Failed to initialize Queue DB schema at {:?}: {}", db_path, e))?;
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(storage_channel_capacity);
 
         let path_clone = db_path.clone();
         let handle = tokio::spawn(async move {
@@ -88,13 +89,16 @@ impl QueueStore {
         Ok((main_messages, dlq_messages))
     }
 
-    /// Send a storage op to the background writer (sync, never blocks)
+    /// Send a storage op to the background writer, awaiting if the bounded
+    /// channel is full. This provides backpressure to the caller.
     #[inline]
-    pub fn execute(&self, op: StorageOp) {
-        if let Some(sender) = self.sender.lock().as_ref() {
-            if let Err(e) = sender.send(op) {
-                error!("Writer channel closed, op lost: {:?}", e.0);
-            }
+    pub async fn execute(&self, op: StorageOp) -> Result<(), String> {
+        let sender = self.sender.lock().as_ref().cloned();
+        match sender {
+            Some(s) => s.send(op).await.map_err(|e| {
+                format!("Writer channel closed, op lost: {:?}", e.0)
+            }),
+            None => Err("Writer channel closed".into()),
         }
     }
 
@@ -113,7 +117,7 @@ impl QueueStore {
 // ==========================================
 
 async fn run_writer(
-    mut rx: mpsc::UnboundedReceiver<StorageOp>,
+    mut rx: mpsc::Receiver<StorageOp>,
     db_path: PathBuf,
     flush_ms: u64,
     batch_size: usize,
@@ -451,14 +455,14 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_rollback.db");
 
-        let store = QueueStore::new(db_path.clone(), 10, 100).unwrap();
+        let store = QueueStore::new(db_path.clone(), 10, 100, 1024).unwrap();
 
         let msg = Message::new(Bytes::from("payload"), 0, 0);
 
         // Send two inserts with the same ID — second will fail with PK violation.
-        // Both ops land in the same batch (unbounded channel + try_recv drain).
-        store.execute(StorageOp::Insert(vec![msg.clone()]));
-        store.execute(StorageOp::Insert(vec![msg.clone()]));
+        // Both ops land in the same batch (bounded channel + try_recv drain).
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
 
         // Wait for flush timer (10ms) to fire
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -481,12 +485,12 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_commit.db");
 
-        let store = QueueStore::new(db_path.clone(), 10, 100).unwrap();
+        let store = QueueStore::new(db_path.clone(), 10, 100, 1024).unwrap();
 
         let msg1 = Message::new(Bytes::from("a"), 0, 0);
         let msg2 = Message::new(Bytes::from("b"), 0, 0);
 
-        store.execute(StorageOp::Insert(vec![msg1.clone(), msg2.clone()]));
+        store.execute(StorageOp::Insert(vec![msg1.clone(), msg2.clone()])).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         store.shutdown().await;
@@ -501,7 +505,7 @@ mod tests {
     #[test]
     fn test_queue_store_new_fails_on_invalid_path() {
         // A path inside /dev/null should fail to open as a SQLite DB
-        let result = QueueStore::new(PathBuf::from("/dev/null/cannot_create.db"), 10, 100);
+        let result = QueueStore::new(PathBuf::from("/dev/null/cannot_create.db"), 10, 100, 1024);
         assert!(result.is_err(), "QueueStore::new should fail on invalid path");
     }
 }

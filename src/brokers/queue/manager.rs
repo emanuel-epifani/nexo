@@ -140,6 +140,7 @@ impl QueueManager {
             db_path,
             system_config.default_flush_ms,
             system_config.writer_batch_size,
+            system_config.storage_channel_capacity,
         )?;
 
         let mut main_state = QueueState::new();
@@ -208,18 +209,23 @@ impl QueueManager {
                         let max_deliveries = inner.config.max_deliveries;
                         let (requeued, mut dlq_msgs) = inner.state.process_expired(max_deliveries);
 
-                        if !requeued.is_empty() {
-                            shared.store.execute(StorageOp::UpdateState(requeued.clone()));
-                        }
                         for ref mut dlq_msg in &mut dlq_msgs {
                             inner.dlq.push(dlq_msg);
-                        }
-                        for dlq_msg in &dlq_msgs {
-                            shared.store.execute(StorageOp::MoveToDLQ(dlq_msg.clone()));
                         }
 
                         (requeued, dlq_msgs)
                     };
+
+                    if !requeued.is_empty() {
+                        if let Err(e) = shared.store.execute(StorageOp::UpdateState(requeued.clone())).await {
+                            error!("Failed to persist timeout requeue: {}", e);
+                        }
+                    }
+                    for dlq_msg in &dlq_msgs {
+                        if let Err(e) = shared.store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await {
+                            error!("Failed to persist timeout dlq: {}", e);
+                        }
+                    }
 
                     if requeued.is_empty() && dlq_msgs.is_empty() {
                         continue;
@@ -332,8 +338,9 @@ impl QueueManager {
             for msg in &mut msgs {
                 inner.state.push(msg);
             }
-            shared.store.execute(StorageOp::Insert(msgs));
         }
+
+        shared.store.execute(StorageOp::Insert(msgs)).await?;
 
         shared.notify.notify_waiters();
 
@@ -351,12 +358,14 @@ impl QueueManager {
         let msg_opt = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
-            let msg = inner.state.pop(vt, now);
-            if let Some(ref m) = msg {
-                shared.store.execute(StorageOp::UpdateState(vec![m.clone()]));
-            }
-            msg
+            inner.state.pop(vt, now)
         };
+
+        if let Some(ref m) = msg_opt {
+            if let Err(e) = shared.store.execute(StorageOp::UpdateState(vec![m.clone()])).await {
+                error!("Failed to persist pop state: {}", e);
+            }
+        }
 
         msg_opt
     }
@@ -367,16 +376,18 @@ impl QueueManager {
             None => return false,
         };
 
-        let result = {
+        let ok = {
             let mut inner = Self::lock(&shared.inner);
-            let ok = inner.state.ack(id, delivery_token);
-            if ok {
-                shared.store.execute(StorageOp::Delete(id));
-            }
-            ok
+            inner.state.ack(id, delivery_token)
         };
 
-        result
+        if ok {
+            if let Err(e) = shared.store.execute(StorageOp::Delete(id)).await {
+                error!("Failed to persist ack: {}", e);
+            }
+        }
+
+        ok
     }
 
     pub async fn nack(&self, queue_name: &str, id: Uuid, delivery_token: u64, reason: String) -> bool {
@@ -390,16 +401,23 @@ impl QueueManager {
             let max_deliveries = inner.config.max_deliveries;
             let (requeued, mut dlq_msg) = inner.state.nack(id, delivery_token, reason, max_deliveries);
 
-            if let Some(ref msg) = requeued {
-                shared.store.execute(StorageOp::UpdateState(vec![msg.clone()]));
-            }
             if let Some(ref mut dlq_message) = dlq_msg {
                 inner.dlq.push(dlq_message);
-                shared.store.execute(StorageOp::MoveToDLQ(dlq_message.clone()));
             }
 
             (requeued, dlq_msg)
         };
+
+        if let Some(ref msg) = requeued {
+            if let Err(e) = shared.store.execute(StorageOp::UpdateState(vec![msg.clone()])).await {
+                error!("Failed to persist nack requeue: {}", e);
+            }
+        }
+        if let Some(ref dlq_message) = dlq_msg {
+            if let Err(e) = shared.store.execute(StorageOp::MoveToDLQ(dlq_message.clone())).await {
+                error!("Failed to persist nack dlq: {}", e);
+            }
+        }
 
         if requeued.is_some() {
             shared.notify.notify_waiters();
@@ -424,13 +442,10 @@ impl QueueManager {
         let msgs = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
-            let msgs = inner.state.take_batch(max_val, vt);
-            if !msgs.is_empty() {
-                shared.store.execute(StorageOp::UpdateState(msgs.clone()));
-            }
-            msgs
+            inner.state.take_batch(max_val, vt)
         };
         if !msgs.is_empty() {
+            shared.store.execute(StorageOp::UpdateState(msgs.clone())).await?;
             return Ok(msgs);
         }
 
@@ -450,13 +465,10 @@ impl QueueManager {
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;
-                let msgs = inner.state.take_batch(max_val, vt);
-                if !msgs.is_empty() {
-                    shared.store.execute(StorageOp::UpdateState(msgs.clone()));
-                }
-                msgs
+                inner.state.take_batch(max_val, vt)
             };
             if !msgs.is_empty() {
+                shared.store.execute(StorageOp::UpdateState(msgs.clone())).await?;
                 return Ok(msgs);
             }
 
@@ -506,14 +518,14 @@ impl QueueManager {
             if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
                 let mut new_msg = dlq_msg.to_message();
                 inner.state.push(&mut new_msg);
-                shared.store.execute(StorageOp::MoveToMain(new_msg.clone()));
                 Some(new_msg)
             } else {
                 None
             }
         };
 
-        if let Some(_) = new_msg {
+        if let Some(new_msg) = new_msg {
+            shared.store.execute(StorageOp::MoveToMain(new_msg.clone())).await?;
             shared.notify.notify_waiters();
             Ok(true)
         } else {
@@ -528,12 +540,12 @@ impl QueueManager {
 
         let removed = {
             let mut inner = Self::lock(&shared.inner);
-            let removed = inner.dlq.remove(&message_id).is_some();
-            if removed {
-                shared.store.execute(StorageOp::DeleteDLQ(message_id));
-            }
-            removed
+            inner.dlq.remove(&message_id).is_some()
         };
+
+        if removed {
+            shared.store.execute(StorageOp::DeleteDLQ(message_id)).await?;
+        }
 
         Ok(removed)
     }
@@ -547,9 +559,10 @@ impl QueueManager {
             let mut inner = Self::lock(&shared.inner);
             let count = inner.dlq.len();
             inner.dlq.clear();
-            shared.store.execute(StorageOp::PurgeDLQ);
             count
         };
+
+        shared.store.execute(StorageOp::PurgeDLQ).await?;
 
         Ok(count)
     }
