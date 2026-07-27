@@ -203,17 +203,18 @@ impl QueueManager {
                             inner.dlq.push((*dlq_msg).clone());
                         }
 
+                        if !requeued.is_empty() {
+                            shared.store.execute(StorageOp::UpdateState(requeued.clone()));
+                        }
+                        for ref dlq_msg in &dlq_msgs {
+                            shared.store.execute(StorageOp::MoveToDLQ((*dlq_msg).clone()));
+                        }
+
                         (requeued, dlq_msgs)
                     };
 
                     if requeued.is_empty() && dlq_msgs.is_empty() {
                         continue;
-                    }
-
-                    Self::persist_batch_state(&shared, &requeued);
-
-                    for dlq_msg in dlq_msgs {
-                        shared.store.execute(StorageOp::MoveToDLQ(dlq_msg));
                     }
 
                     if !requeued.is_empty() {
@@ -234,12 +235,6 @@ impl QueueManager {
         self.queues.get(name).map(|r| r.value().clone())
     }
 
-    fn persist_batch_state(shared: &Arc<QueueShared>, msgs: &[Message]) {
-        if msgs.is_empty() {
-            return;
-        }
-        shared.store.execute(StorageOp::UpdateState(msgs.to_vec()));
-    }
 
     // ==========================================
     // PUBLIC API
@@ -319,8 +314,8 @@ impl QueueManager {
             for msg in &msgs {
                 inner.state.push(msg.clone());
             }
+            shared.store.execute(StorageOp::Insert(msgs));
         }
-        shared.store.execute(StorageOp::Insert(msgs));
 
         shared.notify.notify_waiters();
 
@@ -338,12 +333,12 @@ impl QueueManager {
         let msg_opt = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
-            inner.state.pop(vt, now)
+            let msg = inner.state.pop(vt, now);
+            if let Some(ref m) = msg {
+                shared.store.execute(StorageOp::UpdateState(vec![m.clone()]));
+            }
+            msg
         };
-
-        if let Some(msg) = &msg_opt {
-            shared.store.execute(StorageOp::UpdateState(vec![msg.clone()]));
-        }
 
         msg_opt
     }
@@ -356,12 +351,12 @@ impl QueueManager {
 
         let result = {
             let mut inner = Self::lock(&shared.inner);
-            inner.state.ack(id)
+            let ok = inner.state.ack(id);
+            if ok {
+                shared.store.execute(StorageOp::Delete(id));
+            }
+            ok
         };
-
-        if result {
-            shared.store.execute(StorageOp::Delete(id));
-        }
 
         result
     }
@@ -381,21 +376,22 @@ impl QueueManager {
                 inner.dlq.push(dlq_message.clone());
             }
 
+            if let Some(ref msg) = requeued {
+                shared.store.execute(StorageOp::UpdateState(vec![msg.clone()]));
+            }
+            if let Some(ref dlq_message) = dlq_msg {
+                shared.store.execute(StorageOp::MoveToDLQ(dlq_message.clone()));
+            }
+
             (requeued, dlq_msg)
         };
 
-        if let Some(msg) = requeued {
-            shared.store.execute(StorageOp::UpdateState(vec![msg]));
+        if requeued.is_some() {
             shared.notify.notify_waiters();
             return true;
         }
 
-        if let Some(dlq_message) = dlq_msg {
-            shared.store.execute(StorageOp::MoveToDLQ(dlq_message));
-            return true;
-        }
-
-        false
+        dlq_msg.is_some()
     }
 
     pub async fn consume_batch(&self, queue_name: String, max: Option<usize>, wait_ms: Option<u64>) -> Result<Vec<Message>, String> {
@@ -414,10 +410,12 @@ impl QueueManager {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
             let msgs = inner.state.take_batch(max_val, vt);
+            if !msgs.is_empty() {
+                shared.store.execute(StorageOp::UpdateState(msgs.clone()));
+            }
             msgs
         };
         if !msgs.is_empty() {
-            Self::persist_batch_state(&shared, &msgs);
             return Ok(msgs);
         }
 
@@ -437,10 +435,13 @@ impl QueueManager {
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;
-                inner.state.take_batch(max_val, vt)
+                let msgs = inner.state.take_batch(max_val, vt);
+                if !msgs.is_empty() {
+                    shared.store.execute(StorageOp::UpdateState(msgs.clone()));
+                }
+                msgs
             };
             if !msgs.is_empty() {
-                Self::persist_batch_state(&shared, &msgs);
                 return Ok(msgs);
             }
 
@@ -490,14 +491,14 @@ impl QueueManager {
             if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
                 let new_msg = dlq_msg.clone().to_message();
                 inner.state.push(new_msg.clone());
+                shared.store.execute(StorageOp::MoveToMain(new_msg.clone()));
                 Some(new_msg)
             } else {
                 None
             }
         };
 
-        if let Some(msg) = new_msg {
-            shared.store.execute(StorageOp::MoveToMain(msg));
+        if let Some(_) = new_msg {
             shared.notify.notify_waiters();
             Ok(true)
         } else {
@@ -512,12 +513,12 @@ impl QueueManager {
 
         let removed = {
             let mut inner = Self::lock(&shared.inner);
-            inner.dlq.remove(&message_id).is_some()
+            let removed = inner.dlq.remove(&message_id).is_some();
+            if removed {
+                shared.store.execute(StorageOp::DeleteDLQ(message_id));
+            }
+            removed
         };
-
-        if removed {
-            shared.store.execute(StorageOp::DeleteDLQ(message_id));
-        }
 
         Ok(removed)
     }
@@ -531,10 +532,10 @@ impl QueueManager {
             let mut inner = Self::lock(&shared.inner);
             let count = inner.dlq.len();
             inner.dlq.clear();
+            shared.store.execute(StorageOp::PurgeDLQ);
             count
         };
 
-        shared.store.execute(StorageOp::PurgeDLQ);
         Ok(count)
     }
 }
