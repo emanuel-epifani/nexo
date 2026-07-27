@@ -839,4 +839,51 @@ mod queue_tests {
         }
     }
 
+    mod security {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_create_rejects_path_traversal_names() {
+            let (manager, _tmp) = setup_queue_manager().await;
+
+            for invalid in ["../outside", "nested/queue", "nested\\queue", "/tmp/queue", "..", "."] {
+                let result = manager.create_queue(invalid.to_string(), QueueCreateOptions::default()).await;
+                assert!(result.is_err(), "create_queue({invalid:?}) should fail");
+            }
+        }
+
+        #[tokio::test]
+        async fn test_delete_rejects_path_traversal_names() {
+            let (manager, _tmp) = setup_queue_manager().await;
+
+            let result = manager.delete_queue("../outside".to_string()).await;
+            assert!(result.is_err(), "delete_queue with traversal name should fail");
+        }
+
+        #[tokio::test]
+        async fn test_exists_returns_false_for_invalid_names() {
+            let (manager, _tmp) = setup_queue_manager().await;
+
+            assert!(!manager.exists("../outside").await);
+            assert!(!manager.exists("nested/queue").await);
+            assert!(!manager.exists("").await);
+        }
+
+        #[tokio::test]
+        async fn test_create_rejects_empty_name() {
+            let (manager, _tmp) = setup_queue_manager().await;
+
+            let result = manager.create_queue("".to_string(), QueueCreateOptions::default()).await;
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_create_rejects_name_with_spaces() {
+            let (manager, _tmp) = setup_queue_manager().await;
+
+            let result = manager.create_queue("queue name".to_string(), QueueCreateOptions::default()).await;
+            assert!(result.is_err());
+        }
+    }
+
 }

@@ -47,6 +47,26 @@ pub struct QueueManager {
 }
 
 impl QueueManager {
+    const MAX_QUEUE_NAME_BYTES: usize = 255;
+
+    fn validate_queue_name(name: &str) -> Result<(), String> {
+        if name.is_empty() || name.len() > Self::MAX_QUEUE_NAME_BYTES {
+            return Err(format!(
+                "Invalid queue name: length must be between 1 and {} bytes",
+                Self::MAX_QUEUE_NAME_BYTES
+            ));
+        }
+        if name == "." || name == ".." || !name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+        }) {
+            return Err(
+                "Invalid queue name: only ASCII letters, digits, '.', '_' and '-' are allowed"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn new(system_config: Arc<SystemQueueConfig>) -> Self {
         let queues = Arc::new(DashMap::new());
         let cancel = CancellationToken::new();
@@ -73,6 +93,11 @@ impl QueueManager {
                         if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                             if filename.ends_with(".db") && !filename.ends_with(".db-wal") && !filename.ends_with(".db-shm") {
                                 let queue_name = filename.trim_end_matches(".db").to_string();
+
+                                if Self::validate_queue_name(&queue_name).is_err() {
+                                    error!("[QueueManager] Skipping queue with invalid name during warm start: '{}'", queue_name);
+                                    continue;
+                                }
 
                                 let config_path = persistence_path.join(format!("{}.config.json", queue_name));
                                 let config = if let Ok(data) = std::fs::read_to_string(&config_path) {
@@ -221,6 +246,17 @@ impl QueueManager {
     // ==========================================
 
     pub async fn create_queue(&self, name: String, options: QueueCreateOptions) -> Result<(), String> {
+        Self::validate_queue_name(&name)?;
+
+        // Reject if the DB path is a symlink (path traversal protection)
+        let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
+        let db_path = persistence_path.join(format!("{}.db", name));
+        if let Ok(meta) = std::fs::symlink_metadata(&db_path) {
+            if meta.file_type().is_symlink() {
+                return Err("Invalid queue path: symbolic links are not allowed".to_string());
+            }
+        }
+
         use dashmap::mapref::entry::Entry;
 
         match self.queues.entry(name.clone()) {
@@ -243,6 +279,8 @@ impl QueueManager {
     }
 
     pub async fn delete_queue(&self, name: String) -> Result<(), String> {
+        Self::validate_queue_name(&name)?;
+
         if let Some((_, shared)) = self.queues.remove(&name) {
             shared.store.shutdown().await;
         }
@@ -425,6 +463,9 @@ impl QueueManager {
     }
 
     pub async fn exists(&self, name: &str) -> bool {
+        if Self::validate_queue_name(name).is_err() {
+            return false;
+        }
         self.queues.contains_key(name)
     }
 
@@ -498,3 +539,30 @@ impl QueueManager {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_names_cannot_escape_the_persistence_directory() {
+        for invalid in ["", ".", "..", "../outside", "nested/queue", "nested\\queue", "/tmp/queue", "queue name"] {
+            assert!(QueueManager::validate_queue_name(invalid).is_err(), "{invalid:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn queue_names_accept_valid_characters() {
+        assert!(QueueManager::validate_queue_name("orders_42").is_ok());
+        assert!(QueueManager::validate_queue_name("email.queue").is_ok());
+        assert!(QueueManager::validate_queue_name("high-priority").is_ok());
+        assert!(QueueManager::validate_queue_name("a").is_ok());
+    }
+
+    #[test]
+    fn queue_names_reject_too_long() {
+        let long = "a".repeat(256);
+        assert!(QueueManager::validate_queue_name(&long).is_err());
+        let max = "a".repeat(255);
+        assert!(QueueManager::validate_queue_name(&max).is_ok());
+    }
+}
