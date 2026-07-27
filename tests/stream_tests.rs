@@ -2597,5 +2597,191 @@ mod stream_tests {
             assert_eq!(msgs2[0].seq, 1);
         }
     }
+
+    mod delivery_guarantees {
+        use super::*;
+        use nexo::brokers::stream::options::{SeekTarget, RetentionOptions};
+
+        /// SEEK must clear all DLT entries and parked keys — it is a full reset.
+        /// After seek, a previously-poisoned key must accept new messages.
+        #[tokio::test]
+        async fn seek_clears_dlt_and_unblocks_parked_keys() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            config.ack_wait_ms = 50;
+            config.max_deliveries = 2;
+            let manager = build_manager(config).await;
+            let topic = "seek-clears-dlt";
+            let group = "g-seek-clears-dlt";
+            let key = Bytes::from("poison-key");
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish 3 messages with same key
+            for i in 1..=3 {
+                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Fetch msg-1, let it timeout twice → parked in DLT
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Trigger fetch to auto-park msg-2 and msg-3 (same key is poisoned)
+            let batch_parked = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch_parked.len(), 0, "All same-key messages should be auto-parked");
+
+            // Verify DLT has 3 entries
+            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt.len(), 3, "All 3 same-key messages should be in DLT before seek");
+
+            // SEEK to beginning — full reset
+            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+
+            // DLT should be empty
+            let dlt_after = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+            assert_eq!(dlt_after.len(), 0, "DLT should be empty after seek (full reset)");
+
+            // Re-join (seek bumps generation) and publish a new message with same key
+            let consumer2 = join_session(&manager, group, topic, "client-A").await;
+            manager.publish(topic, Some(key.clone()), Bytes::from("msg-4")).await.unwrap();
+
+            // After seek, per-key ordering still applies — all 4 messages share the
+            // same key, so they are delivered one at a time. The key is no longer
+            // poisoned, so seq=1 is deliverable immediately (previously it was blocked).
+            let batch = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+            assert!(!batch.is_empty(), "Previously-parked key should be unblocked after seek");
+            assert_eq!(batch[0].seq, 1, "First message should be deliverable (key unblocked by seek)");
+
+            // ACK through the old messages one at a time (per-key ordering delivers
+            // the next only after the previous is acked) until msg-4 becomes available.
+            let mut current_seq = batch[0].seq;
+            for _ in 0..3 {
+                ack_message(&manager, group, topic, &consumer2, current_seq).await;
+                let next = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+                assert_eq!(next.len(), 1, "Next message should be unblocked after ack");
+                current_seq = next[0].seq;
+            }
+            assert_eq!(current_seq, 4, "Should reach msg-4 after acking predecessors");
+            assert_eq!(fetch_messages(&manager, group, topic, &consumer2, 10, 0).await.len(),
+                0, "No more messages after msg-4 is fetched");
+        }
+
+        /// Retention options set via StreamCreateOptions must override system defaults.
+        /// Messages exceeding maxBytes should be deleted by the retention task.
+        #[tokio::test]
+        async fn retention_override_via_create_options_enforces_max_bytes() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path_str = temp_dir.path().to_str().unwrap().to_string();
+
+            let mut config = get_test_config(Some(&path_str));
+            config.max_segment_size = 100;
+            config.retention_check_interval_ms = 100;
+            config.default_flush_ms = 50;
+            // Set a large system default to prove the override takes precedence
+            config.default_retention_bytes = 10_000_000;
+
+            let manager = build_manager(config).await;
+            let topic = "retention-override";
+
+            // Create with a small per-topic retention override
+            let options = StreamCreateOptions {
+                retention: Some(RetentionOptions {
+                    max_age_ms: None,
+                    max_bytes: Some(250),
+                }),
+            };
+            manager.create_topic(topic.to_string(), options).await.unwrap();
+
+            // Publish 7 messages (~55 bytes each with overhead → total > 250)
+            for i in 1..=7 {
+                manager.publish(topic, None, Bytes::from(format!("msg{}-50bytes-payload-0000000000000000000000000000", i))).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+
+            // Wait for retention task to run
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Oldest segment should be deleted (total > 250 bytes → first segment removed)
+            let topic_path = temp_dir.path().join(topic);
+            let files: Vec<String> = std::fs::read_dir(&topic_path)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
+                .collect();
+
+            assert!(!files.contains(&"1.log".to_string()),
+                "Oldest segment should be deleted under per-topic retention override");
+
+            // Read should return only retained messages (seq > 1)
+            let retained = manager.read(topic, 1, 20).await.unwrap();
+            assert!(!retained.is_empty(), "Should have retained messages");
+            assert!(retained[0].seq > 1, "First message should be deleted by retention");
+        }
+
+        /// Per-key ordering from the consumer's perspective: messages with the same key
+        /// are delivered one at a time in publication order, while keyless messages
+        /// flow in parallel. This test verifies the end-to-end delivery contract
+        /// without relying on internal state inspection.
+        #[tokio::test]
+        async fn per_key_ordering_consumer_receives_same_key_in_publication_order() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "per-key-e2e";
+            let group = "g-per-key-e2e";
+            let key_a = Bytes::from("user-A");
+            let key_b = Bytes::from("user-B");
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+
+            // Publish interleaved messages: A1, B1, A2, no-key, B2, A3
+            manager.publish(topic, Some(key_a.clone()), Bytes::from("A1")).await.unwrap();
+            manager.publish(topic, Some(key_b.clone()), Bytes::from("B1")).await.unwrap();
+            manager.publish(topic, Some(key_a.clone()), Bytes::from("A2")).await.unwrap();
+            manager.publish(topic, None, Bytes::from("no-key-1")).await.unwrap();
+            manager.publish(topic, Some(key_b.clone()), Bytes::from("B2")).await.unwrap();
+            manager.publish(topic, Some(key_a.clone()), Bytes::from("A3")).await.unwrap();
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // First fetch: should get A1, B1, no-key-1 (one per key + keyless)
+            // A2, B2, A3 are blocked by their respective keys
+            let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch1.len(), 3, "Should get 1 per key + 1 keyless");
+
+            let payloads1: Vec<&str> = batch1.iter().map(|m| std::str::from_utf8(&m.payload).unwrap()).collect();
+            assert!(payloads1.contains(&"A1"), "A1 should be delivered (first for key-A)");
+            assert!(payloads1.contains(&"B1"), "B1 should be delivered (first for key-B)");
+            assert!(payloads1.contains(&"no-key-1"), "Keyless message should be delivered");
+
+            // ACK A1 → should unblock A2 (but not A3)
+            let a1_seq = batch1.iter().find(|m| m.payload == Bytes::from("A1")).unwrap().seq;
+            ack_message(&manager, group, topic, &consumer, a1_seq).await;
+
+            // Second fetch: should get A2 (unblocked by A1 ack)
+            let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch2.len(), 1, "Only A2 should be unblocked after A1 ack");
+            assert_eq!(batch2[0].payload, Bytes::from("A2"), "A2 must be delivered after A1 is acked");
+
+            // ACK A2 → should unblock A3
+            ack_message(&manager, group, topic, &consumer, batch2[0].seq).await;
+
+            let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch3.len(), 1, "Only A3 should be unblocked after A2 ack");
+            assert_eq!(batch3[0].payload, Bytes::from("A3"), "A3 must be delivered after A2 is acked");
+
+            // ACK B1 → should unblock B2
+            let b1_seq = batch1.iter().find(|m| m.payload == Bytes::from("B1")).unwrap().seq;
+            ack_message(&manager, group, topic, &consumer, b1_seq).await;
+
+            let batch4 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+            assert_eq!(batch4.len(), 1, "Only B2 should be unblocked after B1 ack");
+            assert_eq!(batch4[0].payload, Bytes::from("B2"), "B2 must be delivered after B1 is acked");
+        }
+    }
     }
 }

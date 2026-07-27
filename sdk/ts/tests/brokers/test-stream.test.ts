@@ -748,4 +748,59 @@ describe('STREAM', () => {
         await subC.stop();
         await nexo.stream(topic).delete();
     });
+
+    // ── Per-key ordering end-to-end ──────────────────────────────
+
+    it('should enforce per-key ordering: same key delivered one at a time, different keys in parallel', async () => {
+        const topic = `stream-perkey-order-${randomUUID()}`;
+        const group = 'perkey-order-group';
+        await nexo.stream(topic).create();
+
+        // Publish all messages BEFORE subscribing so the first fetch sees all 6
+        // and per-key blocking is active immediately.
+        // Interleaved: A0, B0, A1, no-key, B1, A2
+        await nexo.stream(topic).publish({ i: 0 }, { key: 'user-A' });
+        await nexo.stream(topic).publish({ i: 0 }, { key: 'user-B' });
+        await nexo.stream(topic).publish({ i: 1 }, { key: 'user-A' });
+        await nexo.stream(topic).publish({ i: 0 });
+        await nexo.stream(topic).publish({ i: 1 }, { key: 'user-B' });
+        await nexo.stream(topic).publish({ i: 2 }, { key: 'user-A' });
+
+        // Track delivery order per key. Use a gate to hold ACKs until we verify
+        // the first batch, preventing the server from unblocking the next message.
+        const delivered: { key: string; i: number }[] = [];
+        let firstBatchGate: () => void;
+        const firstBatchReady = new Promise<void>(r => { firstBatchGate = r; });
+        let releaseGate: () => void;
+        const gateReleased = new Promise<void>(r => { releaseGate = r; });
+        let count = 0;
+
+        const sub = await clientA.stream(topic).subscribe(group, async (d: any, meta: { key?: Uint8Array }) => {
+            const key = meta.key ? Buffer.from(meta.key).toString('utf-8') : 'none';
+            delivered.push({ key, i: d.i });
+            count++;
+            if (count === 3) firstBatchGate();
+            // Block all callbacks so ACKs don't fire until we've verified
+            await gateReleased;
+        }, { batchSize: 10, concurrency: 10 });
+
+        // Wait for first batch: A0, B0, no-key (3 messages — one per key + keyless)
+        await waitFor(() => expect(count).toBe(3), { timeout: 5000 });
+
+        const firstKeys = delivered.slice(0, 3).map(d => d.key).sort();
+        expect(firstKeys).toEqual(['none', 'user-A', 'user-B']);
+
+        // No second message for any key should have been delivered yet
+        // (ACKs are blocked, so keys remain in-flight on the server)
+        const aMessages = delivered.filter(d => d.key === 'user-A');
+        const bMessages = delivered.filter(d => d.key === 'user-B');
+        expect(aMessages.length).toBe(1);
+        expect(bMessages.length).toBe(1);
+
+        // Release the gate so ACKs proceed and the test can clean up
+        releaseGate!();
+
+        await sub.stop();
+        await nexo.stream(topic).delete();
+    });
 });

@@ -1363,6 +1363,83 @@ mod tests {
         assert!(g.deadlines.is_empty());
     }
 
+    #[test]
+    fn test_per_key_dlt_restore_seek_lifecycle() {
+        let key_a = Bytes::from("key-A");
+        let key_b = Bytes::from("key-B");
+        let mut log = vec![
+            make_msg(1, Some(key_a.clone())),
+            make_msg(2, Some(key_b.clone())),
+            make_msg(3, Some(key_a.clone())),
+            make_msg(4, None),
+            make_msg(5, Some(key_b.clone())),
+            make_msg(6, Some(key_a.clone())),
+        ];
+        let mut group = make_group(100, 0, 1);
+        let consumer = group.add_member("conn-before-restart".to_string());
+        let generation = group.generation();
+
+        let initial = group.fetch(&consumer, generation, 10, &log, 1).unwrap();
+        assert_eq!(initial.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![1, 2, 4]);
+        group.ack(&consumer, generation, 2).unwrap();
+        group.ack(&consumer, generation, 4).unwrap();
+
+        assert!(group.check_redelivery());
+        assert_eq!(group.peek_dlt(10, 0).into_iter().map(|(seq, _)| seq).collect::<Vec<_>>(), vec![1, 3, 6]);
+        assert!(is_key_poisoned(&group, &key_a));
+        assert!(!is_key_poisoned(&group, &key_b));
+
+        let key_b_followup = group.fetch(&consumer, generation, 10, &log, 1).unwrap();
+        assert_eq!(key_b_followup.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![5]);
+        group.ack(&consumer, generation, 5).unwrap();
+
+        let mut group = ConsumerGroup::restore(
+            "test-group".to_string(),
+            group.ack_floor,
+            1,
+            group.max_ack_pending,
+            group.ack_wait,
+            group.max_deliveries,
+            group.dlt_snapshot(),
+            group.parked_keys_snapshot(),
+            group.redeliver_snapshot(),
+        );
+        assert_eq!(group.ack_floor, 6);
+        assert_eq!(dlt_count(&group), 3);
+        assert!(is_key_poisoned(&group, &key_a));
+
+        log.push(make_msg(7, Some(key_a.clone())));
+        log.push(make_msg(8, Some(key_b.clone())));
+        log.push(make_msg(9, None));
+        let consumer = group.add_member("conn-after-restart".to_string());
+        let generation = group.generation();
+        let after_restore = group.fetch(&consumer, generation, 10, &log, 1).unwrap();
+        assert_eq!(after_restore.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![8, 9]);
+        assert_eq!(dlt_count(&group), 4);
+        assert!(is_dlt(&group, 7));
+        group.ack(&consumer, generation, 8).unwrap();
+        group.ack(&consumer, generation, 9).unwrap();
+
+        group.seek_beginning(1);
+        assert_eq!(dlt_count(&group), 0);
+        assert!(!is_key_poisoned(&group, &key_a));
+        assert_eq!(group.ack_floor, 0);
+
+        let consumer = group.add_member("conn-after-seek".to_string());
+        let generation = group.generation();
+        let after_seek = group.fetch(&consumer, generation, 10, &log, 1).unwrap();
+        assert_eq!(after_seek.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![1, 2, 4, 9]);
+
+        let mut delivered_key_a = 1;
+        for expected_seq in [3, 6, 7] {
+            group.ack(&consumer, generation, delivered_key_a).unwrap();
+            let next = group.fetch(&consumer, generation, 10, &log, 1).unwrap();
+            assert_eq!(next.iter().map(|message| message.seq).collect::<Vec<_>>(), vec![expected_seq]);
+            delivered_key_a = expected_seq;
+        }
+        assert_eq!(dlt_count(&group), 0);
+    }
+
     // === Invariant: pending ↔ deadlines sync ===
 
     #[test]

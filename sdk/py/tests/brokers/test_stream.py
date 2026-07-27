@@ -683,3 +683,60 @@ class TestStream:
             client_b.disconnect()
 
         await nexo.stream(topic).delete()
+
+    # ── Per-key ordering end-to-end ──────────────────────────────
+
+    async def test_per_key_ordering_same_key_one_at_a_time(self, nexo: NexoClient):
+        topic = f"stream-perkey-order-{uuid.uuid4()}"
+        group = "perkey-order-group"
+        await nexo.stream(topic).create()
+
+        # Publish all messages BEFORE subscribing so the first fetch sees all 6
+        # and per-key blocking is active immediately.
+        # Interleaved: A0, B0, A1, no-key, B1, A2
+        await nexo.stream(topic).publish({"i": 0}, {"key": "user-A"})
+        await nexo.stream(topic).publish({"i": 0}, {"key": "user-B"})
+        await nexo.stream(topic).publish({"i": 1}, {"key": "user-A"})
+        await nexo.stream(topic).publish({"i": 0})
+        await nexo.stream(topic).publish({"i": 1}, {"key": "user-B"})
+        await nexo.stream(topic).publish({"i": 2}, {"key": "user-A"})
+
+        delivered: list[dict] = []
+        first_batch_event = asyncio.Event()
+        release_gate = asyncio.Event()
+        first_batch_count = 0
+
+        async def callback(d, meta):
+            nonlocal first_batch_count
+            key = bytes(meta["key"]).decode("utf-8") if meta.get("key") else "none"
+            delivered.append({"key": key, "i": d["i"]})
+            first_batch_count += 1
+            if first_batch_count == 3:
+                first_batch_event.set()
+            # Block all callbacks so ACKs don't fire until we've verified
+            await release_gate.wait()
+
+        sub = await nexo.stream(topic).subscribe(
+            group, callback, {"batch_size": 10, "concurrency": 10}
+        )
+
+        # Wait for first batch: A0, B0, no-key (3 messages)
+        # With concurrency=10 the SDK would process all if the server returned them,
+        # but the server only returns 3 due to per-key blocking.
+        await asyncio.wait_for(first_batch_event.wait(), timeout=5.0)
+
+        first_keys = sorted(d["key"] for d in delivered[:3])
+        assert first_keys == ["none", "user-A", "user-B"]
+
+        # No second message for any key should have been delivered yet
+        # (ACKs are blocked, so keys remain in-flight on the server)
+        a_messages = [d for d in delivered if d["key"] == "user-A"]
+        b_messages = [d for d in delivered if d["key"] == "user-B"]
+        assert len(a_messages) == 1
+        assert len(b_messages) == 1
+
+        # Release the gate so ACKs proceed and the test can clean up
+        release_gate.set()
+
+        await sub.stop()
+        await nexo.stream(topic).delete()
