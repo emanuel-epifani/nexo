@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::ServerConfig;
-use crate::transport::tcp::dispatcher::Dispatcher;
+use crate::transport::tcp::dispatcher::{is_inline_opcode, Dispatcher};
 use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
 use crate::NexoEngine;
 
@@ -59,30 +59,55 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
         tokio::select! {
             // EVENT A: We received a command from the Client
             Some(frame) = inbound_rx.recv() => {
-                let tx_clone = outbound_tx.clone();
-                let engine_clone = Arc::clone(&engine);
-                let session_id_clone = Arc::clone(&session_id);
+                let id = frame.header.id();
+                let opcode = frame.header.meta;
+                let frame_type = frame.header.frame_type;
 
-                request_set.spawn(async move {
-                    let id = frame.header.id();
-                    match frame.header.frame_type {
+                if is_inline_opcode(opcode) {
+                    // Inline: preserve TCP arrival order for state mutations
+                    // (ACK/LEAVE/SEEK/JOIN). These are O(1) lock+mutate, never block.
+                    let dispatcher = Dispatcher::new(&engine, &session_id);
+                    match frame_type {
                         TYPE_REQUEST => {
-                            let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
-                            let response = dispatcher.dispatch(frame.header.meta, frame.payload).await;
-                            let _ = tx_clone.send(OutboundFrame::Response { id, response }).await;
+                            let response = dispatcher.dispatch(opcode, frame.payload).await;
+                            let _ = outbound_tx.send(OutboundFrame::Response { id, response }).await;
                         }
                         TYPE_REQUEST_NO_RESPONSE => {
-                            let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
-                            let _ = dispatcher.dispatch(frame.header.meta, frame.payload).await;
+                            let _ = dispatcher.dispatch(opcode, frame.payload).await;
                         }
                         _ => {
-                            let _ = tx_clone.send(OutboundFrame::Response {
+                            let _ = outbound_tx.send(OutboundFrame::Response {
                                 id,
                                 response: Response::Error("Unsupported frame type".into()),
                             }).await;
                         }
                     }
-                });
+                } else {
+                    // Spawn: potentially blocking (FETCH long-poll, PUBLISH I/O, etc.)
+                    let tx_clone = outbound_tx.clone();
+                    let engine_clone = Arc::clone(&engine);
+                    let session_id_clone = Arc::clone(&session_id);
+
+                    request_set.spawn(async move {
+                        match frame_type {
+                            TYPE_REQUEST => {
+                                let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
+                                let response = dispatcher.dispatch(opcode, frame.payload).await;
+                                let _ = tx_clone.send(OutboundFrame::Response { id, response }).await;
+                            }
+                            TYPE_REQUEST_NO_RESPONSE => {
+                                let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
+                                let _ = dispatcher.dispatch(opcode, frame.payload).await;
+                            }
+                            _ => {
+                                let _ = tx_clone.send(OutboundFrame::Response {
+                                    id,
+                                    response: Response::Error("Unsupported frame type".into()),
+                                }).await;
+                            }
+                        }
+                    });
+                }
             }
 
             // EVENT B: The TCP Socket crashed or disconnected

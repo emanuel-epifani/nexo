@@ -2527,6 +2527,75 @@ mod stream_tests {
                 assert_eq!(consumer.ack_floor, 2, "Ack floor should survive shutdown flush");
             }
         }
+
+        /// When a consumer ACKs a message and then leaves the group, the ACK must
+        /// be applied before the LEAVE removes the member. A new consumer joining
+        /// the same group must NOT see the acked message redelivered.
+        #[tokio::test]
+        async fn test_ack_before_leave_does_not_redeliver_acked() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "ack-before-leave";
+            let group = "g-ack-leave";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager.publish(topic, None, Bytes::from("msg-1")).await.unwrap();
+            manager.publish(topic, None, Bytes::from("msg-2")).await.unwrap();
+
+            // Consumer joins and fetches both messages
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+            let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
+            assert_eq!(msgs.len(), 2);
+
+            // ACK seq 1, then immediately LEAVE — inline processing ensures ACK
+            // is applied before LEAVE removes the member.
+            ack_message(&manager, group, topic, &consumer, 1).await;
+            manager.leave_group(group, topic, &consumer.consumer_id, consumer.generation).await.unwrap();
+
+            // A new consumer joining the same group should see only seq 2
+            // (seq 1 was acked before LEAVE, so it must not be redelivered)
+            let consumer2 = join_session(&manager, group, topic, "client-B").await;
+            let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+            assert_eq!(msgs2.len(), 1, "seq 1 was acked before LEAVE — must not be redelivered");
+            assert_eq!(msgs2[0].seq, 2);
+        }
+
+        /// After SEEK to beginning, a consumer that re-joins the group must see
+        /// all messages from seq 1 again. SEEK must reset the delivery cursor
+        /// before the next FETCH reads.
+        #[tokio::test]
+        async fn test_seek_to_beginning_then_refetch_returns_all_messages() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let topic = "seek-refetch";
+            let group = "g-seek-refetch";
+
+            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            for i in 1..=5 {
+                manager.publish(topic, None, Bytes::from(format!("msg-{i}"))).await.unwrap();
+            }
+
+            let consumer = join_session(&manager, group, topic, "client-A").await;
+
+            // Fetch and ack first 3 messages
+            let msgs = fetch_messages(&manager, group, topic, &consumer, 3, 0).await;
+            assert_eq!(msgs.len(), 3);
+            for m in &msgs {
+                ack_message(&manager, group, topic, &consumer, m.seq).await;
+            }
+
+            // SEEK to beginning, then re-join (seek bumps generation) and FETCH —
+            // inline processing ensures SEEK resets the cursor before FETCH reads.
+            use nexo::brokers::stream::options::SeekTarget;
+            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+
+            let consumer2 = join_session(&manager, group, topic, "client-A").await;
+            let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+            assert_eq!(msgs2.len(), 5, "SEEK to beginning should make all messages available");
+            assert_eq!(msgs2[0].seq, 1);
+        }
     }
     }
 }

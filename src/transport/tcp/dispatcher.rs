@@ -8,6 +8,21 @@ use bytes::Bytes;
 
 pub const OP_DEBUG_ECHO: u8 = 0x00;
 
+/// Opcodes that mutate group/queue state and must be processed in TCP arrival
+/// order to prevent races (e.g. ACK processed after LEAVE).
+/// These are all O(1) lock+mutate operations — safe to run inline without spawning.
+pub fn is_inline_opcode(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        stream::tcp::OP_S_ACK
+            | stream::tcp::OP_S_SEEK
+            | stream::tcp::OP_S_LEAVE
+            | stream::tcp::OP_S_JOIN
+            | queue::tcp::OP_Q_ACK
+            | queue::tcp::OP_Q_NACK
+    )
+}
+
 pub struct Dispatcher<'a> {
     engine: &'a NexoEngine,
     /// Opaque per-connection session id (transport-level). Brokers that need to
@@ -41,5 +56,38 @@ impl<'a> Dispatcher<'a> {
 
             _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inline_opcodes_are_classified_correctly() {
+        // Stream opcodes that must be inline
+        assert!(is_inline_opcode(stream::tcp::OP_S_ACK));
+        assert!(is_inline_opcode(stream::tcp::OP_S_SEEK));
+        assert!(is_inline_opcode(stream::tcp::OP_S_LEAVE));
+        assert!(is_inline_opcode(stream::tcp::OP_S_JOIN));
+
+        // Queue opcodes that must be inline
+        assert!(is_inline_opcode(queue::tcp::OP_Q_ACK));
+        assert!(is_inline_opcode(queue::tcp::OP_Q_NACK));
+    }
+
+    #[test]
+    fn test_blocking_opcodes_are_not_inline() {
+        // These must NOT be inline — they can block (long-poll, I/O, etc.)
+        assert!(!is_inline_opcode(stream::tcp::OP_S_FETCH));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_PUB));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_CREATE));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_DELETE));
+    }
+
+    #[test]
+    fn test_unknown_opcode_is_not_inline() {
+        assert!(!is_inline_opcode(0xFF));
+        assert!(!is_inline_opcode(0x00));
     }
 }
