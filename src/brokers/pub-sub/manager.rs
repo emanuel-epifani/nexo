@@ -123,11 +123,19 @@ impl PubSubManager {
         }
     }
 
-    pub fn connect(&self, client_id: &str, sender: mpsc::UnboundedSender<Arc<PubSubMessage>>) {
+    pub fn connect(&self, client_id: &str, sender: mpsc::Sender<Arc<PubSubMessage>>) {
         self.clients.insert(Arc::from(client_id), ClientInfo {
             sender,
             subscriptions: HashSet::new(),
         });
+    }
+
+    pub fn push_channel_capacity(&self) -> usize {
+        self.config.push_channel_capacity
+    }
+
+    pub fn exists(&self, client_id: &str) -> bool {
+        self.clients.contains_key(client_id)
     }
 
     pub fn disconnect(&self, client_id: &str) {
@@ -185,9 +193,19 @@ impl PubSubManager {
         let mut retained = Vec::new();
         root.collect_retained_for_pattern(&parts, "", &mut retained);
 
+        let mut zombie = false;
         for (p, b) in retained {
             let msg = Arc::new(PubSubMessage::new(p, b));
-            let _ = sender.send(msg);
+            if sender.try_send(msg).is_err() {
+                zombie = true;
+                break;
+            }
+        }
+        drop(root);
+
+        if zombie {
+            self.disconnect(client_id);
+            return Err("Subscriber buffer full, disconnected".into());
         }
         Ok(())
     }
@@ -233,10 +251,10 @@ impl PubSubManager {
 
         for client_id in matched {
             if let Some(info) = self.clients.get(client_id.as_ref()) {
-                if info.sender.send(msg.clone()).is_ok() {
-                    sent_count += 1;
-                } else {
-                    zombies.push(client_id);
+                match info.sender.try_send(msg.clone()) {
+                    Ok(()) => sent_count += 1,
+                    Err(mpsc::error::TrySendError::Full(_)) => zombies.push(client_id),
+                    Err(mpsc::error::TrySendError::Closed(_)) => zombies.push(client_id),
                 }
             } else {
                 zombies.push(client_id);

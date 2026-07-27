@@ -347,4 +347,42 @@ describe('PUBSUB', () => {
         await nexo.pubsub(`ret-hash-${baseId}/#`).unsubscribe();
         await nexo.pubsub(`ret-hash-${baseId}/a/b/c`).clear();
     });
+
+    it('should not affect other subscribers when one is disconnected by server (slow consumer)', async () => {
+        const topic = `slow-consumer-${randomUUID()}`;
+
+        // Fast subscriber on shared client
+        const fastReceived: any[] = [];
+        await nexo.pubsub(topic).subscribe((d) => fastReceived.push(d));
+
+        // "Slow" subscriber on a separate client — server will disconnect it
+        const slowClient = await NexoClient.connect();
+        const slowReceived: any[] = [];
+        await slowClient.pubsub(topic).subscribe((d) => slowReceived.push(d));
+
+        // Publish a message — both should receive
+        await nexo.pubsub(topic).publish({ msg: 'first' });
+        await waitFor(() => expect(fastReceived.length).toBe(1));
+        await waitFor(() => expect(slowReceived.length).toBe(1));
+
+        // Simulate server-initiated disconnect (as would happen for slow consumer)
+        (slowClient as any).conn.socket.destroy();
+        await waitFor(() => expect((slowClient as any).conn.isConnected).toBe(false), { timeout: 3000 });
+
+        // Fast subscriber should still receive messages
+        await nexo.pubsub(topic).publish({ msg: 'second' });
+        await waitFor(() => expect(fastReceived.length).toBe(2));
+        expect(fastReceived[1].msg).toBe('second');
+
+        // Slow client should auto-reconnect and resubscribe
+        await waitFor(() => expect((slowClient as any).conn.isConnected).toBe(true), { timeout: 5000 });
+        await new Promise(r => setTimeout(r, 500)); // allow resubscribe
+
+        await nexo.pubsub(topic).publish({ msg: 'after-reconnect' });
+        await waitFor(() => expect(slowReceived.some(r => r.msg === 'after-reconnect')).toBe(true), { timeout: 5000 });
+
+        await nexo.pubsub(topic).unsubscribe();
+        await slowClient.pubsub(topic).unsubscribe();
+        await slowClient.disconnect();
+    });
 });

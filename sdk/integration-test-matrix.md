@@ -45,6 +45,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | pubsub_disconnect_cleanup | Disconnect cleanup doesn't break topic for others | should clean up subscriber on disconnect without breaking topic | disconnect_cleanup_does_not_break_topic |
 | pubsub_retained_wildcard_plus | Retained messages delivered to `+` subscriber | should deliver retained messages to wildcard + subscriber | retained_with_wildcard_plus |
 | pubsub_retained_wildcard_hash | Retained messages delivered to `#` subscriber | should deliver retained messages to wildcard # subscriber | retained_with_wildcard_hash |
+| pubsub_slow_consumer_disconnect | Slow consumer disconnected by server, others unaffected, auto-reconnect | should not affect other subscribers when one is disconnected by server (slow consumer) | slow_consumer_disconnect_does_not_affect_others |
 
 ## Queue
 

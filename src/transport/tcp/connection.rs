@@ -34,12 +34,14 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
     // ACT 2: PUBSUB PUSH BRIDGE
     // ==========================================
     // Channel to receive push notifications from the PubSub Engine
-    let (push_tx, mut push_rx) = mpsc::unbounded_channel::<Arc<PubSubMessage>>();
+    let (push_tx, mut push_rx) = mpsc::channel::<Arc<PubSubMessage>>(
+        engine.pubsub.push_channel_capacity(),
+    );
     engine.pubsub.connect(&session_id, push_tx);
 
     // Background task: forwards PubSub pushes to the socket's outbound channel
     let outbound_bridge = outbound_tx.clone();
-    let bridge_handle = tokio::spawn(async move {
+    let mut bridge_handle = tokio::spawn(async move {
         while let Some(msg_arc) = push_rx.recv().await {
             let payload = msg_arc.get_network_packet().clone();
             let frame = OutboundFrame::PushPubSub { id: 0, payload };
@@ -121,6 +123,11 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
 
             // EVENT C: A background request finished, clean up its memory
             _ = request_set.join_next(), if !request_set.is_empty() => {}
+
+            // EVENT D: PubSub bridge exited (slow consumer disconnected by manager)
+            _ = &mut bridge_handle => {
+                break;
+            }
         }
     }
 

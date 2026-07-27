@@ -150,6 +150,12 @@ A later subscriber on that topic will not receive a retained value.
 
 Each subscription runs in its own dedicated consumer loop, isolated from the connection's read loop. See [Broker Semantics](/guide/introduction#broker-semantics) for details on how all brokers dispatch callbacks.
 
+## Slow-Consumer Disconnect
+
+Each subscriber has a **bounded push channel** (capacity configurable via `PUBSUB_PUSH_CHANNEL_CAPACITY`, default 1024). If a subscriber cannot drain messages fast enough and the channel fills up, the server **disconnects** that subscriber to prevent OOM and head-of-line blocking on other subscribers. This matches the semantics of Redis, NATS, and MQTT.
+
+The disconnected client will automatically reconnect and re-subscribe (see [Reconnection](/guide/introduction#reconnection)). Other subscribers on the same topic are unaffected.
+
 ## Configuration
 
 ### Environment Variables
@@ -162,3 +168,4 @@ Global, set at server startup.
 | `PUBSUB_DEFAULT_RETAINED_TTL_SECS` | `3600` (1h) | Default TTL for retained messages when no explicit `ttl` is provided |
 | `PUBSUB_CLEANUP_INTERVAL_SECS` | `60` | Background cleanup interval for expired retained messages |
 | `PUBSUB_RETAINED_FLUSH_MS` | `500` | How often retained messages are flushed to SQLite |
+| `PUBSUB_PUSH_CHANNEL_CAPACITY` | `8192` | Per-subscriber bounded channel capacity. When full, the subscriber is disconnected (slow-consumer protection) |

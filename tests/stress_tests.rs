@@ -233,7 +233,7 @@ mod stress_tests {
         async fn bench_pubsub_throughput_exact_match() {
             let (manager, _tmp) = setup_pubsub_manager().await;
             let client_id = "bench_sub".to_string();
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (tx, mut rx) = mpsc::channel(8192);
             manager.connect(&client_id, tx);
 
             let topic = "bench/speed";
@@ -261,7 +261,7 @@ mod stress_tests {
         async fn bench_pubsub_throughput_wildcard_match() {
             let (manager, _tmp) = setup_pubsub_manager().await;
             let client_id = "bench_wild".to_string();
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (tx, mut rx) = mpsc::channel(8192);
             manager.connect(&client_id, tx);
 
             // Subscribe with wildcard
@@ -292,7 +292,7 @@ mod stress_tests {
             // Create 100 subscribers
             for i in 0..num_subs {
                 let client_id = format!("sub_{}", i);
-                let (tx, mut rx) = mpsc::unbounded_channel();
+                let (tx, mut rx) = mpsc::channel(8192);
                 manager.connect(&client_id, tx);
                 manager.subscribe(&client_id, topic).unwrap();
 

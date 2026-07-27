@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use dashmap::DashMap;
 
 pub(crate) struct ClientInfo {
-    pub sender: mpsc::UnboundedSender<Arc<PubSubMessage>>,
+    pub sender: mpsc::Sender<Arc<PubSubMessage>>,
     pub subscriptions: HashSet<String>,
 }
 

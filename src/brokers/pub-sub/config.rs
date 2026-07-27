@@ -4,6 +4,7 @@ pub struct PubSubConfig {
     pub default_retained_ttl_seconds: u32,
     pub cleanup_interval_seconds: u64,
     pub retained_flush_ms: u64,
+    pub push_channel_capacity: usize,
 }
 
 impl Default for PubSubConfig {
@@ -13,6 +14,7 @@ impl Default for PubSubConfig {
             default_retained_ttl_seconds: 3600,
             cleanup_interval_seconds: 60,
             retained_flush_ms: 500,
+            push_channel_capacity: 8192,
         }
     }
 }
@@ -25,6 +27,7 @@ impl PubSubConfig {
             default_retained_ttl_seconds: crate::config::get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", default.default_retained_ttl_seconds),
             cleanup_interval_seconds: crate::config::get_env("PUBSUB_CLEANUP_INTERVAL_SECS", default.cleanup_interval_seconds),
             retained_flush_ms: crate::config::get_env("PUBSUB_RETAINED_FLUSH_MS", default.retained_flush_ms),
+            push_channel_capacity: crate::config::get_env("PUBSUB_PUSH_CHANNEL_CAPACITY", default.push_channel_capacity),
         }
     }
 }

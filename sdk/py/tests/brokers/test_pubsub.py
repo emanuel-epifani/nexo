@@ -295,3 +295,39 @@ class TestPubSub:
 
         await nexo.pubsub(f"ret-hash-{base_id}/#").unsubscribe()
         await nexo.pubsub(f"ret-hash-{base_id}/a/b/c").clear()
+
+    async def test_slow_consumer_disconnect_does_not_affect_others(self, nexo: NexoClient):
+        topic = f"slow-consumer-{uuid.uuid4()}"
+
+        fast_received: list = []
+        await nexo.pubsub(topic).subscribe(lambda d: fast_received.append(d))
+
+        slow_client = await NexoClient.connect()
+        slow_received: list = []
+        await slow_client.pubsub(topic).subscribe(lambda d: slow_received.append(d))
+
+        await nexo.pubsub(topic).publish({"msg": "first"})
+        await wait_for(lambda: len(fast_received) == 1)
+        await wait_for(lambda: len(slow_received) == 1)
+
+        # Simulate server-initiated disconnect (as would happen for slow consumer)
+        conn = slow_client._conn
+        if conn._writer is not None:
+            conn._writer.close()
+        await wait_for(lambda: not conn.is_connected, timeout=3.0)
+
+        # Fast subscriber should still receive messages
+        await nexo.pubsub(topic).publish({"msg": "second"})
+        await wait_for(lambda: len(fast_received) == 2)
+        assert fast_received[1]["msg"] == "second"
+
+        # Slow client should auto-reconnect and resubscribe
+        await wait_for(lambda: conn.is_connected, timeout=5.0)
+        await asyncio.sleep(0.5)  # allow resubscribe
+
+        await nexo.pubsub(topic).publish({"msg": "after-reconnect"})
+        await wait_for(lambda: any(r.get("msg") == "after-reconnect" for r in slow_received), timeout=5.0)
+
+        await nexo.pubsub(topic).unsubscribe()
+        await slow_client.pubsub(topic).unsubscribe()
+        slow_client.disconnect()
