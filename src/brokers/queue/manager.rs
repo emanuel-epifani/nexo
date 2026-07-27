@@ -106,7 +106,13 @@ impl QueueManager {
                                     QueueConfig::from_options(QueueCreateOptions::default(), &system_config)
                                 };
 
-                                let shared = Self::build_queue(queue_name.clone(), config, &system_config);
+                                let shared = match Self::build_queue(queue_name.clone(), config, &system_config) {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        error!("[QueueManager] Warm start: Failed to build queue '{}': {}", queue_name, e);
+                                        continue;
+                                    }
+                                };
                                 queues.insert(queue_name.clone(), shared);
                                 info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
                             }
@@ -124,14 +130,14 @@ impl QueueManager {
     // INTERNAL HELPERS
     // ==========================================
 
-    fn build_queue(name: String, config: QueueConfig, system_config: &SystemQueueConfig) -> Arc<QueueShared> {
+    fn build_queue(name: String, config: QueueConfig, system_config: &SystemQueueConfig) -> Result<Arc<QueueShared>, String> {
         let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
         let db_path = persistence_path.join(format!("{}.db", name));
         let store = QueueStore::new(
             db_path,
             system_config.default_flush_ms,
             system_config.writer_batch_size,
-        );
+        )?;
 
         let mut main_state = QueueState::new();
         let mut dlq_state = DlqState::new();
@@ -158,7 +164,7 @@ impl QueueManager {
             }
         }
 
-        Arc::new(QueueShared {
+        Ok(Arc::new(QueueShared {
             inner: Mutex::new(QueueInner {
                 state: main_state,
                 dlq: dlq_state,
@@ -166,7 +172,7 @@ impl QueueManager {
             }),
             notify: Notify::new(),
             store,
-        })
+        }))
     }
 
     fn spawn_timeout_task(&self) {
@@ -266,7 +272,7 @@ impl QueueManager {
                     let _ = std::fs::write(&config_path, data);
                 }
 
-                let shared = Self::build_queue(name, config, &self.config);
+                let shared = Self::build_queue(name, config, &self.config)?;
                 v.insert(shared);
                 Ok(())
             }

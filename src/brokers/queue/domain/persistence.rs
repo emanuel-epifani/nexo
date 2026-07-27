@@ -48,32 +48,29 @@ pub struct QueueStore {
 
 impl QueueStore {
     pub fn new(
-        db_path: PathBuf, 
+        db_path: PathBuf,
         flush_ms: u64,
         batch_size: usize,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // SYNCHRONOUS INIT: Ensure DB schema exists before anything else
         // This prevents race conditions where recover() runs before Writer creates tables.
-        if let Ok(conn) = Connection::open(&db_path) {
-            if let Err(e) = init_db(&conn) {
-                error!("FATAL: Failed to initialize Queue DB at {:?}: {}", db_path, e);
-            }
-        } else {
-            error!("FATAL: Failed to open Queue DB for initialization at {:?}", db_path);
-        }
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("Failed to open Queue DB at {:?}: {}", db_path, e))?;
+        init_db(&conn)
+            .map_err(|e| format!("Failed to initialize Queue DB schema at {:?}: {}", db_path, e))?;
 
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         let path_clone = db_path.clone();
         let handle = tokio::spawn(async move {
             run_writer(rx, path_clone, flush_ms, batch_size).await;
         });
 
-        Self {
+        Ok(Self {
             sender: Mutex::new(Some(tx)),
             writer_handle: Mutex::new(Some(handle)),
             db_path,
-        }
+        })
     }
 
     /// Recover all messages from DB (Read-Only connection)
@@ -430,7 +427,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_rollback.db");
 
-        let store = QueueStore::new(db_path.clone(), 10, 100);
+        let store = QueueStore::new(db_path.clone(), 10, 100).unwrap();
 
         let msg = Message::new(Bytes::from("payload"), 0, 0);
 
@@ -460,7 +457,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_commit.db");
 
-        let store = QueueStore::new(db_path.clone(), 10, 100);
+        let store = QueueStore::new(db_path.clone(), 10, 100).unwrap();
 
         let msg1 = Message::new(Bytes::from("a"), 0, 0);
         let msg2 = Message::new(Bytes::from("b"), 0, 0);
@@ -475,5 +472,12 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2, "Both messages should be persisted");
+    }
+
+    #[test]
+    fn test_queue_store_new_fails_on_invalid_path() {
+        // A path inside /dev/null should fail to open as a SQLite DB
+        let result = QueueStore::new(PathBuf::from("/dev/null/cannot_create.db"), 10, 100);
+        assert!(result.is_err(), "QueueStore::new should fail on invalid path");
     }
 }
