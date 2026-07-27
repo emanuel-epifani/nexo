@@ -19,6 +19,13 @@ export class RequestTimeoutError extends NexoError {
   }
 }
 
+export class RequestCancelledError extends NexoError {
+  constructor() {
+    super("Request cancelled");
+    this.name = 'RequestCancelledError';
+  }
+}
+
 export class NotConnectedError extends NexoError {
   constructor() {
     super("Client not connected");

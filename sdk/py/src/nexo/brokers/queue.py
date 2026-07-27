@@ -5,7 +5,7 @@ from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
-from ..errors import ConnectionClosedError, NotConnectedError, RequestTimeoutError
+from ..errors import ConnectionClosedError, NotConnectedError, RequestCancelledError, RequestTimeoutError
 from ..subscription import Subscription
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
@@ -256,6 +256,7 @@ class QueueSubscription(Generic[T]):
         batch_size: int,
         wait_ms: int,
         concurrency: int,
+        stop_timeout_ms: int,
     ) -> None:
         self._conn = conn
         self._queue_name = queue_name
@@ -264,8 +265,10 @@ class QueueSubscription(Generic[T]):
         self._batch_size = batch_size
         self._wait_ms = wait_ms
         self._concurrency = concurrency
+        self._stop_timeout_ms = stop_timeout_ms
         self._active = False
         self._loop_task: asyncio.Task | None = None
+        self._consume_task: asyncio.Task | None = None
 
     def start(self) -> None:
         self._active = True
@@ -280,9 +283,14 @@ class QueueSubscription(Generic[T]):
 
     async def stop(self) -> None:
         self._active = False
+        if self._consume_task is not None and not self._consume_task.done():
+            self._consume_task.cancel()
         if self._loop_task is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(self._loop_task), timeout=2.0)
+                await asyncio.wait_for(
+                    asyncio.shield(self._loop_task),
+                    timeout=self._stop_timeout_ms / 1000.0,
+                )
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._loop_task.cancel()
                 try:
@@ -305,9 +313,13 @@ class QueueSubscription(Generic[T]):
                     if not self._conn.is_connected:
                         continue
 
-                    messages = await QueueCommands.consume(
-                        self._conn, self._queue_name, self._batch_size, self._wait_ms
+                    self._consume_task = asyncio.create_task(
+                        QueueCommands.consume(
+                            self._conn, self._queue_name, self._batch_size, self._wait_ms
+                        )
                     )
+                    messages = await self._consume_task
+                    self._consume_task = None
 
                     if not messages:
                         continue
@@ -332,6 +344,8 @@ class QueueSubscription(Generic[T]):
                     await run_concurrent(messages, self._concurrency, process_msg)
 
                 except asyncio.CancelledError:
+                    if not self._active:
+                        break
                     raise
                 except Exception as e:
                     if not self._active:
@@ -410,6 +424,7 @@ class NexoQueue(Generic[T]):
             batch_size,
             wait_ms,
             concurrency,
+            DEFAULT_CONFIG.queue.stop_timeout_ms,
         )
         sub.start()
 

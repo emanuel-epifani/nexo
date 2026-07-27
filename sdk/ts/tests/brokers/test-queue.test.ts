@@ -549,4 +549,29 @@ describe('QUEUE', () => {
         await sub.stop();
         await q.delete();
     });
+
+    // ── stop() cancels in-flight consume and drains ────────────────
+
+    it('stop() should return quickly when long-polling with no messages', async () => {
+        const qName = `queue-stop-longpoll-${randomUUID()}`;
+        const q = await nexo.queue(qName).create();
+
+        const sub = await q.subscribe(async () => {}, {
+            batchSize: 1,
+            waitMs: 10000, // 10s long-poll
+            concurrency: 1,
+        });
+
+        // Wait for consumer to enter long-poll
+        await new Promise(r => setTimeout(r, 300));
+
+        const stopStart = Date.now();
+        await sub.stop();
+        const stopElapsed = Date.now() - stopStart;
+
+        // stop() should cancel the in-flight long-poll and return within stopTimeoutMs
+        // Without cancellation, stop() would block for 10s
+        expect(stopElapsed).toBeLessThan(2000);
+        await q.delete();
+    });
 });

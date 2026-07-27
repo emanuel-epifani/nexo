@@ -4,7 +4,7 @@ import { Logger } from './utils/logger';
 import { NexoConnectionConfig } from './config';
 import { FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './protocol';
 import { Cursor, FrameWriter } from './codec';
-import { ConnectionClosedError, NotConnectedError, RequestTimeoutError } from './errors';
+import { ConnectionClosedError, NotConnectedError, RequestTimeoutError, RequestCancelledError } from './errors';
 
 /** @internal */
 export class NexoConnection extends EventEmitter {
@@ -189,7 +189,7 @@ export class NexoConnection extends EventEmitter {
   send(
     opcode: number,
     build?: (w: FrameWriter) => void,
-    options?: { timeoutMs?: number }
+    options?: { timeoutMs?: number; signal?: AbortSignal }
   ): Promise<{ status: ResponseStatus, cursor: Cursor }> {
     const id = this.nextId;
     this.nextId = (this.nextId + 1) & 0xFFFFFFFF || 1;
@@ -199,22 +199,37 @@ export class NexoConnection extends EventEmitter {
     const packet = this.writer.finish(id, opcode);
 
     const timeoutMs = options?.timeoutMs ?? this.config.requestTimeoutMs;
+    const signal = options?.signal;
 
     return new Promise((resolve, reject) => {
       if (!this.isConnected) {
         return reject(new NotConnectedError());
       }
+      if (signal?.aborted) {
+        return reject(new RequestCancelledError());
+      }
 
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
+          cleanupAbort();
           reject(new RequestTimeoutError(timeoutMs));
         }
       }, timeoutMs);
       timer.unref();
 
+      const onAbort = () => {
+        if (this.pending.delete(id)) {
+          clearTimeout(timer);
+          reject(new RequestCancelledError());
+        }
+      };
+      const cleanupAbort = () => signal?.removeEventListener('abort', onAbort);
+      signal?.addEventListener('abort', onAbort, { once: true });
+
       this.pending.set(id, {
         resolve: (res) => {
           clearTimeout(timer);
+          cleanupAbort();
           if (res.status === ResponseStatus.ERR) {
             // Error payload is the raw utf8 message (read to end of frame).
             const errMsg = res.data.toString('utf8');

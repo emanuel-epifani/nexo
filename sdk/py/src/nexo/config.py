@@ -22,6 +22,7 @@ class _QueueDefaults:
     batch_size: int = 50
     wait_ms: int = 20000
     concurrency: int = 5
+    stop_timeout_ms: int = 5000
     peek_limit: int = 10
     peek_offset: int = 0
 

@@ -119,6 +119,12 @@ Queues are **pull-based**: the SDK continuously polls the server for new message
 
 How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips but increase memory usage per cycle.
 
+::: tip Choosing batchSize vs concurrency
+The SDK fetches `batchSize` messages per request and processes them with `concurrency` parallel workers. If `batchSize` is much larger than `concurrency`, some messages may sit in the client's local buffer waiting for a worker. The server marks each delivered message with a visibility timeout (set at queue creation via `visibilityTimeoutMs`). If a message waits too long in the buffer, its timeout expires and the server redelivers it to another consumer — resulting in duplicate processing.
+
+This is safe (Nexo guarantees at-least-once delivery), but wasteful. As a rule of thumb: if your callbacks are fast, `batchSize` can be much larger than `concurrency`. If your callbacks are slow or your visibility timeout is short, keep `batchSize` close to `concurrency`.
+:::
+
 ### `waitMs` (default: 20000)
 
 When the queue is **empty**, the server holds the connection open for up to `waitMs` milliseconds before responding with an empty result (long-polling). This avoids the client hammering the server with tight empty loops. If a message arrives during the wait, the server responds immediately.
@@ -137,7 +143,7 @@ With `concurrency: 1`, messages are processed **strictly in order** (true FIFO).
 await criticalQueue.subscribe(
   async (task) => { await processTask(task); },
   {
-    batchSize: 100,    // Fetch 100 messages per network request
+    batchSize: 100,    // Request up to 100 messages per network request
     concurrency: 10,   // Process 10 messages concurrently (I/O-bound tasks)
     waitMs: 5000       // If empty, wait 5s (server-side) before responding
   }
@@ -151,7 +157,7 @@ async def handle_task(task: CriticalTask) -> None:
 await critical_queue.subscribe(
     handle_task,
     {
-        "batch_size": 100,    # Fetch 100 messages per network request
+        "batch_size": 100,    # Request up to 100 messages per network request
         "concurrency": 10,    # Process 10 messages concurrently (I/O-bound tasks)
         "wait_ms": 5000       # If empty, wait 5s (server-side) before responding
     }
@@ -227,20 +233,6 @@ purged_count = await critical_queue.dlq.purge()
 | `moveToQueue(messageId)` | Replay message to main queue (resets attempts) | `boolean` |
 | `delete(messageId)` | Permanently remove a single message | `boolean` |
 | `purge()` | Remove all messages from DLQ | `number` (count) |
-
-## Delivery Tokens
-
-Each time a message is delivered to a consumer (via `consume` or `subscribe`), the server assigns a unique **delivery token** (`u64`). This token is included in the consume response alongside the message ID and payload.
-
-When a consumer sends `ACK` or `NACK`, it must include the delivery token. The server verifies that the token matches the **current** delivery. If the token is stale (from a previous delivery that already timed out and was requeued), the ACK/NACK is silently ignored — the message is not deleted or requeued.
-
-This prevents a critical race condition:
-1. Consumer A receives message M (token 1, visibility timeout 30s)
-2. Timeout expires → M is requeued and redelivered to Consumer B (token 2)
-3. Consumer A sends `ACK(M.id, token=1)` — server rejects it (stale)
-4. Consumer B sends `ACK(M.id, token=2)` — server accepts it
-
-The SDK handles this automatically: `subscribe` passes the delivery token to `ack`/`nack` internally. If you use `consume` directly, you must pass the `deliveryToken` field from the consumed message to `ack`/`nack`.
 
 ## Configuration
 

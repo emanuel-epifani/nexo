@@ -29,6 +29,7 @@ export const DEFAULT_CONFIG = {
     batchSize: 50,
     waitMs: 20000,
     concurrency: 5,
+    stopTimeoutMs: 5000,
     peek: {
       limit: 10,
       offset: 0,

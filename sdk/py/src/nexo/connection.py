@@ -225,6 +225,9 @@ class NexoConnection:
         except asyncio.TimeoutError:
             self._pending.pop(corr_id, None)
             raise RequestTimeoutError(timeout)
+        except asyncio.CancelledError:
+            self._pending.pop(corr_id, None)
+            raise
         except ConnectionClosedError:
             raise
         except Exception as e:

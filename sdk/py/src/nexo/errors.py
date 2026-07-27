@@ -12,6 +12,11 @@ class RequestTimeoutError(NexoError):
         super().__init__(f"Request timeout after {timeout_ms}ms")
 
 
+class RequestCancelledError(NexoError):
+    def __init__(self) -> None:
+        super().__init__("Request cancelled")
+
+
 class NotConnectedError(NexoError):
     def __init__(self) -> None:
         super().__init__("Client not connected")

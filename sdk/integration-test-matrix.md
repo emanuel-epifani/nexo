@@ -76,6 +76,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | queue_push_deleted_fails | Push to deleted queue fails | should fail push to deleted queue | push_deleted_queue_fails |
 | queue_delivery_token_lifecycle | deliveryToken flows through subscribe lifecycle | should handle deliveryToken in subscribe lifecycle | delivery_token_in_subscribe_lifecycle |
 | queue_redelivery_new_token | NACK triggers redelivery with new token | should requeue on stale ACK and redeliver to another consumer | redelivery_after_nack_uses_new_token |
+| queue_stop_cancels_long_poll | stop() returns quickly when long-polling with no messages | stop() should return quickly when long-polling with no messages | stop_returns_quickly_when_long_polling |
 
 ## Stream
 

@@ -1,7 +1,7 @@
 import { NexoConnection } from '../connection';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
-import { ConnectionClosedError, RequestTimeoutError } from '../errors';
+import { ConnectionClosedError, RequestTimeoutError, RequestCancelledError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
 
@@ -68,10 +68,10 @@ const QueueCommands = {
     });
   },
 
-  consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number): Promise<{ id: string, deliveryToken: bigint, data: T }[]> => {
+  consume: async <T>(conn: NexoConnection, name: string, batchSize: number, waitMs: number, signal?: AbortSignal): Promise<{ id: string, deliveryToken: bigint, data: T }[]> => {
     const res = await conn.send(QueueOpcode.Q_CONSUME, w => {
       w.string(name).u32(batchSize).u32(waitMs);
-    }, { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS });
+    }, { timeoutMs: waitMs + CONSUME_TIMEOUT_MARGIN_MS, signal });
 
     const count = res.cursor.readU32();
     if (count === 0) return [];
@@ -214,6 +214,7 @@ export class NexoDLQ<T = any> {
 class QueueSubscription<T> {
   active = false;
   private loopPromise: Promise<void> = Promise.resolve();
+  private abortController: AbortController | null = null;
 
   constructor(
     private readonly conn: NexoConnection,
@@ -223,7 +224,8 @@ class QueueSubscription<T> {
     private readonly batchSize: number,
     private readonly waitMs: number,
     private readonly concurrency: number,
-  ) { }
+    private readonly stopTimeoutMs: number,
+  ) {}
 
   start(): void {
     this.active = true;
@@ -234,7 +236,17 @@ class QueueSubscription<T> {
 
   async stop(): Promise<void> {
     this.active = false;
-    await this.loopPromise;
+    this.abortController?.abort();
+    try {
+      await Promise.race([
+        this.loopPromise,
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error(`stop() drain timeout after ${this.stopTimeoutMs}ms`)), this.stopTimeoutMs)
+        ),
+      ]);
+    } catch (e: any) {
+      this.logger.warn(`[Queue:${this.queueName}] ${e.message}`);
+    }
   }
 
   private async loop(): Promise<void> {
@@ -247,7 +259,9 @@ class QueueSubscription<T> {
       try {
         if (!this.conn.isConnected) continue;
 
-        const messages = await QueueCommands.consume<T>(this.conn, this.queueName, this.batchSize, this.waitMs);
+        this.abortController = new AbortController();
+        const messages = await QueueCommands.consume<T>(this.conn, this.queueName, this.batchSize, this.waitMs, this.abortController.signal);
+        this.abortController = null;
 
         if (messages.length === 0) continue;
 
@@ -266,6 +280,7 @@ class QueueSubscription<T> {
 
       } catch (e: any) {
         if (!this.active) break;
+        if (e instanceof RequestCancelledError) break;
         if (!this.conn.isConnected || e instanceof ConnectionClosedError || e instanceof RequestTimeoutError || e.code === 'ECONNRESET') {
           await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
           continue;
@@ -331,7 +346,7 @@ export class NexoQueue<T = any> {
     if (batchSize < 1) throw new Error(`batchSize must be >= 1, got ${batchSize}`);
     if (concurrency < 1) throw new Error(`concurrency must be >= 1, got ${concurrency}`);
 
-    const sub = new QueueSubscription<T>(this.conn, this.name, this.logger, callback, batchSize, waitMs, concurrency);
+    const sub = new QueueSubscription<T>(this.conn, this.name, this.logger, callback, batchSize, waitMs, concurrency, DEFAULT_CONFIG.queue.stopTimeoutMs);
     sub.start();
 
     return new Subscription(

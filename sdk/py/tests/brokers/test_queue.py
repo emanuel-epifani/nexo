@@ -520,7 +520,32 @@ class TestQueue:
             if delivery_count == 1:
                 raise Exception("fail first")
 
-        sub = await q.subscribe(cb, batch_size=1, wait_ms=200, concurrency=1)
+        sub = await q.subscribe(cb, {"batch_size": 1, "wait_ms": 200, "concurrency": 1})
         await wait_for(lambda: delivery_count >= 2)
         await sub.stop()
+        await q.delete()
+
+    # ── stop() cancels in-flight consume and drains ────────────────
+
+    async def test_stop_returns_quickly_when_long_polling(self, nexo: NexoClient):
+        import time
+
+        q_name = f"queue-stop-longpoll-{uuid.uuid4()}"
+        q = await nexo.queue(q_name).create()
+
+        async def _noop(_):
+            pass
+
+        sub = await q.subscribe(
+            _noop,
+            {"batch_size": 1, "wait_ms": 10000, "concurrency": 1},
+        )
+
+        await asyncio.sleep(0.3)
+
+        stop_start = time.monotonic()
+        await sub.stop()
+        stop_elapsed = time.monotonic() - stop_start
+
+        assert stop_elapsed < 2.0
         await q.delete()
