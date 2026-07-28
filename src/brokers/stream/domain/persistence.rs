@@ -362,7 +362,7 @@ async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Resul
 }
 
 // ==========================================
-// HELPERS (Formerly in writer.rs)
+// HELPERS
 // ==========================================
 
 /// Total on-disk size of a serialized message record: [len: u32][crc: u32][content].

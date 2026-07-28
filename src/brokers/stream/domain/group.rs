@@ -2,11 +2,13 @@
 //!
 //! Each group tracks:
 //! - ack_floor: highest seq such that ALL seqs 1..=ack_floor are acked
-//! - msgs: unified state map (Pending / Redeliver / Dlt) replacing separate pending/redeliver/dlt/delivery_attempts
-//! - keys: unified key state (in_flight / blocked / poisoned) replacing keys_in_flight/blocked_by_key/parked_keys
+//! - msgs: unified state map (Pending / Redeliver / Dlt)
+//! - keys: unified key state (in_flight / blocked / poisoned)
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
+use priority_queue::PriorityQueue;
 
 use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
@@ -21,12 +23,11 @@ pub struct DltEntry {
     pub key: Option<Bytes>,
 }
 
-/// Unified message state — replaces PendingMsg + redeliver BTreeSet + DLT BTreeMap + delivery_attempts
+/// Unified message state — Pending, Redeliver, or Dlt
 #[derive(Clone, Debug)]
 enum MsgState {
     Pending {
         consumer_id: String,
-        delivered_at: Instant,
         delivery_count: u32,
         key: Option<Bytes>,
     },
@@ -36,7 +37,7 @@ enum MsgState {
     Dlt(DltEntry),
 }
 
-/// Unified key state — replaces keys_in_flight + blocked_by_key + parked_keys
+/// Unified key state — in_flight, blocked, or poisoned
 #[derive(Default)]
 struct KeyState {
     in_flight: Option<u64>,
@@ -65,7 +66,7 @@ pub struct ConsumerGroup {
     pub generation: u64,
     pub cancel: CancellationToken,
     last_clamped_head: u64,
-    deadlines: BTreeMap<Instant, BTreeSet<u64>>,
+    deadlines: PriorityQueue<u64, Reverse<Instant>>,
 }
 
 impl ConsumerGroup {
@@ -87,7 +88,7 @@ impl ConsumerGroup {
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
-            deadlines: BTreeMap::new(),
+            deadlines: PriorityQueue::new(),
         }
     }
 
@@ -134,7 +135,7 @@ impl ConsumerGroup {
             generation: 1,
             cancel: CancellationToken::new(),
             last_clamped_head: 0,
-            deadlines: BTreeMap::new(),
+            deadlines: PriorityQueue::new(),
         }
     }
 
@@ -145,7 +146,7 @@ impl ConsumerGroup {
         self.clamp_head(head_seq);
 
         if self.pending_count >= self.max_ack_pending {
-            return Ok(vec![]); // backpressure
+            return Ok(vec![]);
         }
 
         let budget = limit.min(self.max_ack_pending - self.pending_count);
@@ -236,36 +237,21 @@ impl ConsumerGroup {
         Ok(key_unblocked)
     }
 
-    /// Negative acknowledge: move message back to redeliver queue.
+    /// Move timed-out pending messages back to redeliver queue.
     pub fn check_redelivery(&mut self) -> bool {
-        if self.deadlines.is_empty() {
-            return false;
-        }
         let now = Instant::now();
-        if let Some((&deadline, _)) = self.deadlines.first_key_value() {
-            if now < deadline {
-                return false;
-            }
-        }
-
-        let expired: Vec<u64> = self.deadlines
-            .range(..=now)
-            .flat_map(|(_, seqs)| seqs.iter().copied())
-            .collect();
-
-        if expired.is_empty() {
-            return false;
-        }
-
-        for seq in expired {
+        let mut changed = false;
+        while let Some((_, Reverse(d))) = self.deadlines.peek() {
+            if *d > now { break; }
+            let (seq, _) = self.deadlines.pop().unwrap();
             if let Some((delivery_count, key)) = self.remove_pending(seq) {
                 tracing::debug!("[Group:{}] Redelivery timeout seq={} (attempts={})", self.id, seq, delivery_count);
                 self.release_seq(seq, delivery_count, key);
+                changed = true;
             }
         }
-
-        self.try_advance_floor();
-        true
+        if changed { self.try_advance_floor(); }
+        changed
     }
 
     pub fn seek_beginning(&mut self, head_seq: u64) {
@@ -297,18 +283,12 @@ impl ConsumerGroup {
             changed = true;
         }
 
-        // Remove all msgs below head_seq (unifies pending + redeliver + dlt + delivery_attempts cleanup)
+        // Remove all msgs below head_seq
         let stale: Vec<u64> = self.msgs.range(..head_seq).map(|(s, _)| *s).collect();
         for seq in &stale {
             if let Some(state) = self.msgs.remove(seq) {
-                if let MsgState::Pending { delivered_at, .. } = &state {
-                    let deadline = *delivered_at + self.ack_wait;
-                    if let Some(set) = self.deadlines.get_mut(&deadline) {
-                        set.remove(seq);
-                        if set.is_empty() {
-                            self.deadlines.remove(&deadline);
-                        }
-                    }
+                if let MsgState::Pending { .. } = &state {
+                    self.deadlines.remove(seq);
                     self.pending_count -= 1;
                 }
                 if let MsgState::Dlt(entry) = &state {
@@ -396,14 +376,8 @@ impl ConsumerGroup {
     fn remove_pending(&mut self, seq: u64) -> Option<(u32, Option<Bytes>)> {
         let state = self.msgs.remove(&seq)?;
         match state {
-            MsgState::Pending { delivered_at, delivery_count, key, .. } => {
-                let deadline = delivered_at + self.ack_wait;
-                if let Some(set) = self.deadlines.get_mut(&deadline) {
-                    set.remove(&seq);
-                    if set.is_empty() {
-                        self.deadlines.remove(&deadline);
-                    }
-                }
+            MsgState::Pending { delivery_count, key, .. } => {
+                self.deadlines.remove(&seq);
                 self.pending_count -= 1;
                 Some((delivery_count, key))
             }
@@ -448,7 +422,7 @@ impl ConsumerGroup {
         self.generation
     }
 
-    // --- Accessors for manager.rs (replacing direct field access) ---
+    // --- Accessors ---
 
     pub fn dlt_snapshot(&self) -> BTreeMap<u64, DltEntry> {
         self.msgs.iter()
@@ -540,13 +514,11 @@ impl ConsumerGroup {
             self.keys.entry(key.clone()).or_default().in_flight = Some(msg.seq);
         }
 
-        let delivered_at = Instant::now();
-        let deadline = delivered_at + self.ack_wait;
-        self.deadlines.entry(deadline).or_default().insert(msg.seq);
+        let now = Instant::now();
+        self.deadlines.push(msg.seq, Reverse(now + self.ack_wait));
         self.redeliver_idx.remove(&msg.seq);
         self.msgs.insert(msg.seq, MsgState::Pending {
             consumer_id: consumer_id.to_string(),
-            delivered_at,
             delivery_count: next_attempt,
             key: msg.key.clone(),
         });
@@ -735,7 +707,7 @@ mod tests {
         (1..=count).map(|i| make_msg(i as u64, None)).collect()
     }
 
-    // Test helpers for unified state
+    // Test helpers
     fn is_pending(g: &ConsumerGroup, seq: u64) -> bool {
         matches!(g.msgs.get(&seq), Some(MsgState::Pending { .. }))
     }
@@ -781,8 +753,8 @@ mod tests {
         g.keys.entry(key).or_default().poisoned = true;
     }
     fn insert_pending(g: &mut ConsumerGroup, seq: u64, consumer_id: String, delivered_at: Instant, delivery_count: u32, key: Option<Bytes>) {
-        g.deadlines.entry(delivered_at + g.ack_wait).or_default().insert(seq);
-        g.msgs.insert(seq, MsgState::Pending { consumer_id, delivered_at, delivery_count, key });
+        g.deadlines.push(seq, Reverse(delivered_at + g.ack_wait));
+        g.msgs.insert(seq, MsgState::Pending { consumer_id, delivery_count, key });
         g.pending_count += 1;
     }
 
@@ -1001,12 +973,12 @@ mod tests {
 
         // Deliver 3 messages
         g.fetch(&consumer, gen, 3, &log, 1).unwrap();
-        let total_in_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
+        let total_in_deadlines: usize = g.deadlines.len();
         assert_eq!(total_in_deadlines, 3);
 
         // Ack seq 2
         g.ack(&consumer, gen, 2).unwrap();
-        let total_in_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
+        let total_in_deadlines: usize = g.deadlines.len();
         assert_eq!(total_in_deadlines, 2);
 
         // Ack remaining
@@ -1451,19 +1423,19 @@ mod tests {
 
         // Deliver 5 messages
         g.fetch(&consumer, gen, 5, &log, 1).unwrap();
-        let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
+        let total_deadlines: usize = g.deadlines.len();
         assert_eq!(pending_count(&g), total_deadlines);
 
         // Ack some
         g.ack(&consumer, gen, 2).unwrap();
         g.ack(&consumer, gen, 4).unwrap();
-        let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
+        let total_deadlines: usize = g.deadlines.len();
         assert_eq!(pending_count(&g), total_deadlines);
 
         // Timeout redelivery
         std::thread::sleep(Duration::from_millis(60));
         g.check_redelivery();
-        let total_deadlines: usize = g.deadlines.values().map(|s| s.len()).sum();
+        let total_deadlines: usize = g.deadlines.len();
         assert_eq!(pending_count(&g), total_deadlines);
         assert_eq!(pending_count(&g), 0);
         assert_eq!(total_deadlines, 0);
