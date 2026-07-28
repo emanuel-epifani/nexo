@@ -313,10 +313,10 @@ def _decode_fixture(fixture: dict) -> object:
         }
 
     if fid == "QUEUE_ACK":
-        return {"message_id": c.read_uuid(), "queue": c.read_string()}
+        return {"message_id": c.read_uuid(), "delivery_token": c.read_u64(), "queue": c.read_string()}
 
     if fid == "QUEUE_NACK":
-        return {"message_id": c.read_uuid(), "queue": c.read_string(), "reason": c.read_string()}
+        return {"message_id": c.read_uuid(), "delivery_token": c.read_u64(), "queue": c.read_string(), "reason": c.read_string()}
 
     if fid == "QUEUE_PEEK_DLQ":
         return {"queue": c.read_string(), "limit": c.read_u32(), "offset": c.read_u32()}

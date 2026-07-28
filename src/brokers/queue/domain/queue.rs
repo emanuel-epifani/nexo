@@ -4,12 +4,13 @@
 //! This module contains the pure state logic without any concurrency primitives.
 //! The QueueManager wraps this state in a Mutex<QueueInner> per queue.
 
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
+use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use hashlink::LinkedHashSet;
 
 use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::config::SystemQueueConfig;
@@ -78,10 +79,10 @@ impl QueueConfig {
 pub struct QueueState {
     /// Source of truth for all messages
     registry: HashMap<Uuid, Message>,
-    /// Ready messages by priority (high priority first)
-    waiting_for_dispatch: BTreeMap<u8, LinkedHashSet<Uuid>>,
-    /// In-flight messages by timeout time
-    waiting_for_ack: BTreeMap<u64, LinkedHashSet<Uuid>>,
+    /// Ready messages ordered by (priority desc, ready_seq asc).
+    ready: PriorityQueue<Uuid, (u8, Reverse<u64>)>,
+    /// In-flight messages ordered by (visible_at asc, delivery_token asc).
+    in_flight: PriorityQueue<Uuid, Reverse<(u64, u64)>>,
     /// Monotonic counter for ready_seq (FIFO ordering that survives restart)
     ready_seq_counter: u64,
     /// Monotonic counter for delivery_token (identifies a specific delivery)
@@ -91,14 +92,14 @@ pub struct QueueState {
 impl QueueState {
     /// Returns the earliest visibility timeout (ms) for in-flight messages.
     pub fn next_inflight_timeout(&self) -> Option<u64> {
-        self.waiting_for_ack.keys().next().cloned()
+        self.in_flight.peek().map(|(_, Reverse((ts, _)))| *ts)
     }
 
     pub fn new() -> Self {
         Self {
             registry: HashMap::new(),
-            waiting_for_dispatch: BTreeMap::new(),
-            waiting_for_ack: BTreeMap::new(),
+            ready: PriorityQueue::new(),
+            in_flight: PriorityQueue::new(),
             ready_seq_counter: 0,
             delivery_counter: 0,
         }
@@ -110,16 +111,15 @@ impl QueueState {
     pub fn push(&mut self, msg: &mut Message) {
         let id = msg.id;
         let priority = msg.priority;
-        let visible_at = msg.visible_at;
 
         msg.ready_seq = self.next_ready_seq();
 
         self.registry.insert(id, msg.clone());
 
-        if visible_at > 0 {
-            self.waiting_for_ack.entry(visible_at).or_default().insert(id);
+        if msg.visible_at > 0 {
+            self.in_flight.push(id, Reverse((msg.visible_at, msg.delivery_token)));
         } else {
-            self.waiting_for_dispatch.entry(priority).or_default().insert(id);
+            self.ready.push(id, (priority, Reverse(msg.ready_seq)));
         }
     }
 
@@ -128,7 +128,6 @@ impl QueueState {
     pub fn restore(&mut self, msg: Message) {
         let id = msg.id;
         let priority = msg.priority;
-        let visible_at = msg.visible_at;
 
         if msg.ready_seq > self.ready_seq_counter {
             self.ready_seq_counter = msg.ready_seq;
@@ -137,12 +136,12 @@ impl QueueState {
             self.delivery_counter = msg.delivery_token;
         }
 
-        self.registry.insert(id, msg);
+        self.registry.insert(id, msg.clone());
 
-        if visible_at > 0 {
-            self.waiting_for_ack.entry(visible_at).or_default().insert(id);
+        if msg.visible_at > 0 {
+            self.in_flight.push(id, Reverse((msg.visible_at, msg.delivery_token)));
         } else {
-            self.waiting_for_dispatch.entry(priority).or_default().insert(id);
+            self.ready.push(id, (priority, Reverse(msg.ready_seq)));
         }
     }
 
@@ -194,13 +193,13 @@ impl QueueState {
         let now = current_time_ms();
 
         // 1. Check existence, token and active lease
-        let (should_dlq, priority, visible_at) = if let Some(msg) = self.registry.get_mut(&id) {
+        let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
             // Must be an active in-flight delivery with a matching token.
             if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
                 return (None, None);
             }
             msg.failure_reason = Some(reason.clone());
-            (msg.attempts >= max_deliveries, msg.priority, msg.visible_at)
+            (msg.attempts >= max_deliveries, msg.priority)
         } else {
             return (None, None);
         };
@@ -214,14 +213,14 @@ impl QueueState {
             }
             (None, None)
         } else {
-            // Requeue: remove from in-flight index, reset visible_at/delivery_token, assign new ready_seq, add to ready index
-            self.remove_from_index(id, priority, visible_at);
+            // Requeue: remove from in-flight, reset visible_at/delivery_token, assign new ready_seq, add to ready
+            self.in_flight.remove(&id);
             let new_seq = self.next_ready_seq();
             if let Some(msg) = self.registry.get_mut(&id) {
                 msg.visible_at = 0;
                 msg.ready_seq = new_seq;
                 msg.delivery_token = 0;
-                self.waiting_for_dispatch.entry(priority).or_default().insert(id);
+                self.ready.push(id, (priority, Reverse(new_seq)));
                 return (Some(msg.clone()), None);
             }
             (None, None)
@@ -237,34 +236,30 @@ impl QueueState {
         let mut requeued_msgs = Vec::new();
         let mut dlq_msgs = Vec::new();
 
-        // Collect expired timestamps (BTreeMap keys are sorted ascending)
-        let expired_ts: Vec<u64> = self.waiting_for_ack
-            .keys()
-            .take_while(|&&ts| ts <= now)
-            .copied()
-            .collect();
+        while let Some((_, Reverse((visible_at, _)))) = self.in_flight.peek() {
+            if *visible_at > now {
+                break;
+            }
 
-        for ts in expired_ts {
-            let ids = self.waiting_for_ack.remove(&ts).unwrap_or_default();
-            for id in ids {
-                let should_dlq = self.registry.get(&id)
-                    .map(|m| m.attempts >= max_deliveries)
-                    .unwrap_or(false);
+            let (id, _) = self.in_flight.pop().expect("non-empty in-flight heap");
 
-                if should_dlq {
-                    if let Some(msg) = self.registry.remove(&id) {
-                        dlq_msgs.push(DlqMessage::from_message(msg, "Timeout".to_string()));
-                    }
-                } else {
-                    let new_seq = self.next_ready_seq();
-                    if let Some(msg) = self.registry.get_mut(&id) {
-                        msg.visible_at = 0;
-                        msg.ready_seq = new_seq;
-                        msg.delivery_token = 0;
-                        let priority = msg.priority;
-                        requeued_msgs.push(msg.clone());
-                        self.waiting_for_dispatch.entry(priority).or_default().insert(id);
-                    }
+            let should_dlq = self.registry.get(&id)
+                .map(|m| m.attempts >= max_deliveries)
+                .unwrap_or(false);
+
+            if should_dlq {
+                if let Some(msg) = self.registry.remove(&id) {
+                    dlq_msgs.push(DlqMessage::from_message(msg, "Timeout".to_string()));
+                }
+            } else {
+                let new_seq = self.next_ready_seq();
+                if let Some(msg) = self.registry.get_mut(&id) {
+                    msg.visible_at = 0;
+                    msg.ready_seq = new_seq;
+                    msg.delivery_token = 0;
+                    let priority = msg.priority;
+                    requeued_msgs.push(msg.clone());
+                    self.ready.push(id, (priority, Reverse(new_seq)));
                 }
             }
         }
@@ -276,24 +271,9 @@ impl QueueState {
 
     /// Pop a single message from the queue.
     fn pop_single(&mut self, visibility_timeout_ms: u64, now: u64) -> Option<Message> {
-        // Find highest priority ready message
-        let next_id = self.waiting_for_dispatch
-            .iter()
-            .rev()
-            .find_map(|(_, queue)| queue.front().cloned());
-
-        let next_id = match next_id {
-            Some(id) => id,
-            None => return None,
-        };
+        let (next_id, _) = self.ready.pop()?;
 
         let timeout = now + visibility_timeout_ms;
-
-        // Get priority before mutable borrow
-        let priority = self.registry.get(&next_id)?.priority;
-
-        // Remove from ready index
-        self.remove_from_index(next_id, priority, 0);
 
         // Update to in-flight
         let msg = self.registry.get_mut(&next_id)?;
@@ -303,25 +283,9 @@ impl QueueState {
         msg.delivery_token = self.delivery_counter;
 
         // Add to in-flight index
-        self.waiting_for_ack.entry(timeout).or_default().insert(next_id);
+        self.in_flight.push(next_id, Reverse((timeout, msg.delivery_token)));
 
         Some(msg.clone())
-    }
-
-    /// Remove a message ID from the appropriate index based on visible_at.
-    /// visible_at > 0 → in-flight index; visible_at == 0 → ready index.
-    fn remove_from_index(&mut self, id: Uuid, priority: u8, visible_at: u64) {
-        if visible_at > 0 {
-            if let Some(queue) = self.waiting_for_ack.get_mut(&visible_at) {
-                queue.remove(&id);
-                if queue.is_empty() { self.waiting_for_ack.remove(&visible_at); }
-            }
-        } else {
-            if let Some(queue) = self.waiting_for_dispatch.get_mut(&priority) {
-                queue.remove(&id);
-                if queue.is_empty() { self.waiting_for_dispatch.remove(&priority); }
-            }
-        }
     }
 
     fn delete_message(&mut self, id: Uuid) -> bool {
@@ -330,7 +294,8 @@ impl QueueState {
 
     fn delete_message_and_return(&mut self, id: Uuid) -> Option<Message> {
         let msg = self.registry.remove(&id)?;
-        self.remove_from_index(id, msg.priority, msg.visible_at);
+        self.ready.remove(&id);
+        self.in_flight.remove(&id);
         Some(msg)
     }
 }
@@ -531,5 +496,42 @@ mod tests {
         let mut third = Message::new(b("third"), 0, current_time_ms());
         state.push(&mut third);
         assert!(third.ready_seq > m1.ready_seq, "new push must have higher ready_seq than requeued message");
+    }
+
+    #[test]
+    fn higher_priority_pops_first() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+
+        let mut low = Message::new(b("low"), 1, now);
+        let mut high = Message::new(b("high"), 10, now);
+        state.push(&mut low);
+        state.push(&mut high);
+
+        let first = state.pop(1000, now).unwrap();
+        assert_eq!(first.priority, 10);
+        assert_eq!(first.payload, b("high"));
+
+        let second = state.pop(1000, now).unwrap();
+        assert_eq!(second.priority, 1);
+        assert_eq!(second.payload, b("low"));
+    }
+
+    #[test]
+    fn fifo_at_same_priority() {
+        let mut state = QueueState::new();
+        let now = current_time_ms();
+
+        let mut first = Message::new(b("first"), 5, now);
+        let mut second = Message::new(b("second"), 5, now);
+        state.push(&mut first);
+        state.push(&mut second);
+
+        let m1 = state.pop(1000, now).unwrap();
+        let m2 = state.pop(1000, now).unwrap();
+
+        assert_eq!(m1.payload, b("first"));
+        assert_eq!(m2.payload, b("second"));
+        assert!(m1.ready_seq < m2.ready_seq);
     }
 }

@@ -345,14 +345,16 @@ function decodeFixture(fixture: Fixture): any {
       return { queue: c.readString(), batch_size: c.readU32(), wait_ms: c.readU32() };
     case 'QUEUE_ACK': {
       const messageId = c.readUUID();
+      const deliveryToken = Number(c.readU64());
       const queue = c.readString();
-      return { queue, message_id: messageId };
+      return { queue, message_id: messageId, delivery_token: deliveryToken };
     }
     case 'QUEUE_NACK': {
       const messageId = c.readUUID();
+      const deliveryToken = Number(c.readU64());
       const queue = c.readString();
       const reason = c.readString();
-      return { queue, message_id: messageId, reason };
+      return { queue, message_id: messageId, delivery_token: deliveryToken, reason };
     }
     case 'QUEUE_PEEK_DLQ':
       return { queue: c.readString(), limit: c.readU32(), offset: c.readU32() };
