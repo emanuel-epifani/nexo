@@ -155,7 +155,7 @@ async fn run_writer(
                     Some(op) => {
                         batch.push(op);
 
-                        // Drain everything currently available in the channel
+                        // Drain channel
                         while batch.len() < batch_size {
                             match rx.try_recv() {
                                 Ok(op) => batch.push(op),
@@ -177,7 +177,6 @@ async fn run_writer(
                                     break;
                                 }
                                 if batch.len() != prev_len {
-                                    // Partial progress (constraint discard), keep retrying remainder
                                     continue;
                                 }
                                 if attempt < 5 {
@@ -275,7 +274,6 @@ fn uuid_from_blob(id_blob: Vec<u8>) -> Result<Uuid> {
 }
 
 fn init_db(conn: &Connection) -> Result<()> {
-    // Set pragmas for schema initialization connection
     // synchronous=NORMAL for safety during table creation
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;

@@ -49,6 +49,7 @@ Any wire change must stay symmetric across `src/`, `sdk/ts/`, `sdk/py/`, and bum
 - **Regression**: any bug fix must include a regression test in the affected broker/SDK.
 - **Performance**: compare always before/after of test-stress.test.ts, test_stress.py, tests/stress_tests.rs (keep alignes benchmark on docstring)
 - **Algorithm**: only O(1) / O(log n) is acceptable. Never implement O(n)+ solutions — go back to redesign and pick better data structures.
+- **Comments**: minimal and high-value only. Write "why", not "what" — if the code already says it, don't repeat it. No stale references to past refactors or old structures.
 
 
 ## Commands

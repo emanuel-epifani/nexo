@@ -73,7 +73,7 @@ impl QueueConfig {
 }
 
 // ==========================================
-// QUEUE STATE (Pure State, No Concurrency)
+// QUEUE STATE
 // ==========================================
 
 pub struct QueueState {
@@ -192,7 +192,7 @@ impl QueueState {
     pub fn nack(&mut self, id: Uuid, delivery_token: u64, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
         let now = current_time_ms();
 
-        // 1. Check existence, token and active lease
+        // 1. Check existence, token, and active lease
         let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
             // Must be an active in-flight delivery with a matching token.
             if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
@@ -206,14 +206,12 @@ impl QueueState {
 
         // 2. Action
         if should_dlq {
-            // Remove from here, return for DLQ
             if let Some(msg) = self.delete_message_and_return(id) {
                 let dlq_msg = DlqMessage::from_message(msg, reason);
                 return (None, Some(dlq_msg));
             }
             (None, None)
         } else {
-            // Requeue: remove from in-flight, reset visible_at/delivery_token, assign new ready_seq, add to ready
             self.in_flight.remove(&id);
             let new_seq = self.next_ready_seq();
             if let Some(msg) = self.registry.get_mut(&id) {
@@ -275,14 +273,12 @@ impl QueueState {
 
         let timeout = now + visibility_timeout_ms;
 
-        // Update to in-flight
         let msg = self.registry.get_mut(&next_id)?;
         msg.visible_at = timeout;
         msg.attempts += 1;
         self.delivery_counter += 1;
         msg.delivery_token = self.delivery_counter;
 
-        // Add to in-flight index
         self.in_flight.push(next_id, Reverse((timeout, msg.delivery_token)));
 
         Some(msg.clone())

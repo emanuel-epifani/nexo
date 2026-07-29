@@ -1,12 +1,9 @@
 #[derive(Debug, Clone)]
 pub struct SystemQueueConfig {
-    // CREATE config
     pub visibility_timeout_ms: u64,
     pub max_deliveries: u32,
-    // PUSH config
     pub default_batch_size: usize,
     pub default_wait_ms: u64,
-    // PERSISTENCE config
     pub persistence_path: String,
     pub default_flush_ms: u64,
     pub writer_batch_size: usize,

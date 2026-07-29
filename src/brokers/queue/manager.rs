@@ -73,7 +73,6 @@ impl QueueManager {
         let queues = Arc::new(DashMap::new());
         let cancel = CancellationToken::new();
 
-        // Ensure persistence directory exists (one-time setup)
         let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
         if let Err(e) = std::fs::create_dir_all(&persistence_path) {
             error!("Failed to create queue data directory at {:?}: {}", persistence_path, e);
@@ -86,7 +85,7 @@ impl QueueManager {
             lifecycle_mutex: TokioMutex::new(()),
         };
 
-        // WARM START: Discover and restore queues from filesystem
+        // Warm start: discover and restore queues from filesystem
         let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
         if persistence_path.exists() {
             if let Ok(entries) = std::fs::read_dir(&persistence_path) {
@@ -146,7 +145,6 @@ impl QueueManager {
         let mut main_state = QueueState::new();
         let mut dlq_state = DlqState::new();
 
-        // Recovery
         match store.recover() {
             Ok((main_messages, dlq_messages)) => {
                 let main_count = main_messages.len();
@@ -200,7 +198,6 @@ impl QueueManager {
                     let (requeued, dlq_msgs) = {
                         let mut inner = Self::lock(&shared.inner);
                         
-                        // Check if processing is needed
                         let should_process = inner.state.next_inflight_timeout().map(|ts| ts <= now).unwrap_or(false);
                         if !should_process {
                             continue;
@@ -259,7 +256,7 @@ impl QueueManager {
 
         let _guard = self.lifecycle_mutex.lock().await;
 
-        // Reject if the DB path is a symlink (path traversal protection)
+        // Path traversal protection
         let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
         let db_path = persistence_path.join(format!("{}.db", name));
         if let Ok(meta) = std::fs::symlink_metadata(&db_path) {
@@ -275,7 +272,6 @@ impl QueueManager {
             Entry::Vacant(v) => {
                 let config = QueueConfig::from_options(options, &self.config);
 
-                // Persist config
                 let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
                 let config_path = persistence_path.join(format!("{}.config.json", name));
                 if let Ok(data) = serde_json::to_string_pretty(&config) {
@@ -298,22 +294,21 @@ impl QueueManager {
             shared.store.shutdown().await;
         }
 
-        // Delete Persistence (safe: writer has flushed and closed)
+        // Safe: writer has flushed and closed
         let base_path = std::path::PathBuf::from(&self.config.persistence_path);
         let db_path = base_path.join(format!("{}.db", name));
         let wal_path = base_path.join(format!("{}.db-wal", name));
         let shm_path = base_path.join(format!("{}.db-shm", name));
         let config_path = base_path.join(format!("{}.config.json", name));
 
-        // Remove main DB file - error if it exists but cannot be removed
         if db_path.exists() {
             std::fs::remove_file(&db_path)
                 .map_err(|e| format!("Failed to delete queue DB file: {}", e))?;
         }
-        // WAL/SHM may not exist, ignore errors
+        // WAL/SHM may not exist
         let _ = std::fs::remove_file(wal_path);
         let _ = std::fs::remove_file(shm_path);
-        // Config may not exist, ignore errors
+        // Config may not exist
         let _ = std::fs::remove_file(config_path);
 
         Ok(())
@@ -438,7 +433,6 @@ impl QueueManager {
             return Err("batch_size must be >= 1".to_string());
         }
 
-        // Try immediate fetch
         let msgs = {
             let mut inner = Self::lock(&shared.inner);
             let vt = inner.config.visibility_timeout_ms;
@@ -449,19 +443,16 @@ impl QueueManager {
             return Ok(msgs);
         }
 
-        // No messages and no wait -> return empty
         if wait_val == 0 {
             return Ok(vec![]);
         }
 
-        // Long polling loop
         let deadline = Instant::now() + Duration::from_millis(wait_val);
 
         loop {
-            // Register interest before checking
+            // Register interest before checking to avoid missed wakeups
             let notified = shared.notify.notified();
 
-            // Try fetch under lock
             let msgs = {
                 let mut inner = Self::lock(&shared.inner);
                 let vt = inner.config.visibility_timeout_ms;

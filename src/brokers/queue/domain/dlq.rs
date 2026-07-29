@@ -1,10 +1,5 @@
 #![allow(clippy::too_many_arguments)]
-//! DLQ State: Specialized state management for Dead Letter Queue
-//! 
-//! Optimized for:
-//! - Chronological ordering (Insert order)
-//! - Fast lookup by ID (O(1))
-//! - Simple pagination (Offset/Limit)
+//! DLQ State: LinkedHashMap for O(1) lookup + insertion-ordered iteration + pagination.
 
 use hashlink::LinkedHashMap;
 use uuid::Uuid;
@@ -43,19 +38,18 @@ impl DlqMessage {
             id: self.id,
             payload: self.payload,
             priority: self.priority,
-            attempts: 0, // Reset attempts on replay
+            attempts: 0,
             created_at: self.created_at,
-            visible_at: 0, // Ready immediately
-            ready_seq: 0, // Will be assigned by QueueState::push
-            delivery_token: 0, // Will be assigned on next pop
-            failure_reason: None, // Clear reason
+            visible_at: 0,
+            ready_seq: 0,
+            delivery_token: 0,
+            failure_reason: None,
         }
     }
 }
 
 pub struct DlqState {
-    /// Ordered map of failed messages.
-    /// Order is FIFO (insertion order).
+    /// FIFO ordered map of failed messages.
     messages: LinkedHashMap<Uuid, DlqMessage>,
     /// Monotonic counter for dlq_seq (ordering that survives restart)
     dlq_seq_counter: u64,
@@ -72,7 +66,6 @@ impl DlqState {
     pub fn push(&mut self, msg: &mut DlqMessage) {
         self.dlq_seq_counter += 1;
         msg.dlq_seq = self.dlq_seq_counter;
-        // Updates position to end if already exists (which shouldn't happen usually)
         self.messages.insert(msg.id, msg.clone());
     }
 
