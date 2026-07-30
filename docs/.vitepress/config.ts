@@ -1,5 +1,46 @@
 import { defineConfig } from 'vitepress'
 
+const docsSidebar = [
+  {
+    text: 'Getting Started',
+    items: [
+      { text: 'Introduction', link: '/guide/introduction' },
+      { text: 'Quick Start', link: '/guide/quickstart' },
+    ],
+  },
+  {
+    text: 'Brokers',
+    items: [
+      { text: 'Store', link: '/guide/store' },
+      { text: 'Queue', link: '/guide/queue' },
+      { text: 'Pub/Sub', link: '/guide/pubsub' },
+      { text: 'Stream', link: '/guide/stream' },
+    ],
+  },
+  {
+    text: 'Advanced',
+    items: [
+      { text: 'Binary Payloads', link: '/guide/binary' },
+      { text: 'Deployment', link: '/guide/deployment' },
+    ],
+  },
+  {
+    text: 'Releases',
+    items: [
+      { text: 'Changelog', link: '/changelog' },
+    ],
+  },
+]
+
+const referenceSidebar = [
+  {
+    text: 'Reference',
+    items: [
+      { text: 'SDKs', link: '/reference/sdks' },
+    ],
+  },
+]
+
 export default defineConfig({
   title: 'Nexo',
   description: 'The High-Performance All-in-One Broker',
@@ -17,44 +58,14 @@ export default defineConfig({
 
     nav: [
       { text: 'Docs', link: '/guide/introduction' },
-      { text: 'Client SDKs', link: '/reference/sdks' },
+      { text: 'SDKs', link: '/reference/sdks' },
       { text: 'Docker Hub', link: 'https://hub.docker.com/r/emanuelepifani/nexo' },
     ],
 
     sidebar: {
-      '/guide/': [
-        {
-          text: 'Getting Started',
-          items: [
-            { text: 'Introduction', link: '/guide/introduction' },
-            { text: 'Quick Start', link: '/guide/quickstart' },
-          ],
-        },
-        {
-          text: 'Brokers',
-          items: [
-            { text: 'Store', link: '/guide/store' },
-            { text: 'Queue', link: '/guide/queue' },
-            { text: 'Pub/Sub', link: '/guide/pubsub' },
-            { text: 'Stream', link: '/guide/stream' },
-          ],
-        },
-        {
-          text: 'Advanced',
-          items: [
-            { text: 'Binary Payloads', link: '/guide/binary' },
-            { text: 'Deployment', link: '/guide/deployment' },
-          ],
-        },
-      ],
-      '/reference/': [
-        {
-          text: 'Reference',
-          items: [
-            { text: 'Client SDKs', link: '/reference/sdks' },
-          ],
-        },
-      ],
+      '/guide/': docsSidebar,
+      '/changelog': docsSidebar,
+      '/reference/': referenceSidebar,
     },
 
     socialLinks: [

@@ -51,6 +51,11 @@ Any wire change must stay symmetric across `src/`, `sdk/ts/`, `sdk/py/`, and bum
 - **Algorithm**: only O(1) / O(log n) is acceptable. Never implement O(n)+ solutions — go back to redesign and pick better data structures.
 - **Comments**: minimal and high-value only. Write "why", not "what" — if the code already says it, don't repeat it. No stale references to past refactors or old structures.
 
+## Commit Conventions
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/) — see [docs/commit-conventions.md](./docs/commit-conventions.md) for the full legend.
+
+**One commit per feature/refactor.** Cross-scope changes (broker + SDKs + tests + docs) go in a single commit. Use `git commit --amend` to keep squashing until the change is complete.
 
 ## Commands
 

@@ -639,6 +639,68 @@ body:has(.nexo-landing) .VPNavBarSearch .DocSearch-Button {
   letter-spacing: 0.02em;
 }
 
+/* ─── Changelog download pills ─── */
+.release-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.75rem 0 1.25rem;
+}
+
+.download-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 999px;
+  padding: 0.4rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  background-color: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+  border: 1px solid var(--vp-c-divider);
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.download-pill::before {
+  content: "↓";
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.download-pill:hover {
+  background-color: var(--vp-c-brand-soft);
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+.download-pill.alt::before {
+  content: "🐳";
+  font-size: 0.7rem;
+}
+
+.download-pill.npm::before {
+  content: "npm";
+  font-size: 0.6rem;
+  font-weight: 700;
+  background: var(--vp-c-brand-1);
+  color: var(--vp-c-white);
+  border-radius: 3px;
+  padding: 0.05rem 0.25rem;
+  opacity: 1;
+}
+
+.download-pill.pypi::before {
+  content: "PyPI";
+  font-size: 0.55rem;
+  font-weight: 700;
+  background: #3775a9;
+  color: var(--vp-c-white);
+  border-radius: 3px;
+  padding: 0.05rem 0.2rem;
+  opacity: 1;
+}
+
 /* ─── Hide VitePress footer globally on landing ─── */
 body:has(.nexo-landing) .VPFooter {
   display: none !important;

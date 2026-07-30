@@ -187,6 +187,10 @@ async function main() {
     // 2. Update version in all files
     updateVersion(newVersion);
 
+    // 2c. Update public changelog (renders the new version at the top)
+    console.log("📝 Updating docs changelog...");
+    run(`node scripts/build-changelog.js ${newVersion}`);
+
     // 2b. Update lockfiles
     console.log("📦 Updating Cargo.lock...");
     run('cargo check'); // This updates Cargo.lock automatically
@@ -201,6 +205,7 @@ async function main() {
     console.log("\n📦 Staging files...");
     const filesToStage = [
         ...FILES.map(f => f.path),
+        'docs/changelog.md',
         'Cargo.lock',
         'sdk/ts/package-lock.json',
         'sdk/py/uv.lock'
