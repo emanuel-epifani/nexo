@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexo-client"
-version = "5.0.1"
+version = "5.0.2"
 description = "High-performance Python Client for Nexo Broker"
 readme = "README.md"
 license = "MIT"

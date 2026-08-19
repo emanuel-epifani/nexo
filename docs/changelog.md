@@ -12,6 +12,21 @@ Release notes for the Nexo broker and SDKs.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## v5.0.2
+
+**Released:** 2026-08-19
+
+<p class="release-downloads">
+  <a class="download-pill" href="https://github.com/emanuel-epifani/nexo/releases/tag/v5.0.2" target="_blank" rel="noreferrer">Download v5.0.2</a>
+  <a class="download-pill alt" href="https://hub.docker.com/r/emanuelepifani/nexo/tags?name=5.0.2" target="_blank" rel="noreferrer">Docker tag v5.0.2</a>
+  <a class="download-pill npm" href="https://www.npmjs.com/package/@emanuelepifani/nexo-client/v/5.0.2" target="_blank" rel="noreferrer">npm v5.0.2</a>
+  <a class="download-pill pypi" href="https://pypi.org/project/nexo-client/5.0.2/" target="_blank" rel="noreferrer">PyPI v5.0.2</a>
+</p>
+
+### Changed
+
+- Centralize protocol constants in protocol.json and extract protocol module from transport
+
 ## v5.0.1
 
 **Released:** 2026-07-29

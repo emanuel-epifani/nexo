@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "nexo"
-version = "5.0.1"
+version = "5.0.2"
 dependencies = [
  "base64",
  "bytemuck",
