@@ -4,8 +4,8 @@
 use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::transport::tcp::protocol::wire::{PayloadCursor, PayloadWriter};
-use crate::transport::tcp::protocol::{ParseError, Response};
+use crate::protocol::wire::{PayloadCursor, PayloadWriter};
+use crate::protocol::{FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES, FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT, FLAG_QUEUE_Q_PUSH_HAS_PRIORITY, ParseError, Response};
 use crate::NexoEngine;
 
 use crate::brokers::queue::domain::dlq::DlqMessage;
@@ -16,29 +16,17 @@ use crate::brokers::queue::domain::queue::Message;
 // OPCODES
 // ==========================================
 
-pub const OPCODE_MIN: u8 = 0x10;
-pub const OPCODE_MAX: u8 = 0x1F;
-
-pub const OP_Q_CREATE: u8 = 0x10;
-pub const OP_Q_PUSH: u8 = 0x11;
-pub const OP_Q_CONSUME: u8 = 0x12;
-pub const OP_Q_ACK: u8 = 0x13;
-pub const OP_Q_EXISTS: u8 = 0x14;
-pub const OP_Q_DELETE: u8 = 0x15;
-pub const OP_Q_NACK: u8 = 0x1A;
-
-// DLQ Operations
-pub const OP_Q_PEEK_DLQ: u8 = 0x16;
-pub const OP_Q_MOVE_TO_QUEUE: u8 = 0x17;
-pub const OP_Q_DELETE_DLQ: u8 = 0x18;
-pub const OP_Q_PURGE_DLQ: u8 = 0x19;
+pub use crate::protocol::{
+    OP_Q_ACK, OP_Q_CONSUME, OP_Q_CREATE, OP_Q_DELETE, OP_Q_DELETE_DLQ, OP_Q_EXISTS,
+    OP_Q_MOVE_TO_QUEUE, OP_Q_NACK, OP_Q_PEEK_DLQ, OP_Q_PURGE_DLQ, OP_Q_PUSH,
+    QUEUE_OPCODE_MAX as OPCODE_MAX, QUEUE_OPCODE_MIN as OPCODE_MIN,
+};
+use crate::protocol::QUEUE_MAX_PUSH_ITEMS as MAX_PUSH_ITEMS;
 
 // ==========================================
 // WIRE LIMITS (server-side caps before allocation)
 // ==========================================
 
-/// Maximum number of items in a single PUSH request.
-const MAX_PUSH_ITEMS: usize = 10_000;
 /// Minimum bytes per push item (flags:1 + payload_len:4).
 const MIN_PUSH_ITEM_BYTES: usize = 5;
 
@@ -73,8 +61,8 @@ impl QueueCommand {
             OP_Q_CREATE => {
                 let q_name = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let visibility_timeout_ms = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
-                let max_deliveries = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
+                let visibility_timeout_ms = if flags & FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT != 0 { Some(cursor.read_u64()?) } else { None };
+                let max_deliveries = if flags & FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES != 0 { Some(cursor.read_u32()?) } else { None };
                 Ok(Self::Create { q_name, options: QueueCreateOptions { visibility_timeout_ms, max_deliveries } })
             }
             OP_Q_PUSH => {
@@ -89,7 +77,7 @@ impl QueueCommand {
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     let flags = cursor.read_u8()?;
-                    let priority = if flags & 0x01 != 0 { Some(cursor.read_u8()?) } else { None };
+                    let priority = if flags & FLAG_QUEUE_Q_PUSH_HAS_PRIORITY != 0 { Some(cursor.read_u8()?) } else { None };
                     let payload_len = cursor.read_u32()? as usize;
                     let payload = cursor.read_bytes(payload_len)?;
                     items.push(PushItem { priority, payload });
@@ -265,7 +253,7 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::tcp::protocol::wire::{PayloadWriter, PayloadCursor};
+    use crate::protocol::wire::{PayloadWriter, PayloadCursor};
 
     fn make_cursor(op: u8, payload: bytes::Bytes) -> (u8, PayloadCursor) {
         (op, PayloadCursor::new(payload))

@@ -1,19 +1,10 @@
 import { NexoConnection } from '../connection';
-import { ResponseStatus } from '../protocol';
-
-enum StoreOpcode {
-  MAP_SET = 0x02,
-  MAP_GET = 0x03,
-  MAP_DEL = 0x04,
-  MAP_INCR = 0x05,
-  MAP_CLEAR_ALL = 0x06,
-  MAP_CLEAR_PREFIX = 0x07,
-}
+import { FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode } from '../protocol';
 
 const StoreCommands = {
   mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) => {
     const hasTtl = options?.ttl !== undefined;
-    const flags = hasTtl ? 0x01 : 0x00;
+    const flags = hasTtl ? FLAG_STORE_MAP_SET_HAS_TTL : 0x00;
     return conn.send(StoreOpcode.MAP_SET, w => {
       w.string(key).u8(flags);
       if (hasTtl) w.u64(options!.ttl!);
@@ -39,7 +30,7 @@ const StoreCommands = {
   },
 
   mapClearAll: async (conn: NexoConnection) => {
-    const res = await conn.send(StoreOpcode.MAP_CLEAR_ALL, () => {});
+    const res = await conn.send(StoreOpcode.MAP_CLEAR_ALL, () => { });
     if (res.status === ResponseStatus.DATA) {
       return res.cursor.decodeAny() as number;
     }

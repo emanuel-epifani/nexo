@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
 use crate::brokers::store::config::StoreConfig;
+use crate::protocol::DATA_TYPE_INT;
 use bytes::Bytes;
 
 #[derive(Clone, Debug)]
@@ -101,10 +102,8 @@ impl Map {
     pub fn incr(&self, key: &str, delta: i64) -> Result<Bytes, String> {
         use dashmap::mapref::entry::Entry as DashEntry;
 
-        const INT_PREFIX: u8 = 0x03;
-
         fn encode_int(val: i64) -> Bytes {
-            let mut buf = vec![INT_PREFIX];
+            let mut buf = vec![DATA_TYPE_INT];
             buf.extend_from_slice(&val.to_be_bytes());
             Bytes::from(buf)
         }
@@ -151,7 +150,7 @@ impl Map {
 }
 
 fn parse_i64(raw: &[u8]) -> Option<i64> {
-    if raw.len() == 9 && raw[0] == 0x03 {
+    if raw.len() == 9 && raw[0] == DATA_TYPE_INT {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(&raw[1..]);
         Some(i64::from_be_bytes(arr))

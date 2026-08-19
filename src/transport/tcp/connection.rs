@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::ServerConfig;
 use crate::transport::tcp::dispatcher::{is_inline_opcode, Dispatcher};
-use crate::transport::tcp::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
+use crate::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
 use crate::NexoEngine;
 
 pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_config: ServerConfig) -> Result<(), String> {

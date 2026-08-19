@@ -3,9 +3,10 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::config::Config;
 use super::errors::ParseError;
-use super::frame::{
-    FrameHeader, InboundFrame, OutboundFrame, Response, PROTOCOL_VERSION, STATUS_DATA, STATUS_ERR,
-    STATUS_NULL, STATUS_OK, TYPE_PUSH_PUBSUB, TYPE_RESPONSE,
+use super::frame::{FrameHeader, InboundFrame, OutboundFrame, Response};
+use super::generated::{
+    PROTOCOL_VERSION, STATUS_DATA, STATUS_ERR, STATUS_NULL, STATUS_OK, TYPE_PUSH_PUBSUB,
+    TYPE_RESPONSE,
 };
 
 #[derive(Debug, Default)]
@@ -106,7 +107,7 @@ impl Encoder<OutboundFrame> for NexoCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::tcp::protocol::frame::{STATUS_DATA, TYPE_RESPONSE};
+    use super::super::generated::{STATUS_DATA, TYPE_RESPONSE};
 
     const TEST_ID: u32 = 42;
     const TEST_PAYLOAD: &[u8] = b"nexo-test-payload";

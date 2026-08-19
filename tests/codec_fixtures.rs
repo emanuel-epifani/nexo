@@ -11,7 +11,7 @@ use nexo::brokers::queue::tcp::QueueCommand;
 use nexo::brokers::store::tcp::{MapCmd, StoreCommand};
 use nexo::brokers::stream::tcp::StreamCommand;
 use nexo::brokers::stream::options::SeekTarget;
-use nexo::transport::tcp::protocol::wire::{PayloadCursor, PayloadWriter};
+use nexo::protocol::wire::{PayloadCursor, PayloadWriter};
 
 const HEADER_LEN: usize = 11;
 

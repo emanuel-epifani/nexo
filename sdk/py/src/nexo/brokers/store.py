@@ -3,19 +3,10 @@ from __future__ import annotations
 from typing import Any, TypeVar, TypedDict
 
 from ..connection import NexoConnection
-from ..protocol import ResponseStatus
+from ..protocol import FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode
 
 
 T = TypeVar("T")
-
-
-class StoreOpcode:
-    MAP_SET = 0x02
-    MAP_GET = 0x03
-    MAP_DEL = 0x04
-    MAP_INCR = 0x05
-    MAP_CLEAR_ALL = 0x06
-    MAP_CLEAR_PREFIX = 0x07
 
 
 class MapSetOptions(TypedDict, total=False):
@@ -32,7 +23,7 @@ class NexoMap:
         opts = options or {}
         ttl = opts.get("ttl")
         has_ttl = ttl is not None
-        flags = 0x01 if has_ttl else 0x00
+        flags = FLAG_STORE_MAP_SET_HAS_TTL if has_ttl else 0x00
 
         def build(w):
             w.string(key).u8(flags)

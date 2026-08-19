@@ -1,0 +1,126 @@
+{
+  "protocolVersion": 6,
+  "header": {
+    "size": 11,
+    "offsets": {
+      "VERSION": 0,
+      "TYPE": 1,
+      "META": 2,
+      "ID": 3,
+      "PAYLOAD_LEN": 7
+    }
+  },
+  "frameTypes": {
+    "REQUEST": 1,
+    "RESPONSE": 2,
+    "PUSH_PUBSUB": 3,
+    "REQUEST_NO_RESPONSE": 4
+  },
+  "responseStatuses": {
+    "OK": 0,
+    "ERR": 1,
+    "NULL": 2,
+    "DATA": 3
+  },
+  "dataTypes": {
+    "RAW": 0,
+    "STRING": 1,
+    "JSON": 2,
+    "INT": 3
+  },
+  "opcodes": {
+    "debug": {
+      "values": {
+        "ECHO": 0
+      }
+    },
+    "store": {
+      "range": [2, 15],
+      "values": {
+        "MAP_SET": 2,
+        "MAP_GET": 3,
+        "MAP_DEL": 4,
+        "MAP_INCR": 5,
+        "MAP_CLEAR_ALL": 6,
+        "MAP_CLEAR_PREFIX": 7
+      }
+    },
+    "queue": {
+      "range": [16, 31],
+      "values": {
+        "Q_CREATE": 16,
+        "Q_PUSH": 17,
+        "Q_CONSUME": 18,
+        "Q_ACK": 19,
+        "Q_EXISTS": 20,
+        "Q_DELETE": 21,
+        "Q_PEEK_DLQ": 22,
+        "Q_MOVE_TO_QUEUE": 23,
+        "Q_DELETE_DLQ": 24,
+        "Q_PURGE_DLQ": 25,
+        "Q_NACK": 26
+      }
+    },
+    "pubsub": {
+      "range": [33, 47],
+      "values": {
+        "PUB": 33,
+        "SUB": 34,
+        "UNSUB": 35
+      }
+    },
+    "stream": {
+      "range": [48, 63],
+      "values": {
+        "S_CREATE": 48,
+        "S_PUB": 49,
+        "S_FETCH": 50,
+        "S_JOIN": 51,
+        "S_ACK": 52,
+        "S_EXISTS": 53,
+        "S_DELETE": 54,
+        "S_SEEK": 56,
+        "S_LEAVE": 57,
+        "S_PEEK_DLT": 58,
+        "S_MOVE_TO_STREAM": 59,
+        "S_DELETE_DLT": 60,
+        "S_PURGE_DLT": 61
+      }
+    }
+  },
+  "commandFlags": {
+    "store": {
+      "MAP_SET": {
+        "HAS_TTL": 1
+      }
+    },
+    "queue": {
+      "Q_CREATE": {
+        "HAS_VISIBILITY_TIMEOUT": 1,
+        "HAS_MAX_DELIVERIES": 2
+      },
+      "Q_PUSH": {
+        "HAS_PRIORITY": 1
+      }
+    },
+    "pubsub": {
+      "PUB": {
+        "RETAIN": 1,
+        "HAS_TTL": 2,
+        "CLEAR": 4
+      }
+    },
+    "stream": {
+      "S_CREATE": {
+        "HAS_MAX_AGE": 1,
+        "HAS_MAX_BYTES": 2
+      }
+    }
+  },
+  "limits": {
+    "QUEUE_MAX_PUSH_ITEMS": 10000,
+    "STREAM_MAX_PUBLISH_BATCH": 65536,
+    "STREAM_MAX_FETCH_BATCH_SIZE": 65536,
+    "STREAM_MAX_KEY_BYTES": 65535
+  }
+}

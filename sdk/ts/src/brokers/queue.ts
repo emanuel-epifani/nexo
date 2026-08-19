@@ -4,20 +4,7 @@ import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError, RequestCancelledError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
-
-enum QueueOpcode {
-  Q_CREATE = 0x10,
-  Q_PUSH = 0x11,
-  Q_CONSUME = 0x12,
-  Q_ACK = 0x13,
-  Q_EXISTS = 0x14,
-  Q_DELETE = 0x15,
-  Q_PEEK_DLQ = 0x16,
-  Q_MOVE_TO_QUEUE = 0x17,
-  Q_DELETE_DLQ = 0x18,
-  Q_PURGE_DLQ = 0x19,
-  Q_NACK = 0x1A,
-}
+import { FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES, FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT, FLAG_QUEUE_Q_PUSH_HAS_PRIORITY, QueueOpcode } from '../protocol';
 
 const CONSUME_TIMEOUT_MARGIN_MS = 5000;
 
@@ -25,7 +12,7 @@ const QueueCommands = {
   create: (conn: NexoConnection, name: string, config: QueueConfig) => {
     const hasVto = config?.visibilityTimeoutMs !== undefined;
     const hasRetries = config?.maxDeliveries !== undefined;
-    const flags = (hasVto ? 0x01 : 0x00) | (hasRetries ? 0x02 : 0x00);
+    const flags = (hasVto ? FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT : 0x00) | (hasRetries ? FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES : 0x00);
     return conn.send(QueueOpcode.Q_CREATE, w => {
       w.string(name).u8(flags);
       if (hasVto) w.u64(config!.visibilityTimeoutMs!);
@@ -47,7 +34,7 @@ const QueueCommands = {
 
   push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) => {
     const hasPriority = options?.priority !== undefined;
-    const flags = hasPriority ? 0x01 : 0x00;
+    const flags = hasPriority ? FLAG_QUEUE_Q_PUSH_HAS_PRIORITY : 0x00;
     return conn.send(QueueOpcode.Q_PUSH, w => {
       w.string(name).u32(1).u8(flags);
       if (hasPriority) w.u8(options!.priority!);
@@ -60,7 +47,7 @@ const QueueCommands = {
       w.string(name).u32(items.length);
       for (const item of items) {
         const hasPriority = item.options?.priority !== undefined;
-        const flags = hasPriority ? 0x01 : 0x00;
+        const flags = hasPriority ? FLAG_QUEUE_Q_PUSH_HAS_PRIORITY : 0x00;
         w.u8(flags);
         if (hasPriority) w.u8(item.options!.priority!);
         w.anyWithLen(item.data);
@@ -225,7 +212,7 @@ class QueueSubscription<T> {
     private readonly waitMs: number,
     private readonly concurrency: number,
     private readonly stopTimeoutMs: number,
-  ) {}
+  ) { }
 
   start(): void {
     this.active = true;

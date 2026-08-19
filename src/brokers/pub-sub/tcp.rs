@@ -2,20 +2,17 @@
 
 use bytes::Bytes;
 
-use crate::transport::tcp::protocol::wire::PayloadCursor;
-use crate::transport::tcp::protocol::{ParseError, Response};
+use crate::protocol::wire::PayloadCursor;
+use crate::protocol::{FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================
 // OPCODES
 // ==========================================
 
-pub const OPCODE_MIN: u8 = 0x21;
-pub const OPCODE_MAX: u8 = 0x2F;
-
-pub const OP_PUB: u8 = 0x21;
-pub const OP_SUB: u8 = 0x22;
-pub const OP_UNSUB: u8 = 0x23;
+pub use crate::protocol::{
+    OP_PUB, OP_SUB, OP_UNSUB, PUBSUB_OPCODE_MAX as OPCODE_MAX, PUBSUB_OPCODE_MIN as OPCODE_MIN,
+};
 
 // ==========================================
 // COMMANDS
@@ -34,9 +31,9 @@ impl PubSubCommand {
             OP_PUB => {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let retain = flags & 0x01 != 0;
-                let clear = flags & 0x04 != 0;
-                let ttl = if flags & 0x02 != 0 { Some(cursor.read_u32()?) } else { None };
+                let retain = flags & FLAG_PUBSUB_PUB_RETAIN != 0;
+                let clear = flags & FLAG_PUBSUB_PUB_CLEAR != 0;
+                let ttl = if flags & FLAG_PUBSUB_PUB_HAS_TTL != 0 { Some(cursor.read_u32()?) } else { None };
                 let payload = cursor.read_remaining();
                 Ok(Self::Publish { topic, retain, clear, ttl, payload })
             }

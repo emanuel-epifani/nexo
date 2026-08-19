@@ -4,18 +4,13 @@ import asyncio
 from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..connection import NexoConnection
+from ..protocol import FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode
 from ..subscription import Subscription
 from ..utils.logger import Logger
 
 
 T = TypeVar("T")
 PubSubHandler = Callable[[T], Any]
-
-
-class PubSubOpcode:
-    PUB = 0x21
-    SUB = 0x22
-    UNSUB = 0x23
 
 
 class PublishOptions(TypedDict, total=False):
@@ -86,7 +81,7 @@ class NexoPubSub:
         if ttl is not None and (ttl < 0 or not isinstance(ttl, int)):
             raise ValueError(f"[PubSub] Invalid ttl: {ttl}")
         has_ttl = ttl is not None
-        flags = (0x01 if retain else 0x00) | (0x02 if has_ttl else 0x00)
+        flags = (FLAG_PUBSUB_PUB_RETAIN if retain else 0x00) | (FLAG_PUBSUB_PUB_HAS_TTL if has_ttl else 0x00)
 
         def build(w):
             w.string(topic).u8(flags)
@@ -98,7 +93,7 @@ class NexoPubSub:
 
     async def clear(self, topic: str) -> None:
         def build(w):
-            w.string(topic).u8(0x04).any(b"")
+            w.string(topic).u8(FLAG_PUBSUB_PUB_CLEAR).any(b"")
 
         await self._conn.send(PubSubOpcode.PUB, build)
 

@@ -300,11 +300,6 @@ fn init_db(conn: &Connection) -> Result<()> {
         [],
     )?;
 
-    // Migration: add ready_seq column if it doesn't exist (for existing DBs)
-    let _ = conn.execute("ALTER TABLE queue ADD COLUMN ready_seq INTEGER NOT NULL DEFAULT 0", []);
-    // Migration: add delivery_token column if it doesn't exist (for existing DBs)
-    let _ = conn.execute("ALTER TABLE queue ADD COLUMN delivery_token INTEGER NOT NULL DEFAULT 0", []);
-
     // DLQ Table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS dlq_messages (
@@ -319,9 +314,6 @@ fn init_db(conn: &Connection) -> Result<()> {
         )",
         [],
     )?;
-
-    // Migration: add dlq_seq column if it doesn't exist (for existing DBs)
-    let _ = conn.execute("ALTER TABLE dlq_messages ADD COLUMN dlq_seq INTEGER NOT NULL DEFAULT 0", []);
 
     Ok(())
 }

@@ -7,26 +7,18 @@ from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError, RequestCancelledError, RequestTimeoutError
 from ..subscription import Subscription
+from ..protocol import (
+    FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES,
+    FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT,
+    FLAG_QUEUE_Q_PUSH_HAS_PRIORITY,
+    QueueOpcode,
+)
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
 
 
 T = TypeVar("T")
 QueueHandler = Callable[[T], Any]
-
-
-class QueueOpcode:
-    Q_CREATE = 0x10
-    Q_PUSH = 0x11
-    Q_CONSUME = 0x12
-    Q_ACK = 0x13
-    Q_EXISTS = 0x14
-    Q_DELETE = 0x15
-    Q_PEEK_DLQ = 0x16
-    Q_MOVE_TO_QUEUE = 0x17
-    Q_DELETE_DLQ = 0x18
-    Q_PURGE_DLQ = 0x19
-    Q_NACK = 0x1A
 
 
 CONSUME_TIMEOUT_MARGIN_MS = 5000
@@ -56,7 +48,7 @@ class QueueCommands:
         retries = config.get("max_deliveries")
         has_vto = vto is not None
         has_retries = retries is not None
-        flags = (0x01 if has_vto else 0x00) | (0x02 if has_retries else 0x00)
+        flags = (FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT if has_vto else 0x00) | (FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES if has_retries else 0x00)
 
         def build(w):
             w.string(name).u8(flags)
@@ -91,7 +83,7 @@ class QueueCommands:
         opts = options or {}
         priority = opts.get("priority")
         has_priority = priority is not None
-        flags = 0x01 if has_priority else 0x00
+        flags = FLAG_QUEUE_Q_PUSH_HAS_PRIORITY if has_priority else 0x00
 
         def build(w):
             w.string(name).u32(1).u8(flags)
@@ -113,7 +105,7 @@ class QueueCommands:
                 opts = item.get("options") or {}
                 priority = opts.get("priority")
                 has_priority = priority is not None
-                flags = 0x01 if has_priority else 0x00
+                flags = FLAG_QUEUE_Q_PUSH_HAS_PRIORITY if has_priority else 0x00
                 w.u8(flags)
                 if has_priority:
                     w.u8(priority)

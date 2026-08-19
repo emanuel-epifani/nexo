@@ -1,12 +1,7 @@
 import { NexoConnection } from '../connection';
 import { Logger } from '../utils/logger';
 import { Subscription } from '../subscription';
-
-enum PubSubOpcode {
-  PUB = 0x21,
-  SUB = 0x22,
-  UNSUB = 0x23,
-}
+import { FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode } from '../protocol';
 
 const PubSubCommands = {
   publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) => {
@@ -15,7 +10,7 @@ const PubSubCommands = {
       throw new Error(`[PubSub] Invalid ttl: ${options.ttl}`);
     }
     const hasTtl = options?.ttl !== undefined;
-    const flags = (retain ? 0x01 : 0x00) | (hasTtl ? 0x02 : 0x00);
+    const flags = (retain ? FLAG_PUBSUB_PUB_RETAIN : 0x00) | (hasTtl ? FLAG_PUBSUB_PUB_HAS_TTL : 0x00);
     return conn.send(PubSubOpcode.PUB, w => {
       w.string(topic).u8(flags);
       if (hasTtl) w.u32(options!.ttl!);
@@ -24,7 +19,7 @@ const PubSubCommands = {
   },
 
   clear: (conn: NexoConnection, topic: string) =>
-    conn.send(PubSubOpcode.PUB, w => w.string(topic).u8(0x04).any(Buffer.alloc(0))),
+    conn.send(PubSubOpcode.PUB, w => w.string(topic).u8(FLAG_PUBSUB_PUB_CLEAR).any(Buffer.alloc(0))),
 
   subscribe: (conn: NexoConnection, topic: string) =>
     conn.send(PubSubOpcode.SUB, w => w.string(topic)),

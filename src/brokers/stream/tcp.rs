@@ -5,32 +5,20 @@ use bytes::Bytes;
 
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
-use crate::transport::tcp::protocol::wire::{PayloadCursor, PayloadWriter};
-use crate::transport::tcp::protocol::{ParseError, Response};
+use crate::protocol::wire::{PayloadCursor, PayloadWriter};
+use crate::protocol::{FLAG_STREAM_S_CREATE_HAS_MAX_AGE, FLAG_STREAM_S_CREATE_HAS_MAX_BYTES, ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================
 // OPCODES
 // ==========================================
 
-pub const OPCODE_MIN: u8 = 0x30;
-pub const OPCODE_MAX: u8 = 0x3F;
-
-pub const OP_S_CREATE: u8 = 0x30;
-pub const OP_S_PUB: u8 = 0x31;
-pub const OP_S_FETCH: u8 = 0x32;
-pub const OP_S_JOIN: u8 = 0x33;
-pub const OP_S_ACK: u8 = 0x34;
-pub const OP_S_EXISTS: u8 = 0x35;
-pub const OP_S_DELETE: u8 = 0x36;
-pub const OP_S_SEEK: u8 = 0x38;
-pub const OP_S_LEAVE: u8 = 0x39;
-pub const OP_S_PEEK_DLT: u8 = 0x3A;
-pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
-pub const OP_S_DELETE_DLT: u8 = 0x3C;
-pub const OP_S_PURGE_DLT: u8 = 0x3D;
-
-const MAX_PUBLISH_BATCH: usize = 65_536;
+pub use crate::protocol::{
+    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLT, OP_S_EXISTS, OP_S_FETCH, OP_S_JOIN,
+    OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLT, OP_S_PUB, OP_S_PURGE_DLT, OP_S_SEEK,
+    STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
+};
+use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
 
 // ==========================================
@@ -66,8 +54,8 @@ impl StreamCommand {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let max_age_ms = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
-                let max_bytes = if flags & 0x02 != 0 { Some(cursor.read_u64()?) } else { None };
+                let max_age_ms = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_AGE != 0 { Some(cursor.read_u64()?) } else { None };
+                let max_bytes = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_BYTES != 0 { Some(cursor.read_u64()?) } else { None };
                 let retention = if max_age_ms.is_some() || max_bytes.is_some() {
                     Some(RetentionOptions { max_age_ms, max_bytes })
                 } else {

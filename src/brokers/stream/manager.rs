@@ -18,6 +18,7 @@ use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::domain::persistence::{recover_topic, record_len, GroupPersistentState, Segment, StorageCommand, StorageManager, MAX_STREAM_RECORD_BYTES};
 use crate::brokers::stream::domain::topic::TopicConfig;
+use crate::protocol::STREAM_MAX_KEY_BYTES;
 
 struct TopicShared {
     state: Mutex<TopicState>,
@@ -236,8 +237,8 @@ impl StreamManager {
             if key.as_ref().is_some_and(Bytes::is_empty) {
                 return Err("Stream key must not be empty".to_string());
             }
-            if key.as_ref().is_some_and(|key| key.len() > u16::MAX as usize) {
-                return Err(format!("Stream key exceeds {} bytes", u16::MAX));
+            if key.as_ref().is_some_and(|key| key.len() > STREAM_MAX_KEY_BYTES) {
+                return Err(format!("Stream key exceeds {} bytes", STREAM_MAX_KEY_BYTES));
             }
             let size = record_len(key.as_deref(), payload);
             if size > MAX_STREAM_RECORD_BYTES as u64 {

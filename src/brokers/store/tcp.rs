@@ -2,23 +2,18 @@
 
 use bytes::Bytes;
 
-use crate::transport::tcp::protocol::wire::PayloadCursor;
-use crate::transport::tcp::protocol::{ParseError, Response};
+use crate::protocol::wire::PayloadCursor;
+use crate::protocol::{DATA_TYPE_INT, FLAG_STORE_MAP_SET_HAS_TTL, ParseError, Response};
 use crate::NexoEngine;
 
 // ==========================================
 // OPCODES
 // ==========================================
 
-pub const OPCODE_MIN: u8 = 0x02;
-pub const OPCODE_MAX: u8 = 0x0F;
-
-pub const OP_MAP_SET: u8 = 0x02;
-pub const OP_MAP_GET: u8 = 0x03;
-pub const OP_MAP_DEL: u8 = 0x04;
-pub const OP_MAP_INCR: u8 = 0x05;
-pub const OP_MAP_CLEAR_ALL: u8 = 0x06;
-pub const OP_MAP_CLEAR_PREFIX: u8 = 0x07;
+pub use crate::protocol::{
+    OP_MAP_CLEAR_ALL, OP_MAP_CLEAR_PREFIX, OP_MAP_DEL, OP_MAP_GET, OP_MAP_INCR, OP_MAP_SET,
+    STORE_OPCODE_MAX as OPCODE_MAX, STORE_OPCODE_MIN as OPCODE_MIN,
+};
 
 // ==========================================
 // COMMANDS
@@ -45,7 +40,7 @@ impl MapCmd {
             OP_MAP_SET => {
                 let key = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let ttl = if flags & 0x01 != 0 { Some(cursor.read_u64()?) } else { None };
+                let ttl = if flags & FLAG_STORE_MAP_SET_HAS_TTL != 0 { Some(cursor.read_u64()?) } else { None };
                 let value = cursor.read_remaining();
                 Ok(Self::Set { key, ttl, value })
             }
@@ -117,13 +112,13 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
             }
             MapCmd::ClearAll => {
                 let count = engine.store.map.clear_all();
-                let mut buf = vec![0x03u8];
+                let mut buf = vec![DATA_TYPE_INT];
                 buf.extend_from_slice(&(count as i64).to_be_bytes());
                 Response::Data(Bytes::from(buf))
             }
             MapCmd::ClearPrefix { prefix } => {
                 let count = engine.store.map.clear_with_prefix(&prefix);
-                let mut buf = vec![0x03u8];
+                let mut buf = vec![DATA_TYPE_INT];
                 buf.extend_from_slice(&(count as i64).to_be_bytes());
                 Response::Data(Bytes::from(buf))
             }

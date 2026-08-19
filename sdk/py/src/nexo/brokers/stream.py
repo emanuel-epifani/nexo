@@ -8,6 +8,14 @@ from ..config import DEFAULT_CONFIG
 from ..connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError
 from ..subscription import Subscription
+from ..protocol import (
+    FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
+    FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
+    STREAM_MAX_FETCH_BATCH_SIZE,
+    STREAM_MAX_KEY_BYTES,
+    STREAM_MAX_PUBLISH_BATCH,
+    StreamOpcode,
+)
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
 
@@ -24,8 +32,6 @@ StreamHandler = Callable[[T, StreamMessageMeta], Any] | Callable[[T], Any]
 
 
 FETCH_TIMEOUT_MARGIN_MS = 5000
-MAX_PUBLISH_BATCH = 65_536
-MAX_FETCH_BATCH_SIZE = 65_536
 
 
 def _write_stream_key(writer, key: str | bytes | None) -> None:
@@ -35,25 +41,9 @@ def _write_stream_key(writer, key: str | bytes | None) -> None:
     key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
     if not key_bytes:
         raise ValueError("Stream key must not be empty")
-    if len(key_bytes) > 0xFFFF:
-        raise ValueError("Stream key exceeds 65535 bytes")
+    if len(key_bytes) > STREAM_MAX_KEY_BYTES:
+        raise ValueError(f"Stream key exceeds {STREAM_MAX_KEY_BYTES} bytes")
     writer.u16(len(key_bytes)).raw_bytes(key_bytes)
-
-
-class StreamOpcode:
-    S_CREATE = 0x30
-    S_PUB = 0x31
-    S_FETCH = 0x32
-    S_JOIN = 0x33
-    S_ACK = 0x34
-    S_EXISTS = 0x35
-    S_DELETE = 0x36
-    S_SEEK = 0x38
-    S_LEAVE = 0x39
-    S_PEEK_DLT = 0x3A
-    S_MOVE_TO_STREAM = 0x3B
-    S_DELETE_DLT = 0x3C
-    S_PURGE_DLT = 0x3D
 
 
 class RetentionOptions(TypedDict, total=False):
@@ -323,7 +313,7 @@ class NexoStream(Generic[T]):
         max_bytes = retention.get("max_bytes")
         has_max_age = max_age is not None
         has_max_bytes = max_bytes is not None
-        flags = (0x01 if has_max_age else 0x00) | (0x02 if has_max_bytes else 0x00)
+        flags = (FLAG_STREAM_S_CREATE_HAS_MAX_AGE if has_max_age else 0x00) | (FLAG_STREAM_S_CREATE_HAS_MAX_BYTES if has_max_bytes else 0x00)
 
         def build(w):
             w.string(self.name).u8(flags)
@@ -369,9 +359,9 @@ class NexoStream(Generic[T]):
     ) -> list[int]:
         if not items:
             return []
-        if len(items) > MAX_PUBLISH_BATCH:
+        if len(items) > STREAM_MAX_PUBLISH_BATCH:
             raise ValueError(
-                f"Publish batch too large: {len(items)} items (max: {MAX_PUBLISH_BATCH})"
+                f"Publish batch too large: {len(items)} items (max: {STREAM_MAX_PUBLISH_BATCH})"
             )
 
         def build(w):
@@ -410,9 +400,9 @@ class NexoStream(Generic[T]):
         stop_timeout_ms = opts.get("stop_timeout_ms")
         if stop_timeout_ms is None:
             stop_timeout_ms = DEFAULT_CONFIG.stream.stop_timeout_ms
-        if not isinstance(batch_size, int) or batch_size < 1 or batch_size > MAX_FETCH_BATCH_SIZE:
+        if not isinstance(batch_size, int) or batch_size < 1 or batch_size > STREAM_MAX_FETCH_BATCH_SIZE:
             raise ValueError(
-                f"batch_size must be an integer between 1 and {MAX_FETCH_BATCH_SIZE}"
+                f"batch_size must be an integer between 1 and {STREAM_MAX_FETCH_BATCH_SIZE}"
             )
         if not isinstance(wait_ms, int) or wait_ms < 1:
             raise ValueError("wait_ms must be a positive integer")

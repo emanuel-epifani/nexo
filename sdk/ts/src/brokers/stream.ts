@@ -4,10 +4,16 @@ import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
+import {
+  FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
+  FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
+  STREAM_MAX_FETCH_BATCH_SIZE,
+  STREAM_MAX_KEY_BYTES,
+  STREAM_MAX_PUBLISH_BATCH,
+  StreamOpcode,
+} from '../protocol';
 
 const FETCH_TIMEOUT_MARGIN_MS = 5000;
-const MAX_PUBLISH_BATCH = 65_536;
-const MAX_FETCH_BATCH_SIZE = 65_536;
 const textEncoder = new TextEncoder();
 
 function encodeStreamKey(w: { u16(value: number): any; bytes(value: Uint8Array): any }, key?: string | Uint8Array): void {
@@ -17,25 +23,9 @@ function encodeStreamKey(w: { u16(value: number): any; bytes(value: Uint8Array):
   }
   const keyBytes = typeof key === 'string' ? textEncoder.encode(key) : key;
   if (keyBytes.length === 0) throw new Error('Stream key must not be empty');
-  if (keyBytes.length > 0xFFFF) throw new Error('Stream key exceeds 65535 bytes');
+  if (keyBytes.length > STREAM_MAX_KEY_BYTES) throw new Error(`Stream key exceeds ${STREAM_MAX_KEY_BYTES} bytes`);
   w.u16(keyBytes.length);
   w.bytes(keyBytes);
-}
-
-enum StreamOpcode {
-  S_CREATE = 0x30,
-  S_PUB = 0x31,
-  S_FETCH = 0x32,
-  S_JOIN = 0x33,
-  S_ACK = 0x34,
-  S_EXISTS = 0x35,
-  S_DELETE = 0x36,
-  S_SEEK = 0x38,
-  S_LEAVE = 0x39,
-  S_PEEK_DLT = 0x3A,
-  S_MOVE_TO_STREAM = 0x3B,
-  S_DELETE_DLT = 0x3C,
-  S_PURGE_DLT = 0x3D,
 }
 
 export interface RetentionOptions {
@@ -274,7 +264,7 @@ export class NexoStream<T = any> {
     const retention = options.retention;
     const hasMaxAge = retention?.maxAgeMs !== undefined;
     const hasMaxBytes = retention?.maxBytes !== undefined;
-    const flags = (hasMaxAge ? 0x01 : 0x00) | (hasMaxBytes ? 0x02 : 0x00);
+    const flags = (hasMaxAge ? FLAG_STREAM_S_CREATE_HAS_MAX_AGE : 0x00) | (hasMaxBytes ? FLAG_STREAM_S_CREATE_HAS_MAX_BYTES : 0x00);
     await this.conn.send(StreamOpcode.S_CREATE, w => {
       w.string(this.name).u8(flags);
       if (hasMaxAge) w.u64(retention!.maxAgeMs!);
@@ -308,8 +298,8 @@ export class NexoStream<T = any> {
 
   async publishBatch(items: { data: T, key?: string | Uint8Array }[]): Promise<bigint[]> {
     if (items.length === 0) return [];
-    if (items.length > MAX_PUBLISH_BATCH) {
-      throw new Error(`Publish batch too large: ${items.length} items (max: ${MAX_PUBLISH_BATCH})`);
+    if (items.length > STREAM_MAX_PUBLISH_BATCH) {
+      throw new Error(`Publish batch too large: ${items.length} items (max: ${STREAM_MAX_PUBLISH_BATCH})`);
     }
     const res = await this.conn.send(StreamOpcode.S_PUB, w => {
       w.string(this.name).u32(items.length);
@@ -337,8 +327,8 @@ export class NexoStream<T = any> {
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.stream.waitMs;
     const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONFIG.stream.concurrency);
     const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_CONFIG.stream.stopTimeoutMs;
-    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_FETCH_BATCH_SIZE) {
-      throw new Error(`batchSize must be an integer between 1 and ${MAX_FETCH_BATCH_SIZE}`);
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > STREAM_MAX_FETCH_BATCH_SIZE) {
+      throw new Error(`batchSize must be an integer between 1 and ${STREAM_MAX_FETCH_BATCH_SIZE}`);
     }
     if (!Number.isInteger(waitMs) || waitMs < 1) throw new Error('waitMs must be a positive integer');
     if (!Number.isInteger(stopTimeoutMs) || stopTimeoutMs < 1) {

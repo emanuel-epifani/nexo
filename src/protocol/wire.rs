@@ -10,7 +10,7 @@
 //! `PayloadWriter` serializes, `PayloadCursor` parses. Keep the put_*/read_*
 //! pairs aligned so the layout stays consistent across every broker.
 
-use crate::transport::tcp::protocol::ParseError;
+use crate::protocol::ParseError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 // ==========================================

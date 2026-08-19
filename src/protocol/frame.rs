@@ -1,4 +1,4 @@
-//! Nexo Binary Protocol: Frame Types and Constants
+//! Nexo Binary Protocol: Frame Types
 //!
 //! Every frame starts with a fixed 11-byte header. The first byte is the
 //! protocol version, so the framing is fully self-describing and stateless:
@@ -21,41 +21,7 @@
 
 use bytes::Bytes;
 use bytemuck::{Pod, Zeroable};
-
-// ========================================
-// PROTOCOL VERSION
-// ========================================
-/// Bumped on any breaking change to the framing or payload layout. Peers must
-/// reject frames whose first byte does not match.
-pub const PROTOCOL_VERSION: u8 = 0x06;
-
-// ========================================
-// FRAME TYPES
-// ========================================
-pub const TYPE_REQUEST: u8 = 0x01;
-pub const TYPE_RESPONSE: u8 = 0x02;
-pub const TYPE_PUSH_PUBSUB: u8 = 0x03;
-pub const TYPE_REQUEST_NO_RESPONSE: u8 = 0x04;
-
-// ========================================
-// RESPONSE STATUS (Meta byte for Response frames)
-// ========================================
-pub const STATUS_OK: u8 = 0x00;
-pub const STATUS_ERR: u8 = 0x01;
-pub const STATUS_NULL: u8 = 0x02;
-pub const STATUS_DATA: u8 = 0x03;
-
-// ========================================
-// DATA TYPE FLAGS (First byte of a user data payload)
-//
-// This prefix is a CLIENT-SIDE payload-encoding contract: SDKs write it when
-// serializing a value and read it when deserializing, so all SDKs must agree
-// on these values. The server is agnostic — it stores/forwards the payload
-// (prefix included) as opaque bytes and never relies on it on the data-plane.
-// ========================================
-pub const DATA_TYPE_RAW: u8 = 0x00;
-pub const DATA_TYPE_STRING: u8 = 0x01;
-pub const DATA_TYPE_JSON: u8 = 0x02;
+use super::generated::HEADER_SIZE;
 
 // ========================================
 // FRAME HEADER
@@ -72,8 +38,10 @@ pub struct FrameHeader {
     pub payload_len: [u8; 4],
 }
 
+const _: [(); HEADER_SIZE] = [(); std::mem::size_of::<FrameHeader>()];
+
 impl FrameHeader {
-    pub const SIZE: usize = std::mem::size_of::<Self>();
+    pub const SIZE: usize = HEADER_SIZE;
 
     pub fn id(&self) -> u32 {
         u32::from_be_bytes(self.id)

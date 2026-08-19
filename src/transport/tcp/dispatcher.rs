@@ -1,12 +1,11 @@
 //! Thin opcode dispatcher delegating to broker-specific TCP handlers.
 
 use crate::brokers::{pub_sub, queue, store, stream};
-use crate::transport::tcp::protocol::wire::PayloadCursor;
-use crate::transport::tcp::protocol::Response;
+use crate::protocol::wire::PayloadCursor;
+use crate::protocol::Response;
+pub use crate::protocol::OP_DEBUG_ECHO;
 use crate::NexoEngine;
 use bytes::Bytes;
-
-pub const OP_DEBUG_ECHO: u8 = 0x00;
 
 /// Opcodes that mutate state and must be processed in TCP arrival order to
 /// prevent races (e.g. ACK processed after LEAVE, SUB processed after PUBLISH).
