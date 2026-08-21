@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, Generic, TypeVar, TypedDict
 
-from ..connection import NexoConnection
-from ..protocol import FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode
+from ..transport.tcp.connection import NexoConnection
+from ..protocol.generated import FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode
 from ..subscription import Subscription
 from ..utils.logger import Logger
 

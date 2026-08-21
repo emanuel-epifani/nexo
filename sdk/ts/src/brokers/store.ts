@@ -1,5 +1,5 @@
-import { NexoConnection } from '../connection';
-import { FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode } from '../protocol';
+import { NexoConnection } from '../transport/tcp/connection';
+import { FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode } from '../protocol/generated';
 
 const StoreCommands = {
   mapSet: (conn: NexoConnection, key: string, value: any, options: MapSetOptions) => {

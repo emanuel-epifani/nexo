@@ -1,10 +1,10 @@
-import { NexoConnection } from '../connection';
+import { NexoConnection } from '../transport/tcp/connection';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, RequestTimeoutError, RequestCancelledError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
-import { FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES, FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT, FLAG_QUEUE_Q_PUSH_HAS_PRIORITY, QueueOpcode } from '../protocol';
+import { FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES, FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT, FLAG_QUEUE_Q_PUSH_HAS_PRIORITY, QueueOpcode } from '../protocol/generated';
 
 const CONSUME_TIMEOUT_MARGIN_MS = 5000;
 

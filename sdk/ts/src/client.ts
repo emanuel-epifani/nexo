@@ -1,6 +1,6 @@
 import { Logger, LogHandler } from './utils/logger';
 import { DEFAULT_CONFIG, DEFAULT_HOST, DEFAULT_PORT } from './config';
-import { NexoConnection } from './connection';
+import { NexoConnection } from './transport/tcp/connection';
 import { NexoStore } from './brokers/store';
 import { NexoQueue } from './brokers/queue';
 import { NexoPubSub, NexoTopic } from './brokers/pubsub';
@@ -22,9 +22,9 @@ export class NexoClient {
   private shutdownHandler: (() => void) | null = null;
 
   constructor(options: NexoOptions = {}) {
-    this.logger = new Logger({ 
-      handler: options.logger, 
-      level: options.logLevel ?? DEFAULT_CONFIG.logger.level 
+    this.logger = new Logger({
+      handler: options.logger,
+      level: options.logLevel ?? DEFAULT_CONFIG.logger.level
     });
 
     this.conn = new NexoConnection({

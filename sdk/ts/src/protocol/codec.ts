@@ -1,4 +1,4 @@
-import { DataType, FrameType, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './protocol';
+import { DataType, FrameType, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './generated';
 
 /** @internal */
 export class Cursor {

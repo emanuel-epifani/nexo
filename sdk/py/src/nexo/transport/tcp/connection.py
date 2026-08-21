@@ -5,15 +5,15 @@ import struct
 import time
 from typing import Any, Callable, Optional
 
-from .codec import FrameWriter, Cursor, BuildFn
-from .config import NexoConnectionConfig
-from .errors import (
+from ...protocol.codec import FrameWriter, Cursor, BuildFn
+from ...config import NexoConnectionConfig
+from ...errors import (
     ConnectionClosedError,
     NexoError,
     NotConnectedError,
     RequestTimeoutError,
 )
-from .protocol import (
+from ...protocol.generated import (
     FrameType,
     ResponseStatus,
     PROTOCOL_VERSION,
@@ -24,7 +24,7 @@ from .protocol import (
     HEADER_OFFSET_ID,
     HEADER_OFFSET_PAYLOAD_LEN,
 )
-from .utils.logger import Logger
+from ...utils.logger import Logger
 
 
 class NexoConnection:

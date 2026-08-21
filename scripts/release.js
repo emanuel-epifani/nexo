@@ -231,8 +231,8 @@ async function main() {
     "protocol.json",
     "scripts/generate-protocol.js",
     "src/protocol/generated.rs",
-    "sdk/ts/src/protocol.ts",
-    "sdk/py/src/nexo/protocol.py",
+    "sdk/ts/src/protocol/generated.ts",
+    "sdk/py/src/nexo/protocol/generated.py",
   ].filter((p) => fs.existsSync(path.join(ROOT_DIR, p)));
   run(`git add ${filesToStage.join(" ")}`);
 

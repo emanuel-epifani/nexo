@@ -269,5 +269,5 @@ function updateFile(relativePath, expected) {
 
 validateSpec();
 updateFile("src/protocol/generated.rs", renderRust());
-updateFile("sdk/ts/src/protocol.ts", renderTypeScript());
-updateFile("sdk/py/src/nexo/protocol.py", renderPython());
+updateFile("sdk/ts/src/protocol/generated.ts", renderTypeScript());
+updateFile("sdk/py/src/nexo/protocol/generated.py", renderPython());

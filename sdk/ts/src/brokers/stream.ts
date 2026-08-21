@@ -1,4 +1,4 @@
-import { NexoConnection } from '../connection';
+import { NexoConnection } from '../transport/tcp/connection';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
 import { ConnectionClosedError, NotConnectedError } from '../errors';
@@ -11,7 +11,7 @@ import {
   STREAM_MAX_KEY_BYTES,
   STREAM_MAX_PUBLISH_BATCH,
   StreamOpcode,
-} from '../protocol';
+} from '../protocol/generated';
 
 const FETCH_TIMEOUT_MARGIN_MS = 5000;
 const textEncoder = new TextEncoder();

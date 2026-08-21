@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, TypeVar, TypedDict
 
-from ..connection import NexoConnection
-from ..protocol import FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode
+from ..transport.tcp.connection import NexoConnection
+from ..protocol.generated import FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode
 
 
 T = TypeVar("T")

@@ -29,9 +29,15 @@ pnpm-debug.log*
 # PYTHON (SDK)
 # ========================
 __pycache__/
+*.py[cod]
 *.egg-info/
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
 
 # ========================
 # SYSTEM & EDITORS

@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FrameWriter, Cursor } from '../../src/codec';
-import { FrameType, DataType, HEADER_SIZE, PROTOCOL_VERSION } from '../../src/protocol';
+import { FrameWriter, Cursor } from '../../src/protocol/codec';
+import { FrameType, DataType, HEADER_SIZE, PROTOCOL_VERSION } from '../../src/protocol/generated';
 
 interface PayloadValue {
   data_type: 'raw' | 'string' | 'json';

@@ -8,7 +8,7 @@ from .brokers.queue import NexoQueue
 from .brokers.store import NexoStore
 from .brokers.stream import NexoStream
 from .config import DEFAULT_CONFIG, DEFAULT_HOST, DEFAULT_PORT, NexoConnectionConfig
-from .connection import NexoConnection
+from .transport.tcp.connection import NexoConnection
 from .utils.logger import Logger, LogHandler
 
 

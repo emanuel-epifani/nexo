@@ -1,7 +1,7 @@
-import { NexoConnection } from '../connection';
+import { NexoConnection } from '../transport/tcp/connection';
 import { Logger } from '../utils/logger';
 import { Subscription } from '../subscription';
-import { FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode } from '../protocol';
+import { FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, PubSubOpcode } from '../protocol/generated';
 
 const PubSubCommands = {
   publish: (conn: NexoConnection, topic: string, data: any, options: PublishOptions) => {

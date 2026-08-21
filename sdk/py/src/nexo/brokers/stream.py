@@ -5,10 +5,10 @@ import inspect
 from typing import Any, Callable, Generic, Optional, TypeVar, TypedDict, Union
 
 from ..config import DEFAULT_CONFIG
-from ..connection import NexoConnection
+from ..transport.tcp.connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError
 from ..subscription import Subscription
-from ..protocol import (
+from ..protocol.generated import (
     FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
     FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
     STREAM_MAX_FETCH_BATCH_SIZE,

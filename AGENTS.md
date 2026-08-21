@@ -22,18 +22,24 @@ src/
     tcp.rs                     # Command parse, Response, handle()
     domain/persistence.rs      # durable I/O (Queue SQLite, Stream log, PubSub retained)
 protocol.json                  # single source of truth for all protocol constants
-scripts/generate-protocol.js   # codegen: protocol.json → generated.rs, protocol.ts, protocol.py
+scripts/generate-protocol.js   # codegen: protocol.json → generated.{rs,ts,py}
 tests/                         # Rust integration tests, one file per broker
 sdk/ts/src/                    # TypeScript SDK
-  protocol.ts                  # AUTO-GENERATED from protocol.json — do not edit
-sdk/py/src/                    # Python SDK (typed, py.typed)
-  nexo/protocol.py             # AUTO-GENERATED from protocol.json — do not edit
+  protocol/                    # transport-agnostic wire contract
+    generated.ts               # AUTO-GENERATED from protocol.json — do not edit
+    codec.ts                   # frame serialization/deserialization
+  transport/tcp/connection.ts  # TCP adapter
+sdk/py/src/nexo/               # Python SDK package (typed, py.typed)
+  protocol/                    # transport-agnostic wire contract
+    generated.py               # AUTO-GENERATED from protocol.json — do not edit
+    codec.py                   # frame serialization/deserialization
+  transport/tcp/connection.py  # TCP adapter
 sdk/integration-test-matrix.md # source of truth: test scenario IDs + TS/Python test names
 docs/guide/                    # functional docs
 ```
 
 
-**Dependency rule**: `manager.rs` must NOT import from `tcp.rs`, `transport/`, or any adapter layer. Adapters depend on the manager, never the reverse.
+**Dependency rule**: `manager.rs` must NOT import from `tcp.rs`, `transport/`, or any adapter layer. Adapters depend on the manager, never the reverse. Across server and SDKs, `protocol/` must remain transport-agnostic; `transport/tcp/` may depend on `protocol/`, never the reverse.
 
 ## Wire Protocol
 
@@ -54,8 +60,8 @@ Any wire change must stay symmetric across `src/`, `sdk/ts/`, `sdk/py/`, and bum
 All protocol constants — `PROTOCOL_VERSION`, frame types, response statuses, data types, opcodes, command flag bits, and wire limits — are defined in `protocol.json` and generated into three files by `scripts/generate-protocol.js`:
 
 - `src/protocol/generated.rs` (Rust)
-- `sdk/ts/src/protocol.ts` (TypeScript)
-- `sdk/py/src/nexo/protocol.py` (Python)
+- `sdk/ts/src/protocol/generated.ts` (TypeScript)
+- `sdk/py/src/nexo/protocol/generated.py` (Python)
 
 **These generated files must never be edited by hand.** The generator validates uniqueness, range constraints, and cross-broker opcode collisions at generation time.
 
@@ -68,7 +74,7 @@ vim protocol.json
 node scripts/generate-protocol.js
 
 # 3. Commit the spec + all generated files together
-git add protocol.json src/protocol/generated.rs sdk/ts/src/protocol.ts sdk/py/src/nexo/protocol.py
+git add protocol.json src/protocol/generated.rs sdk/ts/src/protocol/generated.ts sdk/py/src/nexo/protocol/generated.py
 ```
 
 **Verify sync (used in release script and CI):**
@@ -102,8 +108,10 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/) — see [doc
 ```bash
 cargo test --test queue_tests          # single suite (also: store_/pubsub_/stream_tests)
 cd sdk/ts && npm test                  # TS SDK (vitest)
+cd sdk/ts && npm run build             # clean TypeScript package build
 cd sdk/py && pytest                    # Python SDK (pytest)
 cd sdk/py && mypy src/nexo             # type checks
+cd sdk/py && uv build                  # Python sdist + wheel
 node scripts/generate-protocol.js      # regenerate protocol constants from protocol.json
 node scripts/generate-protocol.js --check  # verify generated files are in sync
 ```

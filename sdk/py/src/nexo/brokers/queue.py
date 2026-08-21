@@ -4,10 +4,10 @@ import asyncio
 from typing import Any, Callable, Generic, TypeVar, TypedDict
 
 from ..config import DEFAULT_CONFIG
-from ..connection import NexoConnection
+from ..transport.tcp.connection import NexoConnection
 from ..errors import ConnectionClosedError, NotConnectedError, RequestCancelledError, RequestTimeoutError
 from ..subscription import Subscription
-from ..protocol import (
+from ..protocol.generated import (
     FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES,
     FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT,
     FLAG_QUEUE_Q_PUSH_HAS_PRIORITY,

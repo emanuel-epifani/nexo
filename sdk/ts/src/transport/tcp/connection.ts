@@ -1,10 +1,10 @@
 import * as net from 'net';
 import { EventEmitter } from 'events';
-import { Logger } from './utils/logger';
-import { NexoConnectionConfig } from './config';
-import { FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from './protocol';
-import { Cursor, FrameWriter } from './codec';
-import { ConnectionClosedError, NotConnectedError, RequestTimeoutError, RequestCancelledError } from './errors';
+import { Logger } from '../../utils/logger';
+import { NexoConnectionConfig } from '../../config';
+import { FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from '../../protocol/generated';
+import { Cursor, FrameWriter } from '../../protocol/codec';
+import { ConnectionClosedError, NotConnectedError, RequestTimeoutError, RequestCancelledError } from '../../errors';
 
 /** @internal */
 export class NexoConnection extends EventEmitter {

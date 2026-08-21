@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from nexo.codec import Cursor, FrameWriter
-from nexo.protocol import DataType, FrameType, PROTOCOL_VERSION
+from nexo.protocol.codec import Cursor, FrameWriter
+from nexo.protocol.generated import DataType, FrameType, PROTOCOL_VERSION
 
 _FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "../..", "..", "codec-fixtures.json")
 FIXTURES = json.load(open(_FIXTURES_PATH))

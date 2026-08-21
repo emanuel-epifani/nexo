@@ -4,7 +4,7 @@ import json
 import struct
 from typing import Any, Callable, Union
 
-from .protocol import (
+from .generated import (
     DataType,
     FrameType,
     PROTOCOL_VERSION,
