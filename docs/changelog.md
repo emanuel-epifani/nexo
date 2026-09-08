@@ -12,14 +12,20 @@ Release notes for the Nexo broker and SDKs.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## v6.0.0
+
+**Released:** 2026-09-08
+
+<p class="release-downloads">
+  <a class="download-pill" href="https://github.com/emanuel-epifani/nexo/releases/tag/v6.0.0" target="_blank" rel="noreferrer">Download v6.0.0</a>
+  <a class="download-pill alt" href="https://hub.docker.com/r/emanuelepifani/nexo/tags?name=6.0.0" target="_blank" rel="noreferrer">Docker tag v6.0.0</a>
+  <a class="download-pill npm" href="https://www.npmjs.com/package/@emanuelepifani/nexo-client/v/6.0.0" target="_blank" rel="noreferrer">npm v6.0.0</a>
+  <a class="download-pill pypi" href="https://pypi.org/project/nexo-client/6.0.0/" target="_blank" rel="noreferrer">PyPI v6.0.0</a>
+</p>
 
 ### Changed
 
-- Separate Queue and Stream provisioning from runtime handles across TypeScript and Python SDKs
-- Return authoritative effective definitions from idempotent resource provisioning and detect configuration drift
-- Add fail-fast resource lookup, Stream group/DLT handles, and independently owned Pub/Sub subscriptions
-- Replace textual server-error matching with stable protocol error codes and structured conflict details
+- refactor!: separate resource provisioning from runtime SDKs
 
 ## v5.0.3
 
