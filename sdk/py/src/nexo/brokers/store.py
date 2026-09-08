@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TypeVar, TypedDict
+from typing import Any, TypeVar
 
 from ..transport.tcp.connection import NexoConnection
 from ..protocol.generated import FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, StoreOpcode
@@ -9,19 +9,17 @@ from ..protocol.generated import FLAG_STORE_MAP_SET_HAS_TTL, ResponseStatus, Sto
 T = TypeVar("T")
 
 
-class MapSetOptions(TypedDict, total=False):
-    ttl: int
-
-
 class NexoMap:
     def __init__(self, conn: NexoConnection) -> None:
         self._conn = conn
 
     async def set(
-        self, key: str, value: T, options: MapSetOptions | None = None
+        self,
+        key: str,
+        value: T,
+        *,
+        ttl: int | None = None,
     ) -> None:
-        opts = options or {}
-        ttl = opts.get("ttl")
         has_ttl = ttl is not None
         flags = FLAG_STORE_MAP_SET_HAS_TTL if has_ttl else 0x00
 

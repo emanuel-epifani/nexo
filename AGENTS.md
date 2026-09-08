@@ -47,7 +47,7 @@ docs/guide/                    # functional docs
 
 **Header** (11 bytes, `bytemuck` Pod): `[Version:1][FrameType:1][Meta:1][CorrelationID:4 BE][PayloadLen:4 BE]`. Mismatched `PROTOCOL_VERSION` → rejected both ends (stateless). `Meta` = opcode (Request) / status (Response) / push-type (Push).
 
-**Response payloads**: `OK`/`NULL` → empty; `DATA` → bytes to end; `ERR` → utf8 to end. Booleans = `DATA` with single `0/1` byte.
+**Response payloads**: `OK`/`NULL` → empty; `DATA` → bytes to end; `ERR` → `[ErrorCode:1][MessageLen:4 BE][Message:utf8][Details:optional JSON to end]`. Booleans = `DATA` with single `0/1` byte.
 
 **Serialization**: `PayloadWriter`/`PayloadCursor` in `wire.rs` — big-endian, u32 length-prefix, UUID 16B raw. Keep `put_*`/`read_*` pairs aligned.
 
@@ -57,7 +57,7 @@ Any wire change must stay symmetric across `src/`, `sdk/ts/`, `sdk/py/`, and bum
 
 ## Protocol Constants (Single Source of Truth)
 
-All protocol constants — `PROTOCOL_VERSION`, frame types, response statuses, data types, opcodes, command flag bits, and wire limits — are defined in `protocol.json` and generated into three files by `scripts/generate-protocol.js`:
+All protocol constants — `PROTOCOL_VERSION`, frame types, response statuses, error codes, provisioning statuses, data types, opcodes, command flag bits, and wire limits — are defined in `protocol.json` and generated into three files by `scripts/generate-protocol.js`:
 
 - `src/protocol/generated.rs` (Rust)
 - `sdk/ts/src/protocol/generated.ts` (TypeScript)

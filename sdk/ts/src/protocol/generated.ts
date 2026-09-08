@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 0x06;
+export const PROTOCOL_VERSION = 0x07;
 
 export enum FrameType {
   REQUEST = 0x01,
@@ -12,6 +12,24 @@ export enum ResponseStatus {
   ERR = 0x01,
   NULL = 0x02,
   DATA = 0x03,
+}
+
+export enum ErrorCode {
+  INTERNAL = 0x00,
+  INVALID_ARGUMENT = 0x01,
+  RESOURCE_NOT_FOUND = 0x02,
+  RESOURCE_CONFIG_CONFLICT = 0x03,
+  NOT_AUTHORIZED = 0x04,
+  FENCED = 0x05,
+  NOT_MEMBER = 0x06,
+  SLOW_CONSUMER = 0x07,
+  STORAGE_ERROR = 0x08,
+  PROTOCOL_ERROR = 0x09,
+}
+
+export enum ProvisionStatus {
+  CREATED = 0x01,
+  UNCHANGED = 0x02,
 }
 
 export enum DataType {
@@ -51,6 +69,7 @@ export enum QueueOpcode {
   Q_DELETE_DLQ = 0x18,
   Q_PURGE_DLQ = 0x19,
   Q_NACK = 0x1A,
+  Q_DESCRIBE = 0x1B,
 }
 
 export enum PubSubOpcode {
@@ -67,6 +86,7 @@ export enum StreamOpcode {
   S_ACK = 0x34,
   S_EXISTS = 0x35,
   S_DELETE = 0x36,
+  S_DESCRIBE = 0x37,
   S_SEEK = 0x38,
   S_LEAVE = 0x39,
   S_PEEK_DLT = 0x3A,

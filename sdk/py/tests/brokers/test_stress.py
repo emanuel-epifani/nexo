@@ -80,7 +80,8 @@ class TestStressThroughput:
 
     async def test_queue_push_concurrent(self, nexo: NexoClient):
         q_name = f"bench-queue-push-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -98,11 +99,12 @@ class TestStressThroughput:
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await q.delete()
+        await nexo.queue.delete(q_name)
 
     async def test_queue_push_batch_concurrent(self, nexo: NexoClient):
         q_name = f"bench-queue-batch-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -122,11 +124,12 @@ class TestStressThroughput:
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await q.delete()
+        await nexo.queue.delete(q_name)
 
     async def test_stream_publish_concurrent(self, nexo: NexoClient):
         topic = f"bench-stream-pub-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        await nexo.stream.create(topic)
+        stream = await nexo.stream.get(topic)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -139,16 +142,17 @@ class TestStressThroughput:
         async def worker(worker_id: int):
             for i in range(OPS_PER_WORKER):
                 t0 = time.perf_counter()
-                await nexo.stream(topic).publish(payload)
+                await stream.publish(payload)
                 probe.record((time.perf_counter() - t0) * 1000)
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_stream_publish_batch_concurrent(self, nexo: NexoClient):
         topic = f"bench-stream-batch-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        await nexo.stream.create(topic)
+        stream = await nexo.stream.get(topic)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -163,16 +167,16 @@ class TestStressThroughput:
             batch = [{"data": payload} for _ in range(BATCH_SIZE)]
             for i in range(BATCHES_PER_WORKER):
                 t0 = time.perf_counter()
-                await nexo.stream(topic).publish_batch(batch)
+                await stream.publish_batch(batch)
                 probe.record_batch(BATCH_SIZE, (time.perf_counter() - t0) * 1000)
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_pubsub_publish_concurrent(self, nexo: NexoClient):
         topic_name = f"bench/pubsub-pub-{uuid.uuid4()}"
-        topic = nexo.pubsub(topic_name)
+        topic = nexo.pubsub.topic(topic_name)
         payload = {"op": "ping", "data": "x", "t": time.time()}
 
         TOTAL = 50_000
@@ -195,7 +199,8 @@ class TestStressThroughput:
         from tests.utils.wait_for import wait_for
 
         q_name = f"bench-queue-consume-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         TOTAL = 50_000
         payload = {"op": "job", "data": "x", "t": time.time()}
@@ -212,39 +217,43 @@ class TestStressThroughput:
 
         sub = await q.subscribe(
             cb,
-            {"batch_size": 50, "wait_ms": 100, "concurrency": 10},
+            batch_size=50,
+            wait_ms=100,
+            concurrency=10,
         )
 
         await wait_for(lambda: consumed[0] >= TOTAL, timeout=60.0)
         await sub.stop()
         probe.print_result()
-        await q.delete()
+        await nexo.queue.delete(q_name)
 
     async def test_stream_subscribe_ack_throughput(self, nexo: NexoClient):
         topic = f"bench-stream-sub-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        await nexo.stream.create(topic)
+        stream = await nexo.stream.get(topic)
 
         TOTAL = 50_000
         payload = {"op": "event", "data": "x", "t": time.time()}
 
         for i in range(TOTAL):
-            await nexo.stream(topic).publish(payload)
+            await stream.publish(payload)
 
         probe = BenchmarkProbe("STREAM SUBSCRIBE+ACK", TOTAL)
         consumed: list[int] = [0]
         probe.start_timer()
 
-        sub = await nexo.stream(topic).subscribe(
-            "bench-group",
+        sub = await stream.group("bench-group").subscribe(
             lambda _data, _meta: consumed.__setitem__(0, consumed[0] + 1),
-            {"batch_size": 100, "wait_ms": 100, "concurrency": 10},
+            batch_size=100,
+            wait_ms=100,
+            concurrency=10,
         )
 
         from tests.utils.wait_for import wait_for
         await wait_for(lambda: consumed[0] >= TOTAL, timeout=60.0)
         await sub.stop()
         probe.print_result()
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
 
 @pytest.mark.asyncio
@@ -279,7 +288,8 @@ class TestStressLatency:
 
     async def test_queue_push_sequential(self, nexo: NexoClient):
         q_name = f"bench-queue-lat-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         ITERATIONS = 100_000
         payload = {"op": "job", "data": "x", "t": time.time()}
@@ -292,11 +302,12 @@ class TestStressLatency:
             probe.record((time.perf_counter() - t0) * 1000)
 
         probe.print_result()
-        await q.delete()
+        await nexo.queue.delete(q_name)
 
     async def test_stream_publish_sequential(self, nexo: NexoClient):
         topic = f"bench-stream-lat-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        await nexo.stream.create(topic)
+        stream = await nexo.stream.get(topic)
 
         ITERATIONS = 100_000
         payload = {"op": "event", "data": "x", "t": time.time()}
@@ -305,15 +316,15 @@ class TestStressLatency:
 
         for i in range(ITERATIONS):
             t0 = time.perf_counter()
-            await nexo.stream(topic).publish(payload)
+            await stream.publish(payload)
             probe.record((time.perf_counter() - t0) * 1000)
 
         probe.print_result()
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_pubsub_publish_sequential(self, nexo: NexoClient):
         topic_name = f"bench/pubsub-lat-{uuid.uuid4()}"
-        topic = nexo.pubsub(topic_name)
+        topic = nexo.pubsub.topic(topic_name)
         payload = {"op": "ping", "data": "x", "t": time.time()}
 
         ITERATIONS = 100_000

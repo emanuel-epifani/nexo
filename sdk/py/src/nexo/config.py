@@ -36,6 +36,11 @@ class _StreamDefaults:
 
 
 @dataclass(frozen=True)
+class _PubSubDefaults:
+    listener_queue_capacity: int = 1024
+
+
+@dataclass(frozen=True)
 class _LoggerDefaults:
     level: str = "ERROR"
 
@@ -45,6 +50,7 @@ class _DefaultConfig:
     connection: NexoConnectionConfig = field(default_factory=NexoConnectionConfig)
     queue: _QueueDefaults = field(default_factory=_QueueDefaults)
     stream: _StreamDefaults = field(default_factory=_StreamDefaults)
+    pubsub: _PubSubDefaults = field(default_factory=_PubSubDefaults)
     logger: _LoggerDefaults = field(default_factory=_LoggerDefaults)
 
 

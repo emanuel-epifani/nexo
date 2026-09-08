@@ -35,11 +35,13 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | pubsub_reject_invalid_ttl | Invalid TTL values are rejected | should reject invalid ttl values | reject_invalid_ttl |
 | pubsub_async_callbacks | Async callbacks work correctly | should support async callbacks | async_callback |
 | pubsub_slow_callback_no_block | Slow callback doesn't block other operations | should not block other operations when callback is slow | slow_callback_does_not_block_store |
-| pubsub_parallel_subscriptions | Multiple parallel subscriptions on same topic | should run parallel subscriptions independently | parallel_subscriptions |
+| pubsub_parallel_subscriptions | Parallel subscriptions on different topics execute independently | should run parallel subscriptions independently | parallel_subscriptions |
+| pubsub_same_pattern_local | Two local listeners share one wildcard pattern and stop independently | should isolate two local listeners on the same pattern | two_local_listeners_share_pattern_and_stop_independently |
+| pubsub_local_overflow | A bounded slow local listener stops without unbounded memory growth | should stop only the overflowing local listener | overflow_stops_only_local_listener |
 | pubsub_retained_new_subscriber | Retained message delivered to new subscriber | should deliver retained message to new subscriber | retained_delivered_to_new_subscriber |
 | pubsub_retained_overwrite | Second retained publish overwrites first | should overwrite retained message on second publish | retained_overwrite_on_second_publish |
 | pubsub_retained_ttl_expiry | Retained with TTL not delivered after expiry | should not deliver retained message after TTL expiry | retained_not_delivered_after_ttl_expiry |
-| pubsub_unsubscribe_stops_delivery | No messages received after unsubscribe | should stop delivery after unsubscribe | unsubscribe_stops_delivery |
+| pubsub_subscription_stop | No messages received after the owned subscription is stopped | should stop delivery after unsubscribe | unsubscribe_stops_delivery |
 | pubsub_combined_wildcards | Combined wildcards `a/+/b/#` match correctly | should match combined wildcards a/+/b/# | combined_wildcards_plus_and_hash |
 | pubsub_broadcast_3plus | Broadcast to 3+ subscribers on same topic | should broadcast to 3+ subscribers on same topic | broadcast_to_3_plus_subscribers |
 | pubsub_disconnect_cleanup | Disconnect cleanup doesn't break topic for others | should clean up subscriber on disconnect without breaking topic | disconnect_cleanup_does_not_break_topic |
@@ -58,17 +60,20 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | queue_push_batch_empty | Empty pushBatch handled gracefully | should handle empty pushBatch gracefully | empty_push_batch |
 | queue_nack_dlq | Explicit NACK persists failure reason in DLQ | Should handle explicit NACK and persist failure reason in DLQ | nack_persists_failure_reason |
 | queue_retry_dlq | Message exceeds max_deliveries, lands in DLQ | should move failed messages to DLQ | move_failed_to_dlq |
-| queue_dlq_workflow | DLQ full workflow: peek, moveToQueue, delete, purge | Should handle DLQ workflow: peek, moveToQueue, delete, purge | dlq_workflow_peek_move_delete_purge |
+| queue_dlq_workflow | DLQ full workflow: peek, replay, delete, purge | Should handle DLQ workflow: peek, replay, delete, purge | dlq_workflow_peek_move_delete_purge |
 | queue_concurrency_serial | concurrency=1 serializes callbacks | should serialize callbacks with concurrency=1 | serialize_callbacks_concurrency_1 |
 | queue_concurrency_parallel | concurrency>1 processes messages in parallel | should process messages in parallel with concurrency > 1 | parallel_concurrency_gt_1 |
 | queue_multiple_subscribers | Multiple parallel subscribers on same queue | should allow multiple parallel subscribers on the same queue (in-process scaling) | multiple_parallel_subscribers |
 | queue_no_dlq_on_shutdown | Graceful shutdown requeues via visibility timeout | should not DLQ messages on graceful shutdown (requeue via visibility timeout) | no_dlq_on_graceful_shutdown |
 | queue_stop_on_delete | Consumer stops when queue is deleted during subscribe | should stop consumer when queue is deleted during subscribe | stop_consumer_when_queue_deleted |
-| queue_stop_on_nonexistent | Subscribe to non-existent queue fails gracefully | should stop consumer when subscribing to non-existent queue | stop_consumer_nonexistent_queue |
+| queue_subscribe_missing | Subscribe to a non-existent queue rejects before starting a loop | should fail fast when subscribing to a missing queue | subscribe_nonexistent_queue_fails_fast |
 | queue_reject_batch_size_zero | batchSize=0 in subscribe is rejected | should reject batchSize=0 in subscribe | reject_batch_size_zero |
 | queue_reject_concurrency_zero | concurrency=0 in subscribe is rejected | should reject concurrency=0 in subscribe | reject_concurrency_zero |
 | queue_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
-| queue_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
+| queue_provisioning_result | Create returns `created`, repeated equivalent create returns `unchanged`, differing config conflicts | should return provisioning results and reject configuration conflicts | create_idempotent |
+| queue_config_conflict_typed | Configuration drift raises the typed conflict error with details | should return provisioning results and reject configuration conflicts | create_config_conflict_is_typed |
+| queue_get_missing | Fail-fast get on an absent resource raises typed not-found | should fail fast when getting a non-existent queue | get_nonexistent_queue_fails |
+| queue_exists_transport_error | exists propagates connection errors instead of returning false | should propagate connection errors from exists | exists_propagates_connection_error |
 | queue_empty_no_wait | Consume empty queue with short waitMs returns immediately | should consume empty queue without waiting and return immediately | consume_empty_queue_no_wait_returns_immediately |
 | queue_partial_batch | Partial batch when fewer messages than batchSize | should return partial batch when fewer messages than batchSize | partial_batch_when_fewer_than_batch_size |
 | queue_long_poll_wakeup | Long-polling consumer wakes up on push | should wake up long-polling consumer when message is pushed | long_polling_wakeup_on_push |
@@ -109,14 +114,17 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_empty_key_rejected | Empty keys are rejected instead of silently becoming keyless | should reject empty stream keys | reject_empty_stream_keys |
 | stream_publish_batch_limit | Publish batches above 65,536 items are rejected locally | should reject publish batches above the protocol limit | reject_oversized_publish_batch |
 | stream_exists | exists() returns true after create, false before | should return exists=true after create, false before | exists_true_after_create_false_before |
-| stream_create_idempotent | Create twice succeeds (idempotent) | should be idempotent on create (create twice succeeds) | create_idempotent |
-| stream_invalid_topic_name | Topic names cannot escape the persistence directory | should reject topic names that escape the stream directory | reject_invalid_topic_name |
+| stream_provisioning_result | Create returns `created`, repeated equivalent create returns `unchanged`, differing config conflicts | should return provisioning results and reject configuration conflicts | create_idempotent |
+| stream_config_conflict_typed | Configuration drift raises the typed conflict error with details | should return provisioning results and reject configuration conflicts | create_config_conflict_is_typed |
+| stream_get_missing | Fail-fast get on an absent resource raises typed not-found | should fail fast when getting a non-existent stream | get_nonexistent_stream_fails |
+| stream_exists_transport_error | exists propagates connection errors instead of returning false | should propagate connection errors from exists | exists_propagates_connection_error |
+| stream_invalid_name | Stream names cannot escape the persistence directory | should reject stream names that escape the stream directory | reject_invalid_stream_name |
 | stream_invalid_runtime_options | Invalid seek targets and zero polling options are rejected | should reject invalid seek and subscription polling options | reject_invalid_seek_and_subscription_options |
 | stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
 | stream_publish_storage_failure | Storage write failure rejects publish instead of returning a sequence | should fail publish when storage cannot write the message | publish_storage_write_failure |
 | stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |
-| stream_peek_dlt_empty | peekDlt returns empty array when DLT is empty | should return empty array from peekDlt when DLT is empty | peek_dlt_empty_returns_empty |
-| stream_purge_dlt_empty | purgeDlt returns 0 when DLT is empty | should return 0 from purgeDlt when DLT is empty | purge_dlt_empty_returns_zero |
+| stream_peek_dlt_empty | `group.dlt.peek()` returns an empty array when DLT is empty | should expose group DLT peek when the DLT is empty | peek_dlt_empty_returns_empty |
+| stream_purge_dlt_empty | `group.dlt.purge()` returns 0 when DLT is empty | should expose group DLT purge when the DLT is empty | purge_dlt_empty_returns_zero |
 | stream_resubscribe_after_stop | Resubscribe same group after stop receives only new messages | should resubscribe same group after stop and receive only new messages | resubscribe_same_group_after_stop |
 | stream_multi_groups_simultaneous | Multiple independent groups receive all messages simultaneously | should deliver messages to multiple independent groups simultaneously | multiple_groups_simultaneous_delivery |
 

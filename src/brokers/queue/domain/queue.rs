@@ -1,20 +1,20 @@
 #![allow(clippy::too_many_arguments)]
 //! Queue State: Internal state management for queue broker
-//! 
+//!
 //! This module contains the pure state logic without any concurrency primitives.
 //! The QueueManager wraps this state in a Mutex<QueueInner> per queue.
 
-use std::cmp::Reverse;
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use priority_queue::PriorityQueue;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::domain::dlq::DlqMessage;
+use crate::brokers::queue::options::QueueCreateOptions;
 
 // ==========================================
 // MESSAGE & CONFIG
@@ -54,19 +54,26 @@ impl Message {
     pub fn is_in_flight(&self) -> bool {
         self.visible_at > 0 && self.visible_at > current_time_ms()
     }
-
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueConfig {
     pub visibility_timeout_ms: u64,
     pub max_deliveries: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueDefinition {
+    pub name: String,
+    pub config: QueueConfig,
+}
+
 impl QueueConfig {
     pub fn from_options(opts: QueueCreateOptions, sys: &SystemQueueConfig) -> Self {
         Self {
-            visibility_timeout_ms: opts.visibility_timeout_ms.unwrap_or(sys.visibility_timeout_ms),
+            visibility_timeout_ms: opts
+                .visibility_timeout_ms
+                .unwrap_or(sys.visibility_timeout_ms),
             max_deliveries: opts.max_deliveries.unwrap_or(sys.max_deliveries),
         }
     }
@@ -117,7 +124,8 @@ impl QueueState {
         self.registry.insert(id, msg.clone());
 
         if msg.visible_at > 0 {
-            self.in_flight.push(id, Reverse((msg.visible_at, msg.delivery_token)));
+            self.in_flight
+                .push(id, Reverse((msg.visible_at, msg.delivery_token)));
         } else {
             self.ready.push(id, (priority, Reverse(msg.ready_seq)));
         }
@@ -139,7 +147,8 @@ impl QueueState {
         self.registry.insert(id, msg.clone());
 
         if msg.visible_at > 0 {
-            self.in_flight.push(id, Reverse((msg.visible_at, msg.delivery_token)));
+            self.in_flight
+                .push(id, Reverse((msg.visible_at, msg.delivery_token)));
         } else {
             self.ready.push(id, (priority, Reverse(msg.ready_seq)));
         }
@@ -162,7 +171,8 @@ impl QueueState {
         let now = current_time_ms();
         if let Some(msg) = self.registry.get(&id) {
             // Must be an active in-flight delivery with a matching token.
-            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
+            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now
+            {
                 return false;
             }
         } else {
@@ -189,13 +199,20 @@ impl QueueState {
     /// Negative Acknowledge. Returns (requeued_msg, dlq_msg).
     /// If dlq_msg is Some, the message was removed from this state and should be added to DLQ state.
     /// Returns (None, None) if the delivery is not active or the delivery_token doesn't match (stale NACK).
-    pub fn nack(&mut self, id: Uuid, delivery_token: u64, reason: String, max_deliveries: u32) -> (Option<Message>, Option<DlqMessage>) {
+    pub fn nack(
+        &mut self,
+        id: Uuid,
+        delivery_token: u64,
+        reason: String,
+        max_deliveries: u32,
+    ) -> (Option<Message>, Option<DlqMessage>) {
         let now = current_time_ms();
 
         // 1. Check existence, token, and active lease
         let (should_dlq, priority) = if let Some(msg) = self.registry.get_mut(&id) {
             // Must be an active in-flight delivery with a matching token.
-            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now {
+            if msg.delivery_token != delivery_token || msg.visible_at == 0 || msg.visible_at <= now
+            {
                 return (None, None);
             }
             msg.failure_reason = Some(reason.clone());
@@ -241,7 +258,9 @@ impl QueueState {
 
             let (id, _) = self.in_flight.pop().expect("non-empty in-flight heap");
 
-            let should_dlq = self.registry.get(&id)
+            let should_dlq = self
+                .registry
+                .get(&id)
                 .map(|m| m.attempts >= max_deliveries)
                 .unwrap_or(false);
 
@@ -279,7 +298,8 @@ impl QueueState {
         self.delivery_counter += 1;
         msg.delivery_token = self.delivery_counter;
 
-        self.in_flight.push(next_id, Reverse((timeout, msg.delivery_token)));
+        self.in_flight
+            .push(next_id, Reverse((timeout, msg.delivery_token)));
 
         Some(msg.clone())
     }
@@ -326,8 +346,14 @@ mod tests {
         let msg = state.pop(1000, now).unwrap();
         assert_eq!(msg.delivery_token, 1);
 
-        assert!(!state.ack(msg.id, msg.delivery_token + 999), "wrong token must be rejected");
-        assert!(state.ack(msg.id, msg.delivery_token), "active delivery with correct token must be accepted");
+        assert!(
+            !state.ack(msg.id, msg.delivery_token + 999),
+            "wrong token must be rejected"
+        );
+        assert!(
+            state.ack(msg.id, msg.delivery_token),
+            "active delivery with correct token must be accepted"
+        );
     }
 
     #[test]
@@ -339,9 +365,15 @@ mod tests {
         state.push(&mut msg);
 
         // Token 0 on a never-popped (ready) message must be stale.
-        assert!(!state.ack(id, 0), "ack with token 0 on a ready message must be rejected");
+        assert!(
+            !state.ack(id, 0),
+            "ack with token 0 on a ready message must be rejected"
+        );
         // Any token on a ready message must be rejected.
-        assert!(!state.ack(id, 123), "ack on a ready message must be rejected");
+        assert!(
+            !state.ack(id, 123),
+            "ack on a ready message must be rejected"
+        );
     }
 
     #[test]
@@ -354,7 +386,10 @@ mod tests {
         let msg = state.pop(1, now).unwrap();
         std::thread::sleep(Duration::from_millis(5));
 
-        assert!(!state.ack(msg.id, msg.delivery_token), "ack after lease expiration must be rejected");
+        assert!(
+            !state.ack(msg.id, msg.delivery_token),
+            "ack after lease expiration must be rejected"
+        );
     }
 
     #[test]
@@ -366,10 +401,16 @@ mod tests {
 
         let msg = state.pop(1000, now).unwrap();
         let (requeued, dlq) = state.nack(msg.id, msg.delivery_token + 999, "fail".to_string(), 5);
-        assert!(requeued.is_none() && dlq.is_none(), "wrong token nack must be a no-op");
+        assert!(
+            requeued.is_none() && dlq.is_none(),
+            "wrong token nack must be a no-op"
+        );
 
         let (requeued, dlq) = state.nack(msg.id, 0, "fail".to_string(), 5);
-        assert!(requeued.is_none() && dlq.is_none(), "nack with token 0 on in-flight must be rejected");
+        assert!(
+            requeued.is_none() && dlq.is_none(),
+            "nack with token 0 on in-flight must be rejected"
+        );
     }
 
     #[test]
@@ -383,7 +424,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
 
         let (requeued, dlq) = state.nack(msg.id, msg.delivery_token, "fail".to_string(), 5);
-        assert!(requeued.is_none() && dlq.is_none(), "nack after lease expiration must be rejected");
+        assert!(
+            requeued.is_none() && dlq.is_none(),
+            "nack after lease expiration must be rejected"
+        );
     }
 
     #[test]
@@ -400,11 +444,20 @@ mod tests {
         assert!(requeued.is_some() && dlq.is_none(), "nack should requeue");
 
         // Old token on the requeued message must be stale.
-        assert!(!state.ack(msg.id, token1), "ack with old token after nack requeue must fail");
+        assert!(
+            !state.ack(msg.id, token1),
+            "ack with old token after nack requeue must fail"
+        );
 
         let msg2 = state.pop(1000, current_time_ms()).unwrap();
-        assert_eq!(msg2.delivery_token, 2, "second delivery should have a new token");
-        assert!(state.ack(msg2.id, msg2.delivery_token), "ack with current token should succeed");
+        assert_eq!(
+            msg2.delivery_token, 2,
+            "second delivery should have a new token"
+        );
+        assert!(
+            state.ack(msg2.id, msg2.delivery_token),
+            "ack with current token should succeed"
+        );
     }
 
     #[test]
@@ -423,11 +476,20 @@ mod tests {
         assert!(dlq.is_empty());
 
         // Old token on the requeued message must be stale.
-        assert!(!state.ack(msg.id, token1), "ack with old token after timeout requeue must fail");
+        assert!(
+            !state.ack(msg.id, token1),
+            "ack with old token after timeout requeue must fail"
+        );
 
         let msg2 = state.pop(1000, current_time_ms()).unwrap();
-        assert_eq!(msg2.delivery_token, 2, "second delivery should have a new token");
-        assert!(state.ack(msg2.id, msg2.delivery_token), "ack with current token should succeed");
+        assert_eq!(
+            msg2.delivery_token, 2,
+            "second delivery should have a new token"
+        );
+        assert!(
+            state.ack(msg2.id, msg2.delivery_token),
+            "ack with current token should succeed"
+        );
     }
 
     #[test]
@@ -439,7 +501,10 @@ mod tests {
 
         let msg = state.pop(1000, now).unwrap();
         let (requeued, dlq) = state.nack(msg.id, msg.delivery_token, "fail".to_string(), 1);
-        assert!(requeued.is_none() && dlq.is_some(), "first delivery at max_deliveries=1 should go to DLQ");
+        assert!(
+            requeued.is_none() && dlq.is_some(),
+            "first delivery at max_deliveries=1 should go to DLQ"
+        );
         assert_eq!(dlq.unwrap().id, msg.id);
     }
 
@@ -491,7 +556,10 @@ mod tests {
         // New push should have a higher ready_seq than the requeued message.
         let mut third = Message::new(b("third"), 0, current_time_ms());
         state.push(&mut third);
-        assert!(third.ready_seq > m1.ready_seq, "new push must have higher ready_seq than requeued message");
+        assert!(
+            third.ready_seq > m1.ready_seq,
+            "new push must have higher ready_seq than requeued message"
+        );
     }
 
     #[test]

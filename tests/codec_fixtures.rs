@@ -9,8 +9,8 @@ use std::time::Instant;
 use nexo::brokers::pub_sub::tcp::PubSubCommand;
 use nexo::brokers::queue::tcp::QueueCommand;
 use nexo::brokers::store::tcp::{MapCmd, StoreCommand};
-use nexo::brokers::stream::tcp::StreamCommand;
 use nexo::brokers::stream::options::SeekTarget;
+use nexo::brokers::stream::tcp::StreamCommand;
 use nexo::protocol::wire::{PayloadCursor, PayloadWriter};
 
 const HEADER_LEN: usize = 11;
@@ -58,7 +58,10 @@ fn parse_uuid(hex: &str) -> uuid::Uuid {
 
 #[test]
 fn store_fixtures() {
-    for f in load_fixtures().into_iter().filter(|f| f["broker"] == "store") {
+    for f in load_fixtures()
+        .into_iter()
+        .filter(|f| f["broker"] == "store")
+    {
         let id = f["id"].as_str().unwrap();
         let (opcode, payload) = decode_frame(f["expected_bytes"].as_str().unwrap());
         let mut c = PayloadCursor::new(payload);
@@ -101,7 +104,10 @@ fn store_fixtures() {
 
 #[test]
 fn pubsub_fixtures() {
-    for f in load_fixtures().into_iter().filter(|f| f["broker"] == "pubsub") {
+    for f in load_fixtures()
+        .into_iter()
+        .filter(|f| f["broker"] == "pubsub")
+    {
         let id = f["id"].as_str().unwrap();
         let (opcode, payload) = decode_frame(f["expected_bytes"].as_str().unwrap());
         let mut c = PayloadCursor::new(payload);
@@ -111,7 +117,13 @@ fn pubsub_fixtures() {
 
         let inp = &f["input"];
         match cmd {
-            PubSubCommand::Publish { topic, retain, clear, ttl, payload } => {
+            PubSubCommand::Publish {
+                topic,
+                retain,
+                clear,
+                ttl,
+                payload,
+            } => {
                 assert_eq!(topic, inp["topic"].as_str().unwrap(), "{id}: topic");
                 assert_eq!(retain, inp["retain"].as_bool().unwrap(), "{id}: retain");
                 if let Some(clear_val) = inp.get("clear").and_then(|v| v.as_bool()) {
@@ -139,7 +151,10 @@ fn pubsub_fixtures() {
 
 #[test]
 fn queue_fixtures() {
-    for f in load_fixtures().into_iter().filter(|f| f["broker"] == "queue") {
+    for f in load_fixtures()
+        .into_iter()
+        .filter(|f| f["broker"] == "queue")
+    {
         let id = f["id"].as_str().unwrap();
         let (opcode, payload) = decode_frame(f["expected_bytes"].as_str().unwrap());
         let mut c = PayloadCursor::new(payload);
@@ -170,7 +185,9 @@ fn queue_fixtures() {
                 for (i, (actual, exp)) in items.iter().zip(exp_items).enumerate() {
                     assert_eq!(
                         actual.priority,
-                        exp.get("priority").and_then(|v| v.as_u64()).map(|v| v as u8),
+                        exp.get("priority")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u8),
                         "{id}: item {i} priority",
                     );
                     let ap = expected_payload(
@@ -180,40 +197,93 @@ fn queue_fixtures() {
                     assert_eq!(actual.payload, ap, "{id}: item {i} payload");
                 }
             }
-            QueueCommand::Consume { q_name, batch_size, wait_ms } => {
+            QueueCommand::Consume {
+                q_name,
+                batch_size,
+                wait_ms,
+            } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(batch_size, inp["batch_size"].as_u64().unwrap() as usize, "{id}: batch_size");
+                assert_eq!(
+                    batch_size,
+                    inp["batch_size"].as_u64().unwrap() as usize,
+                    "{id}: batch_size"
+                );
                 assert_eq!(wait_ms, inp["wait_ms"].as_u64().unwrap(), "{id}: wait_ms");
             }
-            QueueCommand::Ack { id: uid, delivery_token, q_name } => {
+            QueueCommand::Ack {
+                id: uid,
+                delivery_token,
+                q_name,
+            } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(uid, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
-                assert_eq!(delivery_token, inp["delivery_token"].as_u64().unwrap(), "{id}: delivery_token");
+                assert_eq!(
+                    uid,
+                    parse_uuid(inp["message_id"].as_str().unwrap()),
+                    "{id}: message_id"
+                );
+                assert_eq!(
+                    delivery_token,
+                    inp["delivery_token"].as_u64().unwrap(),
+                    "{id}: delivery_token"
+                );
             }
-            QueueCommand::Nack { id: uid, delivery_token, q_name, reason } => {
+            QueueCommand::Nack {
+                id: uid,
+                delivery_token,
+                q_name,
+                reason,
+            } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(uid, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
-                assert_eq!(delivery_token, inp["delivery_token"].as_u64().unwrap(), "{id}: delivery_token");
+                assert_eq!(
+                    uid,
+                    parse_uuid(inp["message_id"].as_str().unwrap()),
+                    "{id}: message_id"
+                );
+                assert_eq!(
+                    delivery_token,
+                    inp["delivery_token"].as_u64().unwrap(),
+                    "{id}: delivery_token"
+                );
                 assert_eq!(reason, inp["reason"].as_str().unwrap(), "{id}: reason");
             }
-            QueueCommand::Exists { q_name } => {
+            QueueCommand::Exists { q_name } | QueueCommand::Describe { q_name } => {
                 assert_eq!(q_name, q, "{id}: queue");
             }
             QueueCommand::Delete { q_name } => {
                 assert_eq!(q_name, q, "{id}: queue");
             }
-            QueueCommand::PeekDLQ { q_name, limit, offset } => {
+            QueueCommand::PeekDLQ {
+                q_name,
+                limit,
+                offset,
+            } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(limit, inp["limit"].as_u64().unwrap() as usize, "{id}: limit");
-                assert_eq!(offset, inp["offset"].as_u64().unwrap() as usize, "{id}: offset");
+                assert_eq!(
+                    limit,
+                    inp["limit"].as_u64().unwrap() as usize,
+                    "{id}: limit"
+                );
+                assert_eq!(
+                    offset,
+                    inp["offset"].as_u64().unwrap() as usize,
+                    "{id}: offset"
+                );
             }
             QueueCommand::MoveToQueue { q_name, message_id } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(message_id, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
+                assert_eq!(
+                    message_id,
+                    parse_uuid(inp["message_id"].as_str().unwrap()),
+                    "{id}: message_id"
+                );
             }
             QueueCommand::DeleteDLQ { q_name, message_id } => {
                 assert_eq!(q_name, q, "{id}: queue");
-                assert_eq!(message_id, parse_uuid(inp["message_id"].as_str().unwrap()), "{id}: message_id");
+                assert_eq!(
+                    message_id,
+                    parse_uuid(inp["message_id"].as_str().unwrap()),
+                    "{id}: message_id"
+                );
             }
             QueueCommand::PurgeDLQ { q_name } => {
                 assert_eq!(q_name, q, "{id}: queue");
@@ -226,7 +296,10 @@ fn queue_fixtures() {
 
 #[test]
 fn stream_fixtures() {
-    for f in load_fixtures().into_iter().filter(|f| f["broker"] == "stream") {
+    for f in load_fixtures()
+        .into_iter()
+        .filter(|f| f["broker"] == "stream")
+    {
         let id = f["id"].as_str().unwrap();
         let (opcode, payload) = decode_frame(f["expected_bytes"].as_str().unwrap());
         let mut c = PayloadCursor::new(payload);
@@ -272,26 +345,67 @@ fn stream_fixtures() {
                     assert_eq!(actual.payload, ap, "{id}: item {i} payload");
                 }
             }
-            StreamCommand::Fetch { topic: t, group, consumer_id, generation, limit, wait_ms } => {
+            StreamCommand::Fetch {
+                topic: t,
+                group,
+                consumer_id,
+                generation,
+                limit,
+                wait_ms,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
-                assert_eq!(consumer_id, inp["consumer_id"].as_str().unwrap(), "{id}: consumer_id");
-                assert_eq!(generation, inp["generation"].as_u64().unwrap(), "{id}: generation");
-                assert_eq!(limit, inp["batch_size"].as_u64().unwrap() as u32, "{id}: batch_size");
-                assert_eq!(wait_ms, inp["wait_ms"].as_u64().unwrap() as u32, "{id}: wait_ms");
+                assert_eq!(
+                    consumer_id,
+                    inp["consumer_id"].as_str().unwrap(),
+                    "{id}: consumer_id"
+                );
+                assert_eq!(
+                    generation,
+                    inp["generation"].as_u64().unwrap(),
+                    "{id}: generation"
+                );
+                assert_eq!(
+                    limit,
+                    inp["batch_size"].as_u64().unwrap() as u32,
+                    "{id}: batch_size"
+                );
+                assert_eq!(
+                    wait_ms,
+                    inp["wait_ms"].as_u64().unwrap() as u32,
+                    "{id}: wait_ms"
+                );
             }
             StreamCommand::Join { topic: t, group } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
             }
-            StreamCommand::Ack { topic: t, group, consumer_id, generation, seq } => {
+            StreamCommand::Ack {
+                topic: t,
+                group,
+                consumer_id,
+                generation,
+                seq,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
-                assert_eq!(consumer_id, inp["consumer_id"].as_str().unwrap(), "{id}: consumer_id");
-                assert_eq!(generation, inp["generation"].as_u64().unwrap(), "{id}: generation");
+                assert_eq!(
+                    consumer_id,
+                    inp["consumer_id"].as_str().unwrap(),
+                    "{id}: consumer_id"
+                );
+                assert_eq!(
+                    generation,
+                    inp["generation"].as_u64().unwrap(),
+                    "{id}: generation"
+                );
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
-            StreamCommand::Seek { topic: t, group, target } => {
+            StreamCommand::Seek {
+                topic: t,
+                group,
+                target,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 let exp_target = match inp["target"].as_str().unwrap() {
@@ -301,30 +415,60 @@ fn stream_fixtures() {
                 };
                 assert_eq!(target, exp_target, "{id}: target");
             }
-            StreamCommand::Exists { topic: t } => {
+            StreamCommand::Exists { topic: t } | StreamCommand::Describe { topic: t } => {
                 assert_eq!(t, topic, "{id}: topic");
             }
             StreamCommand::Delete { topic: t } => {
                 assert_eq!(t, topic, "{id}: topic");
             }
-            StreamCommand::Leave { topic: t, group, consumer_id, generation } => {
+            StreamCommand::Leave {
+                topic: t,
+                group,
+                consumer_id,
+                generation,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
-                assert_eq!(consumer_id, inp["consumer_id"].as_str().unwrap(), "{id}: consumer_id");
-                assert_eq!(generation, inp["generation"].as_u64().unwrap(), "{id}: generation");
+                assert_eq!(
+                    consumer_id,
+                    inp["consumer_id"].as_str().unwrap(),
+                    "{id}: consumer_id"
+                );
+                assert_eq!(
+                    generation,
+                    inp["generation"].as_u64().unwrap(),
+                    "{id}: generation"
+                );
             }
-            StreamCommand::PeekDlt { topic: t, group, limit, offset } => {
+            StreamCommand::PeekDlt {
+                topic: t,
+                group,
+                limit,
+                offset,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(limit, inp["limit"].as_u64().unwrap() as u32, "{id}: limit");
-                assert_eq!(offset, inp["offset"].as_u64().unwrap() as u32, "{id}: offset");
+                assert_eq!(
+                    offset,
+                    inp["offset"].as_u64().unwrap() as u32,
+                    "{id}: offset"
+                );
             }
-            StreamCommand::MoveToStream { topic: t, group, seq } => {
+            StreamCommand::MoveToStream {
+                topic: t,
+                group,
+                seq,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
-            StreamCommand::DeleteDlt { topic: t, group, seq } => {
+            StreamCommand::DeleteDlt {
+                topic: t,
+                group,
+                seq,
+            } => {
                 assert_eq!(t, topic, "{id}: topic");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
@@ -355,7 +499,9 @@ fn codec_benchmark() {
             let payload = w.into_bytes();
             let mut c = PayloadCursor::new(payload);
             if let Ok(StoreCommand::Map(MapCmd::Get { key })) = StoreCommand::parse(0x03, &mut c) {
-                if key == "foo" && c.len() == 0 { ok += 1; }
+                if key == "foo" && c.len() == 0 {
+                    ok += 1;
+                }
             }
         }
         let elapsed = t0.elapsed();
@@ -377,8 +523,14 @@ fn codec_benchmark() {
             w.put_raw(json_bytes);
             let payload = w.into_bytes();
             let mut c = PayloadCursor::new(payload);
-            if let Ok(StoreCommand::Map(MapCmd::Set { key, ttl, value })) = StoreCommand::parse(0x02, &mut c) {
-                if key == "foo" && ttl.is_none() && value.len() == json_bytes.len() + 1 && c.len() == 0 {
+            if let Ok(StoreCommand::Map(MapCmd::Set { key, ttl, value })) =
+                StoreCommand::parse(0x02, &mut c)
+            {
+                if key == "foo"
+                    && ttl.is_none()
+                    && value.len() == json_bytes.len() + 1
+                    && c.len() == 0
+                {
                     ok += 1;
                 }
             }

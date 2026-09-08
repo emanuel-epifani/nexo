@@ -15,7 +15,10 @@ impl StoreConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            cleanup_interval_secs: crate::config::get_env("STORE_CLEANUP_INTERVAL_SECS", default.cleanup_interval_secs),
+            cleanup_interval_secs: crate::config::get_env(
+                "STORE_CLEANUP_INTERVAL_SECS",
+                default.cleanup_interval_secs,
+            ),
         }
     }
 }

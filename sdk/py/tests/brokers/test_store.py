@@ -23,7 +23,7 @@ class TestStore:
 
     async def test_ttl_expiration(self, nexo: NexoClient):
         key = f"ttl:{uuid.uuid4()}"
-        await nexo.store.map.set(key, "temp", {"ttl": 1})
+        await nexo.store.map.set(key, "temp", ttl=1)
 
         assert await nexo.store.map.get(key) == "temp"
 
@@ -34,7 +34,7 @@ class TestStore:
     async def test_ttl_zero_is_error(self, nexo: NexoClient):
         key = f"ttl0:{uuid.uuid4()}"
         with pytest.raises(Exception):
-            await nexo.store.map.set(key, "val", {"ttl": 0})
+            await nexo.store.map.set(key, "val", ttl=0)
         assert await nexo.store.map.get(key) is None
 
     async def test_no_ttl_is_persistent(self, nexo: NexoClient):
@@ -104,7 +104,7 @@ class TestStore:
 
     async def test_incr_preserves_ttl(self, nexo: NexoClient):
         key = f"incr:ttl:{uuid.uuid4()}"
-        await nexo.store.map.set(key, 5, {"ttl": 60})
+        await nexo.store.map.set(key, 5, ttl=60)
         await nexo.store.map.incr(key, 1)
         await asyncio.sleep(0.2)
         assert await nexo.store.map.get(key) == 6

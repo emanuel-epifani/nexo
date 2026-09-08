@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from ..config import DEFAULT_CONFIG
@@ -43,7 +43,7 @@ class Logger:
         self._handler: LogHandler = handler or self._default_handler
 
     def _default_handler(self, level: str, msg: str, *args: Any) -> None:
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         prefix = f"[SDK] [{timestamp}] {level}"
         if level == "ERROR":
             print(prefix, msg, *args, file=sys.stderr)

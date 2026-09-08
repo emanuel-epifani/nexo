@@ -13,7 +13,7 @@
         "payload": "eyJ4IjoxfQ=="
       }
     },
-    "expected_bytes": "BgECAAAAAQAAABAAAAADZm9vAAJ7IngiOjF9"
+    "expected_bytes": "BwECAAAAAQAAABAAAAADZm9vAAJ7IngiOjF9"
   },
   {
     "id": "STORE_MAP_SET_STRING_TTL",
@@ -29,7 +29,7 @@
         "payload": "aGVsbG8="
       }
     },
-    "expected_bytes": "BgECAAAAAQAAABYAAAADZm9vAQAAAAAAAOpgAWhlbGxv"
+    "expected_bytes": "BwECAAAAAQAAABYAAAADZm9vAQAAAAAAAOpgAWhlbGxv"
   },
   {
     "id": "STORE_MAP_GET",
@@ -40,7 +40,7 @@
     "input": {
       "key": "foo"
     },
-    "expected_bytes": "BgEDAAAAAQAAAAcAAAADZm9v"
+    "expected_bytes": "BwEDAAAAAQAAAAcAAAADZm9v"
   },
   {
     "id": "STORE_MAP_DEL",
@@ -51,7 +51,7 @@
     "input": {
       "key": "foo"
     },
-    "expected_bytes": "BgEEAAAAAQAAAAcAAAADZm9v"
+    "expected_bytes": "BwEEAAAAAQAAAAcAAAADZm9v"
   },
   {
     "id": "PUBSUB_PUB_JSON",
@@ -68,7 +68,7 @@
         "payload": "eyJ0IjoyNX0="
       }
     },
-    "expected_bytes": "BgEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXAAAnsidCI6MjV9"
+    "expected_bytes": "BwEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXAAAnsidCI6MjV9"
   },
   {
     "id": "PUBSUB_PUB_STRING_RETAIN",
@@ -85,7 +85,7 @@
         "payload": "b24="
       }
     },
-    "expected_bytes": "BgEhAAAAAQAAABMAAAALc2Vuc29yL3RlbXABAW9u"
+    "expected_bytes": "BwEhAAAAAQAAABMAAAALc2Vuc29yL3RlbXABAW9u"
   },
   {
     "id": "PUBSUB_PUB_RAW_TTL",
@@ -102,7 +102,7 @@
         "payload": "aGVsbG8="
       }
     },
-    "expected_bytes": "BgEhAAAAAQAAABoAAAALc2Vuc29yL3RlbXACAAAAHgBoZWxsbw=="
+    "expected_bytes": "BwEhAAAAAQAAABoAAAALc2Vuc29yL3RlbXACAAAAHgBoZWxsbw=="
   },
   {
     "id": "PUBSUB_PUB_JSON_RETAIN_TTL",
@@ -119,7 +119,7 @@
         "payload": "bnVsbA=="
       }
     },
-    "expected_bytes": "BgEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXADAAAAPAJudWxs"
+    "expected_bytes": "BwEhAAAAAQAAABkAAAALc2Vuc29yL3RlbXADAAAAPAJudWxs"
   },
   {
     "id": "PUBSUB_CLEAR",
@@ -136,7 +136,7 @@
         "payload": ""
       }
     },
-    "expected_bytes": "BgEhAAAAAQAAABEAAAALc2Vuc29yL3RlbXAEAA=="
+    "expected_bytes": "BwEhAAAAAQAAABEAAAALc2Vuc29yL3RlbXAEAA=="
   },
   {
     "id": "PUBSUB_SUB",
@@ -147,7 +147,7 @@
     "input": {
       "topic": "sensor/+"
     },
-    "expected_bytes": "BgEiAAAAAQAAAAwAAAAIc2Vuc29yLys="
+    "expected_bytes": "BwEiAAAAAQAAAAwAAAAIc2Vuc29yLys="
   },
   {
     "id": "PUBSUB_UNSUB",
@@ -158,7 +158,7 @@
     "input": {
       "topic": "sensor/+"
     },
-    "expected_bytes": "BgEjAAAAAQAAAAwAAAAIc2Vuc29yLys="
+    "expected_bytes": "BwEjAAAAAQAAAAwAAAAIc2Vuc29yLys="
   },
   {
     "id": "QUEUE_CREATE",
@@ -171,7 +171,7 @@
       "visibility_timeout_ms": null,
       "max_deliveries": null
     },
-    "expected_bytes": "BgEQAAAAAQAAAAsAAAAGZW1haWxzAA=="
+    "expected_bytes": "BwEQAAAAAQAAAAsAAAAGZW1haWxzAA=="
   },
   {
     "id": "QUEUE_CREATE_FULL",
@@ -184,7 +184,7 @@
       "visibility_timeout_ms": 30000,
       "max_deliveries": 5
     },
-    "expected_bytes": "BgEQAAAAAQAAABcAAAAGZW1haWxzAwAAAAAAAHUwAAAABQ=="
+    "expected_bytes": "BwEQAAAAAQAAABcAAAAGZW1haWxzAwAAAAAAAHUwAAAABQ=="
   },
   {
     "id": "QUEUE_EXISTS",
@@ -195,7 +195,7 @@
     "input": {
       "queue": "emails"
     },
-    "expected_bytes": "BgEUAAAAAQAAAAoAAAAGZW1haWxz"
+    "expected_bytes": "BwEUAAAAAQAAAAoAAAAGZW1haWxz"
   },
   {
     "id": "QUEUE_DELETE",
@@ -206,7 +206,7 @@
     "input": {
       "queue": "emails"
     },
-    "expected_bytes": "BgEVAAAAAQAAAAoAAAAGZW1haWxz"
+    "expected_bytes": "BwEVAAAAAQAAAAoAAAAGZW1haWxz"
   },
   {
     "id": "QUEUE_PUSH_JSON",
@@ -223,7 +223,7 @@
         }
       ]
     },
-    "expected_bytes": "BgERAAAAAQAAACQAAAAGZW1haWxzAAAAAQAAAAARAnsidG8iOiJhQGIuY29tIn0="
+    "expected_bytes": "BwERAAAAAQAAACQAAAAGZW1haWxzAAAAAQAAAAARAnsidG8iOiJhQGIuY29tIn0="
   },
   {
     "id": "QUEUE_PUSH_STRING_PRIORITY",
@@ -241,7 +241,7 @@
         }
       ]
     },
-    "expected_bytes": "BgERAAAAAQAAABoAAAAGZW1haWxzAAAAAQEFAAAABgFoZWxsbw=="
+    "expected_bytes": "BwERAAAAAQAAABoAAAAGZW1haWxzAAAAAQEFAAAABgFoZWxsbw=="
   },
   {
     "id": "QUEUE_PUSH_BATCH",
@@ -263,7 +263,7 @@
         }
       ]
     },
-    "expected_bytes": "BgERAAAAAQAAACcAAAAGZW1haWxzAAAAAgEHAAAACAJ7IngiOjF9AAAAAAYAaGVsbG8="
+    "expected_bytes": "BwERAAAAAQAAACcAAAAGZW1haWxzAAAAAgEHAAAACAJ7IngiOjF9AAAAAAYAaGVsbG8="
   },
   {
     "id": "QUEUE_CONSUME",
@@ -276,7 +276,7 @@
       "batch_size": 10,
       "wait_ms": 5000
     },
-    "expected_bytes": "BgESAAAAAQAAABIAAAAGZW1haWxzAAAACgAAE4g="
+    "expected_bytes": "BwESAAAAAQAAABIAAAAGZW1haWxzAAAACgAAE4g="
   },
   {
     "id": "QUEUE_ACK",
@@ -289,7 +289,7 @@
       "message_id": "deadbeefdeadbeefdeadbeefdeadbeef",
       "delivery_token": 1
     },
-    "expected_bytes": "BgQTAAAAAQAAACLerb7v3q2+796tvu/erb7vAAAAAAAAAAEAAAAGZW1haWxz"
+    "expected_bytes": "BwQTAAAAAQAAACLerb7v3q2+796tvu/erb7vAAAAAAAAAAEAAAAGZW1haWxz"
   },
   {
     "id": "QUEUE_NACK",
@@ -303,7 +303,7 @@
       "reason": "fail",
       "delivery_token": 1
     },
-    "expected_bytes": "BgQaAAAAAQAAACrerb7v3q2+796tvu/erb7vAAAAAAAAAAEAAAAGZW1haWxzAAAABGZhaWw="
+    "expected_bytes": "BwQaAAAAAQAAACrerb7v3q2+796tvu/erb7vAAAAAAAAAAEAAAAGZW1haWxzAAAABGZhaWw="
   },
   {
     "id": "QUEUE_PEEK_DLQ",
@@ -316,7 +316,7 @@
       "limit": 10,
       "offset": 0
     },
-    "expected_bytes": "BgEWAAAAAQAAABIAAAAGZW1haWxzAAAACgAAAAA="
+    "expected_bytes": "BwEWAAAAAQAAABIAAAAGZW1haWxzAAAACgAAAAA="
   },
   {
     "id": "QUEUE_MOVE_TO_QUEUE",
@@ -328,7 +328,7 @@
       "queue": "emails",
       "message_id": "deadbeefdeadbeefdeadbeefdeadbeef"
     },
-    "expected_bytes": "BgEXAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
+    "expected_bytes": "BwEXAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
   },
   {
     "id": "QUEUE_DELETE_DLQ",
@@ -340,7 +340,7 @@
       "queue": "emails",
       "message_id": "deadbeefdeadbeefdeadbeefdeadbeef"
     },
-    "expected_bytes": "BgEYAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
+    "expected_bytes": "BwEYAAAAAQAAABoAAAAGZW1haWxz3q2+796tvu/erb7v3q2+7w=="
   },
   {
     "id": "QUEUE_PURGE_DLQ",
@@ -351,7 +351,7 @@
     "input": {
       "queue": "emails"
     },
-    "expected_bytes": "BgEZAAAAAQAAAAoAAAAGZW1haWxz"
+    "expected_bytes": "BwEZAAAAAQAAAAoAAAAGZW1haWxz"
   },
   {
     "id": "STREAM_CREATE",
@@ -364,7 +364,7 @@
       "max_age_ms": null,
       "max_bytes": null
     },
-    "expected_bytes": "BgEwAAAAAQAAAAsAAAAGZXZlbnRzAA=="
+    "expected_bytes": "BwEwAAAAAQAAAAsAAAAGZXZlbnRzAA=="
   },
   {
     "id": "STREAM_CREATE_RETENTION",
@@ -377,7 +377,7 @@
       "max_age_ms": 3600000,
       "max_bytes": 1048576
     },
-    "expected_bytes": "BgEwAAAAAQAAABsAAAAGZXZlbnRzAwAAAAAANu6AAAAAAAAQAAA="
+    "expected_bytes": "BwEwAAAAAQAAABsAAAAGZXZlbnRzAwAAAAAANu6AAAAAAAAQAAA="
   },
   {
     "id": "STREAM_EXISTS",
@@ -388,7 +388,7 @@
     "input": {
       "stream": "events"
     },
-    "expected_bytes": "BgE1AAAAAQAAAAoAAAAGZXZlbnRz"
+    "expected_bytes": "BwE1AAAAAQAAAAoAAAAGZXZlbnRz"
   },
   {
     "id": "STREAM_DELETE",
@@ -399,7 +399,7 @@
     "input": {
       "stream": "events"
     },
-    "expected_bytes": "BgE2AAAAAQAAAAoAAAAGZXZlbnRz"
+    "expected_bytes": "BwE2AAAAAQAAAAoAAAAGZXZlbnRz"
   },
   {
     "id": "STREAM_PUB_JSON",
@@ -417,7 +417,7 @@
         }
       ]
     },
-    "expected_bytes": "BgExAAAAAQAAABwAAAAGZXZlbnRzAAAAAQAAAAAACAJ7IngiOjF9"
+    "expected_bytes": "BwExAAAAAQAAABwAAAAGZXZlbnRzAAAAAQAAAAAACAJ7IngiOjF9"
   },
   {
     "id": "STREAM_PUB_STRING_KEY",
@@ -435,7 +435,7 @@
         }
       ]
     },
-    "expected_bytes": "BgExAAAAAQAAAB4AAAAGZXZlbnRzAAAAAQAHb3JkZXItMQAAAAMBb2s="
+    "expected_bytes": "BwExAAAAAQAAAB4AAAAGZXZlbnRzAAAAAQAHb3JkZXItMQAAAAMBb2s="
   },
   {
     "id": "STREAM_PUB_BATCH",
@@ -458,7 +458,7 @@
         }
       ]
     },
-    "expected_bytes": "BgExAAAAAQAAAC8AAAAGZXZlbnRzAAAAAgAAAAAACAJ7IngiOjF9AAdvcmRlci0yAAAABgBoZWxsbw=="
+    "expected_bytes": "BwExAAAAAQAAAC8AAAAGZXZlbnRzAAAAAgAAAAAACAJ7IngiOjF9AAdvcmRlci0yAAAABgBoZWxsbw=="
   },
   {
     "id": "STREAM_FETCH",
@@ -474,7 +474,7 @@
       "batch_size": 10,
       "wait_ms": 5000
     },
-    "expected_bytes": "BgEyAAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAKAAATiA=="
+    "expected_bytes": "BwEyAAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAKAAATiA=="
   },
   {
     "id": "STREAM_JOIN",
@@ -486,7 +486,7 @@
       "stream": "events",
       "group": "g1"
     },
-    "expected_bytes": "BgEzAAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
+    "expected_bytes": "BwEzAAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
   },
   {
     "id": "STREAM_ACK",
@@ -501,7 +501,7 @@
       "generation": 1,
       "seq": 42
     },
-    "expected_bytes": "BgE0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
+    "expected_bytes": "BwE0AAAAAQAAAEQAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAEAAAAAAAAAKg=="
   },
   {
     "id": "STREAM_SEEK_END",
@@ -514,7 +514,7 @@
       "group": "g1",
       "target": "end"
     },
-    "expected_bytes": "BgE4AAAAAQAAABEAAAAGZXZlbnRzAAAAAmcxAQ=="
+    "expected_bytes": "BwE4AAAAAQAAABEAAAAGZXZlbnRzAAAAAmcxAQ=="
   },
   {
     "id": "STREAM_LEAVE",
@@ -528,7 +528,7 @@
       "consumer_id": "deadbeefdeadbeefdeadbeefdeadbeef",
       "generation": 1
     },
-    "expected_bytes": "BgE5AAAAAQAAADwAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAE="
+    "expected_bytes": "BwE5AAAAAQAAADwAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAE="
   },
   {
     "id": "STREAM_PEEK_DLT",
@@ -542,7 +542,7 @@
       "limit": 10,
       "offset": 0
     },
-    "expected_bytes": "BgE6AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAACgAAAAA="
+    "expected_bytes": "BwE6AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAACgAAAAA="
   },
   {
     "id": "STREAM_MOVE_TO_STREAM",
@@ -555,7 +555,7 @@
       "group": "g1",
       "seq": 42
     },
-    "expected_bytes": "BgE7AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
+    "expected_bytes": "BwE7AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
   },
   {
     "id": "STREAM_DELETE_DLT",
@@ -568,7 +568,7 @@
       "group": "g1",
       "seq": 42
     },
-    "expected_bytes": "BgE8AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
+    "expected_bytes": "BwE8AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
   },
   {
     "id": "STREAM_PURGE_DLT",
@@ -580,6 +580,28 @@
       "stream": "events",
       "group": "g1"
     },
-    "expected_bytes": "BgE9AAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
+    "expected_bytes": "BwE9AAAAAQAAABAAAAAGZXZlbnRzAAAAAmcx"
+  },
+  {
+    "id": "QUEUE_DESCRIBE",
+    "broker": "queue",
+    "opcode": 27,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "queue": "emails"
+    },
+    "expected_bytes": "BwEbAAAAAQAAAAoAAAAGZW1haWxz"
+  },
+  {
+    "id": "STREAM_DESCRIBE",
+    "broker": "stream",
+    "opcode": 55,
+    "frame_type": "REQUEST",
+    "correlation_id": 1,
+    "input": {
+      "stream": "events"
+    },
+    "expected_bytes": "BwE3AAAAAQAAAAoAAAAGZXZlbnRz"
   }
 ]

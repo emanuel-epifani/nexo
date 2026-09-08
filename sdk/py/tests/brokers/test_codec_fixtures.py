@@ -148,7 +148,7 @@ def _encode_fixture(fixture: dict) -> bytes:
         if has_retries:
             w.u32(inp["max_deliveries"])
 
-    elif fid in ("QUEUE_EXISTS", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
+    elif fid in ("QUEUE_EXISTS", "QUEUE_DESCRIBE", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
         w.string(inp["queue"])
 
     elif fid in ("QUEUE_PUSH_JSON", "QUEUE_PUSH_STRING_PRIORITY", "QUEUE_PUSH_BATCH"):
@@ -187,7 +187,7 @@ def _encode_fixture(fixture: dict) -> bytes:
         if has_bytes:
             w.u64(inp["max_bytes"])
 
-    elif fid in ("STREAM_EXISTS", "STREAM_DELETE", "STREAM_PURGE_DLT"):
+    elif fid in ("STREAM_EXISTS", "STREAM_DESCRIBE", "STREAM_DELETE", "STREAM_PURGE_DLT"):
         w.string(inp["stream"])
         if fid == "STREAM_PURGE_DLT":
             w.string(inp["group"])
@@ -291,7 +291,7 @@ def _decode_fixture(fixture: dict) -> object:
         retries = c.read_u32() if flags & 0x02 else None
         return {"queue": queue, "visibility_timeout_ms": vto, "max_deliveries": retries}
 
-    if fid in ("QUEUE_EXISTS", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
+    if fid in ("QUEUE_EXISTS", "QUEUE_DESCRIBE", "QUEUE_DELETE", "QUEUE_PURGE_DLQ"):
         return {"queue": c.read_string()}
 
     if fid in ("QUEUE_PUSH_JSON", "QUEUE_PUSH_STRING_PRIORITY", "QUEUE_PUSH_BATCH"):
@@ -331,7 +331,7 @@ def _decode_fixture(fixture: dict) -> object:
         max_bytes = c.read_u64() if flags & 0x02 else None
         return {"stream": stream, "max_age_ms": max_age, "max_bytes": max_bytes}
 
-    if fid in ("STREAM_EXISTS", "STREAM_DELETE"):
+    if fid in ("STREAM_EXISTS", "STREAM_DESCRIBE", "STREAM_DELETE"):
         return {"stream": c.read_string()}
 
     if fid == "STREAM_PURGE_DLT":

@@ -1,9 +1,8 @@
 mod common;
-use common::setup_store_manager;
 use bytes::Bytes;
+use common::setup_store_manager;
 use std::time::Duration;
 use uuid::Uuid;
-
 
 #[cfg(test)]
 mod store_tests {
@@ -43,8 +42,14 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("key_ovr_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("v1"), None).unwrap();
-            manager.map.set(key.clone(), Bytes::from("v2"), None).unwrap();
+            manager
+                .map
+                .set(key.clone(), Bytes::from("v1"), None)
+                .unwrap();
+            manager
+                .map
+                .set(key.clone(), Bytes::from("v2"), None)
+                .unwrap();
 
             let val = manager.map.get(&key).unwrap();
             assert_eq!(val, Bytes::from("v2"));
@@ -55,11 +60,17 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("key_persist_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("forever"), None).unwrap();
+            manager
+                .map
+                .set(key.clone(), Bytes::from("forever"), None)
+                .unwrap();
 
             // Should still exist after a short wait
             tokio::time::sleep(Duration::from_millis(200)).await;
-            assert!(manager.map.get(&key).is_some(), "Key without TTL should persist");
+            assert!(
+                manager.map.get(&key).is_some(),
+                "Key without TTL should persist"
+            );
         }
 
         #[tokio::test]
@@ -68,7 +79,10 @@ mod store_tests {
             let key = format!("key_ttl_{}", Uuid::new_v4());
 
             let ttl_sec = 1;
-            manager.map.set(key.clone(), Bytes::from("temp"), Some(ttl_sec)).unwrap();
+            manager
+                .map
+                .set(key.clone(), Bytes::from("temp"), Some(ttl_sec))
+                .unwrap();
 
             let retrieved = manager.map.get(&key);
             assert!(retrieved.is_some());
@@ -87,7 +101,10 @@ mod store_tests {
 
             let result = manager.map.set(key.clone(), Bytes::from("val"), Some(0));
             assert!(result.is_err(), "ttl=0 should return an error");
-            assert!(manager.map.get(&key).is_none(), "Key should not exist after failed set");
+            assert!(
+                manager.map.get(&key).is_none(),
+                "Key should not exist after failed set"
+            );
         }
     }
 
@@ -142,10 +159,16 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_str_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), Bytes::from("hello"), None).unwrap();
+            manager
+                .map
+                .set(key.clone(), Bytes::from("hello"), None)
+                .unwrap();
             let result = manager.map.incr(&key, 1);
             assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), "value is not an integer or out of range");
+            assert_eq!(
+                result.unwrap_err(),
+                "value is not an integer or out of range"
+            );
         }
 
         #[tokio::test]
@@ -153,7 +176,10 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_overflow_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), encode_int(i64::MAX), None).unwrap();
+            manager
+                .map
+                .set(key.clone(), encode_int(i64::MAX), None)
+                .unwrap();
             let result = manager.map.incr(&key, 1);
             assert!(result.is_err());
             assert_eq!(result.unwrap_err(), "increment would overflow");
@@ -164,7 +190,10 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_ttl_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), encode_int(5), Some(60)).unwrap();
+            manager
+                .map
+                .set(key.clone(), encode_int(5), Some(60))
+                .unwrap();
             manager.map.incr(&key, 1).unwrap();
 
             // Verify value updated
@@ -173,7 +202,10 @@ mod store_tests {
 
             // Verify TTL preserved: wait 200ms, should still exist (TTL=60)
             tokio::time::sleep(Duration::from_millis(200)).await;
-            assert!(manager.map.get(&key).is_some(), "Key should still exist with TTL=60");
+            assert!(
+                manager.map.get(&key).is_some(),
+                "Key should still exist with TTL=60"
+            );
         }
 
         #[tokio::test]
@@ -181,7 +213,10 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let key = format!("incr_expired_{}", Uuid::new_v4());
 
-            manager.map.set(key.clone(), encode_int(99), Some(1)).unwrap();
+            manager
+                .map
+                .set(key.clone(), encode_int(99), Some(1))
+                .unwrap();
 
             // Wait for expiry
             tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -213,9 +248,18 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let prefix = format!("clearall_{}_", Uuid::new_v4());
 
-            manager.map.set(format!("{}a", prefix), Bytes::from("1"), None).unwrap();
-            manager.map.set(format!("{}b", prefix), Bytes::from("2"), None).unwrap();
-            manager.map.set(format!("{}c", prefix), Bytes::from("3"), None).unwrap();
+            manager
+                .map
+                .set(format!("{}a", prefix), Bytes::from("1"), None)
+                .unwrap();
+            manager
+                .map
+                .set(format!("{}b", prefix), Bytes::from("2"), None)
+                .unwrap();
+            manager
+                .map
+                .set(format!("{}c", prefix), Bytes::from("3"), None)
+                .unwrap();
 
             let count = manager.map.clear_all();
             assert_eq!(count, 3);
@@ -237,9 +281,22 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let prefix = format!("clearprefix_{}_", Uuid::new_v4());
 
-            manager.map.set(format!("{}a", prefix), Bytes::from("1"), None).unwrap();
-            manager.map.set(format!("{}b", prefix), Bytes::from("2"), None).unwrap();
-            manager.map.set(format!("other_{}", Uuid::new_v4()), Bytes::from("keep"), None).unwrap();
+            manager
+                .map
+                .set(format!("{}a", prefix), Bytes::from("1"), None)
+                .unwrap();
+            manager
+                .map
+                .set(format!("{}b", prefix), Bytes::from("2"), None)
+                .unwrap();
+            manager
+                .map
+                .set(
+                    format!("other_{}", Uuid::new_v4()),
+                    Bytes::from("keep"),
+                    None,
+                )
+                .unwrap();
 
             let count = manager.map.clear_with_prefix(&prefix);
             assert_eq!(count, 2);
@@ -251,7 +308,10 @@ mod store_tests {
         #[tokio::test]
         async fn test_clear_with_prefix_no_match_returns_zero() {
             let (manager, _tmp) = setup_store_manager().await;
-            manager.map.set("keepme".to_string(), Bytes::from("val"), None).unwrap();
+            manager
+                .map
+                .set("keepme".to_string(), Bytes::from("val"), None)
+                .unwrap();
 
             let count = manager.map.clear_with_prefix("nonexistent_");
             assert_eq!(count, 0);
@@ -263,15 +323,17 @@ mod store_tests {
             let (manager, _tmp) = setup_store_manager().await;
             let id = Uuid::new_v4();
 
-            manager.map.set(format!("a_{}", id), Bytes::from("1"), None).unwrap();
-            manager.map.set(format!("b_{}", id), Bytes::from("2"), None).unwrap();
+            manager
+                .map
+                .set(format!("a_{}", id), Bytes::from("1"), None)
+                .unwrap();
+            manager
+                .map
+                .set(format!("b_{}", id), Bytes::from("2"), None)
+                .unwrap();
 
             let count = manager.map.clear_with_prefix("");
             assert_eq!(count, 2);
         }
     }
-
-
-
-
 }

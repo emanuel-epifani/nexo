@@ -1,3 +1,3 @@
-pub mod queue;
 pub mod dlq;
 pub mod persistence;
+pub mod queue;

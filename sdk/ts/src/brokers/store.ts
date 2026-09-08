@@ -61,7 +61,7 @@ export class NexoMap {
     return StoreCommands.mapGet(this.conn, key);
   }
 
-  async del(key: string): Promise<void> {
+  async delete(key: string): Promise<void> {
     await StoreCommands.mapDel(this.conn, key);
   }
 

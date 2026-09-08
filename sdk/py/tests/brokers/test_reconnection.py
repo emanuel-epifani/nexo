@@ -38,17 +38,19 @@ class TestReconnection:
         topic = f"reconnect-pubsub-{uuid.uuid4()}"
         received: list[str] = []
 
-        await nexo.pubsub(topic).subscribe(lambda m: received.append(m))
+        pubsub_topic = nexo.pubsub.topic(topic)
+        await pubsub_topic.subscribe(lambda m: received.append(m))
 
         await _destroy_and_reconnect(nexo)
 
-        await _send_with_retry(lambda: nexo.pubsub(topic).publish("after-crash"))
+        await _send_with_retry(lambda: pubsub_topic.publish("after-crash"))
 
         await wait_for(lambda: "after-crash" in received)
 
     async def test_queue_resume_consuming(self, nexo: NexoClient):
         q_name = f"reconnect-queue-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
         received: list = []
 
         await q.subscribe(lambda msg: received.append(msg))
@@ -62,20 +64,22 @@ class TestReconnection:
     async def test_stream_resume_consuming(self, nexo: NexoClient):
         stream_name = f"reconnect-stream-{uuid.uuid4()}"
         group = f"g-{uuid.uuid4()}"
-        await nexo.stream(stream_name).create()
+        await nexo.stream.create(stream_name)
+        stream = await nexo.stream.get(stream_name)
         received: list = []
 
-        await nexo.stream(stream_name).subscribe(group, lambda m: received.append(m))
+        await stream.group(group).subscribe(lambda m: received.append(m))
 
         await _destroy_and_reconnect(nexo)
 
-        await _send_with_retry(lambda: nexo.stream(stream_name).publish({"status": "recovered"}))
+        await _send_with_retry(lambda: stream.publish({"status": "recovered"}))
 
         await wait_for(lambda: {"status": "recovered"} in received, timeout=10.0)
 
     async def test_queue_inflight_redelivered(self, nexo: NexoClient):
         q_name = f"reconnect-inflight-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create({"visibility_timeout_ms": 2000})
+        await nexo.queue.create(q_name, visibility_timeout_ms=2000)
+        q = await nexo.queue.get(q_name)
 
         await q.push({"important": True})
 
@@ -101,7 +105,8 @@ class TestReconnection:
 
     async def test_queue_push_during_disconnect_fails(self, nexo: NexoClient):
         q_name = f"reconnect-push-err-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         conn = nexo._conn
         if conn._writer is not None:
@@ -116,7 +121,8 @@ class TestReconnection:
 
     async def test_queue_survive_double_crash(self, nexo: NexoClient):
         q_name = f"reconnect-double-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
         received: list = []
 
         await q.subscribe(lambda msg: received.append(msg))
@@ -134,7 +140,8 @@ class TestReconnection:
 
     async def test_queue_stop_during_disconnect(self, nexo: NexoClient):
         q_name = f"reconnect-stop-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
         received: list = []
 
         sub = await q.subscribe(lambda msg: received.append(msg))
@@ -159,14 +166,16 @@ class TestReconnection:
         received_before: list[str] = []
         received_after: list[str] = []
 
-        await nexo.pubsub(topic_before).subscribe(lambda m: received_before.append(m))
+        before = nexo.pubsub.topic(topic_before)
+        after = nexo.pubsub.topic(topic_after)
+        await before.subscribe(lambda m: received_before.append(m))
 
         await _destroy_and_reconnect(nexo)
 
-        await nexo.pubsub(topic_after).subscribe(lambda m: received_after.append(m))
+        await after.subscribe(lambda m: received_after.append(m))
 
-        await _send_with_retry(lambda: nexo.pubsub(topic_before).publish("msg-before"))
-        await nexo.pubsub(topic_after).publish("msg-after")
+        await _send_with_retry(lambda: before.publish("msg-before"))
+        await after.publish("msg-after")
 
         await wait_for(lambda: "msg-before" in received_before)
         await wait_for(lambda: "msg-after" in received_after)
@@ -174,9 +183,10 @@ class TestReconnection:
     async def test_stream_inflight_redelivered(self, nexo: NexoClient):
         stream_name = f"reconnect-stream-inflight-{uuid.uuid4()}"
         group = f"g-inflight-{uuid.uuid4()}"
-        await nexo.stream(stream_name).create()
+        await nexo.stream.create(stream_name)
+        stream = await nexo.stream.get(stream_name)
 
-        await nexo.stream(stream_name).publish({"important": True})
+        await stream.publish({"important": True})
 
         received: list = []
         first_delivery = True
@@ -191,7 +201,7 @@ class TestReconnection:
                     conn._writer.close()
                 raise Exception("crash before ack")
 
-        await nexo.stream(stream_name).subscribe(group, cb)
+        await stream.group(group).subscribe(cb)
 
         await wait_for(lambda: len(received) >= 2, timeout=30.0)
 
@@ -201,11 +211,12 @@ class TestReconnection:
     async def test_stream_same_key_serial_ordering(self, nexo: NexoClient):
         stream_name = f"key-order-tcp-{uuid.uuid4()}"
         group = f"g-key-order-{uuid.uuid4()}"
-        await nexo.stream(stream_name).create()
+        await nexo.stream.create(stream_name)
+        stream = await nexo.stream.get(stream_name)
 
-        await nexo.stream(stream_name).publish({"n": 1}, {"key": "order-key"})
-        await nexo.stream(stream_name).publish({"n": 2}, {"key": "order-key"})
-        await nexo.stream(stream_name).publish({"n": 3}, {"key": "order-key"})
+        await stream.publish({"n": 1}, key="order-key")
+        await stream.publish({"n": 2}, key="order-key")
+        await stream.publish({"n": 3}, key="order-key")
 
         received: list[int] = []
         in_flight = False
@@ -218,9 +229,10 @@ class TestReconnection:
             received.append(data["n"])
             in_flight = False
 
-        sub = await nexo.stream(stream_name).subscribe(
-            group, cb,
-            {"batch_size": 1, "concurrency": 1},
+        sub = await stream.group(group).subscribe(
+            cb,
+            batch_size=1,
+            concurrency=1,
         )
 
         await wait_for(lambda: len(received) == 3, timeout=10.0)

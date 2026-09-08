@@ -36,58 +36,68 @@ client = await NexoClient.connect(host="localhost", port=7654)
 ### 1. STORE
 
 ```python
-# Set key
 await client.store.map.set("user:1", {"name": "Max", "role": "admin"})
-# Get key
 user: User | None = await client.store.map.get("user:1")
-# Delete key
 await client.store.map.delete("user:1")
 ```
 
 ### 2. QUEUE
 
-```python
-# Create queue
-mail_q: NexoQueue[Email] = await client.queue("emails").create()
-# Push message
-await mail_q.push({"to": "test@test.com"})
-# Subscribe
-async def handle_email(msg: Email) -> None:
-    print(msg)
+Provision durable resources from deployment or administrative code:
 
-await mail_q.subscribe(handle_email)
-# Delete queue
-await mail_q.delete()
+```python
+result = await client.queue.create(
+    "emails",
+    visibility_timeout_ms=30_000,
+    max_deliveries=5,
+)
+print(result.status, result.definition.config)
+```
+
+Application code retrieves the existing resource and fails fast when it is missing:
+
+```python
+mail_queue: NexoQueue[Email] = await client.queue.get("emails")
+await mail_queue.push({"to": "test@test.com"})
+
+async def handle_email(message: Email, meta: QueueMessageMeta) -> None:
+    print(meta["id"], message)
+
+subscription = await mail_queue.subscribe(handle_email)
+await subscription.stop()
 ```
 
 ### 3. PUB/SUB
 
-```python
-# Define topic (no need to create, auto-created on first publish)
-alerts: NexoTopic[Alert] = client.pubsub("system-alerts")
-# Subscribe
-async def on_alert(msg: Alert) -> None:
-    print(msg)
+Topics are routing addresses and do not require provisioning:
 
-await alerts.subscribe(on_alert)
-# Publish
+```python
+alerts: NexoTopic[Alert] = client.pubsub.topic("system-alerts")
+
+async def on_alert(message: Alert) -> None:
+    print(message)
+
+subscription = await alerts.subscribe(on_alert)
 await alerts.publish({"level": "high"})
+await subscription.stop()
+
+all_alerts = client.pubsub.pattern("system-alerts/#")
+await all_alerts.subscribe(lambda message, meta: print(meta["topic"], message))
 ```
 
 ### 4. STREAM
 
 ```python
-# Create topic
-stream: NexoStream[UserEvent] = await client.stream("user-events").create()
-# Publisher
-await stream.publish({"type": "login", "userId": "u1"})
-# Consumer (must specify group)
-async def on_event(msg: UserEvent, meta: StreamMessageMeta) -> None:
-    print(f"User {msg['userId']} performed {msg['type']}")
+result = await client.stream.create("user-events")
+print(result.status, result.definition.config)
 
-await stream.subscribe("analytics", on_event)
-# Delete topic
-await stream.delete()
+stream: NexoStream[UserEvent] = await client.stream.get("user-events")
+await stream.publish({"type": "login", "userId": "u1"})
+
+async def on_event(message: UserEvent, meta: StreamMessageMeta) -> None:
+    print(meta["seq"], message)
+
+await stream.group("analytics").subscribe(on_event)
 ```
 
 > Callbacks for Queue, Pub/Sub, and Stream can be sync `def` or async `async def` — the SDK handles both.
@@ -104,19 +114,14 @@ Bypassing JSON serialization drastically reduces Latency, increases Throughput, 
 **Perfect for:** Video chunks, Images, Protobuf/MsgPack, Encrypted blobs.
 
 ```python
-# Send 1MB raw bytes (30% smaller than JSON/Base64)
 heavy_payload = b"\x00" * (1024 * 1024)
+stream: NexoStream[bytes] = await client.stream.get("cctv-archive")
+queue: NexoQueue[bytes] = await client.queue.get("pdf-processing")
+audio_topic: NexoTopic[bytes] = client.pubsub.topic("live-audio-call")
 
-# 1. STREAM
-stream: NexoStream[bytes] = client.stream("cctv-archive")
 await stream.publish(heavy_payload)
-# 2. PUBSUB
-audio_topic: NexoTopic[bytes] = client.pubsub("live-audio-call")
-audio_topic.publish(heavy_payload)
-# 3. STORE
+await audio_topic.publish(heavy_payload)
 await client.store.map.set("user:avatar:1", heavy_payload)
-# 4. QUEUE
-queue: NexoQueue[bytes] = client.queue("pdf-processing")
 await queue.push(heavy_payload)
 ```
 

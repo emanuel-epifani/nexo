@@ -1,10 +1,10 @@
+use crate::brokers::store::config::StoreConfig;
+use crate::protocol::DATA_TYPE_INT;
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
-use crate::brokers::store::config::StoreConfig;
-use crate::protocol::DATA_TYPE_INT;
-use bytes::Bytes;
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -57,10 +57,7 @@ impl Map {
             Some(secs) => Some(Instant::now() + Duration::from_secs(secs)),
         };
 
-        self.inner.insert(key, Entry {
-            value,
-            expires_at,
-        });
+        self.inner.insert(key, Entry { value, expires_at });
         Ok(())
     }
 
@@ -134,7 +131,8 @@ impl Map {
                 let raw = &o.get().value;
                 let current: i64 = parse_i64(raw)
                     .ok_or_else(|| "value is not an integer or out of range".to_string())?;
-                let new_val = current.checked_add(delta)
+                let new_val = current
+                    .checked_add(delta)
                     .ok_or_else(|| "increment would overflow".to_string())?;
 
                 let expires_at = o.get().expires_at;
@@ -146,7 +144,6 @@ impl Map {
             }
         }
     }
-
 }
 
 fn parse_i64(raw: &[u8]) -> Option<i64> {

@@ -41,6 +41,8 @@ function validateSpec() {
   }
   validateByteMap("frameTypes", spec.frameTypes);
   validateByteMap("responseStatuses", spec.responseStatuses);
+  validateByteMap("errorCodes", spec.errorCodes);
+  validateByteMap("provisionStatuses", spec.provisionStatuses);
   validateByteMap("dataTypes", spec.dataTypes);
 
   const usedOpcodes = new Map();
@@ -88,6 +90,14 @@ function number(value) {
   return value.toLocaleString("en-US").replaceAll(",", "_");
 }
 
+function pascalCase(value) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join("");
+}
+
 function renderRust() {
   const lines = [
     `pub const PROTOCOL_VERSION: u8 = ${hex(spec.protocolVersion)};`,
@@ -104,7 +114,26 @@ function renderRust() {
   for (const [name, value] of Object.entries(spec.responseStatuses)) {
     lines.push(`pub const STATUS_${name}: u8 = ${hex(value)};`);
   }
-  lines.push("");
+  lines.push(
+    "",
+    "#[repr(u8)]",
+    "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+    "pub enum ErrorCode {",
+  );
+  for (const [name, value] of Object.entries(spec.errorCodes)) {
+    lines.push(`    ${pascalCase(name)} = ${hex(value)},`);
+  }
+  lines.push(
+    "}",
+    "",
+    "#[repr(u8)]",
+    "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+    "pub enum ProvisionStatus {",
+  );
+  for (const [name, value] of Object.entries(spec.provisionStatuses)) {
+    lines.push(`    ${pascalCase(name)} = ${hex(value)},`);
+  }
+  lines.push("}", "");
   for (const [name, value] of Object.entries(spec.dataTypes)) {
     lines.push(`pub const DATA_TYPE_${name}: u8 = ${hex(value)};`);
   }
@@ -157,6 +186,14 @@ function renderTypeScript() {
   }
   lines.push("}", "", "export enum ResponseStatus {");
   for (const [name, value] of Object.entries(spec.responseStatuses)) {
+    lines.push(`  ${name} = ${hex(value)},`);
+  }
+  lines.push("}", "", "export enum ErrorCode {");
+  for (const [name, value] of Object.entries(spec.errorCodes)) {
+    lines.push(`  ${name} = ${hex(value)},`);
+  }
+  lines.push("}", "", "export enum ProvisionStatus {");
+  for (const [name, value] of Object.entries(spec.provisionStatuses)) {
     lines.push(`  ${name} = ${hex(value)},`);
   }
   lines.push("}", "", "export enum DataType {");
@@ -218,6 +255,14 @@ function renderPython() {
   }
   lines.push("", "", "class ResponseStatus(IntEnum):");
   for (const [name, value] of Object.entries(spec.responseStatuses)) {
+    lines.push(`    ${name} = ${hex(value)}`);
+  }
+  lines.push("", "", "class ErrorCode(IntEnum):");
+  for (const [name, value] of Object.entries(spec.errorCodes)) {
+    lines.push(`    ${name} = ${hex(value)}`);
+  }
+  lines.push("", "", "class ProvisionStatus(IntEnum):");
+  for (const [name, value] of Object.entries(spec.provisionStatuses)) {
     lines.push(`    ${name} = ${hex(value)}`);
   }
   lines.push("", "", "class DataType(IntEnum):");

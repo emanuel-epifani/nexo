@@ -27,7 +27,7 @@ await client.store.map.set("user:1", { name: "Max", role: "admin" });
 const user = await client.store.map.get<User>("user:1");
 
 // Delete a key
-await client.store.map.del("user:1");
+await client.store.map.delete("user:1");
 ```
 
 ```python
@@ -75,14 +75,14 @@ await client.store.map.set("config:feature_flags", {"darkMode": True})
 flags: FeatureFlags | None = await client.store.map.get("config:feature_flags")
 
 # Temporary key — expires after 60 seconds
-await client.store.map.set("session:abc", {"userId": 42}, {"ttl": 60})
+await client.store.map.set("session:abc", {"userId": 42}, ttl=60)
 session: Session | None = await client.store.map.get("session:abc")
 
 # Short-lived cache — expires after 5 seconds
-await client.store.map.set("cache:hot_data", payload, {"ttl": 5})
+await client.store.map.set("cache:hot_data", payload, ttl=5)
 
 # ttl: 0 is rejected by the server
-await client.store.map.set("bad", "val", {"ttl": 0})
+await client.store.map.set("bad", "val", ttl=0)
 ```
 
 :::

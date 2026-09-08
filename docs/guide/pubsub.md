@@ -2,41 +2,28 @@
 
 **Transient message bus with Topic-based routing.** Designed for "fire-and-forget" scenarios where low latency is critical — live chat, stock tickers, multi-service notifications.
 
-Unlike [Queues](/guide/queue) and [Streams](/guide/stream) (pull-based with long-polling), Pub/Sub is **push-based**: the server delivers messages to subscribers immediately as they are published, with no polling loop on the client side. This makes it the lowest-latency primitive in Nexo. Topics are **auto-created** on first publish or subscribe — no `.create()` needed.
+Unlike [Queues](/guide/queue) and [Streams](/guide/stream) (pull-based with long-polling), Pub/Sub is **push-based**: the server delivers messages to subscribers immediately as they are published, with no polling loop on the client side. This makes it the lowest-latency primitive in Nexo. Topics are routing addresses rather than provisioned resources, so they have no `create`, `get`, or `delete` lifecycle.
 
 ## Basic Usage
 
 ::: code-group
 
 ```typescript
-// Define a topic
-const alerts = client.pubsub<AlertMsg>("system-alerts");
-
-// Subscribe
-await alerts.subscribe((msg) => console.log(msg));
-
-// Publish
-await alerts.publish({ level: "high" });
-
-// Unsubscribe
-await alerts.unsubscribe();
+const alerts = client.pubsub.topic<AlertMsg>('system-alerts');
+const subscription = await alerts.subscribe((message) => console.log(message));
+await alerts.publish({ level: 'high' });
+await subscription.stop();
 ```
 
 ```python
-# Define a topic
-alerts: NexoTopic[AlertMsg] = client.pubsub("system-alerts")
+alerts: NexoTopic[AlertMsg] = client.pubsub.topic("system-alerts")
 
-# Subscribe
-async def on_alert(msg: AlertMsg) -> None:
-    print(msg)
+async def on_alert(message: AlertMsg) -> None:
+    print(message)
 
-await alerts.subscribe(on_alert)
-
-# Publish
+subscription = await alerts.subscribe(on_alert)
 await alerts.publish({"level": "high"})
-
-# Unsubscribe
-await alerts.unsubscribe()
+await subscription.stop()
 ```
 
 :::
@@ -53,13 +40,13 @@ Matches exactly one segment.
 
 ```typescript
 // Matches: 'home/kitchen/light', 'home/garage/light'
-const roomLights = client.pubsub<LightStatus>('home/+/light');
+const roomLights = client.pubsub.pattern<LightStatus>('home/+/light');
 await roomLights.subscribe((status) => console.log('Light is:', status.state));
 ```
 
 ```python
 # Matches: 'home/kitchen/light', 'home/garage/light'
-room_lights: NexoTopic[LightStatus] = client.pubsub('home/+/light')
+room_lights: NexoPattern[LightStatus] = client.pubsub.pattern('home/+/light')
 
 async def on_status(status: LightStatus) -> None:
     print('Light is:', status["state"])
@@ -77,13 +64,13 @@ Matches all remaining segments.
 
 ```typescript
 // Matches all topics under 'sensors/'
-const allSensors = client.pubsub<SensorData>('sensors/#');
+const allSensors = client.pubsub.pattern<SensorData>('sensors/#');
 await allSensors.subscribe((data) => console.log('Sensor value:', data.value));
 ```
 
 ```python
 # Matches all topics under 'sensors/'
-all_sensors: NexoTopic[SensorData] = client.pubsub('sensors/#')
+all_sensors: NexoPattern[SensorData] = client.pubsub.pattern('sensors/#')
 
 async def on_data(data: SensorData) -> None:
     print('Sensor value:', data["value"])
@@ -105,18 +92,19 @@ By default, Pub/Sub messages are ephemeral — if no one is subscribed, the mess
 
 ```typescript
 // Publish with retain — this value is stored
-await client.pubsub<string>('config/theme').publish('dark', { retain: true });
+const themeTopic = client.pubsub.topic<string>('config/theme');
+await themeTopic.publish('dark', { retain: true });
 
 // A new subscriber connecting later instantly receives 'dark'
-await client.pubsub<string>('config/theme').subscribe((theme) => {
+await themeTopic.subscribe((theme) => {
   console.log(theme); // 'dark' — received immediately
 });
 ```
 
 ```python
 # Publish with retain — this value is stored
-theme_topic: NexoTopic[str] = client.pubsub('config/theme')
-await theme_topic.publish('dark', {"retain": True})
+theme_topic: NexoTopic[str] = client.pubsub.topic('config/theme')
+await theme_topic.publish('dark', retain=True)
 
 # A new subscriber connecting later instantly receives 'dark'
 async def on_theme(theme: str) -> None:
@@ -129,22 +117,37 @@ await theme_topic.subscribe(on_theme)
 
 Retained messages are **persisted to SQLite** and survive server restarts. They have a default **TTL of 1 hour** (configurable via `PUBSUB_DEFAULT_RETAINED_TTL_SECS`), after which they are automatically cleaned up.
 
-To clear a retained message, use `clear()`:
+To clear a retained message, use `clearRetained()` / `clear_retained()`:
 
 ::: code-group
 
 ```typescript
-await client.pubsub<string>('config/theme').clear();
+await client.pubsub.topic<string>('config/theme').clearRetained();
 ```
 
 ```python
-theme_topic: NexoTopic[str] = client.pubsub('config/theme')
-await theme_topic.clear()
+theme_topic: NexoTopic[str] = client.pubsub.topic('config/theme')
+await theme_topic.clear_retained()
 ```
 
 :::
 
 A later subscriber on that topic will not receive a retained value.
+
+## Multiple Local Subscribers
+
+A client may register multiple independent subscriptions for the same topic or pattern. The SDK sends one server-side `SUB` for the first local listener, fans messages out locally, and sends `UNSUB` only after the final listener stops.
+
+```typescript
+const alerts = client.pubsub.topic<Alert>('alerts');
+const ui = await alerts.subscribe(renderAlert);
+const metrics = await alerts.subscribe(recordMetric);
+
+await ui.stop();      // metrics remains active
+await metrics.stop(); // final listener: UNSUB is sent
+```
+
+Each subscription preserves its own message order and callback failures are isolated. Registering the same callback twice intentionally produces two deliveries to that callback. Retained replay occurs on the first local listener, when the SDK creates the server-side subscription; listeners added while that pattern is already active receive subsequent messages.
 
 ## Callback Execution
 

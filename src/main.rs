@@ -1,6 +1,6 @@
 use nexo::config::Config;
-use nexo::NexoEngine;
 use nexo::transport::tcp;
+use nexo::NexoEngine;
 use tokio::net::TcpListener;
 
 // ========================================
@@ -26,9 +26,7 @@ async fn main() {
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
 
-    let listener = TcpListener::bind(&addr)
-        .await
-        .expect("Failed to bind");
+    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
     tracing::info!(
         host = %config.server.host,
@@ -64,7 +62,9 @@ async fn accept_loop(
         tracing::debug!(client = %client_addr, "New connection accepted");
 
         tokio::spawn(async move {
-            if let Err(e) = tcp::connection::handle_connection(socket, engine_clone, server_config_clone).await {
+            if let Err(e) =
+                tcp::connection::handle_connection(socket, engine_clone, server_config_clone).await
+            {
                 tracing::error!(client = %client_addr, error = %e, "Connection error");
             }
             tracing::debug!(client = %client_addr, "Connection closed");

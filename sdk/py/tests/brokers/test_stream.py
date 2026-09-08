@@ -7,8 +7,19 @@ import uuid
 
 import pytest
 
-from nexo import NexoClient
+from nexo import (
+    NexoClient,
+    NotConnectedError,
+    ProvisionOutcome,
+    ResourceConfigurationConflictError,
+    ResourceNotFoundError,
+)
 from tests.utils.wait_for import wait_for
+
+
+async def _create_stream(nexo: NexoClient, name: str, **retention):
+    await nexo.stream.create(name, **retention)
+    return await nexo.stream.get(name)
 
 
 STREAM_DATA_DIR = Path(__file__).resolve().parents[4] / "data" / "streams"
@@ -18,25 +29,33 @@ STREAM_DATA_DIR = Path(__file__).resolve().parents[4] / "data" / "streams"
 class TestStream:
     async def test_happy_path_publish_subscribe(self, nexo: NexoClient):
         topic = f"stream-basic-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list = []
-        sub = await nexo.stream(topic).subscribe("g1", lambda data: received.append(data))
+        sub = await stream.group("g1").subscribe(lambda data: received.append(data))
+        assert sub.active
 
-        await nexo.stream(topic).publish({"id": 1})
-        await nexo.stream(topic).publish({"id": 2})
+        await stream.publish({"id": 1})
+        await stream.publish({"id": 2})
 
         await wait_for(lambda: len(received) == 2)
         await sub.stop()
+        await sub.stop()
+        await sub.wait_closed()
+        assert sub.completion.done()
+        assert not sub.active
+        await nexo.stream.delete(topic)
 
     async def test_subscribe_nonexistent_stream(self, nexo: NexoClient):
         topic = f"stream-missing-{uuid.uuid4()}"
-        with pytest.raises(Exception):
-            await nexo.stream(topic).subscribe("missing-group", lambda _: None)
+        stream = await _create_stream(nexo, topic)
+        await nexo.stream.delete(topic)
+        with pytest.raises(ResourceNotFoundError):
+            await stream.group("missing-group").subscribe(lambda _: None)
 
     async def test_independent_consumer_groups(self, nexo: NexoClient):
         topic = f"stream-groups-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         client_a = await NexoClient.connect()
         client_b = await NexoClient.connect()
@@ -45,10 +64,10 @@ class TestStream:
             recv_a: list = []
             recv_b: list = []
 
-            sub_a = await client_a.stream(topic).subscribe("group_A", lambda d: recv_a.append(d))
-            sub_b = await client_b.stream(topic).subscribe("group_B", lambda d: recv_b.append(d))
+            sub_a = await (await client_a.stream.get(topic)).group("group_A").subscribe(lambda d: recv_a.append(d))
+            sub_b = await (await client_b.stream.get(topic)).group("group_B").subscribe(lambda d: recv_b.append(d))
 
-            await nexo.stream(topic).publish({"msg": "hello"})
+            await stream.publish({"msg": "hello"})
 
             await wait_for(lambda: len(recv_a) == 1 and len(recv_b) == 1)
 
@@ -61,7 +80,7 @@ class TestStream:
     async def test_same_group_no_duplicates(self, nexo: NexoClient):
         topic = f"parallel-consumers-{uuid.uuid4()}"
         group = "parallel_group"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         client_a = await NexoClient.connect()
         client_b = await NexoClient.connect()
@@ -80,11 +99,11 @@ class TestStream:
                     raise Exception(f"Duplicate in B: {d['id']}")
                 received_b.add(d["id"])
 
-            sub_a = await client_a.stream(topic).subscribe(group, cb_a)
-            sub_b = await client_b.stream(topic).subscribe(group, cb_b)
+            sub_a = await (await client_a.stream.get(topic)).group(group).subscribe(cb_a)
+            sub_b = await (await client_b.stream.get(topic)).group(group).subscribe(cb_b)
 
             for i in range(100):
-                await nexo.stream(topic).publish({"id": i})
+                await stream.publish({"id": i})
 
             await wait_for(lambda: len(received_a) + len(received_b) == 100, timeout=10.0)
 
@@ -104,16 +123,16 @@ class TestStream:
         try:
             topic = f"stream-disconnect-{uuid.uuid4()}"
             group = "group_disconnect"
-            await nexo.stream(topic).create()
+            stream = await _create_stream(nexo, topic)
 
             all_received: set[int] = set()
             track = lambda d: all_received.add(d["i"])
 
-            sub_a = await temp_a.stream(topic).subscribe(group, track)
-            sub_b = await temp_b.stream(topic).subscribe(group, track)
+            sub_a = await (await temp_a.stream.get(topic)).group(group).subscribe(track)
+            sub_b = await (await temp_b.stream.get(topic)).group(group).subscribe(track)
 
             for i in range(20):
-                await nexo.stream(topic).publish({"i": i})
+                await stream.publish({"i": i})
             await wait_for(lambda: len(all_received) == 20)
 
             temp_a.disconnect()
@@ -121,7 +140,7 @@ class TestStream:
             await asyncio.sleep(0.5)
 
             for i in range(20, 60):
-                await nexo.stream(topic).publish({"i": i})
+                await stream.publish({"i": i})
 
             await wait_for(lambda: len(all_received) == 60, timeout=10.0)
 
@@ -137,13 +156,13 @@ class TestStream:
 
     async def test_history_sync_new_group_from_beginning(self, nexo: NexoClient):
         topic = f"stream-history-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         for i in range(5):
-            await nexo.stream(topic).publish({"i": i})
+            await stream.publish({"i": i})
 
         received: list = []
-        sub = await nexo.stream(topic).subscribe("history-group", lambda d: received.append(d))
+        sub = await stream.group("history-group").subscribe(lambda d: received.append(d))
 
         await wait_for(lambda: len(received) == 5)
         assert received[0]["i"] == 0
@@ -153,9 +172,9 @@ class TestStream:
 
     async def test_stop_subscription_quickly(self, nexo: NexoClient):
         topic = f"stream-fast-stop-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
-        sub = await nexo.stream(topic).subscribe("fast-stop-group", lambda _: None)
+        sub = await stream.group("fast-stop-group").subscribe(lambda _: None)
 
         start = asyncio.get_event_loop().time()
         await sub.stop()
@@ -166,7 +185,7 @@ class TestStream:
     async def test_stop_commits_started_callback_before_leave(self, nexo: NexoClient):
         topic = f"stream-stop-processing-{uuid.uuid4()}"
         group = "stop-processing-group"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -178,8 +197,8 @@ class TestStream:
             started.set()
             await release.wait()
 
-        sub = await nexo.stream(topic).subscribe(group, callback)
-        await nexo.stream(topic).publish({"id": 1})
+        sub = await stream.group(group).subscribe(callback)
+        await stream.publish({"id": 1})
         await asyncio.wait_for(started.wait(), timeout=2.0)
 
         stopping = asyncio.create_task(sub.stop())
@@ -190,17 +209,17 @@ class TestStream:
         await stopping
 
         redelivered: list = []
-        resumed = await nexo.stream(topic).subscribe(group, lambda data: redelivered.append(data))
+        resumed = await stream.group(group).subscribe(lambda data: redelivered.append(data))
         await asyncio.sleep(0.2)
         await resumed.stop()
 
         assert callback_count == 1
         assert redelivered == []
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_stop_callback_timeout_is_reported(self, nexo: NexoClient):
         topic = f"stream-stop-timeout-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         started = asyncio.Event()
 
@@ -208,24 +227,22 @@ class TestStream:
             started.set()
             await asyncio.Event().wait()
 
-        sub = await nexo.stream(topic).subscribe(
-            "stop-timeout-group",
+        sub = await stream.group("stop-timeout-group").subscribe(
             callback,
-            {"stop_timeout_ms": 100},
+            stop_timeout_ms=100,
         )
-        await nexo.stream(topic).publish({"id": 1})
+        await stream.publish({"id": 1})
         await asyncio.wait_for(started.wait(), timeout=2.0)
 
         with pytest.raises(TimeoutError, match="stop timed out"):
             await sub.stop()
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_stop_exposes_ack_failure(self, nexo: NexoClient):
         topic = f"stream-stop-ack-failure-{uuid.uuid4()}"
         group = "stop-ack-failure-group"
-        stream = nexo.stream(topic)
-        await stream.create()
+        stream = await _create_stream(nexo, topic)
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -234,23 +251,22 @@ class TestStream:
             started.set()
             await release.wait()
 
-        sub = await stream.subscribe(group, callback)
+        sub = await stream.group(group).subscribe(callback)
         await stream.publish({"id": 1})
         await asyncio.wait_for(started.wait(), timeout=2.0)
-        await stream.seek(group, "beginning")
+        await stream.group(group).seek("beginning")
 
         stopping = asyncio.create_task(sub.stop())
         release.set()
         with pytest.raises(Exception, match=r"stream ACK request\(s\) failed"):
             await stopping
 
-        await stream.delete()
+        await nexo.stream.delete(topic)
 
     async def test_active_subscription_rejoins_after_ack_failure(self, nexo: NexoClient):
         topic = f"stream-active-ack-failure-{uuid.uuid4()}"
         group = "active-ack-failure-group"
-        stream = nexo.stream(topic)
-        await stream.create()
+        stream = await _create_stream(nexo, topic)
 
         attempts = 0
         first_started = asyncio.Event()
@@ -263,25 +279,25 @@ class TestStream:
                 first_started.set()
                 await release_first.wait()
 
-        sub = await stream.subscribe(group, callback)
+        sub = await stream.group(group).subscribe(callback)
         await stream.publish({"id": 1})
         await asyncio.wait_for(first_started.wait(), timeout=2.0)
-        await stream.seek(group, "beginning")
+        await stream.group(group).seek("beginning")
         release_first.set()
 
         await wait_for(lambda: attempts == 2, timeout=5.0)
         await sub.stop()
-        await stream.delete()
+        await nexo.stream.delete(topic)
 
     async def test_preserve_ordering_default_concurrency(self, nexo: NexoClient):
         topic = f"stream-order-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list[int] = []
-        sub = await nexo.stream(topic).subscribe("order-group", lambda d: received.append(d["i"]))
+        sub = await stream.group("order-group").subscribe(lambda d: received.append(d["i"]))
 
         for i in range(30):
-            await nexo.stream(topic).publish({"i": i})
+            await stream.publish({"i": i})
 
         await wait_for(lambda: len(received) == 30, timeout=10.0)
 
@@ -292,7 +308,7 @@ class TestStream:
 
     async def test_parallel_concurrency_gt_1(self, nexo: NexoClient):
         topic = f"stream-concurrent-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         CALLBACK_DELAY = 0.1
         COUNT = 20
@@ -310,13 +326,14 @@ class TestStream:
             received.append(d["i"])
             in_flight -= 1
 
-        sub = await nexo.stream(topic).subscribe(
-            "concurrent-group", cb,
-            {"batch_size": COUNT, "concurrency": CONCURRENCY},
+        sub = await stream.group("concurrent-group").subscribe(
+            cb,
+            batch_size=COUNT,
+            concurrency=CONCURRENCY,
         )
 
         for i in range(COUNT):
-            await nexo.stream(topic).publish({"i": i})
+            await stream.publish({"i": i})
 
         start = asyncio.get_event_loop().time()
         await wait_for(lambda: len(received) == COUNT, timeout=10.0)
@@ -331,8 +348,7 @@ class TestStream:
     async def test_fast_ack_does_not_wait_for_slow_callback_in_same_batch(self, nexo: NexoClient):
         topic = f"stream-incremental-ack-{uuid.uuid4()}"
         group = "incremental-ack-group"
-        stream = nexo.stream(topic)
-        await stream.create()
+        stream = await _create_stream(nexo, topic)
         await stream.publish_batch([
             {"data": {"id": 1}, "key": "A"},
             {"data": {"id": 2}, "key": "B"},
@@ -350,10 +366,10 @@ class TestStream:
                 slow_started.set()
                 await release_slow.wait()
 
-        first = await stream.subscribe(
-            group,
+        first = await stream.group(group).subscribe(
             first_callback,
-            {"batch_size": 2, "concurrency": 2},
+            batch_size=2,
+            concurrency=2,
         )
         await asyncio.wait_for(
             asyncio.gather(fast_finished.wait(), slow_started.wait()),
@@ -363,10 +379,9 @@ class TestStream:
         client_b = await NexoClient.connect()
         received_by_second: list[int] = []
         try:
-            second = await client_b.stream(topic).subscribe(
-                group,
+            second = await (await client_b.stream.get(topic)).group(group).subscribe(
                 lambda data: received_by_second.append(data["id"]),
-                {"batch_size": 1},
+                batch_size=1,
             )
             await wait_for(lambda: received_by_second == [3], timeout=2.0)
             release_slow.set()
@@ -375,30 +390,30 @@ class TestStream:
         finally:
             client_b.disconnect()
 
-        await stream.delete()
+        await nexo.stream.delete(topic)
 
     async def test_seek_beginning_and_end(self, nexo: NexoClient):
         topic = f"stream-seek-{uuid.uuid4()}"
         group = "seek-group"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         for i in range(10):
-            await nexo.stream(topic).publish({"i": i})
+            await stream.publish({"i": i})
 
-        await nexo.stream(topic).seek(group, "end")
+        await stream.group(group).seek("end")
 
         received_end: list = []
-        sub_end = await nexo.stream(topic).subscribe(group, lambda d: received_end.append(d))
+        sub_end = await stream.group(group).subscribe(lambda d: received_end.append(d))
 
-        await nexo.stream(topic).publish({"i": 10})
+        await stream.publish({"i": 10})
         await wait_for(lambda: len(received_end) == 1)
         assert received_end[0]["i"] == 10
         await sub_end.stop()
 
-        await nexo.stream(topic).seek(group, "beginning")
+        await stream.group(group).seek("beginning")
 
         received_start: list = []
-        sub_start = await nexo.stream(topic).subscribe(group, lambda d: received_start.append(d))
+        sub_start = await stream.group(group).subscribe(lambda d: received_start.append(d))
 
         await wait_for(lambda: len(received_start) == 11)
         assert received_start[0]["i"] == 0
@@ -408,9 +423,9 @@ class TestStream:
 
     async def test_stop_quickly_during_long_poll_idle(self, nexo: NexoClient):
         topic = f"stream-stop-idle-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
-        sub = await nexo.stream(topic).subscribe("idle-stop-group", lambda _: None)
+        sub = await stream.group("idle-stop-group").subscribe(lambda _: None)
 
         await asyncio.sleep(0.2)
 
@@ -422,26 +437,26 @@ class TestStream:
 
     async def test_no_delivery_after_stop(self, nexo: NexoClient):
         topic = f"stream-stop-nodeliver-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list = []
-        sub = await nexo.stream(topic).subscribe("nodeliver-group", lambda d: received.append(d))
+        sub = await stream.group("nodeliver-group").subscribe(lambda d: received.append(d))
 
-        await nexo.stream(topic).publish({"id": 1})
+        await stream.publish({"id": 1})
         await wait_for(lambda: len(received) == 1)
 
         await sub.stop()
 
-        await nexo.stream(topic).publish({"id": 2})
+        await stream.publish({"id": 2})
         await asyncio.sleep(0.5)
 
         assert len(received) == 1
 
     async def test_publish_batch_returns_seq_numbers(self, nexo: NexoClient):
         topic = f"stream-batch-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
-        seqs = await nexo.stream(topic).publish_batch([
+        seqs = await stream.publish_batch([
             {"data": "msg1"},
             {"data": "msg2"},
             {"data": "msg3"},
@@ -454,15 +469,14 @@ class TestStream:
 
     async def test_publish_batch_with_keys(self, nexo: NexoClient):
         topic = f"stream-batch-keys-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list[dict] = []
-        sub = await nexo.stream(topic).subscribe(
-            "g-batch-keys",
+        sub = await stream.group("g-batch-keys").subscribe(
             lambda data, meta: received.append({"data": data, "key": meta.get("key")}),
         )
 
-        await nexo.stream(topic).publish_batch([
+        await stream.publish_batch([
             {"data": "msg1", "key": "key-A"},
             {"data": "msg2", "key": "key-B"},
             {"data": "msg3"},
@@ -473,15 +487,14 @@ class TestStream:
 
     async def test_publish_with_string_key(self, nexo: NexoClient):
         topic = f"stream-pub-key-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list[dict] = []
-        sub = await nexo.stream(topic).subscribe(
-            "g-pub-key",
+        sub = await stream.group("g-pub-key").subscribe(
             lambda data, meta: received.append({"data": data, "key": meta.get("key")}),
         )
 
-        seq = await nexo.stream(topic).publish({"x": 1}, {"key": "my-key"})
+        seq = await stream.publish({"x": 1}, key="my-key")
         assert seq > 0
 
         await wait_for(lambda: len(received) == 1)
@@ -491,20 +504,19 @@ class TestStream:
         assert received[0]["key"] is not None
         assert bytes(received[0]["key"]).decode("utf-8") == "my-key"
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_publish_with_bytes_key(self, nexo: NexoClient):
         topic = f"stream-pub-rawkey-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list[dict] = []
-        sub = await nexo.stream(topic).subscribe(
-            "g-pub-rawkey",
+        sub = await stream.group("g-pub-rawkey").subscribe(
             lambda data, meta: received.append({"data": data, "key": meta.get("key")}),
         )
 
         raw_key = b"\x01\x02\xff"
-        await nexo.stream(topic).publish("payload", {"key": raw_key})
+        await stream.publish("payload", key=raw_key)
 
         await wait_for(lambda: len(received) == 1)
         await sub.stop()
@@ -513,17 +525,17 @@ class TestStream:
         assert received[0]["key"] is not None
         assert bytes(received[0]["key"]) == raw_key
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_publish_bytes_data(self, nexo: NexoClient):
         topic = f"stream-pub-uint8-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         received: list = []
-        sub = await nexo.stream(topic).subscribe("g-pub-uint8", lambda data: received.append(data))
+        sub = await stream.group("g-pub-uint8").subscribe(lambda data: received.append(data))
 
         payload = b"\x01\x02\xff\x00"
-        await nexo.stream(topic).publish(payload)
+        await stream.publish(payload)
 
         await wait_for(lambda: len(received) == 1)
         await sub.stop()
@@ -531,69 +543,110 @@ class TestStream:
         assert isinstance(received[0], (bytes, bytearray))
         assert bytes(received[0]) == payload
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_empty_publish_batch(self, nexo: NexoClient):
         topic = f"stream-batch-empty-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
-        seqs = await nexo.stream(topic).publish_batch([])
+        seqs = await stream.publish_batch([])
         assert len(seqs) == 0
 
     async def test_reject_empty_stream_keys(self, nexo: NexoClient):
-        stream = nexo.stream(f"stream-empty-key-{uuid.uuid4()}")
+        topic = f"stream-empty-key-{uuid.uuid4()}"
+        stream = await _create_stream(nexo, topic)
         with pytest.raises(ValueError, match="must not be empty"):
-            await stream.publish({"x": 1}, {"key": ""})
+            await stream.publish({"x": 1}, key="")
         with pytest.raises(ValueError, match="must not be empty"):
             await stream.publish_batch([{"data": {"x": 1}, "key": b""}])
+        await nexo.stream.delete(topic)
 
     async def test_reject_oversized_publish_batch(self, nexo: NexoClient):
+        topic = f"stream-large-batch-{uuid.uuid4()}"
+        stream = await _create_stream(nexo, topic)
         items = [{"data": None}] * 65_537
         with pytest.raises(ValueError, match="Publish batch too large"):
-            await nexo.stream("stream-large-batch").publish_batch(items)
+            await stream.publish_batch(items)
+        await nexo.stream.delete(topic)
 
     # ── Edge cases ──────────────────────────────────────────────
 
     async def test_exists_true_after_create_false_before(self, nexo: NexoClient):
         topic = f"stream-exists-{uuid.uuid4()}"
-        assert await nexo.stream(topic).exists() is False
-        await nexo.stream(topic).create()
-        assert await nexo.stream(topic).exists() is True
-        await nexo.stream(topic).delete()
-        assert await nexo.stream(topic).exists() is False
+        assert await nexo.stream.exists(topic) is False
+        await nexo.stream.create(topic)
+        assert await nexo.stream.exists(topic) is True
+        await nexo.stream.delete(topic)
+        assert await nexo.stream.exists(topic) is False
 
     async def test_create_idempotent(self, nexo: NexoClient):
         topic = f"stream-idempotent-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
-        await nexo.stream(topic).create()
-        assert await nexo.stream(topic).exists() is True
-        await nexo.stream(topic).delete()
+        created = await nexo.stream.create(
+            topic,
+            max_age_ms=1234,
+            max_bytes=5678,
+        )
+        unchanged = await nexo.stream.create(
+            topic,
+            max_age_ms=1234,
+            max_bytes=5678,
+        )
 
-    async def test_reject_invalid_topic_name(self, nexo: NexoClient):
-        with pytest.raises(Exception, match="Invalid topic name"):
-            await nexo.stream("../outside").create()
+        assert created.status is ProvisionOutcome.CREATED
+        assert unchanged.status is ProvisionOutcome.UNCHANGED
+        assert unchanged.definition == created.definition
+        assert await nexo.stream.describe(topic) == created.definition
+        await nexo.stream.delete(topic)
+
+    async def test_create_config_conflict_is_typed(self, nexo: NexoClient):
+        topic = f"stream-conflict-{uuid.uuid4()}"
+        await nexo.stream.create(topic, max_age_ms=1000)
+
+        with pytest.raises(ResourceConfigurationConflictError) as caught:
+            await nexo.stream.create(topic, max_age_ms=1001)
+
+        assert caught.value.details["resourceKind"] == "stream"
+        assert caught.value.details["resourceName"] == topic
+        assert caught.value.details["differences"] == [
+            {"path": "config.retention.maxAgeMs", "requested": 1001, "actual": 1000}
+        ]
+        await nexo.stream.delete(topic)
+
+    async def test_reject_invalid_stream_name(self, nexo: NexoClient):
+        with pytest.raises(Exception, match="Invalid stream name"):
+            await nexo.stream.create("../outside")
 
     async def test_reject_invalid_seek_and_subscription_options(self, nexo: NexoClient):
-        stream = nexo.stream("stream-invalid-options")
+        topic = f"stream-invalid-options-{uuid.uuid4()}"
+        stream = await _create_stream(nexo, topic)
+        group = stream.group("group")
         with pytest.raises(ValueError, match="Invalid seek target"):
-            await stream.seek("group", "invalid")
+            await group.seek("invalid")
         with pytest.raises(ValueError, match="batch_size must be an integer between"):
-            await stream.subscribe("group", lambda _: None, {"batch_size": 0})
+            await group.subscribe(lambda _: None, batch_size=0)
         with pytest.raises(ValueError, match="wait_ms must be a positive integer"):
-            await stream.subscribe("group", lambda _: None, {"wait_ms": 0})
+            await group.subscribe(lambda _: None, wait_ms=0)
         with pytest.raises(ValueError, match="stop_timeout_ms must be a positive integer"):
-            await stream.subscribe("group", lambda _: None, {"stop_timeout_ms": 0})
+            await group.subscribe(lambda _: None, stop_timeout_ms=0)
+        await nexo.stream.delete(topic)
 
-    async def test_publish_nonexistent_stream_fails(self, nexo: NexoClient):
-        topic = f"stream-pub-missing-{uuid.uuid4()}"
-        with pytest.raises(Exception):
-            await nexo.stream(topic).publish({"x": 1})
+    async def test_get_nonexistent_stream_fails(self, nexo: NexoClient):
+        topic = f"stream-get-missing-{uuid.uuid4()}"
+        with pytest.raises(ResourceNotFoundError):
+            await nexo.stream.get(topic)
+
+    async def test_exists_propagates_connection_error(self):
+        disconnected = NexoClient()
+        try:
+            with pytest.raises(NotConnectedError):
+                await disconnected.stream.exists("stream-disconnected")
+        finally:
+            disconnected.disconnect()
 
     async def test_publish_storage_write_failure(self, nexo: NexoClient):
         topic = f"stream-write-failure-{uuid.uuid4()}"
-        stream = nexo.stream(topic)
+        stream = await _create_stream(nexo, topic)
         topic_path = STREAM_DATA_DIR / topic
-        await stream.create()
         shutil.rmtree(topic_path)
         topic_path.write_text("not-a-directory")
 
@@ -602,62 +655,65 @@ class TestStream:
                 await stream.publish({"x": 1})
         finally:
             topic_path.unlink(missing_ok=True)
-            await stream.delete()
+            await nexo.stream.delete(topic)
 
     async def test_operations_after_delete_fail(self, nexo: NexoClient):
         topic = f"stream-del-ops-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
-        await nexo.stream(topic).delete()
+        stream = await _create_stream(nexo, topic)
+        await nexo.stream.delete(topic)
         with pytest.raises(Exception):
-            await nexo.stream(topic).publish({"x": 1})
+            await stream.publish({"x": 1})
         with pytest.raises(Exception):
-            await nexo.stream(topic).subscribe("g-del", lambda _: None)
+            await stream.group("g-del").subscribe(lambda _: None)
 
     async def test_peek_dlt_empty_returns_empty(self, nexo: NexoClient):
         topic = f"stream-dlt-empty-{uuid.uuid4()}"
         group = "g-dlt-empty"
-        await nexo.stream(topic).create()
-        sub = await nexo.stream(topic).subscribe(group, lambda _: None)
+        stream = await _create_stream(nexo, topic)
+        sub = await stream.group(group).subscribe(lambda _: None)
         await sub.stop()
-        entries = await nexo.stream(topic).peek_dlt(group, 10, 0)
+        dlt = stream.group(group).dlt
+        entries = await dlt.peek(limit=10, offset=0)
         assert entries == []
-        await nexo.stream(topic).delete()
+        assert callable(dlt.replay)
+        assert callable(dlt.delete)
+        await nexo.stream.delete(topic)
 
     async def test_purge_dlt_empty_returns_zero(self, nexo: NexoClient):
         topic = f"stream-dlt-purge-empty-{uuid.uuid4()}"
         group = "g-dlt-purge"
-        await nexo.stream(topic).create()
-        sub = await nexo.stream(topic).subscribe(group, lambda _: None)
+        stream = await _create_stream(nexo, topic)
+        sub = await stream.group(group).subscribe(lambda _: None)
         await sub.stop()
-        count = await nexo.stream(topic).purge_dlt(group)
+        count = await stream.group(group).dlt.purge()
         assert count == 0
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_resubscribe_same_group_after_stop(self, nexo: NexoClient):
         topic = f"stream-resub-{uuid.uuid4()}"
         group = "g-resub"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         recv1: list = []
-        sub1 = await nexo.stream(topic).subscribe(group, lambda d: recv1.append(d))
-        await nexo.stream(topic).publish({"i": 1})
-        await nexo.stream(topic).publish({"i": 2})
+        sub1 = await stream.group(group).subscribe(lambda d: recv1.append(d))
+        await stream.publish({"i": 1})
+        await stream.publish({"i": 2})
         await wait_for(lambda: len(recv1) == 2)
         await sub1.stop()
 
-        await nexo.stream(topic).publish({"i": 3})
+        await stream.publish({"i": 3})
 
         recv2: list = []
-        sub2 = await nexo.stream(topic).subscribe(group, lambda d: recv2.append(d))
+        sub2 = await stream.group(group).subscribe(lambda d: recv2.append(d))
         await wait_for(lambda: len(recv2) == 1)
         assert recv2[0]["i"] == 3
         await sub2.stop()
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     async def test_multiple_groups_simultaneous_delivery(self, nexo: NexoClient):
         topic = f"stream-multi-groups-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         client_a = await NexoClient.connect()
         client_b = await NexoClient.connect()
@@ -666,12 +722,12 @@ class TestStream:
             recv_b: list = []
             recv_c: list = []
 
-            sub_a = await client_a.stream(topic).subscribe("multi-a", lambda d: recv_a.append(d))
-            sub_b = await client_b.stream(topic).subscribe("multi-b", lambda d: recv_b.append(d))
-            sub_c = await nexo.stream(topic).subscribe("multi-c", lambda d: recv_c.append(d))
+            sub_a = await (await client_a.stream.get(topic)).group("multi-a").subscribe(lambda d: recv_a.append(d))
+            sub_b = await (await client_b.stream.get(topic)).group("multi-b").subscribe(lambda d: recv_b.append(d))
+            sub_c = await stream.group("multi-c").subscribe(lambda d: recv_c.append(d))
 
             for i in range(5):
-                await nexo.stream(topic).publish({"i": i})
+                await stream.publish({"i": i})
 
             await wait_for(lambda: len(recv_a) == 5 and len(recv_b) == 5 and len(recv_c) == 5)
 
@@ -682,24 +738,24 @@ class TestStream:
             client_a.disconnect()
             client_b.disconnect()
 
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)
 
     # ── Per-key ordering end-to-end ──────────────────────────────
 
     async def test_per_key_ordering_same_key_one_at_a_time(self, nexo: NexoClient):
         topic = f"stream-perkey-order-{uuid.uuid4()}"
         group = "perkey-order-group"
-        await nexo.stream(topic).create()
+        stream = await _create_stream(nexo, topic)
 
         # Publish all messages BEFORE subscribing so the first fetch sees all 6
         # and per-key blocking is active immediately.
         # Interleaved: A0, B0, A1, no-key, B1, A2
-        await nexo.stream(topic).publish({"i": 0}, {"key": "user-A"})
-        await nexo.stream(topic).publish({"i": 0}, {"key": "user-B"})
-        await nexo.stream(topic).publish({"i": 1}, {"key": "user-A"})
-        await nexo.stream(topic).publish({"i": 0})
-        await nexo.stream(topic).publish({"i": 1}, {"key": "user-B"})
-        await nexo.stream(topic).publish({"i": 2}, {"key": "user-A"})
+        await stream.publish({"i": 0}, key="user-A")
+        await stream.publish({"i": 0}, key="user-B")
+        await stream.publish({"i": 1}, key="user-A")
+        await stream.publish({"i": 0})
+        await stream.publish({"i": 1}, key="user-B")
+        await stream.publish({"i": 2}, key="user-A")
 
         delivered: list[dict] = []
         first_batch_event = asyncio.Event()
@@ -716,8 +772,10 @@ class TestStream:
             # Block all callbacks so ACKs don't fire until we've verified
             await release_gate.wait()
 
-        sub = await nexo.stream(topic).subscribe(
-            group, callback, {"batch_size": 10, "concurrency": 10}
+        sub = await stream.group(group).subscribe(
+            callback,
+            batch_size=10,
+            concurrency=10,
         )
 
         # Wait for first batch: A0, B0, no-key (3 messages)
@@ -739,4 +797,4 @@ class TestStream:
         release_gate.set()
 
         await sub.stop()
-        await nexo.stream(topic).delete()
+        await nexo.stream.delete(topic)

@@ -164,6 +164,7 @@ function encodeFixture(fixture: Fixture): Buffer {
       break;
     }
     case 'QUEUE_EXISTS':
+    case 'QUEUE_DESCRIBE':
     case 'QUEUE_DELETE':
     case 'QUEUE_PURGE_DLQ':
       w.string(inp.queue);
@@ -213,6 +214,7 @@ function encodeFixture(fixture: Fixture): Buffer {
       break;
     }
     case 'STREAM_EXISTS':
+    case 'STREAM_DESCRIBE':
     case 'STREAM_DELETE':
       w.string(inp.stream);
       break;
@@ -324,6 +326,7 @@ function decodeFixture(fixture: Fixture): any {
       return { queue, visibility_timeout_ms: visibilityTimeoutMs, max_deliveries: maxDeliveries };
     }
     case 'QUEUE_EXISTS':
+    case 'QUEUE_DESCRIBE':
     case 'QUEUE_DELETE':
     case 'QUEUE_PURGE_DLQ':
       return { queue: c.readString() };
@@ -375,6 +378,7 @@ function decodeFixture(fixture: Fixture): any {
       return { stream, max_age_ms: maxAgeMs, max_bytes: maxBytes };
     }
     case 'STREAM_EXISTS':
+    case 'STREAM_DESCRIBE':
     case 'STREAM_DELETE':
       return { stream: c.readString() };
     case 'STREAM_PURGE_DLT':

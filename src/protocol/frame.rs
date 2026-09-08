@@ -12,16 +12,16 @@
 //!     response frame. Used only by explicitly best-effort commands.
 //!
 //! Request payload : [binary typed fields per broker] [Data (if applicable)]
-//! Response payload: STATUS_DATA -> [Data...]; STATUS_ERR -> [utf8 message...]
-//!                   (both read to end of payload; OK/NULL carry no payload).
+//! Response payload: STATUS_DATA -> [Data...]; STATUS_ERR -> [Code:1][Message][Details...]
+//!                   (details are optional JSON bytes; OK/NULL carry no payload).
 //! Push payload    : [Data...]  (CorrelationID is unused for pushes -> 0).
 //!
 //! Data Structure (auto-contained):
 //! [DataType: 1 byte] [Data...]
 
-use bytes::Bytes;
+use super::generated::{ErrorCode, HEADER_SIZE};
 use bytemuck::{Pod, Zeroable};
-use super::generated::HEADER_SIZE;
+use bytes::Bytes;
 
 // ========================================
 // FRAME HEADER
@@ -75,6 +75,28 @@ pub enum OutboundFrame {
 pub enum Response {
     Ok,
     Data(Bytes),
-    Error(String),
+    Error {
+        code: ErrorCode,
+        message: String,
+        details: Option<Bytes>,
+    },
     Null,
+}
+
+impl Response {
+    pub fn error(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::Error {
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn error_with_details(code: ErrorCode, message: impl Into<String>, details: Bytes) -> Self {
+        Self::Error {
+            code,
+            message: message.into(),
+            details: Some(details),
+        }
+    }
 }

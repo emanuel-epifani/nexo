@@ -23,7 +23,8 @@ class TestCrossBroker:
 
     async def test_queue_binary_payload(self, nexo: NexoClient):
         q_name = f"bin-queue-{uuid.uuid4()}"
-        q = await nexo.queue(q_name).create()
+        await nexo.queue.create(q_name)
+        q = await nexo.queue.get(q_name)
 
         await q.push(self.BINARY_PAYLOAD)
 
@@ -39,21 +40,23 @@ class TestCrossBroker:
         topic = f"bin-pubsub-{uuid.uuid4()}"
         received: list = []
 
-        await nexo.pubsub(topic).subscribe(lambda msg: received.append(msg))
-        await nexo.pubsub(topic).publish(self.BINARY_PAYLOAD)
+        pubsub_topic = nexo.pubsub.topic(topic)
+        sub = await pubsub_topic.subscribe(lambda msg: received.append(msg))
+        await pubsub_topic.publish(self.BINARY_PAYLOAD)
 
         await wait_for(lambda: len(received) == 1)
         assert isinstance(received[0], (bytes, bytearray))
         assert bytes(received[0]) == self.BINARY_PAYLOAD
+        await sub.stop()
 
     async def test_stream_binary_payload(self, nexo: NexoClient):
         topic = f"bin-stream-{uuid.uuid4()}"
-        await nexo.stream(topic).create()
-
-        await nexo.stream(topic).publish(self.BINARY_PAYLOAD)
+        await nexo.stream.create(topic)
+        stream = await nexo.stream.get(topic)
+        await stream.publish(self.BINARY_PAYLOAD)
 
         received: list = []
-        sub = await nexo.stream(topic).subscribe("g1", lambda msg: received.append(msg))
+        sub = await stream.group("g1").subscribe(lambda msg: received.append(msg))
 
         await wait_for(lambda: len(received) == 1)
         assert isinstance(received[0], (bytes, bytearray))

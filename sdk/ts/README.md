@@ -29,51 +29,59 @@ const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
 ### 1. STORE
 
 ```typescript
-// Set key
-await client.store.map.set("user:1", { name: "Max", role: "admin" });
-// Get key
-const user = await client.store.map.get<User>("user:1");
-// Del key
-await client.store.map.del("user:1");
+await client.store.map.set('user:1', { name: 'Max', role: 'admin' });
+const user = await client.store.map.get<User>('user:1');
+await client.store.map.delete('user:1');
 ```
 
 ### 2. QUEUE
 
+Provision durable resources from deployment or administrative code:
+
 ```typescript
-// Create queue
-const mailQ = await client.queue<MailJob>("emails").create();
-// Push message
-await mailQ.push({ to: "test@test.com" });
-// Subscribe
-await mailQ.subscribe(async (msg) => console.log(msg));
-// Delete queue 
-await mailQ.delete();
+const result = await client.queue.create('emails', {
+  visibilityTimeoutMs: 30_000,
+  maxDeliveries: 5,
+});
+console.log(result.status, result.definition.config);
 ```
 
+Application code retrieves the existing resource and fails fast when it is missing:
+
+```typescript
+const mailQueue = await client.queue.get<MailJob>('emails');
+await mailQueue.push({ to: 'test@test.com' });
+const subscription = await mailQueue.subscribe(async (message, meta) => {
+  console.log(meta.id, message);
+});
+await subscription.stop();
+```
 
 ### 3. PUB/SUB
 
-```typescript
-// Define topic (not need to create, auto-created on first publish)
-const alerts = client.pubsub<AlertMsg>("system-alerts");
-// Subscribe
-await alerts.subscribe(async (msg) => console.log(msg));
-// Publish
-await alerts.publish({ level: "high" });
-```
+Topics are routing addresses and do not require provisioning:
 
+```typescript
+const alerts = client.pubsub.topic<AlertMsg>('system-alerts');
+const subscription = await alerts.subscribe(async (message) => console.log(message));
+await alerts.publish({ level: 'high' });
+await subscription.stop();
+
+const allAlerts = client.pubsub.pattern<AlertMsg>('system-alerts/#');
+await allAlerts.subscribe((message, meta) => console.log(meta.topic, message));
+```
 
 ### 4. STREAM
 
 ```typescript
-// Create topic
-const stream = await client.stream<UserEvent>('user-events').create();
-// Publisher
+const result = await client.stream.create('user-events');
+console.log(result.status, result.definition.config);
+
+const stream = await client.stream.get<UserEvent>('user-events');
 await stream.publish({ type: 'login', userId: 'u1' });
-// Consumer (must specify group)
-await stream.subscribe('analytics', async (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
-// Delete topic
-await stream.delete();
+await stream.group('analytics').subscribe(async (message, meta) => {
+  console.log(meta.seq, message);
+});
 ```
 
 
@@ -88,17 +96,15 @@ Bypassing JSON serialization drastically reduces Latency, increases Throughput, 
 **Perfect for:** Video chunks, Images, Protobuf/MsgPack, Encrypted blobs.
 
 ```typescript
-// Send 1MB raw buffer (30% smaller than JSON/Base64)
 const heavyPayload = Buffer.alloc(1024 * 1024);
+const stream = await client.stream.get<Buffer>('cctv-archive');
+const queue = await client.queue.get<Buffer>('pdf-processing');
+const audio = client.pubsub.topic<Buffer>('live-audio-call');
 
-// 1. STREAM
-await client.stream('cctv-archive').publish(heavyPayload);
-// 2. PUBSUB 
-await client.pubsub('live-audio-call').publish(heavyPayload);
-// 3. STORE
+await stream.publish(heavyPayload);
+await audio.publish(heavyPayload);
 await client.store.map.set('user:avatar:1', heavyPayload);
-// 4. QUEUE
-await client.queue('pdf-processing').push(heavyPayload);
+await queue.push(heavyPayload);
 ```
 
 ---

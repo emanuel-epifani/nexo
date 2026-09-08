@@ -24,11 +24,15 @@ pub struct PayloadWriter {
 
 impl PayloadWriter {
     pub fn new() -> Self {
-        Self { buf: BytesMut::new() }
+        Self {
+            buf: BytesMut::new(),
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: BytesMut::with_capacity(cap) }
+        Self {
+            buf: BytesMut::with_capacity(cap),
+        }
     }
 
     pub fn put_u8(&mut self, v: u8) -> &mut Self {
@@ -130,7 +134,10 @@ impl PayloadCursor {
 
     pub fn read_bytes(&mut self, len: usize) -> Result<Bytes, ParseError> {
         if !self.has_remaining(len) {
-            return Err(ParseError::Invalid(format!("Payload too short: expected {} bytes", len)));
+            return Err(ParseError::Invalid(format!(
+                "Payload too short: expected {} bytes",
+                len
+            )));
         }
         Ok(self.data.copy_to_bytes(len))
     }
@@ -152,10 +159,14 @@ impl PayloadCursor {
     pub fn read_string(&mut self) -> Result<String, ParseError> {
         let len = self.read_u32()? as usize;
         if !self.has_remaining(len) {
-            return Err(ParseError::Invalid(format!("Incomplete string: expected {} bytes", len)));
+            return Err(ParseError::Invalid(format!(
+                "Incomplete string: expected {} bytes",
+                len
+            )));
         }
         let chunk = self.data.copy_to_bytes(len);
-        let s = std::str::from_utf8(&chunk).map_err(|e| ParseError::Invalid(format!("Invalid UTF-8 in string: {}", e)))?;
+        let s = std::str::from_utf8(&chunk)
+            .map_err(|e| ParseError::Invalid(format!("Invalid UTF-8 in string: {}", e)))?;
         Ok(s.to_string())
     }
 

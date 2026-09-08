@@ -1,14 +1,15 @@
-use nexo::brokers::stream::options::StreamCreateOptions;
-use nexo::config::Config;
 use bytes::Bytes;
+use nexo::brokers::stream::options::{RetentionOptions, StreamCreateOptions};
+use nexo::brokers::{BrokerErrorKind, ProvisionOutcome};
+use nexo::config::Config;
 use std::time::{Duration, Instant};
 mod common;
 
 #[cfg(test)]
 mod stream_tests {
     use super::*;
-    use nexo::brokers::stream::Message;
     use nexo::brokers::stream::manager::JoinGroupResult;
+    use nexo::brokers::stream::Message;
     use nexo::brokers::stream::StreamManager;
     use std::sync::Arc;
 
@@ -20,20 +21,59 @@ mod stream_tests {
         config
     }
 
-    async fn build_manager(config: nexo::brokers::stream::config::SystemStreamConfig) -> Arc<StreamManager> {
+    async fn build_manager(
+        config: nexo::brokers::stream::config::SystemStreamConfig,
+    ) -> Arc<StreamManager> {
         Arc::new(StreamManager::new(Arc::new(config)).await)
     }
 
-    async fn join_session(manager: &StreamManager, group: &str, topic: &str, client: &str) -> JoinGroupResult {
+    async fn join_session(
+        manager: &StreamManager,
+        group: &str,
+        topic: &str,
+        client: &str,
+    ) -> JoinGroupResult {
         manager.join_group(group, topic, client).await.unwrap()
     }
 
-    async fn fetch_messages(manager: &StreamManager, group: &str, topic: &str, consumer: &JoinGroupResult, limit: usize, wait_ms: u64) -> Vec<Message> {
-        manager.fetch(group, &consumer.consumer_id, consumer.generation, limit, topic, wait_ms).await.unwrap()
+    async fn fetch_messages(
+        manager: &StreamManager,
+        group: &str,
+        topic: &str,
+        consumer: &JoinGroupResult,
+        limit: usize,
+        wait_ms: u64,
+    ) -> Vec<Message> {
+        manager
+            .fetch(
+                group,
+                &consumer.consumer_id,
+                consumer.generation,
+                limit,
+                topic,
+                wait_ms,
+            )
+            .await
+            .unwrap()
     }
 
-    async fn ack_message(manager: &StreamManager, group: &str, topic: &str, consumer: &JoinGroupResult, seq: u64) {
-        manager.ack(group, topic, &consumer.consumer_id, consumer.generation, seq).await.unwrap();
+    async fn ack_message(
+        manager: &StreamManager,
+        group: &str,
+        topic: &str,
+        consumer: &JoinGroupResult,
+        seq: u64,
+    ) {
+        manager
+            .ack(
+                group,
+                topic,
+                &consumer.consumer_id,
+                consumer.generation,
+                seq,
+            )
+            .await
+            .unwrap();
     }
 
     mod features {
@@ -46,7 +86,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "test-basic-flow";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             assert!(manager.exists(topic).await);
 
@@ -61,13 +104,65 @@ mod stream_tests {
         }
 
         #[tokio::test]
+        async fn test_provisioning_result_describe_and_conflict() {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let name = "definition-stream";
+            let options = StreamCreateOptions {
+                retention: Some(RetentionOptions {
+                    max_age_ms: Some(12_345),
+                    max_bytes: Some(67_890),
+                }),
+            };
+
+            let created = manager
+                .create_topic(name.to_string(), options.clone())
+                .await
+                .unwrap();
+            assert_eq!(created.outcome, ProvisionOutcome::Created);
+            assert_eq!(created.definition.name, name);
+            assert_eq!(created.definition.config.retention.max_age_ms, Some(12_345));
+            assert_eq!(created.definition.config.retention.max_bytes, Some(67_890));
+            assert_eq!(manager.describe(name).await.unwrap(), created.definition);
+
+            let unchanged = manager
+                .create_topic(name.to_string(), options)
+                .await
+                .unwrap();
+            assert_eq!(unchanged.outcome, ProvisionOutcome::Unchanged);
+            assert_eq!(unchanged.definition, created.definition);
+
+            let error = manager
+                .create_topic(
+                    name.to_string(),
+                    StreamCreateOptions {
+                        retention: Some(RetentionOptions {
+                            max_age_ms: Some(12_346),
+                            max_bytes: Some(67_890),
+                        }),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, BrokerErrorKind::ResourceConfigConflict);
+            assert_eq!(
+                error.details.unwrap()["differences"][0]["path"],
+                "config.retention.maxAgeMs"
+            );
+        }
+
+        #[tokio::test]
         async fn test_stream_ordering() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
             let manager = build_manager(config).await;
             let topic = "ordering-topic";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=3 {
                 let payload = Bytes::from(format!("msg-{}", i));
@@ -92,13 +187,19 @@ mod stream_tests {
             let topic = "long-poll-wakeup";
             let group = "g-long-poll";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
             let publisher = manager.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(150)).await;
-                publisher.publish(topic, None, Bytes::from("wake-me")).await.unwrap();
+                publisher
+                    .publish(topic, None, Bytes::from("wake-me"))
+                    .await
+                    .unwrap();
             });
 
             let start = Instant::now();
@@ -117,7 +218,10 @@ mod stream_tests {
             let topic = "long-poll-timeout";
             let group = "g-timeout";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
             let start = Instant::now();
@@ -139,10 +243,19 @@ mod stream_tests {
             let topic = "timeout-park-flow";
             let group = "g-timeout-park";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
-            manager.publish(topic, None, Bytes::from("msg-1")).await.unwrap();
-            manager.publish(topic, None, Bytes::from("msg-2")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg-1"))
+                .await
+                .unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg-2"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
@@ -165,7 +278,10 @@ mod stream_tests {
             ack_message(&manager, group, topic, &consumer, 2).await;
 
             let probe = join_session(&manager, group, topic, "client-B").await;
-            assert_eq!(probe.ack_floor, 2, "ack_floor must advance over DLT entries (msg-1 parked, msg-2 acked)");
+            assert_eq!(
+                probe.ack_floor, 2,
+                "ack_floor must advance over DLT entries (msg-1 parked, msg-2 acked)"
+            );
 
             // Verify msg-1 is in DLT
             let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
@@ -181,10 +297,16 @@ mod stream_tests {
             let topic = "ack-floor";
             let group = "g-floor";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -210,10 +332,16 @@ mod stream_tests {
             let topic = "seek-topic";
             let group = "g-seek";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=10 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -229,10 +357,24 @@ mod stream_tests {
             assert!(empty.is_empty());
 
             use nexo::brokers::stream::options::SeekTarget;
-            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+            manager
+                .seek(group, topic, SeekTarget::Beginning)
+                .await
+                .unwrap();
 
-            let fenced = manager.fetch(group, &consumer.consumer_id, consumer.generation, 10, topic, 0).await;
-            assert!(matches!(fenced, Err(ref e) if e == "FENCED"));
+            let fenced = manager
+                .fetch(
+                    group,
+                    &consumer.consumer_id,
+                    consumer.generation,
+                    10,
+                    topic,
+                    0,
+                )
+                .await;
+            assert!(
+                matches!(fenced, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced)
+            );
 
             let replay = join_session(&manager, group, topic, "client-A").await;
             let from_start = fetch_messages(&manager, group, topic, &replay, 10, 0).await;
@@ -257,10 +399,16 @@ mod stream_tests {
             let topic = "seek-cancel-fetch";
             let group = "g-seek-cancel";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -274,23 +422,36 @@ mod stream_tests {
             let generation = consumer.generation;
             let fetch_handle = tokio::spawn(async move {
                 let start = Instant::now();
-                let result = fetch_manager.fetch(group, &consumer_id, generation, 10, topic, 5_000).await;
+                let result = fetch_manager
+                    .fetch(group, &consumer_id, generation, 10, topic, 5_000)
+                    .await;
                 (start.elapsed(), result)
             });
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             use nexo::brokers::stream::options::SeekTarget;
-            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+            manager
+                .seek(group, topic, SeekTarget::Beginning)
+                .await
+                .unwrap();
 
             let (elapsed, result) = fetch_handle.await.unwrap();
 
-            assert!(elapsed < Duration::from_millis(1_000), "Fetch should have been cancelled by seek, took {:?}", elapsed);
+            assert!(
+                elapsed < Duration::from_millis(1_000),
+                "Fetch should have been cancelled by seek, took {:?}",
+                elapsed
+            );
             assert!(result.unwrap().is_empty());
 
             let from_start_consumer = join_session(&manager, group, topic, "client-A").await;
-            let from_start = fetch_messages(&manager, group, topic, &from_start_consumer, 10, 0).await;
-            assert!(!from_start.is_empty(), "Should have messages from beginning after seek");
+            let from_start =
+                fetch_messages(&manager, group, topic, &from_start_consumer, 10, 0).await;
+            assert!(
+                !from_start.is_empty(),
+                "Should have messages from beginning after seek"
+            );
             assert_eq!(from_start[0].seq, 1);
         }
 
@@ -302,7 +463,10 @@ mod stream_tests {
             let topic = "leave-cancel-fetch";
             let group = "g-leave-cancel";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
             let fetch_manager = manager.clone();
@@ -310,18 +474,30 @@ mod stream_tests {
             let generation = consumer.generation;
             let fetch_handle = tokio::spawn(async move {
                 let start = Instant::now();
-                let result = fetch_manager.fetch(group, &consumer_id, generation, 10, topic, 5_000).await;
+                let result = fetch_manager
+                    .fetch(group, &consumer_id, generation, 10, topic, 5_000)
+                    .await;
                 (start.elapsed(), result)
             });
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            manager.leave_group(group, topic, &consumer.consumer_id, consumer.generation).await.unwrap();
+            manager
+                .leave_group(group, topic, &consumer.consumer_id, consumer.generation)
+                .await
+                .unwrap();
 
             let (elapsed, result) = fetch_handle.await.unwrap();
 
-            assert!(elapsed < Duration::from_millis(1_000), "Fetch should have been cancelled by leave, took {:?}", elapsed);
-            assert!(result.unwrap().is_empty(), "Cancelled fetch should return empty");
+            assert!(
+                elapsed < Duration::from_millis(1_000),
+                "Fetch should have been cancelled by leave, took {:?}",
+                elapsed
+            );
+            assert!(
+                result.unwrap().is_empty(),
+                "Cancelled fetch should return empty"
+            );
         }
 
         #[tokio::test]
@@ -332,10 +508,16 @@ mod stream_tests {
             let topic = "multi-consumer";
             let group = "g-multi";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=6 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer_a = join_session(&manager, group, topic, "client-A").await;
@@ -350,7 +532,10 @@ mod stream_tests {
             let seqs_a: Vec<u64> = msgs_a.iter().map(|m| m.seq).collect();
             let seqs_b: Vec<u64> = msgs_b.iter().map(|m| m.seq).collect();
             for seq in &seqs_a {
-                assert!(!seqs_b.contains(seq), "Messages should not overlap between consumers");
+                assert!(
+                    !seqs_b.contains(seq),
+                    "Messages should not overlap between consumers"
+                );
             }
         }
 
@@ -365,9 +550,15 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "delete-topic-test";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
-            manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg1"))
+                .await
+                .unwrap();
 
             assert!(manager.exists(topic).await);
             let topic_path = temp_dir.path().join(topic);
@@ -390,11 +581,17 @@ mod stream_tests {
             let topic = "disconnect-redeliver";
             let group = "g-disconnect-redeliver";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 3 messages
             for i in 1..=3 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             // Consumer A joins and fetches all 3 (without acking)
@@ -403,12 +600,19 @@ mod stream_tests {
             assert_eq!(msgs_a.len(), 3, "Consumer A should receive all 3 messages");
 
             // Consumer A leaves (simulates disconnect)
-            manager.leave_group(group, topic, &consumer_a.consumer_id, consumer_a.generation).await.unwrap();
+            manager
+                .leave_group(group, topic, &consumer_a.consumer_id, consumer_a.generation)
+                .await
+                .unwrap();
 
             // Consumer B joins and should get the 3 messages redelivered
             let consumer_b = join_session(&manager, group, topic, "client-B").await;
             let msgs_b = fetch_messages(&manager, group, topic, &consumer_b, 10, 0).await;
-            assert_eq!(msgs_b.len(), 3, "Consumer B should receive redelivered messages");
+            assert_eq!(
+                msgs_b.len(),
+                3,
+                "Consumer B should receive redelivered messages"
+            );
 
             // Verify same seqs (redelivery, not new messages)
             let seqs_b: Vec<u64> = msgs_b.iter().map(|m| m.seq).collect();
@@ -426,18 +630,28 @@ mod stream_tests {
             let topic = "backpressure-test";
             let group = "g-backpressure";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 5 messages
             for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
             // Fetch with limit=10 but max_ack_pending=3 → only 3 delivered
             let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch1.len(), 3, "Should only get 3 messages (max_ack_pending=3)");
+            assert_eq!(
+                batch1.len(),
+                3,
+                "Should only get 3 messages (max_ack_pending=3)"
+            );
 
             // Fetch again → empty (backpressure: pending=3, max=3)
             let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
@@ -469,10 +683,19 @@ mod stream_tests {
 
             {
                 let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-                manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
-                manager.publish(topic, None, Bytes::from("msg2")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg2"))
+                    .await
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
@@ -501,17 +724,29 @@ mod stream_tests {
 
             {
                 let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-                manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
-                manager.publish(topic, None, Bytes::from("msg2")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg2"))
+                    .await
+                    .unwrap();
                 let consumer = join_session(&manager, group, topic, "client-A").await;
                 let msgs = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
                 for msg in &msgs {
                     ack_message(&manager, group, topic, &consumer, msg.seq).await;
                 }
 
-                manager.publish(topic, None, Bytes::from("msg3")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg3"))
+                    .await
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(600)).await;
             }
 
@@ -535,15 +770,27 @@ mod stream_tests {
 
             {
                 let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-                manager.publish(topic, None, Bytes::from("valid1")).await.unwrap();
-                manager.publish(topic, None, Bytes::from("valid2")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("valid1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("valid2"))
+                    .await
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
 
             let log_path = temp_dir.path().join(topic).join("1.log");
-            let mut file = std::fs::OpenOptions::new().append(true).open(&log_path).expect("Log file should exist");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .expect("Log file should exist");
             file.write_all(b"GARBAGE_DATA_WITHOUT_HEADER").unwrap();
 
             {
@@ -569,15 +816,30 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "topic_segmentation";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
-            manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg1"))
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
-            manager.publish(topic, None, Bytes::from("msg2")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg2"))
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
-            manager.publish(topic, None, Bytes::from("msg3")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg3"))
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(60)).await;
-            manager.publish(topic, None, Bytes::from("msg4")).await.unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg4"))
+                .await
+                .unwrap();
 
             tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -585,7 +847,9 @@ mod stream_tests {
             let mut files: Vec<String> = std::fs::read_dir(&topic_path)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
+                .filter(|name| {
+                    name.ends_with(".log") && name != "groups.log" && name != "state.log"
+                })
                 .collect();
             files.sort();
 
@@ -602,7 +866,9 @@ mod stream_tests {
 
             while all_msgs.len() < 4 {
                 let batch = recovered_manager.read(topic, next_seq, 10).await.unwrap();
-                if batch.is_empty() { break; }
+                if batch.is_empty() {
+                    break;
+                }
 
                 for msg in batch {
                     next_seq = msg.seq + 1;
@@ -610,7 +876,11 @@ mod stream_tests {
                 }
             }
 
-            assert_eq!(all_msgs.len(), 4, "Should recover all 4 messages across segments");
+            assert_eq!(
+                all_msgs.len(),
+                4,
+                "Should recover all 4 messages across segments"
+            );
             assert_eq!(all_msgs[0].payload, Bytes::from("msg1"));
             assert_eq!(all_msgs[3].payload, Bytes::from("msg4"));
         }
@@ -630,10 +900,23 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "topic_retention";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=7 {
-                manager.publish(topic, None, Bytes::from(format!("msg{}-50bytes-payload-0000000000000000000000000000", i))).await.unwrap();
+                manager
+                    .publish(
+                        topic,
+                        None,
+                        Bytes::from(format!(
+                            "msg{}-50bytes-payload-0000000000000000000000000000",
+                            i
+                        )),
+                    )
+                    .await
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(60)).await;
             }
 
@@ -643,11 +926,16 @@ mod stream_tests {
             let mut files: Vec<String> = std::fs::read_dir(&topic_path)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
+                .filter(|name| {
+                    name.ends_with(".log") && name != "groups.log" && name != "state.log"
+                })
                 .collect();
             files.sort();
 
-            assert!(!files.contains(&"1.log".to_string()), "Oldest segment should be deleted");
+            assert!(
+                !files.contains(&"1.log".to_string()),
+                "Oldest segment should be deleted"
+            );
 
             let retained = manager.read(topic, 1, 20).await.unwrap();
             assert!(!retained.is_empty());
@@ -655,7 +943,10 @@ mod stream_tests {
 
             let consumer = join_session(&manager, "g-retained", topic, "client-retained").await;
             let fetched = fetch_messages(&manager, "g-retained", topic, &consumer, 10, 0).await;
-            assert_eq!(fetched.first().map(|msg| msg.seq), retained.first().map(|msg| msg.seq));
+            assert_eq!(
+                fetched.first().map(|msg| msg.seq),
+                retained.first().map(|msg| msg.seq)
+            );
         }
 
         #[tokio::test]
@@ -673,12 +964,27 @@ mod stream_tests {
             {
                 let manager = build_manager(config.clone()).await;
 
-                manager.create_topic(topic1.to_string(), StreamCreateOptions::default()).await.unwrap();
-                manager.create_topic(topic2.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic1.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+                manager
+                    .create_topic(topic2.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-                manager.publish(topic1, None, Bytes::from("msg1_t1")).await.unwrap();
-                manager.publish(topic1, None, Bytes::from("msg2_t1")).await.unwrap();
-                manager.publish(topic2, None, Bytes::from("msg1_t2")).await.unwrap();
+                manager
+                    .publish(topic1, None, Bytes::from("msg1_t1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic1, None, Bytes::from("msg2_t1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic2, None, Bytes::from("msg1_t2"))
+                    .await
+                    .unwrap();
 
                 let consumer = join_session(&manager, group, topic1, "client-A").await;
                 let msgs = fetch_messages(&manager, group, topic1, &consumer, 1, 0).await;
@@ -686,7 +992,10 @@ mod stream_tests {
                     ack_message(&manager, group, topic1, &consumer, msgs[0].seq).await;
                 }
 
-                manager.publish(topic1, None, Bytes::from("msg3_t1")).await.unwrap();
+                manager
+                    .publish(topic1, None, Bytes::from("msg3_t1"))
+                    .await
+                    .unwrap();
                 tokio::time::sleep(Duration::from_millis(600)).await;
             }
 
@@ -695,8 +1004,14 @@ mod stream_tests {
             {
                 let manager2 = build_manager(config.clone()).await;
 
-                assert!(manager2.exists(topic1).await, "Topic 1 should be auto-restored");
-                assert!(manager2.exists(topic2).await, "Topic 2 should be auto-restored");
+                assert!(
+                    manager2.exists(topic1).await,
+                    "Topic 1 should be auto-restored"
+                );
+                assert!(
+                    manager2.exists(topic2).await,
+                    "Topic 2 should be auto-restored"
+                );
 
                 let msgs2 = manager2.read(topic2, 1, 10).await.unwrap();
                 assert_eq!(msgs2.len(), 1, "Should recover 1 message from topic2");
@@ -717,7 +1032,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "eviction_test";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 0..500 {
                 let payload = Bytes::from(format!("msg_{:04}", i));
@@ -727,12 +1045,20 @@ mod stream_tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
 
             let old_msgs = manager.read(topic, 1, 10).await.unwrap();
-            assert_eq!(old_msgs.len(), 10, "Cold read should work for evicted messages");
+            assert_eq!(
+                old_msgs.len(),
+                10,
+                "Cold read should work for evicted messages"
+            );
             assert_eq!(old_msgs[0].payload, Bytes::from("msg_0000"));
             assert_eq!(old_msgs[9].payload, Bytes::from("msg_0009"));
 
             let recent_msgs = manager.read(topic, 491, 10).await.unwrap();
-            assert_eq!(recent_msgs.len(), 10, "Hot read should work for recent messages");
+            assert_eq!(
+                recent_msgs.len(),
+                10,
+                "Hot read should work for recent messages"
+            );
             assert_eq!(recent_msgs[0].payload, Bytes::from("msg_0490"));
             assert_eq!(recent_msgs[9].payload, Bytes::from("msg_0499"));
         }
@@ -750,10 +1076,16 @@ mod stream_tests {
             let topic = "cold-fetch-test";
             let group = "g-cold";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -761,7 +1093,11 @@ mod stream_tests {
             let consumer = join_session(&manager, group, topic, "client-A").await;
             let msgs = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
 
-            assert_eq!(msgs.len(), 5, "Should have fetched all 5 messages (3 from disk, 2 from RAM)");
+            assert_eq!(
+                msgs.len(),
+                5,
+                "Should have fetched all 5 messages (3 from disk, 2 from RAM)"
+            );
             assert_eq!(msgs[0].seq, 1);
             assert_eq!(msgs[0].payload, Bytes::from("msg-1"));
             assert_eq!(msgs[4].seq, 5);
@@ -781,13 +1117,21 @@ mod stream_tests {
             let temp_dir = tempfile::tempdir().unwrap();
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-            
+
             let manager = build_manager(config).await;
-            
-            let result = manager.publish("nonexistent_topic", None, Bytes::from("msg")).await;
-            
-            assert!(result.is_err(), "Publishing to nonexistent topic should fail");
-            assert_eq!(result.err().unwrap(), "Topic not found");
+
+            let result = manager
+                .publish("nonexistent_topic", None, Bytes::from("msg"))
+                .await;
+
+            assert!(
+                result.is_err(),
+                "Publishing to nonexistent topic should fail"
+            );
+            assert_eq!(
+                result.err().unwrap().kind,
+                nexo::brokers::BrokerErrorKind::ResourceNotFound
+            );
         }
 
         #[tokio::test]
@@ -795,27 +1139,40 @@ mod stream_tests {
             let temp_dir = tempfile::tempdir().unwrap();
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-            
+
             let manager = build_manager(config).await;
-            manager.create_topic("test_topic".to_string(), StreamCreateOptions::default()).await.unwrap();
-            
+            manager
+                .create_topic("test_topic".to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+
             // Publish 10 messages (seq 1-10)
             for i in 0..10 {
-                manager.publish("test_topic", None, Bytes::from(format!("msg{}", i))).await.unwrap();
+                manager
+                    .publish("test_topic", None, Bytes::from(format!("msg{}", i)))
+                    .await
+                    .unwrap();
             }
-            
+
             // Read seq 1000 (beyond) → should return empty
             let msgs = manager.read("test_topic", 1000, 10).await.unwrap();
-            assert!(msgs.is_empty(), "Reading beyond high watermark should return empty");
-            
+            assert!(
+                msgs.is_empty(),
+                "Reading beyond high watermark should return empty"
+            );
+
             // Read seq 1 (valid) → should return messages
             let msgs = manager.read("test_topic", 1, 100).await.unwrap();
             assert!(!msgs.is_empty(), "Should read messages from RAM");
             assert_eq!(msgs[0].seq, 1, "First message should have seq 1");
-            
+
             // Verify sequential
             for i in 1..msgs.len() {
-                assert_eq!(msgs[i].seq, msgs[i-1].seq + 1, "Messages should be sequential");
+                assert_eq!(
+                    msgs[i].seq,
+                    msgs[i - 1].seq + 1,
+                    "Messages should be sequential"
+                );
             }
         }
 
@@ -824,12 +1181,20 @@ mod stream_tests {
             let temp_dir = tempfile::tempdir().unwrap();
             let mut config = Config::global().stream.clone();
             config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-            
+
             let manager = build_manager(config).await;
-            manager.create_topic("test_topic".to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish("test_topic", None, Bytes::from("msg")).await.unwrap();
-            
-            let result = manager.fetch("test_group", "client-A", 1, 10, "test_topic", 0).await;
+            manager
+                .create_topic("test_topic".to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish("test_topic", None, Bytes::from("msg"))
+                .await
+                .unwrap();
+
+            let result = manager
+                .fetch("test_group", "client-A", 1, 10, "test_topic", 0)
+                .await;
             assert!(result.is_err(), "Fetch without join should fail");
         }
 
@@ -841,11 +1206,17 @@ mod stream_tests {
             let topic = "per-key-serial";
             let group = "g-pk-serial";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key = Bytes::from("order-A");
             for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -874,19 +1245,35 @@ mod stream_tests {
             let topic = "per-key-parallel";
             let group = "g-pk-parallel";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key_a = Bytes::from("key-A");
             let key_b = Bytes::from("key-B");
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("msg-1")).await.unwrap();
-            manager.publish(topic, Some(key_b.clone()), Bytes::from("msg-2")).await.unwrap();
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("msg-3")).await.unwrap();
+            manager
+                .publish(topic, Some(key_a.clone()), Bytes::from("msg-1"))
+                .await
+                .unwrap();
+            manager
+                .publish(topic, Some(key_b.clone()), Bytes::from("msg-2"))
+                .await
+                .unwrap();
+            manager
+                .publish(topic, Some(key_a.clone()), Bytes::from("msg-3"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
             // Should get msg-1 (key-A) and msg-2 (key-B) — different keys, parallel
             let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch.len(), 2, "Different keys should be delivered in parallel");
+            assert_eq!(
+                batch.len(),
+                2,
+                "Different keys should be delivered in parallel"
+            );
             assert_eq!(batch[0].seq, 1);
             assert_eq!(batch[1].seq, 2);
 
@@ -903,11 +1290,17 @@ mod stream_tests {
             let topic = "per-key-unblock";
             let group = "g-pk-unblock";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key = Bytes::from("key-X");
             for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -942,16 +1335,26 @@ mod stream_tests {
             let topic = "per-key-none";
             let group = "g-pk-none";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Messages with no key should behave as before — all delivered
             for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
             let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch.len(), 5, "No-key messages should all be delivered without ordering constraints");
+            assert_eq!(
+                batch.len(),
+                5,
+                "No-key messages should all be delivered without ordering constraints"
+            );
         }
 
         #[tokio::test]
@@ -964,11 +1367,17 @@ mod stream_tests {
             let topic = "per-key-park";
             let group = "g-pk-park";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key = Bytes::from("poison-key");
             for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -988,11 +1397,19 @@ mod stream_tests {
             // msg-1 should now be parked (max_deliveries=2)
             // All same-key messages (msg-2, msg-3) should also be parked
             let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch3.len(), 0, "All same-key messages should be parked when one is parked");
+            assert_eq!(
+                batch3.len(),
+                0,
+                "All same-key messages should be parked when one is parked"
+            );
 
             // Verify all 3 same-key messages are in DLT (ack_floor implicitly advanced since batch3 is empty)
             let dlt_entries = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
-            assert_eq!(dlt_entries.len(), 3, "all 3 same-key messages should be in DLT");
+            assert_eq!(
+                dlt_entries.len(),
+                3,
+                "all 3 same-key messages should be in DLT"
+            );
         }
 
         #[tokio::test]
@@ -1005,11 +1422,20 @@ mod stream_tests {
             let topic = "per-key-timeout-order";
             let group = "g-pk-timeout-order";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key = Bytes::from("key-K");
-            manager.publish(topic, Some(key.clone()), Bytes::from("msg-1")).await.unwrap();
-            manager.publish(topic, Some(key.clone()), Bytes::from("msg-2")).await.unwrap();
+            manager
+                .publish(topic, Some(key.clone()), Bytes::from("msg-1"))
+                .await
+                .unwrap();
+            manager
+                .publish(topic, Some(key.clone()), Bytes::from("msg-2"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
@@ -1024,7 +1450,11 @@ mod stream_tests {
 
             // Fetch again: msg-1 should be redelivered, NOT msg-2.
             let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch2.len(), 1, "only msg-1 should be available (key K still locked)");
+            assert_eq!(
+                batch2.len(),
+                1,
+                "only msg-1 should be available (key K still locked)"
+            );
             assert_eq!(batch2[0].seq, 1, "msg-1 must be redelivered before msg-2");
 
             // Ack msg-1 → unblocks key K → msg-2 can now be delivered
@@ -1045,8 +1475,14 @@ mod stream_tests {
             let topic = "dlt-peek";
             let group = "g-dlt-peek";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish(topic, None, Bytes::from("poison"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
             let batch = fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
@@ -1060,7 +1496,10 @@ mod stream_tests {
             let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
             assert_eq!(dlt.len(), 1);
             assert_eq!(dlt[0].0, 1, "seq 1 should be in DLT");
-            assert!(dlt[0].1.contains("max_deliveries"), "reason should mention max_deliveries");
+            assert!(
+                dlt[0].1.contains("max_deliveries"),
+                "reason should mention max_deliveries"
+            );
             assert_eq!(dlt[0].2, 2, "attempts should be 2");
         }
 
@@ -1074,8 +1513,14 @@ mod stream_tests {
             let topic = "dlt-move";
             let group = "g-dlt-move";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish(topic, None, Bytes::from("poison"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
             fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
@@ -1097,7 +1542,10 @@ mod stream_tests {
             // Should be redelivered
             let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
             assert_eq!(batch.len(), 1);
-            assert_eq!(batch[0].seq, 1, "msg should be redelivered after moveToStream");
+            assert_eq!(
+                batch[0].seq, 1,
+                "msg should be redelivered after moveToStream"
+            );
         }
 
         #[tokio::test]
@@ -1110,11 +1558,17 @@ mod stream_tests {
             let topic = "dlt-order";
             let group = "g-dlt-order";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             // Publish 3 messages with same key
             let key = Bytes::from("order-key");
             for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -1139,7 +1593,10 @@ mod stream_tests {
             // Fetch — per-key ordering delivers one at a time, must ack each
             let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
             assert_eq!(batch1.len(), 1);
-            assert_eq!(batch1[0].seq, 1, "seq-1 must be first despite moveToStream(3) called first");
+            assert_eq!(
+                batch1[0].seq, 1,
+                "seq-1 must be first despite moveToStream(3) called first"
+            );
             ack_message(&manager, group, topic, &consumer, batch1[0].seq).await;
 
             let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
@@ -1162,8 +1619,14 @@ mod stream_tests {
             let topic = "dlt-delete";
             let group = "g-dlt-delete";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish(topic, None, Bytes::from("poison"))
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
             fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
@@ -1192,9 +1655,15 @@ mod stream_tests {
             let topic = "dlt-purge";
             let group = "g-dlt-purge";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             for i in 1..=3 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -1224,11 +1693,17 @@ mod stream_tests {
             let topic = "dlt-autounblock";
             let group = "g-dlt-autounblock";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key = Bytes::from("block-key");
             for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                    .await
+                    .unwrap();
             }
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -1240,7 +1715,11 @@ mod stream_tests {
 
             // Trigger fetch to auto-park msg-2 and msg-3 (same key is parked)
             let batch_park = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch_park.len(), 0, "All same-key messages should be auto-parked");
+            assert_eq!(
+                batch_park.len(),
+                0,
+                "All same-key messages should be auto-parked"
+            );
 
             // All 3 should be in DLT
             let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
@@ -1249,25 +1728,42 @@ mod stream_tests {
             // Delete one — key should still be parked (other entries remain)
             manager.delete_dlt(topic, group, 1).await.unwrap();
             // Publish a new message with same key — should be auto-parked
-            manager.publish(topic, Some(key.clone()), Bytes::from("msg-4")).await.unwrap();
+            manager
+                .publish(topic, Some(key.clone()), Bytes::from("msg-4"))
+                .await
+                .unwrap();
             let batch = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch.len(), 0, "Key should still be parked with remaining DLT entries");
+            assert_eq!(
+                batch.len(),
+                0,
+                "Key should still be parked with remaining DLT entries"
+            );
 
             // Delete all remaining original entries — but msg-4 is now in DLT too
             manager.delete_dlt(topic, group, 2).await.unwrap();
             manager.delete_dlt(topic, group, 3).await.unwrap();
             // msg-4 is also in DLT (auto-parked), key still parked
             let batch_still = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch_still.len(), 0, "Key still parked because msg-4 is in DLT");
+            assert_eq!(
+                batch_still.len(),
+                0,
+                "Key still parked because msg-4 is in DLT"
+            );
 
             // Delete msg-4 from DLT — now key is fully unblocked
             manager.delete_dlt(topic, group, 4).await.unwrap();
 
             // Publish msg-5 with same key — should be delivered now
-            manager.publish(topic, Some(key.clone()), Bytes::from("msg-5")).await.unwrap();
+            manager
+                .publish(topic, Some(key.clone()), Bytes::from("msg-5"))
+                .await
+                .unwrap();
             let batch_final = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
             assert_eq!(batch_final.len(), 1);
-            assert_eq!(batch_final[0].seq, 5, "msg-5 should be delivered after all DLT entries cleared");
+            assert_eq!(
+                batch_final[0].seq, 5,
+                "msg-5 should be delivered after all DLT entries cleared"
+            );
         }
 
         #[tokio::test]
@@ -1286,10 +1782,16 @@ mod stream_tests {
 
             {
                 let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
                 for i in 1..=2 {
-                    manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                    manager
+                        .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                        .await
+                        .unwrap();
                 }
 
                 let consumer = join_session(&manager, group, topic, "client-A").await;
@@ -1314,10 +1816,17 @@ mod stream_tests {
                 assert!(dlt.len() >= 1, "DLT entries should persist across restart");
 
                 // Parked key should survive — new message with same key should be auto-parked
-                manager2.publish(topic, Some(key.clone()), Bytes::from("msg-3")).await.unwrap();
+                manager2
+                    .publish(topic, Some(key.clone()), Bytes::from("msg-3"))
+                    .await
+                    .unwrap();
                 let consumer = join_session(&manager2, group, topic, "client-A").await;
                 let batch = fetch_messages(&manager2, group, topic, &consumer, 10, 0).await;
-                assert_eq!(batch.len(), 0, "Parked key should survive restart — msg-3 auto-parked");
+                assert_eq!(
+                    batch.len(),
+                    0,
+                    "Parked key should survive restart — msg-3 auto-parked"
+                );
             }
         }
 
@@ -1329,13 +1838,28 @@ mod stream_tests {
             let topic = "per-key-mixed";
             let group = "g-pk-mixed";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let key_a = Bytes::from("key-A");
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("msg-1")).await.unwrap(); // key-A
-            manager.publish(topic, None, Bytes::from("msg-2")).await.unwrap();                 // no key
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("msg-3")).await.unwrap(); // key-A (blocked)
-            manager.publish(topic, None, Bytes::from("msg-4")).await.unwrap();                 // no key
+            manager
+                .publish(topic, Some(key_a.clone()), Bytes::from("msg-1"))
+                .await
+                .unwrap(); // key-A
+            manager
+                .publish(topic, None, Bytes::from("msg-2"))
+                .await
+                .unwrap(); // no key
+            manager
+                .publish(topic, Some(key_a.clone()), Bytes::from("msg-3"))
+                .await
+                .unwrap(); // key-A (blocked)
+            manager
+                .publish(topic, None, Bytes::from("msg-4"))
+                .await
+                .unwrap(); // no key
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
@@ -1358,8 +1882,14 @@ mod stream_tests {
             let topic = "fencing-test";
             let group = "g-fencing";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish(topic, None, Bytes::from("msg-1")).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish(topic, None, Bytes::from("msg-1"))
+                .await
+                .unwrap();
 
             // Consumer A joins → gets generation N
             let consumer_a = join_session(&manager, group, topic, "client-A").await;
@@ -1370,30 +1900,54 @@ mod stream_tests {
             assert_eq!(msgs.len(), 1);
 
             // Seek triggers reset_runtime() → generation increments to N+1
-            manager.seek(group, topic, nexo::brokers::stream::options::SeekTarget::Beginning).await.unwrap();
+            manager
+                .seek(
+                    group,
+                    topic,
+                    nexo::brokers::stream::options::SeekTarget::Beginning,
+                )
+                .await
+                .unwrap();
 
             // New consumer joins → gets generation N+1
             let consumer_b = join_session(&manager, group, topic, "client-B").await;
-            assert!(consumer_b.generation > old_gen, "New generation should be greater after seek");
+            assert!(
+                consumer_b.generation > old_gen,
+                "New generation should be greater after seek"
+            );
 
             // Fetch with old generation → FENCED
-            let result = manager.fetch(group, &consumer_a.consumer_id, old_gen, 10, topic, 0).await;
-            assert!(matches!(result, Err(ref e) if e == "FENCED"), "Old generation fetch should be FENCED");
+            let result = manager
+                .fetch(group, &consumer_a.consumer_id, old_gen, 10, topic, 0)
+                .await;
+            assert!(
+                matches!(result, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced),
+                "Old generation fetch should be FENCED"
+            );
 
             // Ack with old generation → FENCED
-            let ack_result = manager.ack(group, topic, &consumer_a.consumer_id, old_gen, 1).await;
-            assert!(matches!(ack_result, Err(ref e) if e == "FENCED"), "Old generation ack should be FENCED");
+            let ack_result = manager
+                .ack(group, topic, &consumer_a.consumer_id, old_gen, 1)
+                .await;
+            assert!(
+                matches!(ack_result, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced),
+                "Old generation ack should be FENCED"
+            );
 
             // New consumer can fetch and ack normally
             let msgs_b = fetch_messages(&manager, group, topic, &consumer_b, 10, 0).await;
-            assert_eq!(msgs_b.len(), 1, "New consumer should receive redelivered msg");
+            assert_eq!(
+                msgs_b.len(),
+                1,
+                "New consumer should receive redelivered msg"
+            );
             assert_eq!(msgs_b[0].seq, 1);
             ack_message(&manager, group, topic, &consumer_b, 1).await;
         }
     }
 
     mod persistence_crc {
-        use nexo::brokers::stream::{serialize_message, recover_topic};
+        use nexo::brokers::stream::{recover_topic, serialize_message};
 
         #[tokio::test]
         async fn recover_topic_truncates_at_corrupted_record() {
@@ -1417,18 +1971,32 @@ mod stream_tests {
 
             // recover_topic should stop at msg2, index only msg1, and truncate the file
             let state = recover_topic("test-topic", tmp.path().to_path_buf()).await;
-            assert_eq!(state.index.len(), 1, "Recovery should stop at corrupted record");
+            assert_eq!(
+                state.index.len(),
+                1,
+                "Recovery should stop at corrupted record"
+            );
             assert!(state.index.contains_key(&1));
             assert_eq!(state.next_seq, 2);
 
             // File should be truncated to 30 bytes (only msg1)
             let file_size_after = tokio::fs::metadata(&seg_path).await.unwrap().len();
-            assert_eq!(file_size_after, 30, "Segment file should be truncated to first record only");
-            assert!(file_size_after < file_size_before, "File should be smaller after truncation");
+            assert_eq!(
+                file_size_after, 30,
+                "Segment file should be truncated to first record only"
+            );
+            assert!(
+                file_size_after < file_size_before,
+                "File should be smaller after truncation"
+            );
 
             // Re-reading the truncated file should yield only msg1, no corruption
             let state2 = recover_topic("test-topic", tmp.path().to_path_buf()).await;
-            assert_eq!(state2.index.len(), 1, "Re-reading truncated file should have no corruption");
+            assert_eq!(
+                state2.index.len(),
+                1,
+                "Re-reading truncated file should have no corruption"
+            );
             assert!(state2.index.contains_key(&1));
         }
     }
@@ -1443,9 +2011,15 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "batch-single";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
-            let seqs = manager.publish_batch(topic, vec![(None, Bytes::from("hello"))]).await.unwrap();
+            let seqs = manager
+                .publish_batch(topic, vec![(None, Bytes::from("hello"))])
+                .await
+                .unwrap();
             assert_eq!(seqs.len(), 1);
             assert_eq!(seqs[0], 1);
 
@@ -1461,7 +2035,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "batch-multi";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let items: Vec<(Option<Bytes>, Bytes)> = (1..=5)
                 .map(|i| (None, Bytes::from(format!("msg-{}", i))))
@@ -1484,7 +2061,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "batch-keys";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let items = vec![
                 (Some(Bytes::from("key-A")), Bytes::from("msg-1")),
@@ -1507,7 +2087,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "batch-empty";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let seqs = manager.publish_batch(topic, vec![]).await.unwrap();
             assert!(seqs.is_empty());
@@ -1522,14 +2105,16 @@ mod stream_tests {
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
             let manager = build_manager(config).await;
 
-            let result = manager.publish_batch("nonexistent", vec![(None, Bytes::from("data"))]).await;
+            let result = manager
+                .publish_batch("nonexistent", vec![(None, Bytes::from("data"))])
+                .await;
             assert!(result.is_err());
         }
     }
 
     mod regression {
         use super::*;
-        use nexo::brokers::stream::{serialize_message, recover_topic};
+        use nexo::brokers::stream::{recover_topic, serialize_message};
 
         // Regression #2: concurrent publish must preserve contiguous seqs and segment invariant
         #[tokio::test]
@@ -1538,7 +2123,10 @@ mod stream_tests {
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
             let manager = build_manager(config).await;
             let topic = "reg-concurrent-pub";
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let manager = Arc::new(manager);
             const PUBLISHERS: usize = 4;
@@ -1568,7 +2156,11 @@ mod stream_tests {
             assert_eq!(all_seqs[TOTAL - 1], TOTAL as u64);
             // No duplicates
             let unique: std::collections::HashSet<u64> = all_seqs.iter().copied().collect();
-            assert_eq!(unique.len(), TOTAL, "No duplicate seqs across concurrent publishers");
+            assert_eq!(
+                unique.len(),
+                TOTAL,
+                "No duplicate seqs across concurrent publishers"
+            );
             // No gaps
             for i in 0..TOTAL {
                 assert_eq!(all_seqs[i], (i + 1) as u64, "Seq gap at index {}", i);
@@ -1576,7 +2168,11 @@ mod stream_tests {
 
             // Verify all messages are readable via read()
             let msgs = manager.read(topic, 1, TOTAL as usize * 2).await.unwrap();
-            assert_eq!(msgs.len(), TOTAL, "All messages must be readable after concurrent publish");
+            assert_eq!(
+                msgs.len(),
+                TOTAL,
+                "All messages must be readable after concurrent publish"
+            );
         }
 
         // Regression: concurrent reads from different topics must all return correct data
@@ -1592,9 +2188,15 @@ mod stream_tests {
 
             for t in 0..NUM_TOPICS {
                 let topic = format!("topic-{}", t);
-                manager.create_topic(topic.clone(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.clone(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
                 for i in 0..MSGS_PER_TOPIC {
-                    manager.publish(&topic, None, Bytes::from(format!("t{}-m{}", t, i))).await.unwrap();
+                    manager
+                        .publish(&topic, None, Bytes::from(format!("t{}-m{}", t, i)))
+                        .await
+                        .unwrap();
                 }
             }
 
@@ -1605,7 +2207,13 @@ mod stream_tests {
                 let topic = format!("topic-{}", t);
                 handles.push(tokio::spawn(async move {
                     let msgs = m.read(&topic, 1, MSGS_PER_TOPIC * 2).await.unwrap();
-                    assert_eq!(msgs.len(), MSGS_PER_TOPIC, "Topic {} should have {} messages", t, MSGS_PER_TOPIC);
+                    assert_eq!(
+                        msgs.len(),
+                        MSGS_PER_TOPIC,
+                        "Topic {} should have {} messages",
+                        t,
+                        MSGS_PER_TOPIC
+                    );
                     for (i, msg) in msgs.iter().enumerate() {
                         assert_eq!(msg.seq, (i + 1) as u64);
                         assert_eq!(msg.payload, Bytes::from(format!("t{}-m{}", t, i)));
@@ -1626,17 +2234,28 @@ mod stream_tests {
             let topic = "reg-append-failure";
             let topic_path = temp_dir.path().join(topic);
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
             tokio::fs::remove_dir_all(&topic_path).await.unwrap();
-            tokio::fs::write(&topic_path, b"not-a-directory").await.unwrap();
+            tokio::fs::write(&topic_path, b"not-a-directory")
+                .await
+                .unwrap();
 
-            let error = manager.publish(topic, None, Bytes::from("failed")).await.unwrap_err();
-            assert!(error.contains("Storage append failed"));
+            let error = manager
+                .publish(topic, None, Bytes::from("failed"))
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("Storage append failed"));
 
             tokio::fs::remove_file(&topic_path).await.unwrap();
             tokio::fs::create_dir_all(&topic_path).await.unwrap();
 
-            let seq = manager.publish(topic, None, Bytes::from("committed")).await.unwrap();
+            let seq = manager
+                .publish(topic, None, Bytes::from("committed"))
+                .await
+                .unwrap();
             assert_eq!(seq, 1, "a failed append must not consume a sequence");
             let messages = manager.read(topic, 1, 10).await.unwrap();
             assert_eq!(messages.len(), 1);
@@ -1650,15 +2269,29 @@ mod stream_tests {
             config.max_open_files = 1;
             let manager = build_manager(config).await;
 
-            manager.create_topic("read-error-a".to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish("read-error-a", None, Bytes::from("a")).await.unwrap();
-            manager.create_topic("read-error-b".to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish("read-error-b", None, Bytes::from("b")).await.unwrap();
+            manager
+                .create_topic("read-error-a".to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish("read-error-a", None, Bytes::from("a"))
+                .await
+                .unwrap();
+            manager
+                .create_topic("read-error-b".to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            manager
+                .publish("read-error-b", None, Bytes::from("b"))
+                .await
+                .unwrap();
 
-            tokio::fs::remove_file(temp_dir.path().join("read-error-a/1.log")).await.unwrap();
+            tokio::fs::remove_file(temp_dir.path().join("read-error-a/1.log"))
+                .await
+                .unwrap();
 
             let error = manager.read("read-error-a", 1, 10).await.unwrap_err();
-            assert!(error.contains("Storage read failed"));
+            assert!(error.message.contains("Storage read failed"));
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1695,9 +2328,15 @@ mod stream_tests {
             }
 
             for topic in 0..TOPICS {
-                let messages = manager.read(&format!("bounded-{}", topic), 1, 10).await.unwrap();
+                let messages = manager
+                    .read(&format!("bounded-{}", topic), 1, 10)
+                    .await
+                    .unwrap();
                 assert_eq!(messages.len(), 1);
-                assert_eq!(messages[0].payload, Bytes::from(format!("message-{}", topic)));
+                assert_eq!(
+                    messages[0].payload,
+                    Bytes::from(format!("message-{}", topic))
+                );
             }
         }
 
@@ -1716,9 +2355,10 @@ mod stream_tests {
 
                 let deleting_manager = manager.clone();
                 let deleting_topic = topic.clone();
-                let delete = tokio::spawn(async move {
-                    deleting_manager.delete_topic(deleting_topic).await
-                });
+                let delete =
+                    tokio::spawn(
+                        async move { deleting_manager.delete_topic(deleting_topic).await },
+                    );
 
                 let mut publishers = Vec::new();
                 for publisher in 0..16 {
@@ -1763,8 +2403,14 @@ mod stream_tests {
 
             {
                 let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-                manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("poison"))
+                    .await
+                    .unwrap();
 
                 let consumer = join_session(&manager, group, topic, "client-A").await;
                 // Fetch, timeout, fetch, timeout → DLT (max_deliveries=2)
@@ -1784,7 +2430,10 @@ mod stream_tests {
                 let manager2 = build_manager(config.clone()).await;
                 let consumer = join_session(&manager2, group, topic, "client-A").await;
                 let batch = fetch_messages(&manager2, group, topic, &consumer, 10, 0).await;
-                assert!(batch.is_empty(), "Keyless DLT message must NOT be redelivered after restart");
+                assert!(
+                    batch.is_empty(),
+                    "Keyless DLT message must NOT be redelivered after restart"
+                );
 
                 let dlt = manager2.peek_dlt(topic, group, 10, 0).await.unwrap();
                 assert_eq!(dlt.len(), 1, "DLT entry should survive restart");
@@ -1808,7 +2457,10 @@ mod stream_tests {
                     .create_topic(topic.to_string(), StreamCreateOptions::default())
                     .await
                     .unwrap();
-                manager.publish(topic, None, Bytes::from("poison")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("poison"))
+                    .await
+                    .unwrap();
 
                 let consumer = join_session(&manager, group, topic, "client-A").await;
                 fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
@@ -1816,7 +2468,10 @@ mod stream_tests {
                 fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
-                assert_eq!(manager.peek_dlt(topic, group, 10, 0).await.unwrap().len(), 1);
+                assert_eq!(
+                    manager.peek_dlt(topic, group, 10, 0).await.unwrap().len(),
+                    1
+                );
                 manager.move_to_stream(topic, group, 1).await.unwrap();
                 manager.shutdown().await;
             }
@@ -1851,7 +2506,10 @@ mod stream_tests {
             tokio::fs::write(&seg_path, &file_content).await.unwrap();
 
             let file_size_before = tokio::fs::metadata(&seg_path).await.unwrap().len();
-            assert!(file_size_before > valid_len, "File should have partial bytes at end");
+            assert!(
+                file_size_before > valid_len,
+                "File should have partial bytes at end"
+            );
 
             // recover_topic should truncate the partial bytes
             let state = recover_topic("reg-partial", tmp.path().to_path_buf()).await;
@@ -1860,12 +2518,22 @@ mod stream_tests {
             assert!(state.index.contains_key(&2));
 
             let file_size_after = tokio::fs::metadata(&seg_path).await.unwrap().len();
-            assert_eq!(file_size_after, valid_len, "Partial trailing bytes must be truncated");
-            assert!(file_size_after < file_size_before, "File must be smaller after truncation");
+            assert_eq!(
+                file_size_after, valid_len,
+                "Partial trailing bytes must be truncated"
+            );
+            assert!(
+                file_size_after < file_size_before,
+                "File must be smaller after truncation"
+            );
 
             // Re-read should be clean
             let state2 = recover_topic("reg-partial", tmp.path().to_path_buf()).await;
-            assert_eq!(state2.index.len(), 2, "Re-recovery should find no corruption");
+            assert_eq!(
+                state2.index.len(),
+                2,
+                "Re-recovery should find no corruption"
+            );
         }
 
         #[tokio::test]
@@ -1883,7 +2551,10 @@ mod stream_tests {
 
             recover_topic("reg-partial-prefix", tmp.path().to_path_buf()).await;
 
-            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), valid_len);
+            assert_eq!(
+                tokio::fs::metadata(&seg_path).await.unwrap().len(),
+                valid_len
+            );
         }
 
         #[tokio::test]
@@ -1911,7 +2582,9 @@ mod stream_tests {
             tokio::fs::create_dir_all(&topic_dir).await.unwrap();
 
             let seg_path = topic_dir.join("1.log");
-            tokio::fs::write(&seg_path, u32::MAX.to_be_bytes()).await.unwrap();
+            tokio::fs::write(&seg_path, u32::MAX.to_be_bytes())
+                .await
+                .unwrap();
 
             let state = recover_topic("reg-oversized-record", tmp.path().to_path_buf()).await;
 
@@ -1927,11 +2600,15 @@ mod stream_tests {
 
             let mut first = Vec::new();
             serialize_message(&mut first, 1, 1000, None, b"msg1");
-            tokio::fs::write(topic_dir.join("1.log"), first).await.unwrap();
+            tokio::fs::write(topic_dir.join("1.log"), first)
+                .await
+                .unwrap();
 
             let mut later = Vec::new();
             serialize_message(&mut later, 3, 3000, None, b"msg3");
-            tokio::fs::write(topic_dir.join("3.log"), later).await.unwrap();
+            tokio::fs::write(topic_dir.join("3.log"), later)
+                .await
+                .unwrap();
 
             let state = recover_topic("reg-gap", tmp.path().to_path_buf()).await;
 
@@ -1957,7 +2634,10 @@ mod stream_tests {
             let state = recover_topic("reg-non-monotonic", tmp.path().to_path_buf()).await;
 
             assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1]);
-            assert_eq!(tokio::fs::metadata(&seg_path).await.unwrap().len(), first_len);
+            assert_eq!(
+                tokio::fs::metadata(&seg_path).await.unwrap().len(),
+                first_len
+            );
         }
 
         // Regression #5: ack must wake backpressured long-polling consumers
@@ -1970,7 +2650,10 @@ mod stream_tests {
             let topic = "reg-ack-wake";
             let group = "g-reg-ack-wake";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 4 messages
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=4)
@@ -1992,7 +2675,17 @@ mod stream_tests {
             let consumer_id = consumer.consumer_id.clone();
             let generation = consumer.generation;
             let fetch_handle = tokio::spawn(async move {
-                m_clone.fetch(&group_clone, &consumer_id, generation, 10, &topic_clone, 5000).await.unwrap()
+                m_clone
+                    .fetch(
+                        &group_clone,
+                        &consumer_id,
+                        generation,
+                        10,
+                        &topic_clone,
+                        5000,
+                    )
+                    .await
+                    .unwrap()
             });
 
             // Give the long-poll time to enter the waiting state
@@ -2000,13 +2693,24 @@ mod stream_tests {
 
             // Ack one message — frees a slot and wakes the consumer
             let start = Instant::now();
-            m.ack(group, topic, &consumer.consumer_id, consumer.generation, msgs[0].seq).await.unwrap();
+            m.ack(
+                group,
+                topic,
+                &consumer.consumer_id,
+                consumer.generation,
+                msgs[0].seq,
+            )
+            .await
+            .unwrap();
 
             // The long-poll should return quickly (not wait 5000ms)
             let result = fetch_handle.await.unwrap();
             let elapsed = start.elapsed();
 
-            assert!(!result.is_empty(), "Long-poll should deliver messages after ack frees a slot");
+            assert!(
+                !result.is_empty(),
+                "Long-poll should deliver messages after ack frees a slot"
+            );
             assert!(
                 elapsed < Duration::from_millis(2000),
                 "Long-poll should wake quickly after ack, took {:?}",
@@ -2023,7 +2727,10 @@ mod stream_tests {
             let topic = "reg-interleave";
             let group = "g-reg-interleave";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let consumer = join_session(&manager, group, topic, "client-A").await;
 
@@ -2035,7 +2742,17 @@ mod stream_tests {
             let consumer_id = consumer.consumer_id.clone();
             let generation = consumer.generation;
             let fetch_handle = tokio::spawn(async move {
-                m_clone.fetch(&group_clone, &consumer_id, generation, 10, &topic_clone, 5000).await.unwrap()
+                m_clone
+                    .fetch(
+                        &group_clone,
+                        &consumer_id,
+                        generation,
+                        10,
+                        &topic_clone,
+                        5000,
+                    )
+                    .await
+                    .unwrap()
             });
 
             // Give the long-poll time to enter waiting state
@@ -2043,12 +2760,18 @@ mod stream_tests {
 
             // Publish a message — should wake the long-poll
             let start = Instant::now();
-            m.publish(topic, None, Bytes::from("interleaved-msg")).await.unwrap();
+            m.publish(topic, None, Bytes::from("interleaved-msg"))
+                .await
+                .unwrap();
 
             let result = fetch_handle.await.unwrap();
             let elapsed = start.elapsed();
 
-            assert_eq!(result.len(), 1, "Long-poll should receive the published message");
+            assert_eq!(
+                result.len(),
+                1,
+                "Long-poll should receive the published message"
+            );
             assert_eq!(result[0].payload, Bytes::from("interleaved-msg"));
             assert!(
                 elapsed < Duration::from_millis(2000),
@@ -2069,7 +2792,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-high-pending";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 5000 messages
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=5000)
@@ -2101,7 +2827,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-ooo-ack";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
                 .map(|i| (None, Bytes::from(format!("msg-{}", i))))
@@ -2131,7 +2860,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-redelivery";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=200)
                 .map(|i| (None, Bytes::from(format!("msg-{}", i))))
@@ -2162,7 +2894,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-clamp-head";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 3000 messages
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=3000)
@@ -2196,7 +2931,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-dlt";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 50 messages
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=50)
@@ -2219,7 +2957,10 @@ mod stream_tests {
 
             // Check DLT has entries
             let dlt_entries = manager.peek_dlt(topic, "grp1", 100, 0).await.unwrap();
-            assert!(!dlt_entries.is_empty(), "DLT should have entries after max_deliveries exceeded");
+            assert!(
+                !dlt_entries.is_empty(),
+                "DLT should have entries after max_deliveries exceeded"
+            );
         }
 
         #[tokio::test]
@@ -2230,7 +2971,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-multi-consumer";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 1000 messages
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
@@ -2277,7 +3021,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-persist";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=1000)
                 .map(|i| (None, Bytes::from(format!("msg-{}", i))))
@@ -2307,7 +3054,10 @@ mod stream_tests {
             // Join group and verify ack_floor is preserved
             let consumer2 = join_session(&manager2, "grp1", topic, "conn1").await;
             let msgs2 = fetch_messages(&manager2, "grp1", topic, &consumer2, 10, 50).await;
-            assert!(msgs2.is_empty(), "Should not re-deliver acked messages after restart");
+            assert!(
+                msgs2.is_empty(),
+                "Should not re-deliver acked messages after restart"
+            );
         }
 
         #[tokio::test]
@@ -2318,7 +3068,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-per-key";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish 100 messages with 10 keys (10 messages per key)
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=100)
@@ -2336,7 +3089,8 @@ mod stream_tests {
             assert_eq!(msgs.len(), 10);
 
             // Verify each key appears exactly once
-            let keys: std::collections::HashSet<&Bytes> = msgs.iter().filter_map(|m| m.key.as_ref()).collect();
+            let keys: std::collections::HashSet<&Bytes> =
+                msgs.iter().filter_map(|m| m.key.as_ref()).collect();
             assert_eq!(keys.len(), 10);
 
             // Ack all 10 → should unblock next 10
@@ -2374,7 +3128,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "stress-disconnect";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=500)
                 .map(|i| (None, Bytes::from(format!("msg-{}", i))))
@@ -2387,7 +3144,10 @@ mod stream_tests {
             assert_eq!(msgs1.len(), 500);
 
             // Consumer 1 disconnects
-            manager.leave_group("grp1", topic, &c1.consumer_id, c1.generation).await.unwrap();
+            manager
+                .leave_group("grp1", topic, &c1.consumer_id, c1.generation)
+                .await
+                .unwrap();
 
             // Consumer 2 joins and fetches — should get all 500 redelivered
             let c2 = join_session(&manager, "grp1", topic, "conn2").await;
@@ -2407,7 +3167,10 @@ mod stream_tests {
             let manager = build_manager(config).await;
             let topic = "partial-batch";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             // Publish seq 1..=10
             let batch: Vec<(Option<Bytes>, Bytes)> = (1..=10)
@@ -2419,7 +3182,11 @@ mod stream_tests {
 
             // Fetch with limit=20 — only 10 exist, should get 10
             let msgs = fetch_messages(&manager, "grp1", topic, &consumer, 20, 50).await;
-            assert_eq!(msgs.len(), 10, "should get all available messages, not block on missing seqs");
+            assert_eq!(
+                msgs.len(),
+                10,
+                "should get all available messages, not block on missing seqs"
+            );
 
             // Verify seqs 1..=10
             let seqs: Vec<u64> = msgs.iter().map(|m| m.seq).collect();
@@ -2438,350 +3205,515 @@ mod stream_tests {
 
             // Fetch with limit=20 again — should get only 11..=15
             let msgs2 = fetch_messages(&manager, "grp1", topic, &consumer, 20, 50).await;
-            assert_eq!(msgs2.len(), 5, "should get only new messages, not retry old ones");
+            assert_eq!(
+                msgs2.len(),
+                5,
+                "should get only new messages, not retry old ones"
+            );
             let seqs2: Vec<u64> = msgs2.iter().map(|m| m.seq).collect();
             assert_eq!(seqs2, (11..=15).collect::<Vec<_>>());
         }
 
-    mod fd_cache_regression {
-        use super::*;
+        mod fd_cache_regression {
+            use super::*;
 
-        // Regression: read-after-write on same fd (O_APPEND + seek + read)
-        // Publish, read, publish more, read again — verify all messages visible.
-        #[tokio::test]
-        async fn read_after_write_same_fd() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = build_manager(config).await;
-            let topic = "fd-cache-rw";
+            // Regression: read-after-write on same fd (O_APPEND + seek + read)
+            // Publish, read, publish more, read again — verify all messages visible.
+            #[tokio::test]
+            async fn read_after_write_same_fd() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+                let manager = build_manager(config).await;
+                let topic = "fd-cache-rw";
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-            // Round 1: publish 3 messages
-            for i in 1..=3 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
+                // Round 1: publish 3 messages
+                for i in 1..=3 {
+                    manager
+                        .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                        .await
+                        .unwrap();
+                }
+
+                // Read 1: should see all 3
+                let msgs1 = manager.read(topic, 1, 100).await.unwrap();
+                assert_eq!(msgs1.len(), 3, "first read should see all 3 messages");
+                assert_eq!(msgs1[0].payload, Bytes::from("msg-1"));
+                assert_eq!(msgs1[2].payload, Bytes::from("msg-3"));
+
+                // Round 2: publish 3 more (same segment, same fd in cache)
+                for i in 4..=6 {
+                    manager
+                        .publish(topic, None, Bytes::from(format!("msg-{}", i)))
+                        .await
+                        .unwrap();
+                }
+
+                // Read 2: should see all 6
+                let msgs2 = manager.read(topic, 1, 100).await.unwrap();
+                assert_eq!(msgs2.len(), 6, "second read should see all 6 messages");
+                for (i, msg) in msgs2.iter().enumerate() {
+                    assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
+                    assert_eq!(msg.seq, (i + 1) as u64);
+                }
+
+                // Read 3: partial range
+                let msgs3 = manager.read(topic, 4, 2).await.unwrap();
+                assert_eq!(msgs3.len(), 2, "partial read should see 2 messages");
+                assert_eq!(msgs3[0].seq, 4);
+                assert_eq!(msgs3[1].seq, 5);
             }
-
-            // Read 1: should see all 3
-            let msgs1 = manager.read(topic, 1, 100).await.unwrap();
-            assert_eq!(msgs1.len(), 3, "first read should see all 3 messages");
-            assert_eq!(msgs1[0].payload, Bytes::from("msg-1"));
-            assert_eq!(msgs1[2].payload, Bytes::from("msg-3"));
-
-            // Round 2: publish 3 more (same segment, same fd in cache)
-            for i in 4..=6 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{}", i))).await.unwrap();
-            }
-
-            // Read 2: should see all 6
-            let msgs2 = manager.read(topic, 1, 100).await.unwrap();
-            assert_eq!(msgs2.len(), 6, "second read should see all 6 messages");
-            for (i, msg) in msgs2.iter().enumerate() {
-                assert_eq!(msg.payload, Bytes::from(format!("msg-{}", i + 1)));
-                assert_eq!(msg.seq, (i + 1) as u64);
-            }
-
-            // Read 3: partial range
-            let msgs3 = manager.read(topic, 4, 2).await.unwrap();
-            assert_eq!(msgs3.len(), 2, "partial read should see 2 messages");
-            assert_eq!(msgs3[0].seq, 4);
-            assert_eq!(msgs3[1].seq, 5);
         }
-    }
 
-    mod shutdown {
-        use super::*;
+        mod shutdown {
+            use super::*;
 
-        #[tokio::test]
-        async fn test_shutdown_flushes_messages_and_group_state() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+            #[tokio::test]
+            async fn test_shutdown_flushes_messages_and_group_state() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
 
-            let topic = "shutdown-flush";
-            let group = "g-shutdown";
+                let topic = "shutdown-flush";
+                let group = "g-shutdown";
 
-            {
-                let manager = build_manager(config.clone()).await;
-                manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-                manager.publish(topic, None, Bytes::from("msg1")).await.unwrap();
-                manager.publish(topic, None, Bytes::from("msg2")).await.unwrap();
+                {
+                    let manager = build_manager(config.clone()).await;
+                    manager
+                        .create_topic(topic.to_string(), StreamCreateOptions::default())
+                        .await
+                        .unwrap();
+                    manager
+                        .publish(topic, None, Bytes::from("msg1"))
+                        .await
+                        .unwrap();
+                    manager
+                        .publish(topic, None, Bytes::from("msg2"))
+                        .await
+                        .unwrap();
 
+                    let consumer = join_session(&manager, group, topic, "client-A").await;
+                    let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
+                    assert_eq!(msgs.len(), 2);
+                    ack_message(&manager, group, topic, &consumer, msgs[0].seq).await;
+                    ack_message(&manager, group, topic, &consumer, msgs[1].seq).await;
+
+                    // Shutdown immediately — no sleep, no waiting for flush timer
+                    manager.shutdown().await;
+                }
+
+                // Recover with a new manager
+                {
+                    let manager = build_manager(config).await;
+
+                    let msgs = manager.read(topic, 1, 10).await.unwrap();
+                    assert_eq!(msgs.len(), 2, "Messages should survive shutdown flush");
+
+                    let consumer = join_session(&manager, group, topic, "client-A").await;
+                    assert_eq!(
+                        consumer.ack_floor, 2,
+                        "Ack floor should survive shutdown flush"
+                    );
+                }
+            }
+
+            /// When a consumer ACKs a message and then leaves the group, the ACK must
+            /// be applied before the LEAVE removes the member. A new consumer joining
+            /// the same group must NOT see the acked message redelivered.
+            #[tokio::test]
+            async fn test_ack_before_leave_does_not_redeliver_acked() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+                let manager = build_manager(config).await;
+                let topic = "ack-before-leave";
+                let group = "g-ack-leave";
+
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg-1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("msg-2"))
+                    .await
+                    .unwrap();
+
+                // Consumer joins and fetches both messages
                 let consumer = join_session(&manager, group, topic, "client-A").await;
                 let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
                 assert_eq!(msgs.len(), 2);
-                ack_message(&manager, group, topic, &consumer, msgs[0].seq).await;
-                ack_message(&manager, group, topic, &consumer, msgs[1].seq).await;
 
-                // Shutdown immediately — no sleep, no waiting for flush timer
-                manager.shutdown().await;
+                // ACK seq 1, then immediately LEAVE — inline processing ensures ACK
+                // is applied before LEAVE removes the member.
+                ack_message(&manager, group, topic, &consumer, 1).await;
+                manager
+                    .leave_group(group, topic, &consumer.consumer_id, consumer.generation)
+                    .await
+                    .unwrap();
+
+                // A new consumer joining the same group should see only seq 2
+                // (seq 1 was acked before LEAVE, so it must not be redelivered)
+                let consumer2 = join_session(&manager, group, topic, "client-B").await;
+                let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+                assert_eq!(
+                    msgs2.len(),
+                    1,
+                    "seq 1 was acked before LEAVE — must not be redelivered"
+                );
+                assert_eq!(msgs2[0].seq, 2);
             }
 
-            // Recover with a new manager
-            {
+            /// After SEEK to beginning, a consumer that re-joins the group must see
+            /// all messages from seq 1 again. SEEK must reset the delivery cursor
+            /// before the next FETCH reads.
+            #[tokio::test]
+            async fn test_seek_to_beginning_then_refetch_returns_all_messages() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
                 let manager = build_manager(config).await;
+                let topic = "seek-refetch";
+                let group = "g-seek-refetch";
 
-                let msgs = manager.read(topic, 1, 10).await.unwrap();
-                assert_eq!(msgs.len(), 2, "Messages should survive shutdown flush");
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
+                for i in 1..=5 {
+                    manager
+                        .publish(topic, None, Bytes::from(format!("msg-{i}")))
+                        .await
+                        .unwrap();
+                }
 
                 let consumer = join_session(&manager, group, topic, "client-A").await;
-                assert_eq!(consumer.ack_floor, 2, "Ack floor should survive shutdown flush");
+
+                // Fetch and ack first 3 messages
+                let msgs = fetch_messages(&manager, group, topic, &consumer, 3, 0).await;
+                assert_eq!(msgs.len(), 3);
+                for m in &msgs {
+                    ack_message(&manager, group, topic, &consumer, m.seq).await;
+                }
+
+                // SEEK to beginning, then re-join (seek bumps generation) and FETCH —
+                // inline processing ensures SEEK resets the cursor before FETCH reads.
+                use nexo::brokers::stream::options::SeekTarget;
+                manager
+                    .seek(group, topic, SeekTarget::Beginning)
+                    .await
+                    .unwrap();
+
+                let consumer2 = join_session(&manager, group, topic, "client-A").await;
+                let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+                assert_eq!(
+                    msgs2.len(),
+                    5,
+                    "SEEK to beginning should make all messages available"
+                );
+                assert_eq!(msgs2[0].seq, 1);
             }
         }
 
-        /// When a consumer ACKs a message and then leaves the group, the ACK must
-        /// be applied before the LEAVE removes the member. A new consumer joining
-        /// the same group must NOT see the acked message redelivered.
-        #[tokio::test]
-        async fn test_ack_before_leave_does_not_redeliver_acked() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = build_manager(config).await;
-            let topic = "ack-before-leave";
-            let group = "g-ack-leave";
+        mod delivery_guarantees {
+            use super::*;
+            use nexo::brokers::stream::options::{RetentionOptions, SeekTarget};
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            manager.publish(topic, None, Bytes::from("msg-1")).await.unwrap();
-            manager.publish(topic, None, Bytes::from("msg-2")).await.unwrap();
+            /// SEEK must clear all DLT entries and parked keys — it is a full reset.
+            /// After seek, a previously-poisoned key must accept new messages.
+            #[tokio::test]
+            async fn seek_clears_dlt_and_unblocks_parked_keys() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+                config.ack_wait_ms = 50;
+                config.max_deliveries = 2;
+                let manager = build_manager(config).await;
+                let topic = "seek-clears-dlt";
+                let group = "g-seek-clears-dlt";
+                let key = Bytes::from("poison-key");
 
-            // Consumer joins and fetches both messages
-            let consumer = join_session(&manager, group, topic, "client-A").await;
-            let msgs = fetch_messages(&manager, group, topic, &consumer, 2, 0).await;
-            assert_eq!(msgs.len(), 2);
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-            // ACK seq 1, then immediately LEAVE — inline processing ensures ACK
-            // is applied before LEAVE removes the member.
-            ack_message(&manager, group, topic, &consumer, 1).await;
-            manager.leave_group(group, topic, &consumer.consumer_id, consumer.generation).await.unwrap();
+                // Publish 3 messages with same key
+                for i in 1..=3 {
+                    manager
+                        .publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i)))
+                        .await
+                        .unwrap();
+                }
 
-            // A new consumer joining the same group should see only seq 2
-            // (seq 1 was acked before LEAVE, so it must not be redelivered)
-            let consumer2 = join_session(&manager, group, topic, "client-B").await;
-            let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
-            assert_eq!(msgs2.len(), 1, "seq 1 was acked before LEAVE — must not be redelivered");
-            assert_eq!(msgs2[0].seq, 2);
-        }
+                let consumer = join_session(&manager, group, topic, "client-A").await;
 
-        /// After SEEK to beginning, a consumer that re-joins the group must see
-        /// all messages from seq 1 again. SEEK must reset the delivery cursor
-        /// before the next FETCH reads.
-        #[tokio::test]
-        async fn test_seek_to_beginning_then_refetch_returns_all_messages() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = build_manager(config).await;
-            let topic = "seek-refetch";
-            let group = "g-seek-refetch";
+                // Fetch msg-1, let it timeout twice → parked in DLT
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-            for i in 1..=5 {
-                manager.publish(topic, None, Bytes::from(format!("msg-{i}"))).await.unwrap();
+                // Trigger fetch to auto-park msg-2 and msg-3 (same key is poisoned)
+                let batch_parked = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+                assert_eq!(
+                    batch_parked.len(),
+                    0,
+                    "All same-key messages should be auto-parked"
+                );
+
+                // Verify DLT has 3 entries
+                let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert_eq!(
+                    dlt.len(),
+                    3,
+                    "All 3 same-key messages should be in DLT before seek"
+                );
+
+                // SEEK to beginning — full reset
+                manager
+                    .seek(group, topic, SeekTarget::Beginning)
+                    .await
+                    .unwrap();
+
+                // DLT should be empty
+                let dlt_after = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
+                assert_eq!(
+                    dlt_after.len(),
+                    0,
+                    "DLT should be empty after seek (full reset)"
+                );
+
+                // Re-join (seek bumps generation) and publish a new message with same key
+                let consumer2 = join_session(&manager, group, topic, "client-A").await;
+                manager
+                    .publish(topic, Some(key.clone()), Bytes::from("msg-4"))
+                    .await
+                    .unwrap();
+
+                // After seek, per-key ordering still applies — all 4 messages share the
+                // same key, so they are delivered one at a time. The key is no longer
+                // poisoned, so seq=1 is deliverable immediately (previously it was blocked).
+                let batch = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+                assert!(
+                    !batch.is_empty(),
+                    "Previously-parked key should be unblocked after seek"
+                );
+                assert_eq!(
+                    batch[0].seq, 1,
+                    "First message should be deliverable (key unblocked by seek)"
+                );
+
+                // ACK through the old messages one at a time (per-key ordering delivers
+                // the next only after the previous is acked) until msg-4 becomes available.
+                let mut current_seq = batch[0].seq;
+                for _ in 0..3 {
+                    ack_message(&manager, group, topic, &consumer2, current_seq).await;
+                    let next = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
+                    assert_eq!(next.len(), 1, "Next message should be unblocked after ack");
+                    current_seq = next[0].seq;
+                }
+                assert_eq!(
+                    current_seq, 4,
+                    "Should reach msg-4 after acking predecessors"
+                );
+                assert_eq!(
+                    fetch_messages(&manager, group, topic, &consumer2, 10, 0)
+                        .await
+                        .len(),
+                    0,
+                    "No more messages after msg-4 is fetched"
+                );
             }
 
-            let consumer = join_session(&manager, group, topic, "client-A").await;
+            /// Retention options set via StreamCreateOptions must override system defaults.
+            /// Messages exceeding maxBytes should be deleted by the retention task.
+            #[tokio::test]
+            async fn retention_override_via_create_options_enforces_max_bytes() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let path_str = temp_dir.path().to_str().unwrap().to_string();
 
-            // Fetch and ack first 3 messages
-            let msgs = fetch_messages(&manager, group, topic, &consumer, 3, 0).await;
-            assert_eq!(msgs.len(), 3);
-            for m in &msgs {
-                ack_message(&manager, group, topic, &consumer, m.seq).await;
+                let mut config = get_test_config(Some(&path_str));
+                config.max_segment_size = 100;
+                config.retention_check_interval_ms = 100;
+                config.default_flush_ms = 50;
+                // Set a large system default to prove the override takes precedence
+                config.default_retention_bytes = 10_000_000;
+
+                let manager = build_manager(config).await;
+                let topic = "retention-override";
+
+                // Create with a small per-topic retention override
+                let options = StreamCreateOptions {
+                    retention: Some(RetentionOptions {
+                        max_age_ms: None,
+                        max_bytes: Some(250),
+                    }),
+                };
+                manager
+                    .create_topic(topic.to_string(), options)
+                    .await
+                    .unwrap();
+
+                // Publish 7 messages (~55 bytes each with overhead → total > 250)
+                for i in 1..=7 {
+                    manager
+                        .publish(
+                            topic,
+                            None,
+                            Bytes::from(format!(
+                                "msg{}-50bytes-payload-0000000000000000000000000000",
+                                i
+                            )),
+                        )
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                }
+
+                // Wait for retention task to run
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Oldest segment should be deleted (total > 250 bytes → first segment removed)
+                let topic_path = temp_dir.path().join(topic);
+                let files: Vec<String> = std::fs::read_dir(&topic_path)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                    .filter(|name| {
+                        name.ends_with(".log") && name != "groups.log" && name != "state.log"
+                    })
+                    .collect();
+
+                assert!(
+                    !files.contains(&"1.log".to_string()),
+                    "Oldest segment should be deleted under per-topic retention override"
+                );
+
+                // Read should return only retained messages (seq > 1)
+                let retained = manager.read(topic, 1, 20).await.unwrap();
+                assert!(!retained.is_empty(), "Should have retained messages");
+                assert!(
+                    retained[0].seq > 1,
+                    "First message should be deleted by retention"
+                );
             }
 
-            // SEEK to beginning, then re-join (seek bumps generation) and FETCH —
-            // inline processing ensures SEEK resets the cursor before FETCH reads.
-            use nexo::brokers::stream::options::SeekTarget;
-            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
+            /// Per-key ordering from the consumer's perspective: messages with the same key
+            /// are delivered one at a time in publication order, while keyless messages
+            /// flow in parallel. This test verifies the end-to-end delivery contract
+            /// without relying on internal state inspection.
+            #[tokio::test]
+            async fn per_key_ordering_consumer_receives_same_key_in_publication_order() {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
+                let manager = build_manager(config).await;
+                let topic = "per-key-e2e";
+                let group = "g-per-key-e2e";
+                let key_a = Bytes::from("user-A");
+                let key_b = Bytes::from("user-B");
 
-            let consumer2 = join_session(&manager, group, topic, "client-A").await;
-            let msgs2 = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
-            assert_eq!(msgs2.len(), 5, "SEEK to beginning should make all messages available");
-            assert_eq!(msgs2[0].seq, 1);
-        }
-    }
+                manager
+                    .create_topic(topic.to_string(), StreamCreateOptions::default())
+                    .await
+                    .unwrap();
 
-    mod delivery_guarantees {
-        use super::*;
-        use nexo::brokers::stream::options::{SeekTarget, RetentionOptions};
+                // Publish interleaved messages: A1, B1, A2, no-key, B2, A3
+                manager
+                    .publish(topic, Some(key_a.clone()), Bytes::from("A1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, Some(key_b.clone()), Bytes::from("B1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, Some(key_a.clone()), Bytes::from("A2"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("no-key-1"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, Some(key_b.clone()), Bytes::from("B2"))
+                    .await
+                    .unwrap();
+                manager
+                    .publish(topic, Some(key_a.clone()), Bytes::from("A3"))
+                    .await
+                    .unwrap();
 
-        /// SEEK must clear all DLT entries and parked keys — it is a full reset.
-        /// After seek, a previously-poisoned key must accept new messages.
-        #[tokio::test]
-        async fn seek_clears_dlt_and_unblocks_parked_keys() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let mut config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            config.ack_wait_ms = 50;
-            config.max_deliveries = 2;
-            let manager = build_manager(config).await;
-            let topic = "seek-clears-dlt";
-            let group = "g-seek-clears-dlt";
-            let key = Bytes::from("poison-key");
+                let consumer = join_session(&manager, group, topic, "client-A").await;
 
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+                // First fetch: should get A1, B1, no-key-1 (one per key + keyless)
+                // A2, B2, A3 are blocked by their respective keys
+                let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+                assert_eq!(batch1.len(), 3, "Should get 1 per key + 1 keyless");
 
-            // Publish 3 messages with same key
-            for i in 1..=3 {
-                manager.publish(topic, Some(key.clone()), Bytes::from(format!("msg-{}", i))).await.unwrap();
+                let payloads1: Vec<&str> = batch1
+                    .iter()
+                    .map(|m| std::str::from_utf8(&m.payload).unwrap())
+                    .collect();
+                assert!(
+                    payloads1.contains(&"A1"),
+                    "A1 should be delivered (first for key-A)"
+                );
+                assert!(
+                    payloads1.contains(&"B1"),
+                    "B1 should be delivered (first for key-B)"
+                );
+                assert!(
+                    payloads1.contains(&"no-key-1"),
+                    "Keyless message should be delivered"
+                );
+
+                // ACK A1 → should unblock A2 (but not A3)
+                let a1_seq = batch1
+                    .iter()
+                    .find(|m| m.payload == Bytes::from("A1"))
+                    .unwrap()
+                    .seq;
+                ack_message(&manager, group, topic, &consumer, a1_seq).await;
+
+                // Second fetch: should get A2 (unblocked by A1 ack)
+                let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+                assert_eq!(batch2.len(), 1, "Only A2 should be unblocked after A1 ack");
+                assert_eq!(
+                    batch2[0].payload,
+                    Bytes::from("A2"),
+                    "A2 must be delivered after A1 is acked"
+                );
+
+                // ACK A2 → should unblock A3
+                ack_message(&manager, group, topic, &consumer, batch2[0].seq).await;
+
+                let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+                assert_eq!(batch3.len(), 1, "Only A3 should be unblocked after A2 ack");
+                assert_eq!(
+                    batch3[0].payload,
+                    Bytes::from("A3"),
+                    "A3 must be delivered after A2 is acked"
+                );
+
+                // ACK B1 → should unblock B2
+                let b1_seq = batch1
+                    .iter()
+                    .find(|m| m.payload == Bytes::from("B1"))
+                    .unwrap()
+                    .seq;
+                ack_message(&manager, group, topic, &consumer, b1_seq).await;
+
+                let batch4 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
+                assert_eq!(batch4.len(), 1, "Only B2 should be unblocked after B1 ack");
+                assert_eq!(
+                    batch4[0].payload,
+                    Bytes::from("B2"),
+                    "B2 must be delivered after B1 is acked"
+                );
             }
-
-            let consumer = join_session(&manager, group, topic, "client-A").await;
-
-            // Fetch msg-1, let it timeout twice → parked in DLT
-            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            fetch_messages(&manager, group, topic, &consumer, 1, 0).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
-            // Trigger fetch to auto-park msg-2 and msg-3 (same key is poisoned)
-            let batch_parked = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch_parked.len(), 0, "All same-key messages should be auto-parked");
-
-            // Verify DLT has 3 entries
-            let dlt = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
-            assert_eq!(dlt.len(), 3, "All 3 same-key messages should be in DLT before seek");
-
-            // SEEK to beginning — full reset
-            manager.seek(group, topic, SeekTarget::Beginning).await.unwrap();
-
-            // DLT should be empty
-            let dlt_after = manager.peek_dlt(topic, group, 10, 0).await.unwrap();
-            assert_eq!(dlt_after.len(), 0, "DLT should be empty after seek (full reset)");
-
-            // Re-join (seek bumps generation) and publish a new message with same key
-            let consumer2 = join_session(&manager, group, topic, "client-A").await;
-            manager.publish(topic, Some(key.clone()), Bytes::from("msg-4")).await.unwrap();
-
-            // After seek, per-key ordering still applies — all 4 messages share the
-            // same key, so they are delivered one at a time. The key is no longer
-            // poisoned, so seq=1 is deliverable immediately (previously it was blocked).
-            let batch = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
-            assert!(!batch.is_empty(), "Previously-parked key should be unblocked after seek");
-            assert_eq!(batch[0].seq, 1, "First message should be deliverable (key unblocked by seek)");
-
-            // ACK through the old messages one at a time (per-key ordering delivers
-            // the next only after the previous is acked) until msg-4 becomes available.
-            let mut current_seq = batch[0].seq;
-            for _ in 0..3 {
-                ack_message(&manager, group, topic, &consumer2, current_seq).await;
-                let next = fetch_messages(&manager, group, topic, &consumer2, 10, 0).await;
-                assert_eq!(next.len(), 1, "Next message should be unblocked after ack");
-                current_seq = next[0].seq;
-            }
-            assert_eq!(current_seq, 4, "Should reach msg-4 after acking predecessors");
-            assert_eq!(fetch_messages(&manager, group, topic, &consumer2, 10, 0).await.len(),
-                0, "No more messages after msg-4 is fetched");
         }
-
-        /// Retention options set via StreamCreateOptions must override system defaults.
-        /// Messages exceeding maxBytes should be deleted by the retention task.
-        #[tokio::test]
-        async fn retention_override_via_create_options_enforces_max_bytes() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let path_str = temp_dir.path().to_str().unwrap().to_string();
-
-            let mut config = get_test_config(Some(&path_str));
-            config.max_segment_size = 100;
-            config.retention_check_interval_ms = 100;
-            config.default_flush_ms = 50;
-            // Set a large system default to prove the override takes precedence
-            config.default_retention_bytes = 10_000_000;
-
-            let manager = build_manager(config).await;
-            let topic = "retention-override";
-
-            // Create with a small per-topic retention override
-            let options = StreamCreateOptions {
-                retention: Some(RetentionOptions {
-                    max_age_ms: None,
-                    max_bytes: Some(250),
-                }),
-            };
-            manager.create_topic(topic.to_string(), options).await.unwrap();
-
-            // Publish 7 messages (~55 bytes each with overhead → total > 250)
-            for i in 1..=7 {
-                manager.publish(topic, None, Bytes::from(format!("msg{}-50bytes-payload-0000000000000000000000000000", i))).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(60)).await;
-            }
-
-            // Wait for retention task to run
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            // Oldest segment should be deleted (total > 250 bytes → first segment removed)
-            let topic_path = temp_dir.path().join(topic);
-            let files: Vec<String> = std::fs::read_dir(&topic_path)
-                .unwrap()
-                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-                .filter(|name| name.ends_with(".log") && name != "groups.log" && name != "state.log")
-                .collect();
-
-            assert!(!files.contains(&"1.log".to_string()),
-                "Oldest segment should be deleted under per-topic retention override");
-
-            // Read should return only retained messages (seq > 1)
-            let retained = manager.read(topic, 1, 20).await.unwrap();
-            assert!(!retained.is_empty(), "Should have retained messages");
-            assert!(retained[0].seq > 1, "First message should be deleted by retention");
-        }
-
-        /// Per-key ordering from the consumer's perspective: messages with the same key
-        /// are delivered one at a time in publication order, while keyless messages
-        /// flow in parallel. This test verifies the end-to-end delivery contract
-        /// without relying on internal state inspection.
-        #[tokio::test]
-        async fn per_key_ordering_consumer_receives_same_key_in_publication_order() {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
-            let manager = build_manager(config).await;
-            let topic = "per-key-e2e";
-            let group = "g-per-key-e2e";
-            let key_a = Bytes::from("user-A");
-            let key_b = Bytes::from("user-B");
-
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
-
-            // Publish interleaved messages: A1, B1, A2, no-key, B2, A3
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("A1")).await.unwrap();
-            manager.publish(topic, Some(key_b.clone()), Bytes::from("B1")).await.unwrap();
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("A2")).await.unwrap();
-            manager.publish(topic, None, Bytes::from("no-key-1")).await.unwrap();
-            manager.publish(topic, Some(key_b.clone()), Bytes::from("B2")).await.unwrap();
-            manager.publish(topic, Some(key_a.clone()), Bytes::from("A3")).await.unwrap();
-
-            let consumer = join_session(&manager, group, topic, "client-A").await;
-
-            // First fetch: should get A1, B1, no-key-1 (one per key + keyless)
-            // A2, B2, A3 are blocked by their respective keys
-            let batch1 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch1.len(), 3, "Should get 1 per key + 1 keyless");
-
-            let payloads1: Vec<&str> = batch1.iter().map(|m| std::str::from_utf8(&m.payload).unwrap()).collect();
-            assert!(payloads1.contains(&"A1"), "A1 should be delivered (first for key-A)");
-            assert!(payloads1.contains(&"B1"), "B1 should be delivered (first for key-B)");
-            assert!(payloads1.contains(&"no-key-1"), "Keyless message should be delivered");
-
-            // ACK A1 → should unblock A2 (but not A3)
-            let a1_seq = batch1.iter().find(|m| m.payload == Bytes::from("A1")).unwrap().seq;
-            ack_message(&manager, group, topic, &consumer, a1_seq).await;
-
-            // Second fetch: should get A2 (unblocked by A1 ack)
-            let batch2 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch2.len(), 1, "Only A2 should be unblocked after A1 ack");
-            assert_eq!(batch2[0].payload, Bytes::from("A2"), "A2 must be delivered after A1 is acked");
-
-            // ACK A2 → should unblock A3
-            ack_message(&manager, group, topic, &consumer, batch2[0].seq).await;
-
-            let batch3 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch3.len(), 1, "Only A3 should be unblocked after A2 ack");
-            assert_eq!(batch3[0].payload, Bytes::from("A3"), "A3 must be delivered after A2 is acked");
-
-            // ACK B1 → should unblock B2
-            let b1_seq = batch1.iter().find(|m| m.payload == Bytes::from("B1")).unwrap().seq;
-            ack_message(&manager, group, topic, &consumer, b1_seq).await;
-
-            let batch4 = fetch_messages(&manager, group, topic, &consumer, 10, 0).await;
-            assert_eq!(batch4.len(), 1, "Only B2 should be unblocked after B1 ack");
-            assert_eq!(batch4[0].payload, Bytes::from("B2"), "B2 must be delivered after B1 is acked");
-        }
-    }
     }
 }

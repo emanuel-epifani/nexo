@@ -10,11 +10,18 @@ use uuid::Uuid;
 
 use crate::brokers::pub_sub::PubSubMessage;
 use crate::config::ServerConfig;
+use crate::protocol::{
+    ErrorCode, InboundFrame, NexoCodec, OutboundFrame, ParseError, Response, TYPE_REQUEST,
+    TYPE_REQUEST_NO_RESPONSE,
+};
 use crate::transport::tcp::dispatcher::{is_inline_opcode, Dispatcher};
-use crate::protocol::{InboundFrame, OutboundFrame, ParseError, Response, TYPE_REQUEST, TYPE_REQUEST_NO_RESPONSE, NexoCodec};
 use crate::NexoEngine;
 
-pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_config: ServerConfig) -> Result<(), String> {
+pub async fn handle_connection(
+    socket: TcpStream,
+    engine: NexoEngine,
+    server_config: ServerConfig,
+) -> Result<(), String> {
     let engine = Arc::new(engine); // Wrapped in Arc once for all tasks
 
     // ==========================================
@@ -34,9 +41,8 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
     // ACT 2: PUBSUB PUSH BRIDGE
     // ==========================================
     // Channel to receive push notifications from the PubSub Engine
-    let (push_tx, mut push_rx) = mpsc::channel::<Arc<PubSubMessage>>(
-        engine.pubsub.push_channel_capacity(),
-    );
+    let (push_tx, mut push_rx) =
+        mpsc::channel::<Arc<PubSubMessage>>(engine.pubsub.push_channel_capacity());
     engine.pubsub.connect(&session_id, push_tx);
 
     // Background task: forwards PubSub pushes to the socket's outbound channel
@@ -80,7 +86,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
                         _ => {
                             let _ = outbound_tx.send(OutboundFrame::Response {
                                 id,
-                                response: Response::Error("Unsupported frame type".into()),
+                                response: Response::error(ErrorCode::ProtocolError, "Unsupported frame type"),
                             }).await;
                         }
                     }
@@ -104,7 +110,7 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
                             _ => {
                                 let _ = tx_clone.send(OutboundFrame::Response {
                                     id,
-                                    response: Response::Error("Unsupported frame type".into()),
+                                    response: Response::error(ErrorCode::ProtocolError, "Unsupported frame type"),
                                 }).await;
                             }
                         }
@@ -143,7 +149,6 @@ pub async fn handle_connection(socket: TcpStream, engine: NexoEngine, server_con
 
     Ok(())
 }
-
 
 async fn run_socket(
     reader: OwnedReadHalf,

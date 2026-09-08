@@ -1,16 +1,16 @@
 #![deny(warnings)]
 
-pub mod protocol;
-pub mod transport;
 pub mod brokers;
 pub mod config;
+pub mod protocol;
+pub mod transport;
 
-use std::sync::Arc;
-use crate::brokers::store::StoreManager;
-use crate::brokers::queue::QueueManager;
 use crate::brokers::pub_sub::PubSubManager;
+use crate::brokers::queue::QueueManager;
+use crate::brokers::store::StoreManager;
 use crate::brokers::stream::StreamManager;
 use crate::config::Config;
+use std::sync::Arc;
 
 // ========================================
 // ENGINE (The Singleton)
@@ -27,7 +27,7 @@ pub struct NexoEngine {
 impl NexoEngine {
     pub async fn new(config: &Config) -> Self {
         let pubsub = Arc::new(PubSubManager::new(Arc::new(config.pubsub.clone())));
-        
+
         Self {
             store: Arc::new(StoreManager::new(Arc::new(config.store.clone()))),
             queue: Arc::new(QueueManager::new(Arc::new(config.queue.clone()))),

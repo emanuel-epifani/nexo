@@ -48,25 +48,21 @@ Benchmarks run on MacBook Pro M4 (Single Node):
 
 ## Quick Example
 
+Queue and Stream are provisioned separately by deployment or administrative code. Application code retrieves them with fail-fast `get()` calls.
+
 ::: code-group
 
 ```typescript
 import { NexoClient } from '@emanuelepifani/nexo-client';
 
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
+const queue = await client.queue.get<Email>('emails');
+const stream = await client.stream.get<Event>('events');
+const alerts = client.pubsub.topic<Alert>('alerts');
 
-// Store
-await client.store.map.set("user:1", { name: "Max", role: "admin" });
-
-// Pub/Sub
-await client.pubsub('alerts').publish({ level: "high" });
-
-// Queue
-const q = await client.queue("emails").create();
-await q.push({ to: "test@test.com" });
-
-// Stream
-const stream = await client.stream('events').create();
+await client.store.map.set('user:1', { name: 'Max', role: 'admin' });
+await alerts.publish({ level: 'high' });
+await queue.push({ to: 'test@test.com' });
 await stream.publish({ type: 'login', userId: 'u1' });
 ```
 
@@ -74,21 +70,13 @@ await stream.publish({ type: 'login', userId: 'u1' });
 from nexo import NexoClient, NexoQueue, NexoStream, NexoTopic
 
 client = await NexoClient.connect(host="localhost", port=7654)
+queue: NexoQueue[Email] = await client.queue.get("emails")
+stream: NexoStream[Event] = await client.stream.get("events")
+alerts: NexoTopic[Alert] = client.pubsub.topic("alerts")
 
-# Store
 await client.store.map.set("user:1", {"name": "Max", "role": "admin"})
-user: User | None = await client.store.map.get("user:1")
-
-# Pub/Sub
-alerts: NexoTopic[Alert] = client.pubsub("alerts")
 await alerts.publish({"level": "high"})
-
-# Queue
-q: NexoQueue[Email] = await client.queue("emails").create()
-await q.push({"to": "test@test.com"})
-
-# Stream
-stream: NexoStream[Event] = await client.stream("events").create()
+await queue.push({"to": "test@test.com"})
 await stream.publish({"type": "login", "userId": "u1"})
 ```
 

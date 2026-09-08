@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nexo } from '../nexo';
+import { createQueue, createStream, nexo } from '../nexo';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
@@ -19,7 +19,7 @@ describe('CROSS-BROKER FEATURES', () => {
 
         it('QUEUE: Should push and pop raw Buffer', async () => {
             const qName = `bin-queue-${randomUUID()}`;
-            const q = await nexo.queue(qName).create();
+            const q = await createQueue(qName);
 
             await q.push(binaryPayload);
 
@@ -36,22 +36,24 @@ describe('CROSS-BROKER FEATURES', () => {
             const topic = `bin-pubsub-${randomUUID()}`;
             const received: any[] = [];
 
-            await nexo.pubsub(topic).subscribe(msg => received.push(msg));
-            await nexo.pubsub(topic).publish(binaryPayload);
+            const pubsubTopic = nexo.pubsub.topic(topic);
+            const pubsubSub = await pubsubTopic.subscribe(msg => received.push(msg));
+            await pubsubTopic.publish(binaryPayload);
 
             await waitFor(() => expect(received.length).toBe(1));
             expect(Buffer.isBuffer(received[0])).toBe(true);
             expect(received[0].equals(binaryPayload)).toBe(true);
+            await pubsubSub.stop();
         });
 
         it('STREAM: Should stream raw Buffer', async () => {
             const topic = `bin-stream-${randomUUID()}`;
-            await nexo.stream(topic).create();
+            const stream = await createStream(topic);
 
-            await nexo.stream(topic).publish(binaryPayload);
+            await stream.publish(binaryPayload);
 
             const received: any[] = [];
-            const sub = await nexo.stream(topic).subscribe('g1', msg => received.push(msg));
+            const sub = await stream.group('g1').subscribe(msg => received.push(msg));
 
             await waitFor(() => expect(received.length).toBe(1));
             expect(Buffer.isBuffer(received[0])).toBe(true);

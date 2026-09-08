@@ -3,7 +3,11 @@
 use bytes::Bytes;
 
 use crate::protocol::wire::PayloadCursor;
-use crate::protocol::{FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL, FLAG_PUBSUB_PUB_RETAIN, ParseError, Response};
+use crate::protocol::{
+    ErrorCode, ParseError, Response, FLAG_PUBSUB_PUB_CLEAR, FLAG_PUBSUB_PUB_HAS_TTL,
+    FLAG_PUBSUB_PUB_RETAIN,
+};
+use crate::transport::tcp::error_response;
 use crate::NexoEngine;
 
 // ==========================================
@@ -20,9 +24,19 @@ pub use crate::protocol::{
 
 #[derive(Debug)]
 pub enum PubSubCommand {
-    Publish { topic: String, retain: bool, clear: bool, ttl: Option<u32>, payload: Bytes },
-    Subscribe { topic: String },
-    Unsubscribe { topic: String },
+    Publish {
+        topic: String,
+        retain: bool,
+        clear: bool,
+        ttl: Option<u32>,
+        payload: Bytes,
+    },
+    Subscribe {
+        topic: String,
+    },
+    Unsubscribe {
+        topic: String,
+    },
 }
 
 impl PubSubCommand {
@@ -33,9 +47,19 @@ impl PubSubCommand {
                 let flags = cursor.read_u8()?;
                 let retain = flags & FLAG_PUBSUB_PUB_RETAIN != 0;
                 let clear = flags & FLAG_PUBSUB_PUB_CLEAR != 0;
-                let ttl = if flags & FLAG_PUBSUB_PUB_HAS_TTL != 0 { Some(cursor.read_u32()?) } else { None };
+                let ttl = if flags & FLAG_PUBSUB_PUB_HAS_TTL != 0 {
+                    Some(cursor.read_u32()?)
+                } else {
+                    None
+                };
                 let payload = cursor.read_remaining();
-                Ok(Self::Publish { topic, retain, clear, ttl, payload })
+                Ok(Self::Publish {
+                    topic,
+                    retain,
+                    clear,
+                    ttl,
+                    payload,
+                })
             }
             OP_SUB => {
                 let topic = cursor.read_string()?;
@@ -45,7 +69,10 @@ impl PubSubCommand {
                 let topic = cursor.read_string()?;
                 Ok(Self::Unsubscribe { topic })
             }
-            _ => Err(ParseError::Invalid(format!("Unknown PubSub opcode: 0x{:02X}", opcode))),
+            _ => Err(ParseError::Invalid(format!(
+                "Unknown PubSub opcode: 0x{:02X}",
+                opcode
+            ))),
         }
     }
 }
@@ -62,24 +89,26 @@ pub async fn handle(
 ) -> Response {
     let cmd = match PubSubCommand::parse(opcode, cursor) {
         Ok(c) => c,
-        Err(e) => return Response::Error(e.to_string()),
+        Err(error) => return Response::error(ErrorCode::ProtocolError, error.to_string()),
     };
 
     let pubsub = &engine.pubsub;
 
     match cmd {
-        PubSubCommand::Publish { topic, retain, clear, ttl, payload } => {
-            pubsub.publish(&topic, payload, retain, clear, ttl)
-                .map(|_| Response::Ok)
-                .map_err(Response::Error)
-                .unwrap_or_else(|e| e)
-        }
-        PubSubCommand::Subscribe { topic } => {
-            pubsub.subscribe(session_id, &topic)
-                .map(|_| Response::Ok)
-                .map_err(Response::Error)
-                .unwrap_or_else(|e| e)
-        }
+        PubSubCommand::Publish {
+            topic,
+            retain,
+            clear,
+            ttl,
+            payload,
+        } => match pubsub.publish(&topic, payload, retain, clear, ttl) {
+            Ok(_) => Response::Ok,
+            Err(error) => error_response(error),
+        },
+        PubSubCommand::Subscribe { topic } => match pubsub.subscribe(session_id, &topic) {
+            Ok(_) => Response::Ok,
+            Err(error) => error_response(error),
+        },
         PubSubCommand::Unsubscribe { topic } => {
             pubsub.unsubscribe(session_id, &topic);
             Response::Ok

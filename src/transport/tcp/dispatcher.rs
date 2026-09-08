@@ -2,8 +2,8 @@
 
 use crate::brokers::{pub_sub, queue, store, stream};
 use crate::protocol::wire::PayloadCursor;
-use crate::protocol::Response;
 pub use crate::protocol::OP_DEBUG_ECHO;
+use crate::protocol::{ErrorCode, Response};
 use crate::NexoEngine;
 use bytes::Bytes;
 
@@ -58,7 +58,10 @@ impl<'a> Dispatcher<'a> {
                 stream::tcp::handle(op, &mut cursor, self.engine, self.session_id).await
             }
 
-            _ => Response::Error(format!("Unknown opcode: 0x{:02X}", opcode)),
+            _ => Response::error(
+                ErrorCode::ProtocolError,
+                format!("Unknown opcode: 0x{:02X}", opcode),
+            ),
         }
     }
 }

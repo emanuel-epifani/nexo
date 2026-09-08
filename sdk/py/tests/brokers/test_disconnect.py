@@ -15,7 +15,7 @@ class TestDisconnect:
     async def test_reject_pending_requests_on_disconnect(self):
         client = await NexoClient.connect()
         q_name = f"disconnect-pending-{uuid.uuid4()}"
-        await client.queue(q_name).create()
+        await client.queue.create(q_name)
 
         conn = client._conn
 

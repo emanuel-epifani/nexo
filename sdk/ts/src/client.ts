@@ -2,9 +2,9 @@ import { Logger, LogHandler } from './utils/logger';
 import { DEFAULT_CONFIG, DEFAULT_HOST, DEFAULT_PORT } from './config';
 import { NexoConnection } from './transport/tcp/connection';
 import { NexoStore } from './brokers/store';
-import { NexoQueue } from './brokers/queue';
-import { NexoPubSub, NexoTopic } from './brokers/pubsub';
-import { NexoStream } from './brokers/stream';
+import { NexoQueueFacade } from './brokers/queue';
+import { NexoPubSub } from './brokers/pubsub';
+import { NexoStreamFacade } from './brokers/stream';
 
 export interface NexoOptions {
   host?: string;
@@ -18,7 +18,9 @@ export class NexoClient {
   private logger: Logger;
 
   public readonly store: NexoStore;
-  private readonly pubsubBroker: NexoPubSub;
+  public readonly queue: NexoQueueFacade;
+  public readonly stream: NexoStreamFacade;
+  public readonly pubsub: NexoPubSub;
   private shutdownHandler: (() => void) | null = null;
 
   constructor(options: NexoOptions = {}) {
@@ -34,7 +36,9 @@ export class NexoClient {
     }, this.logger);
 
     this.store = new NexoStore(this.conn);
-    this.pubsubBroker = new NexoPubSub(this.conn, this.logger);
+    this.queue = new NexoQueueFacade(this.conn, this.logger);
+    this.stream = new NexoStreamFacade(this.conn, this.logger);
+    this.pubsub = new NexoPubSub(this.conn, this.logger);
     this.setupGracefulShutdown();
   }
 
@@ -51,18 +55,6 @@ export class NexoClient {
       this.shutdownHandler = null;
     }
     this.conn.disconnect();
-  }
-
-  queue<T = any>(name: string): NexoQueue<T> {
-    return new NexoQueue<T>(this.conn, name, this.logger);
-  }
-
-  stream<T = any>(name: string): NexoStream<T> {
-    return new NexoStream<T>(this.conn, name, this.logger);
-  }
-
-  pubsub<T = any>(name: string): NexoTopic<T> {
-    return new NexoTopic<T>(this.pubsubBroker, name);
   }
 
   private setupGracefulShutdown() {

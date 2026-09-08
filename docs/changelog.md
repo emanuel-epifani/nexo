@@ -12,6 +12,15 @@ Release notes for the Nexo broker and SDKs.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Separate Queue and Stream provisioning from runtime handles across TypeScript and Python SDKs
+- Return authoritative effective definitions from idempotent resource provisioning and detect configuration drift
+- Add fail-fast resource lookup, Stream group/DLT handles, and independently owned Pub/Sub subscriptions
+- Replace textual server-error matching with stable protocol error codes and structured conflict details
+
 ## v5.0.3
 
 **Released:** 2026-08-21

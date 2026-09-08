@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable, Generic, Optional, TypeVar, TypedDict, Union
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, Literal, TypeVar, TypedDict
 
+from . import ProvisionOutcome, ProvisionResult
 from ..config import DEFAULT_CONFIG
-from ..transport.tcp.connection import NexoConnection
-from ..errors import ConnectionClosedError, NotConnectedError
-from ..subscription import Subscription
+from ..errors import ConnectionClosedError, NexoError, NotConnectedError, ProtocolError
 from ..protocol.generated import (
+    ErrorCode,
     FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
     FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
     STREAM_MAX_FETCH_BATCH_SIZE,
     STREAM_MAX_KEY_BYTES,
     STREAM_MAX_PUBLISH_BATCH,
+    ProvisionStatus,
     StreamOpcode,
 )
+from ..subscription import Subscription
+from ..transport.tcp.connection import NexoConnection
 from ..utils.concurrent import run_concurrent
 from ..utils.logger import Logger
 
@@ -34,7 +39,41 @@ StreamHandler = Callable[[T, StreamMessageMeta], Any] | Callable[[T], Any]
 FETCH_TIMEOUT_MARGIN_MS = 5000
 
 
-def _write_stream_key(writer, key: str | bytes | None) -> None:
+@dataclass(frozen=True)
+class StreamRetention:
+    max_age_ms: int | None
+    max_bytes: int | None
+
+
+@dataclass(frozen=True)
+class StreamConfig:
+    retention: StreamRetention
+    max_segment_size: int
+    max_ack_pending: int
+    ack_wait_ms: int
+    max_deliveries: int
+
+
+@dataclass(frozen=True)
+class StreamDefinition:
+    name: str
+    config: StreamConfig
+
+
+@dataclass(frozen=True)
+class StreamPublishItem(Generic[T]):
+    data: T
+    key: str | bytes | None = None
+
+
+class DLTEntry(TypedDict):
+    seq: int
+    reason: str
+    attempts: int
+    key: bytes | None
+
+
+def _write_stream_key(writer: Any, key: str | bytes | None) -> None:
     if key is None:
         writer.u16(0)
         return
@@ -46,34 +85,62 @@ def _write_stream_key(writer, key: str | bytes | None) -> None:
     writer.u16(len(key_bytes)).raw_bytes(key_bytes)
 
 
-class RetentionOptions(TypedDict, total=False):
-    max_age_ms: int
-    max_bytes: int
-
-
-class StreamCreateOptions(TypedDict, total=False):
-    retention: RetentionOptions
-
-
-class StreamSubscribeOptions(TypedDict, total=False):
-    batch_size: int
-    wait_ms: int
-    concurrency: int
-    stop_timeout_ms: int
-
-
-def _callback_accepts_meta(fn: Callable[..., Any]) -> bool:
+def _callback_accepts_meta(callback: Callable[..., Any]) -> bool:
     try:
-        sig = inspect.signature(fn)
+        signature = inspect.signature(callback)
     except (TypeError, ValueError):
         return True
     positional = 0
-    for p in sig.parameters.values():
-        if p.kind == p.VAR_POSITIONAL:
+    for parameter in signature.parameters.values():
+        if parameter.kind == parameter.VAR_POSITIONAL:
             return True
-        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+        if parameter.kind in (
+            parameter.POSITIONAL_ONLY,
+            parameter.POSITIONAL_OR_KEYWORD,
+        ):
             positional += 1
     return positional >= 2
+
+
+def _read_definition(cursor: Any) -> StreamDefinition:
+    name = cursor.read_string()
+    flags = cursor.read_u8()
+    max_age_ms = (
+        cursor.read_u64()
+        if flags & FLAG_STREAM_S_CREATE_HAS_MAX_AGE
+        else None
+    )
+    max_bytes = (
+        cursor.read_u64()
+        if flags & FLAG_STREAM_S_CREATE_HAS_MAX_BYTES
+        else None
+    )
+    return StreamDefinition(
+        name=name,
+        config=StreamConfig(
+            retention=StreamRetention(
+                max_age_ms=max_age_ms,
+                max_bytes=max_bytes,
+            ),
+            max_segment_size=cursor.read_u64(),
+            max_ack_pending=cursor.read_u64(),
+            ack_wait_ms=cursor.read_u64(),
+            max_deliveries=cursor.read_u32(),
+        ),
+    )
+
+
+def _read_provision_result(cursor: Any) -> ProvisionResult[StreamDefinition]:
+    try:
+        status = ProvisionStatus(cursor.read_u8())
+    except ValueError as error:
+        raise ProtocolError("Unknown stream provision status") from error
+    outcome = (
+        ProvisionOutcome.CREATED
+        if status == ProvisionStatus.CREATED
+        else ProvisionOutcome.UNCHANGED
+    )
+    return ProvisionResult(status=outcome, definition=_read_definition(cursor))
 
 
 class StreamAckError(Exception):
@@ -82,15 +149,184 @@ class StreamAckError(Exception):
         self.errors = errors
 
 
-def _is_recoverable_membership_error(e: Exception) -> bool:
-    if isinstance(e, StreamAckError):
-        return any(_is_recoverable_membership_error(error) for error in e.errors)
-    msg = str(e)
-    return "FENCED" in msg or "NOT_MEMBER" in msg
+def _is_recoverable_membership_error(error: Exception) -> bool:
+    if isinstance(error, StreamAckError):
+        return any(
+            _is_recoverable_membership_error(nested_error)
+            for nested_error in error.errors
+        )
+    return isinstance(error, NexoError) and error.code in {
+        ErrorCode.FENCED,
+        ErrorCode.NOT_MEMBER,
+    }
 
 
-async def _sleep(ms: int) -> None:
-    await asyncio.sleep(ms / 1000.0)
+async def _sleep(milliseconds: int) -> None:
+    await asyncio.sleep(milliseconds / 1000.0)
+
+
+class StreamCommands:
+    @staticmethod
+    async def create(
+        conn: NexoConnection,
+        name: str,
+        *,
+        max_age_ms: int | None,
+        max_bytes: int | None,
+    ) -> ProvisionResult[StreamDefinition]:
+        has_max_age = max_age_ms is not None
+        has_max_bytes = max_bytes is not None
+        flags = (
+            FLAG_STREAM_S_CREATE_HAS_MAX_AGE if has_max_age else 0x00
+        ) | (
+            FLAG_STREAM_S_CREATE_HAS_MAX_BYTES if has_max_bytes else 0x00
+        )
+
+        def build(writer: Any) -> None:
+            writer.string(name).u8(flags)
+            if has_max_age:
+                writer.u64(max_age_ms)
+            if has_max_bytes:
+                writer.u64(max_bytes)
+
+        _, cursor = await conn.send(StreamOpcode.S_CREATE, build)
+        return _read_provision_result(cursor)
+
+    @staticmethod
+    async def describe(conn: NexoConnection, name: str) -> StreamDefinition:
+        _, cursor = await conn.send(
+            StreamOpcode.S_DESCRIBE,
+            lambda writer: writer.string(name),
+        )
+        return _read_definition(cursor)
+
+    @staticmethod
+    async def exists(conn: NexoConnection, name: str) -> bool:
+        _, cursor = await conn.send(
+            StreamOpcode.S_EXISTS,
+            lambda writer: writer.string(name),
+        )
+        return cursor.read_u8() == 1
+
+    @staticmethod
+    async def delete(conn: NexoConnection, name: str) -> None:
+        await conn.send(StreamOpcode.S_DELETE, lambda writer: writer.string(name))
+
+    @staticmethod
+    async def publish(
+        conn: NexoConnection,
+        name: str,
+        data: Any,
+        *,
+        key: str | bytes | None,
+    ) -> int:
+        def build(writer: Any) -> None:
+            writer.string(name).u32(1)
+            _write_stream_key(writer, key)
+            writer.any_with_len(data)
+
+        _, cursor = await conn.send(StreamOpcode.S_PUB, build)
+        count = cursor.read_u32()
+        return cursor.read_u64() if count > 0 else 0
+
+    @staticmethod
+    async def publish_batch(
+        conn: NexoConnection,
+        name: str,
+        items: list[StreamPublishItem[Any]],
+    ) -> list[int]:
+        def build(writer: Any) -> None:
+            writer.string(name).u32(len(items))
+            for item in items:
+                _write_stream_key(writer, item.key)
+                writer.any_with_len(item.data)
+
+        _, cursor = await conn.send(StreamOpcode.S_PUB, build)
+        count = cursor.read_u32()
+        return [cursor.read_u64() for _ in range(count)]
+
+    @staticmethod
+    async def seek(
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+        target: Literal["beginning", "end"],
+    ) -> None:
+        await conn.send(
+            StreamOpcode.S_SEEK,
+            lambda writer: writer.string(stream_name)
+            .string(group_name)
+            .u8(0 if target == "beginning" else 1),
+        )
+
+    @staticmethod
+    async def peek_dlt(
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+        limit: int,
+        offset: int,
+    ) -> list[DLTEntry]:
+        _, cursor = await conn.send(
+            StreamOpcode.S_PEEK_DLT,
+            lambda writer: writer.string(stream_name)
+            .string(group_name)
+            .u32(limit)
+            .u32(offset),
+        )
+        count = cursor.read_u32()
+        entries: list[DLTEntry] = []
+        for _ in range(count):
+            seq = cursor.read_u64()
+            reason = cursor.read_string()
+            attempts = cursor.read_u32()
+            key_length = cursor.read_u16()
+            key = cursor.read_buffer(key_length) if key_length > 0 else None
+            entries.append(
+                {
+                    "seq": seq,
+                    "reason": reason,
+                    "attempts": attempts,
+                    "key": key,
+                }
+            )
+        return entries
+
+    @staticmethod
+    async def move_to_stream(
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+        seq: int,
+    ) -> None:
+        await conn.send(
+            StreamOpcode.S_MOVE_TO_STREAM,
+            lambda writer: writer.string(stream_name).string(group_name).u64(seq),
+        )
+
+    @staticmethod
+    async def delete_dlt(
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+        seq: int,
+    ) -> None:
+        await conn.send(
+            StreamOpcode.S_DELETE_DLT,
+            lambda writer: writer.string(stream_name).string(group_name).u64(seq),
+        )
+
+    @staticmethod
+    async def purge_dlt(
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+    ) -> int:
+        _, cursor = await conn.send(
+            StreamOpcode.S_PURGE_DLT,
+            lambda writer: writer.string(stream_name).string(group_name),
+        )
+        return cursor.read_u32()
 
 
 class StreamSubscription(Generic[T]):
@@ -98,9 +334,9 @@ class StreamSubscription(Generic[T]):
         self,
         conn: NexoConnection,
         stream_name: str,
-        group: str,
+        group_name: str,
         logger: Logger,
-        callback: Callable[..., Any],
+        callback: StreamHandler[T],
         batch_size: int,
         wait_ms: int,
         concurrency: int,
@@ -108,34 +344,46 @@ class StreamSubscription(Generic[T]):
     ) -> None:
         self._conn = conn
         self._stream_name = stream_name
-        self._group = group
+        self._group_name = group_name
         self._logger = logger
-        self._callback = callback
+        self._callback: Callable[..., Any] = callback
         self._callback_wants_meta = _callback_accepts_meta(callback)
         self._batch_size = batch_size
         self._wait_ms = wait_ms
         self._concurrency = concurrency
         self._stop_timeout_ms = stop_timeout_ms
-
         self._active = False
-        self._loop_task: Optional[asyncio.Task] = None
-        self._consumer_id: Optional[str] = None
-        self._generation: int = 0
+        self._loop_task: asyncio.Task[None] | None = None
+        self._consumer_id: str | None = None
+        self._generation = 0
         self._phase = "idle"
         self._left_to_cancel_fetch = False
 
+    @property
+    def completion(self) -> asyncio.Task[None]:
+        assert self._loop_task is not None
+        return self._loop_task
+
     async def start(self) -> None:
         self._active = True
-        await self._join()
+        try:
+            await self._join()
+        except Exception:
+            self._active = False
+            raise
         self._loop_task = asyncio.create_task(self._loop())
-        self._loop_task.add_done_callback(
-            lambda t: self._logger.error(
-                f"[{self._stream_name}:{self._group}] Consumer crashed",
-                t.exception(),
+        self._loop_task.add_done_callback(self._on_done)
+
+    def _on_done(self, task: asyncio.Task[None]) -> None:
+        self._active = False
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self._logger.error(
+                f"[{self._stream_name}:{self._group_name}] Consumer crashed",
+                error,
             )
-            if not t.cancelled() and t.exception()
-            else None
-        )
 
     async def stop(self) -> None:
         self._active = False
@@ -152,32 +400,41 @@ class StreamSubscription(Generic[T]):
                     )
                 except asyncio.TimeoutError as error:
                     self._loop_task.cancel()
+                    try:
+                        await self._loop_task
+                    except asyncio.CancelledError:
+                        pass
                     raise TimeoutError(
-                        f"Stream subscription stop timed out after {self._stop_timeout_ms}ms"
+                        "Stream subscription stop timed out after "
+                        f"{self._stop_timeout_ms}ms"
                     ) from error
         finally:
             if not left_while_fetching:
                 await self._leave()
 
     async def _leave(self) -> None:
-        if self._consumer_id is not None:
-            try:
-                await self._conn.send(
-                    StreamOpcode.S_LEAVE,
-                    lambda w: w.string(self._stream_name)
-                    .string(self._group)
-                    .string(self._consumer_id)  # type: ignore[arg-type]
-                    .u64(self._generation),
-                )
-            except Exception:
-                pass
+        consumer_id = self._consumer_id
+        if consumer_id is None:
+            return
+        try:
+            await self._conn.send(
+                StreamOpcode.S_LEAVE,
+                lambda writer: writer.string(self._stream_name)
+                .string(self._group_name)
+                .string(consumer_id)
+                .u64(self._generation),
+            )
+        except Exception:
+            pass
 
     async def _join(self) -> None:
         if not self._conn.is_connected:
             raise NotConnectedError()
-        status, cursor = await self._conn.send(
+        _, cursor = await self._conn.send(
             StreamOpcode.S_JOIN,
-            lambda w: w.string(self._stream_name).string(self._group),
+            lambda writer: writer.string(self._stream_name).string(
+                self._group_name
+            ),
         )
         cursor.read_u64()  # ack_floor (unused)
         self._generation = cursor.read_u64()
@@ -192,43 +449,45 @@ class StreamSubscription(Generic[T]):
                     await self._poll_once()
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
+                except Exception as error:
                     if not self._active:
-                        if self._left_to_cancel_fetch and _is_recoverable_membership_error(e):
+                        if self._left_to_cancel_fetch and _is_recoverable_membership_error(
+                            error
+                        ):
                             break
                         raise
                     self._consumer_id = None
-
-                    if _is_recoverable_membership_error(e):
+                    if _is_recoverable_membership_error(error):
                         continue
-
-                    if not self._conn.is_connected or isinstance(e, ConnectionClosedError):
-                        if not self._active:
-                            break
+                    if not self._conn.is_connected or isinstance(
+                        error,
+                        (ConnectionClosedError, NotConnectedError),
+                    ):
                         await _sleep(DEFAULT_CONFIG.connection.backoff_short_ms)
                         continue
-
+                    if isinstance(error, NexoError):
+                        raise
                     self._logger.error(
-                        f"[{self._stream_name}:{self._group}] Error. "
-                        f"Retrying in {DEFAULT_CONFIG.connection.backoff_long_ms}ms... {e}"
+                        f"[{self._stream_name}:{self._group_name}] Error. "
+                        "Retrying in "
+                        f"{DEFAULT_CONFIG.connection.backoff_long_ms}ms... {error}"
                     )
-                    if not self._active:
-                        break
                     await _sleep(DEFAULT_CONFIG.connection.backoff_long_ms)
         except asyncio.CancelledError:
             pass
+        finally:
+            self._active = False
 
     async def _poll_once(self) -> None:
         consumer_id = self._consumer_id
         assert consumer_id is not None
         generation = self._generation
-
         self._phase = "fetching"
         try:
-            status, cursor = await self._conn.send(
+            _, cursor = await self._conn.send(
                 StreamOpcode.S_FETCH,
-                lambda w: w.string(self._stream_name)
-                .string(self._group)
+                lambda writer: writer.string(self._stream_name)
+                .string(self._group_name)
                 .string(consumer_id)
                 .u64(generation)
                 .u32(self._batch_size)
@@ -242,34 +501,36 @@ class StreamSubscription(Generic[T]):
         count = cursor.read_u32()
         if count == 0:
             return
-
         batch: list[dict[str, Any]] = []
         for _ in range(count):
             seq = cursor.read_u64()
             cursor.read_u64()  # skip timestamp
-            key_len = cursor.read_u16()
-            key = cursor.read_buffer(key_len) if key_len > 0 else None
-            payload_len = cursor.read_u32()
-            data = cursor.decode_any_from_buffer(payload_len)
+            key_length = cursor.read_u16()
+            key = cursor.read_buffer(key_length) if key_length > 0 else None
+            payload_length = cursor.read_u32()
+            data = cursor.decode_any_from_buffer(payload_length)
             batch.append({"seq": seq, "key": key, "data": data})
 
         ack_errors: list[Exception] = []
 
-        async def process(msg):
+        async def process(message: dict[str, Any]) -> None:
             if not self._active or ack_errors:
                 return
             try:
                 if self._callback_wants_meta:
-                    result = self._callback(msg["data"], {"seq": msg["seq"], "key": msg["key"]})
+                    result = self._callback(
+                        message["data"],
+                        {"seq": message["seq"], "key": message["key"]},
+                    )
                 else:
-                    result = self._callback(msg["data"])
+                    result = self._callback(message["data"])
                 if asyncio.iscoroutine(result):
                     await result
-            except Exception as err:
+            except Exception as error:
                 self._logger.error(
-                    f"[{self._stream_name}:{self._group}] "
-                    f"Processing error at seq={msg['seq']}. "
-                    f"Waiting for timeout-based retry. {err}"
+                    f"[{self._stream_name}:{self._group_name}] "
+                    f"Processing error at seq={message['seq']}. "
+                    f"Waiting for timeout-based retry. {error}"
                 )
                 return
 
@@ -277,16 +538,16 @@ class StreamSubscription(Generic[T]):
                 await self._conn.send(
                     StreamOpcode.S_ACK,
                     lambda writer: writer.string(self._stream_name)
-                    .string(self._group)
+                    .string(self._group_name)
                     .string(consumer_id)
                     .u64(generation)
-                    .u64(msg["seq"]),
+                    .u64(message["seq"]),
                 )
             except Exception as error:
                 ack_errors.append(error)
                 self._logger.error(
-                    f"[{self._stream_name}:{self._group}] "
-                    f"ACK failed at seq={msg['seq']}. {error}"
+                    f"[{self._stream_name}:{self._group_name}] "
+                    f"ACK failed at seq={message['seq']}. {error}"
                 )
 
         self._phase = "processing"
@@ -298,121 +559,113 @@ class StreamSubscription(Generic[T]):
             self._phase = "idle"
 
 
-class NexoStream(Generic[T]):
-    def __init__(self, conn: NexoConnection, name: str, logger: Logger) -> None:
+class NexoStreamDLT:
+    def __init__(
+        self,
+        conn: NexoConnection,
+        stream_name: str,
+        group_name: str,
+    ) -> None:
         self._conn = conn
+        self._stream_name = stream_name
+        self._group_name = group_name
+
+    async def peek(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DLTEntry]:
+        return await StreamCommands.peek_dlt(
+            self._conn,
+            self._stream_name,
+            self._group_name,
+            limit,
+            offset,
+        )
+
+    async def replay(self, seq: int) -> None:
+        await StreamCommands.move_to_stream(
+            self._conn,
+            self._stream_name,
+            self._group_name,
+            seq,
+        )
+
+    async def delete(self, seq: int) -> None:
+        await StreamCommands.delete_dlt(
+            self._conn,
+            self._stream_name,
+            self._group_name,
+            seq,
+        )
+
+    async def purge(self) -> int:
+        return await StreamCommands.purge_dlt(
+            self._conn,
+            self._stream_name,
+            self._group_name,
+        )
+
+
+class NexoStreamGroup(Generic[T]):
+    def __init__(
+        self,
+        conn: NexoConnection,
+        stream_name: str,
+        name: str,
+        logger: Logger,
+    ) -> None:
+        if not name:
+            raise ValueError("Consumer group is required")
+        self._conn = conn
+        self._stream_name = stream_name
         self.name = name
         self._logger = logger
+        self._dlt = NexoStreamDLT(conn, stream_name, name)
 
-    async def create(
-        self, options: StreamCreateOptions | None = None
-    ) -> NexoStream[T]:
-        opts = options or {}
-        retention = opts.get("retention") or {}
-        max_age = retention.get("max_age_ms")
-        max_bytes = retention.get("max_bytes")
-        has_max_age = max_age is not None
-        has_max_bytes = max_bytes is not None
-        flags = (FLAG_STREAM_S_CREATE_HAS_MAX_AGE if has_max_age else 0x00) | (FLAG_STREAM_S_CREATE_HAS_MAX_BYTES if has_max_bytes else 0x00)
-
-        def build(w):
-            w.string(self.name).u8(flags)
-            if has_max_age:
-                w.u64(max_age)
-            if has_max_bytes:
-                w.u64(max_bytes)
-
-        await self._conn.send(StreamOpcode.S_CREATE, build)
-        return self
-
-    async def exists(self) -> bool:
-        try:
-            status, cursor = await self._conn.send(
-                StreamOpcode.S_EXISTS, lambda w: w.string(self.name)
-            )
-            return cursor.read_u8() == 1
-        except Exception:
-            return False
-
-    async def delete(self) -> None:
-        await self._conn.send(StreamOpcode.S_DELETE, lambda w: w.string(self.name))
-
-    async def publish(
-        self,
-        data: T,
-        options: Optional[dict[str, Union[str, bytes]]] = None,
-    ) -> int:
-        opts = options or {}
-        key = opts.get("key")
-
-        def build(w):
-            w.string(self.name).u32(1)
-            _write_stream_key(w, key)
-            w.any_with_len(data)
-
-        status, cursor = await self._conn.send(StreamOpcode.S_PUB, build)
-        count = cursor.read_u32()
-        return cursor.read_u64() if count > 0 else 0
-
-    async def publish_batch(
-        self, items: list[dict[str, Any]]
-    ) -> list[int]:
-        if not items:
-            return []
-        if len(items) > STREAM_MAX_PUBLISH_BATCH:
-            raise ValueError(
-                f"Publish batch too large: {len(items)} items (max: {STREAM_MAX_PUBLISH_BATCH})"
-            )
-
-        def build(w):
-            w.string(self.name).u32(len(items))
-            for item in items:
-                _write_stream_key(w, item.get("key"))
-                w.any_with_len(item["data"])
-
-        status, cursor = await self._conn.send(StreamOpcode.S_PUB, build)
-        count = cursor.read_u32()
-        seqs: list[int] = []
-        for _ in range(count):
-            seqs.append(cursor.read_u64())
-        return seqs
+    @property
+    def dlt(self) -> NexoStreamDLT:
+        return self._dlt
 
     async def subscribe(
         self,
-        group: str,
         callback: StreamHandler[T],
-        options: StreamSubscribeOptions | None = None,
+        *,
+        batch_size: int = DEFAULT_CONFIG.stream.batch_size,
+        wait_ms: int = DEFAULT_CONFIG.stream.wait_ms,
+        concurrency: int = DEFAULT_CONFIG.stream.concurrency,
+        stop_timeout_ms: int = DEFAULT_CONFIG.stream.stop_timeout_ms,
     ) -> Subscription[T]:
-        if not group:
-            raise ValueError("Consumer Group is required for subscription")
-
-        opts = options or {}
-        batch_size = opts.get("batch_size")
-        if batch_size is None:
-            batch_size = DEFAULT_CONFIG.stream.batch_size
-        wait_ms = opts.get("wait_ms")
-        if wait_ms is None:
-            wait_ms = DEFAULT_CONFIG.stream.wait_ms
-        concurrency = opts.get("concurrency")
-        if concurrency is None:
-            concurrency = DEFAULT_CONFIG.stream.concurrency
-        concurrency = max(1, concurrency)
-        stop_timeout_ms = opts.get("stop_timeout_ms")
-        if stop_timeout_ms is None:
-            stop_timeout_ms = DEFAULT_CONFIG.stream.stop_timeout_ms
-        if not isinstance(batch_size, int) or batch_size < 1 or batch_size > STREAM_MAX_FETCH_BATCH_SIZE:
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or batch_size < 1
+            or batch_size > STREAM_MAX_FETCH_BATCH_SIZE
+        ):
             raise ValueError(
-                f"batch_size must be an integer between 1 and {STREAM_MAX_FETCH_BATCH_SIZE}"
+                "batch_size must be an integer between 1 and "
+                f"{STREAM_MAX_FETCH_BATCH_SIZE}"
             )
-        if not isinstance(wait_ms, int) or wait_ms < 1:
+        if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms < 1:
             raise ValueError("wait_ms must be a positive integer")
-        if not isinstance(stop_timeout_ms, int) or stop_timeout_ms < 1:
+        if (
+            not isinstance(concurrency, int)
+            or isinstance(concurrency, bool)
+            or concurrency < 1
+        ):
+            raise ValueError("concurrency must be a positive integer")
+        if (
+            not isinstance(stop_timeout_ms, int)
+            or isinstance(stop_timeout_ms, bool)
+            or stop_timeout_ms < 1
+        ):
             raise ValueError("stop_timeout_ms must be a positive integer")
 
-        sub: StreamSubscription[T] = StreamSubscription(
+        consumer = StreamSubscription[T](
             self._conn,
+            self._stream_name,
             self.name,
-            group,
             self._logger,
             callback,
             batch_size,
@@ -420,56 +673,109 @@ class NexoStream(Generic[T]):
             concurrency,
             stop_timeout_ms,
         )
-        await sub.start()
-
+        await consumer.start()
         return Subscription(
-            stop_fn=sub.stop,
-            active_fn=lambda: sub._active,
+            stop_fn=consumer.stop,
+            active_fn=lambda: consumer._active,
+            completion=consumer.completion,
         )
 
-    async def seek(self, group: str, target: str) -> None:
+    async def seek(self, target: Literal["beginning", "end"]) -> None:
         if target not in ("beginning", "end"):
             raise ValueError(f"Invalid seek target: {target!r}")
-        await self._conn.send(
-            StreamOpcode.S_SEEK,
-            lambda w: w.string(self.name)
-            .string(group)
-            .u8(0 if target == "beginning" else 1),
+        await StreamCommands.seek(
+            self._conn,
+            self._stream_name,
+            self.name,
+            target,
         )
 
-    async def peek_dlt(
-        self, group: str, limit: int = 100, offset: int = 0
-    ) -> list[dict[str, Any]]:
-        status, cursor = await self._conn.send(
-            StreamOpcode.S_PEEK_DLT,
-            lambda w: w.string(self.name).string(group).u32(limit).u32(offset),
-        )
-        count = cursor.read_u32()
-        entries: list[dict[str, Any]] = []
-        for _ in range(count):
-            seq = cursor.read_u64()
-            reason = cursor.read_string()
-            attempts = cursor.read_u32()
-            key_len = cursor.read_u16()
-            key = cursor.read_buffer(key_len) if key_len > 0 else None
-            entries.append({"seq": seq, "reason": reason, "attempts": attempts, "key": key})
-        return entries
 
-    async def move_to_stream(self, group: str, seq: int) -> None:
-        await self._conn.send(
-            StreamOpcode.S_MOVE_TO_STREAM,
-            lambda w: w.string(self.name).string(group).u64(seq),
+class NexoStream(Generic[T]):
+    def __init__(self, conn: NexoConnection, name: str, logger: Logger) -> None:
+        self._conn = conn
+        self.name = name
+        self._logger = logger
+
+    async def publish(
+        self,
+        data: T,
+        *,
+        key: str | bytes | None = None,
+    ) -> int:
+        return await StreamCommands.publish(
+            self._conn,
+            self.name,
+            data,
+            key=key,
         )
 
-    async def delete_dlt(self, group: str, seq: int) -> None:
-        await self._conn.send(
-            StreamOpcode.S_DELETE_DLT,
-            lambda w: w.string(self.name).string(group).u64(seq),
+    async def publish_batch(
+        self,
+        items: Sequence[StreamPublishItem[T] | Mapping[str, Any]],
+    ) -> list[int]:
+        if not items:
+            return []
+        if len(items) > STREAM_MAX_PUBLISH_BATCH:
+            raise ValueError(
+                f"Publish batch too large: {len(items)} items "
+                f"(max: {STREAM_MAX_PUBLISH_BATCH})"
+            )
+        normalized: list[StreamPublishItem[Any]] = []
+        for item in items:
+            if isinstance(item, StreamPublishItem):
+                normalized_item = item
+            elif isinstance(item, Mapping):
+                if "options" in item:
+                    raise TypeError("Stream batch options must be direct item fields")
+                if "data" not in item:
+                    raise ValueError("Stream batch item requires data")
+                normalized_item = StreamPublishItem(
+                    data=item["data"],
+                    key=item.get("key"),
+                )
+            else:
+                raise TypeError("Stream batch items must be StreamPublishItem or mapping")
+            if normalized_item.key is not None and not isinstance(
+                normalized_item.key,
+                (str, bytes),
+            ):
+                raise TypeError("Stream key must be str, bytes, or None")
+            normalized.append(normalized_item)
+        return await StreamCommands.publish_batch(self._conn, self.name, normalized)
+
+    def group(self, name: str) -> NexoStreamGroup[T]:
+        return NexoStreamGroup(self._conn, self.name, name, self._logger)
+
+
+class NexoStreamFacade:
+    def __init__(self, conn: NexoConnection, logger: Logger) -> None:
+        self._conn = conn
+        self._logger = logger
+
+    async def create(
+        self,
+        name: str,
+        *,
+        max_age_ms: int | None = None,
+        max_bytes: int | None = None,
+    ) -> ProvisionResult[StreamDefinition]:
+        return await StreamCommands.create(
+            self._conn,
+            name,
+            max_age_ms=max_age_ms,
+            max_bytes=max_bytes,
         )
 
-    async def purge_dlt(self, group: str) -> int:
-        status, cursor = await self._conn.send(
-            StreamOpcode.S_PURGE_DLT,
-            lambda w: w.string(self.name).string(group),
-        )
-        return cursor.read_u32()
+    async def describe(self, name: str) -> StreamDefinition:
+        return await StreamCommands.describe(self._conn, name)
+
+    async def get(self, name: str) -> NexoStream[Any]:
+        await self.describe(name)
+        return NexoStream(self._conn, name, self._logger)
+
+    async def exists(self, name: str) -> bool:
+        return await StreamCommands.exists(self._conn, name)
+
+    async def delete(self, name: str) -> None:
+        await StreamCommands.delete(self._conn, name)

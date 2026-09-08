@@ -1,28 +1,30 @@
 import { describe, it, expect } from 'vitest';
-import { nexo } from '../nexo';
+import { createQueue, nexo } from '../nexo';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
+import { NexoClient } from '../../src/client';
+import { NotConnectedError, ResourceConfigurationConflictError, ResourceNotFoundError } from '../../src/errors';
 
 describe('QUEUE', () => {
     it('should reject batchSize=0 in subscribe', async () => {
         const qName = `queue-batch-zero-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
-        await expect(q.subscribe(async () => {}, { batchSize: 0 })).rejects.toThrow(/batchSize must be >= 1/);
-        await q.delete();
+        await expect(q.subscribe(async () => { }, { batchSize: 0 })).rejects.toThrow(/batchSize must be >= 1/);
+        await nexo.queue.delete(qName);
     });
 
     it('should reject concurrency=0 in subscribe', async () => {
         const qName = `queue-conc-zero-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
-        await expect(q.subscribe(async () => {}, { concurrency: 0 })).rejects.toThrow(/concurrency must be >= 1/);
-        await q.delete();
+        await expect(q.subscribe(async () => { }, { concurrency: 0 })).rejects.toThrow(/concurrency must be >= 1/);
+        await nexo.queue.delete(qName);
     });
 
     it('should not DLQ messages on graceful shutdown (requeue via visibility timeout)', async () => {
         const qName = `queue-shutdown-${randomUUID()}`;
-        const q = await nexo.queue(qName).create({
+        const q = await createQueue(qName, {
             visibilityTimeoutMs: 500,
             maxDeliveries: 3,
         });
@@ -44,7 +46,7 @@ describe('QUEUE', () => {
 
         // By now visibility timeout (500ms) has expired for msg2, server requeued it
         // maxDeliveries=3, attempts=1 → 1 < 3 → requeue, NOT DLQ
-        const dlqResult = await q.dlq.peek(10);
+        const dlqResult = await q.dlq.peek({ limit: 10 });
         expect(dlqResult.total).toBe(0);
 
         // msg2 should be re-delivered to a new consumer
@@ -56,12 +58,12 @@ describe('QUEUE', () => {
         await waitFor(() => expect(received).toContain('msg2'));
         await sub2.stop();
 
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should stop consumer when queue is deleted during subscribe', async () => {
         const qName = `queue-deleted-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         await q.push('msg1');
 
@@ -73,7 +75,7 @@ describe('QUEUE', () => {
         await new Promise(r => setTimeout(r, 200));
 
         // Delete queue while consumer is running
-        await q.delete();
+        await nexo.queue.delete(qName);
 
         // Wait for consumer to detect the error and break
         await new Promise(r => setTimeout(r, 2000));
@@ -83,23 +85,19 @@ describe('QUEUE', () => {
         await sub.stop();
     });
 
-    it('should stop consumer when subscribing to non-existent queue', async () => {
+    it('should fail fast when subscribing to a missing queue', async () => {
         const qName = `queue-nonexist-${randomUUID()}`;
-        const q = nexo.queue(qName); // not created
+        const q = await createQueue(qName);
+        await nexo.queue.delete(qName);
 
-        // subscribe should not throw "Queue not found" — consumer loop handles it
-        const sub = await q.subscribe(async () => {}, { batchSize: 1, waitMs: 100, concurrency: 1 });
-
-        // Wait for consumer to detect "not found" error and break
-        await new Promise(r => setTimeout(r, 500));
-
-        // Consumer should have stopped gracefully
-        await sub.stop();
+        await expect(
+            q.subscribe(async () => { }, { batchSize: 1, waitMs: 100, concurrency: 1 })
+        ).rejects.toBeInstanceOf(ResourceNotFoundError);
     });
 
     it('should handle full lifecycle: Push -> Subscribe -> Ack', async () => {
         const qName = `queue-life-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
         const payload = { task: 'process_me' };
 
         let received: any = null;
@@ -117,7 +115,7 @@ describe('QUEUE', () => {
     it('should move failed messages to DLQ', async () => {
         const qName = `queue-dlq-${randomUUID()}`;
         // Max 1 retry (2 attempts total)
-        const q = await nexo.queue(qName).create({ maxDeliveries: 1, visibilityTimeoutMs: 100 });
+        const q = await createQueue(qName, { maxDeliveries: 1, visibilityTimeoutMs: 100 });
 
         await q.push('fail_payload');
 
@@ -131,14 +129,14 @@ describe('QUEUE', () => {
         await sub.stop();
 
         // Check DLQ using peek
-        const dlqResult = await q.dlq.peek(10);
+        const dlqResult = await q.dlq.peek({ limit: 10 });
         expect(dlqResult.total).toBe(1);
         expect(dlqResult.items[0].data).toBe('fail_payload');
     });
 
     it('should respect priority (High before Low)', async () => {
         const qName = `queue-prio-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         // Push Low then High
         await q.push('low', { priority: 0 });
@@ -156,11 +154,11 @@ describe('QUEUE', () => {
         expect(received).toEqual(['high', 'low']);
     });
 
-    it('Should handle DLQ workflow: peek, moveToQueue, delete, purge', async () => {
+    it('Should handle DLQ workflow: peek, replay, delete, purge', async () => {
         const qName = `dlq-test-${randomUUID()}`;
 
-        const q = await nexo.queue(qName).create({
-            visibilityTimeoutMs: 5000, 
+        const q = await createQueue(qName, {
+            visibilityTimeoutMs: 5000,
             maxDeliveries: 1,
         });
 
@@ -189,16 +187,16 @@ describe('QUEUE', () => {
         // 1. Peek DLQ - should have 3 messages
         let dlqResult;
         await waitFor(async () => {
-            dlqResult = await q.dlq.peek(10);
+            dlqResult = await q.dlq.peek({ limit: 10 });
             expect(dlqResult.total).toBe(3);
             expect(dlqResult.items.length).toBe(3);
         });
-        
+
         expect(dlqResult.items[0].attempts).toBeGreaterThanOrEqual(1);
 
         const targetMsg = dlqResult.items.find((i: any) => i.data.order === 'order3');
         const otherMsg = dlqResult.items.find((i: any) => i.data.order === 'order2');
-        
+
         expect(targetMsg).toBeDefined();
         expect(otherMsg).toBeDefined();
 
@@ -206,12 +204,12 @@ describe('QUEUE', () => {
         const msgToDeleteId = otherMsg!.id;
 
         // 2. Move message back to main queue FIRST
-        const moved = await q.dlq.moveToQueue(msgToReplayId);
+        const moved = await q.dlq.replay(msgToReplayId);
         expect(moved).toBe(true);
 
         // 3. Subscribe AFTER move (message is already Ready in queue)
         const replayed: any[] = [];
-        const sub2 = await nexo.queue(qName).subscribe(async (msg) => {
+        const sub2 = await q.subscribe(async (msg) => {
             replayed.push(msg);
         }, { batchSize: 1, waitMs: 100, concurrency: 1 });
 
@@ -224,7 +222,7 @@ describe('QUEUE', () => {
         const deleted = await q.dlq.delete(msgToDeleteId);
         expect(deleted).toBe(true);
 
-        const dlqAfterDelete = await q.dlq.peek(10);
+        const dlqAfterDelete = await q.dlq.peek({ limit: 10 });
         expect(dlqAfterDelete.total).toBe(1);
         expect(dlqAfterDelete.items.length).toBe(1);
 
@@ -232,16 +230,16 @@ describe('QUEUE', () => {
         const purgedCount = await q.dlq.purge();
         expect(purgedCount).toBe(1);
 
-        const dlqAfterPurge = await q.dlq.peek(10);
+        const dlqAfterPurge = await q.dlq.peek({ limit: 10 });
         expect(dlqAfterPurge.total).toBe(0);
         expect(dlqAfterPurge.items.length).toBe(0);
 
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should serialize callbacks with concurrency=1', async () => {
         const qName = `queue-conc1-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         const COUNT = 10;
         const CALLBACK_DELAY = 50;
@@ -269,7 +267,7 @@ describe('QUEUE', () => {
 
     it('should process messages in parallel with concurrency > 1', async () => {
         const qName = `queue-conc-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         const COUNT = 20;
         const CALLBACK_DELAY = 100;
@@ -302,7 +300,7 @@ describe('QUEUE', () => {
 
     it('should allow multiple parallel subscribers on the same queue (in-process scaling)', async () => {
         const qName = `queue-multi-sub-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         const COUNT = 20;
         const received: number[] = [];
@@ -326,7 +324,7 @@ describe('QUEUE', () => {
 
     it('Should handle explicit NACK and persist failure reason in DLQ', async () => {
         const qName = `nack-reason-${randomUUID()}`;
-        const q = await nexo.queue(qName).create({
+        const q = await createQueue(qName, {
             maxDeliveries: 0,
             visibilityTimeoutMs: 10000
         });
@@ -342,14 +340,14 @@ describe('QUEUE', () => {
         await sub.stop();
 
         // Check DLQ
-        const dlqResult = await q.dlq.peek(10);
+        const dlqResult = await q.dlq.peek({ limit: 10 });
         expect(dlqResult.total).toBe(1);
         expect(dlqResult.items[0].failureReason).toBe("Specific Failure Reason");
     });
 
     it('should push batch of messages', async () => {
         const qName = `batch-push-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         await q.pushBatch([
             { data: 'msg1' },
@@ -364,12 +362,12 @@ describe('QUEUE', () => {
 
         await waitFor(() => expect(received.length).toBe(3));
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should push batch with mixed priorities', async () => {
         const qName = `batch-prio-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         await q.pushBatch([
             { data: 'low', options: { priority: 0 } },
@@ -387,39 +385,59 @@ describe('QUEUE', () => {
         expect(received[1]).toBe('mid');
         expect(received[2]).toBe('low');
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should handle empty pushBatch gracefully', async () => {
         const qName = `batch-empty-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         await q.pushBatch([]);
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     // ── Edge cases ──────────────────────────────────────────────
 
     it('should return exists=true after create, false before', async () => {
         const qName = `queue-exists-${randomUUID()}`;
-        expect(await nexo.queue(qName).exists()).toBe(false);
-        const q = await nexo.queue(qName).create();
-        expect(await q.exists()).toBe(true);
-        await q.delete();
-        expect(await nexo.queue(qName).exists()).toBe(false);
+        expect(await nexo.queue.exists(qName)).toBe(false);
+        const q = await createQueue(qName);
+        expect(await nexo.queue.exists(qName)).toBe(true);
+        await nexo.queue.delete(qName);
+        expect(await nexo.queue.exists(qName)).toBe(false);
     });
 
-    it('should be idempotent on create (create twice succeeds)', async () => {
-        const qName = `queue-idempotent-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
-        await nexo.queue(qName).create();
-        expect(await q.exists()).toBe(true);
-        await q.delete();
+    it('should return provisioning results and reject configuration conflicts', async () => {
+        const qName = `queue-provision-${randomUUID()}`;
+        const options = { visibilityTimeoutMs: 1234, maxDeliveries: 4 };
+
+        const created = await nexo.queue.create(qName, options);
+        expect(created.status).toBe('created');
+        expect(created.definition).toEqual({ name: qName, config: options });
+
+        const unchanged = await nexo.queue.create(qName, options);
+        expect(unchanged.status).toBe('unchanged');
+        expect(unchanged.definition).toEqual(created.definition);
+
+        try {
+            await nexo.queue.create(qName, { ...options, maxDeliveries: 5 });
+            throw new Error('Expected queue configuration conflict');
+        } catch (error) {
+            expect(error).toBeInstanceOf(ResourceConfigurationConflictError);
+            expect((error as ResourceConfigurationConflictError).details).toMatchObject({
+                resourceKind: 'queue',
+                resourceName: qName,
+                differences: [{ path: 'config.maxDeliveries', requested: 5, actual: 4 }],
+            });
+        }
+
+        expect(await nexo.queue.describe(qName)).toEqual(created.definition);
+        await nexo.queue.delete(qName);
     });
 
     it('should consume empty queue without waiting and return immediately', async () => {
         const qName = `queue-empty-nowait-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         const received: any[] = [];
         const sub = await q.subscribe(async (data) => {
@@ -430,12 +448,12 @@ describe('QUEUE', () => {
         await new Promise(r => setTimeout(r, 200));
         expect(received).toEqual([]);
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should return partial batch when fewer messages than batchSize', async () => {
         const qName = `queue-partial-batch-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         await q.push('a');
         await q.push('b');
@@ -449,12 +467,12 @@ describe('QUEUE', () => {
         await waitFor(() => expect(received.length).toBe(3));
         expect(received).toEqual(['a', 'b', 'c']);
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should wake up long-polling consumer when message is pushed', async () => {
         const qName = `queue-longpoll-wake-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         const received: any[] = [];
         const sub = await q.subscribe(async (data) => {
@@ -473,12 +491,12 @@ describe('QUEUE', () => {
         expect(elapsed).toBeLessThan(2000);
         expect(received[0]).toBe('wakeup');
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should preserve FIFO ordering for same-priority messages', async () => {
         const qName = `queue-fifo-same-prio-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         for (let i = 0; i < 10; i++) {
             await q.push({ i }, { priority: 5 });
@@ -494,18 +512,27 @@ describe('QUEUE', () => {
             expect(received[i]).toBe(i);
         }
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
-    it('should fail push to non-existent queue', async () => {
-        const qName = `queue-push-missing-${randomUUID()}`;
-        await expect(nexo.queue(qName).push('data')).rejects.toThrow();
+    it('should fail fast when getting a non-existent queue', async () => {
+        const qName = `queue-get-missing-${randomUUID()}`;
+        await expect(nexo.queue.get(qName)).rejects.toBeInstanceOf(ResourceNotFoundError);
+    });
+
+    it('should propagate connection errors from exists', async () => {
+        const disconnected = new NexoClient();
+        try {
+            await expect(disconnected.queue.exists('emails')).rejects.toBeInstanceOf(NotConnectedError);
+        } finally {
+            disconnected.disconnect();
+        }
     });
 
     it('should fail push to deleted queue', async () => {
         const qName = `queue-push-deleted-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
-        await q.delete();
+        const q = await createQueue(qName);
+        await nexo.queue.delete(qName);
         await expect(q.push('data')).rejects.toThrow();
     });
 
@@ -513,22 +540,25 @@ describe('QUEUE', () => {
 
     it('should handle deliveryToken in subscribe lifecycle', async () => {
         const qName = `queue-token-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         let received: any = null;
-        const sub = await q.subscribe(async (data) => {
+        let messageId: string | null = null;
+        const sub = await q.subscribe(async (data, meta) => {
             received = data;
+            messageId = meta.id;
         });
 
         await q.push('token_test');
         await waitFor(() => expect(received).toBe('token_test'));
+        expect(messageId).toMatch(/^[0-9a-f]{32}$/);
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     it('should requeue on stale ACK and redeliver to another consumer', async () => {
         const qName = `queue-stale-redeliver-${randomUUID()}`;
-        const q = await nexo.queue(qName).create({
+        const q = await createQueue(qName, {
             visibilityTimeoutMs: 100,
             maxDeliveries: 5,
         });
@@ -547,16 +577,16 @@ describe('QUEUE', () => {
         // Wait for at least 2 deliveries (first fails, second succeeds)
         await waitFor(() => expect(deliveryCount).toBeGreaterThanOrEqual(2));
         await sub.stop();
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 
     // ── stop() cancels in-flight consume and drains ────────────────
 
     it('stop() should return quickly when long-polling with no messages', async () => {
         const qName = `queue-stop-longpoll-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
-        const sub = await q.subscribe(async () => {}, {
+        const sub = await q.subscribe(async () => { }, {
             batchSize: 1,
             waitMs: 10000, // 10s long-poll
             concurrency: 1,
@@ -572,6 +602,6 @@ describe('QUEUE', () => {
         // stop() should cancel the in-flight long-poll and return within stopTimeoutMs
         // Without cancellation, stop() would block for 10s
         expect(stopElapsed).toBeLessThan(2000);
-        await q.delete();
+        await nexo.queue.delete(qName);
     });
 });

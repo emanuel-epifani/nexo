@@ -4,21 +4,27 @@
 use bytes::Bytes;
 
 use crate::brokers::stream::domain::message::Message;
+use crate::brokers::stream::domain::topic::StreamDefinition;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
+use crate::brokers::{ProvisionOutcome, ProvisionResult};
 use crate::protocol::wire::{PayloadCursor, PayloadWriter};
-use crate::protocol::{FLAG_STREAM_S_CREATE_HAS_MAX_AGE, FLAG_STREAM_S_CREATE_HAS_MAX_BYTES, ParseError, Response};
+use crate::protocol::{
+    ErrorCode, ParseError, ProvisionStatus, Response, FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
+    FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
+};
+use crate::transport::tcp::error_response;
 use crate::NexoEngine;
 
 // ==========================================
 // OPCODES
 // ==========================================
 
+use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 pub use crate::protocol::{
-    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLT, OP_S_EXISTS, OP_S_FETCH, OP_S_JOIN,
-    OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLT, OP_S_PUB, OP_S_PURGE_DLT, OP_S_SEEK,
+    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLT, OP_S_DESCRIBE, OP_S_EXISTS, OP_S_FETCH,
+    OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLT, OP_S_PUB, OP_S_PURGE_DLT, OP_S_SEEK,
     STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
 };
-use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
 
 // ==========================================
@@ -33,19 +39,73 @@ pub struct PubItem {
 
 #[derive(Debug)]
 pub enum StreamCommand {
-    Create { topic: String, options: StreamCreateOptions },
-    Publish { topic: String, items: Vec<PubItem> },
-    Fetch { topic: String, group: String, consumer_id: String, generation: u64, limit: u32, wait_ms: u32 },
-    Join { topic: String, group: String },
-    Ack { topic: String, group: String, consumer_id: String, generation: u64, seq: u64 },
-    Seek { topic: String, group: String, target: SeekTarget },
-    Exists { topic: String },
-    Delete { topic: String },
-    Leave { topic: String, group: String, consumer_id: String, generation: u64 },
-    PeekDlt { topic: String, group: String, limit: u32, offset: u32 },
-    MoveToStream { topic: String, group: String, seq: u64 },
-    DeleteDlt { topic: String, group: String, seq: u64 },
-    PurgeDlt { topic: String, group: String },
+    Create {
+        topic: String,
+        options: StreamCreateOptions,
+    },
+    Publish {
+        topic: String,
+        items: Vec<PubItem>,
+    },
+    Fetch {
+        topic: String,
+        group: String,
+        consumer_id: String,
+        generation: u64,
+        limit: u32,
+        wait_ms: u32,
+    },
+    Join {
+        topic: String,
+        group: String,
+    },
+    Ack {
+        topic: String,
+        group: String,
+        consumer_id: String,
+        generation: u64,
+        seq: u64,
+    },
+    Seek {
+        topic: String,
+        group: String,
+        target: SeekTarget,
+    },
+    Exists {
+        topic: String,
+    },
+    Describe {
+        topic: String,
+    },
+    Delete {
+        topic: String,
+    },
+    Leave {
+        topic: String,
+        group: String,
+        consumer_id: String,
+        generation: u64,
+    },
+    PeekDlt {
+        topic: String,
+        group: String,
+        limit: u32,
+        offset: u32,
+    },
+    MoveToStream {
+        topic: String,
+        group: String,
+        seq: u64,
+    },
+    DeleteDlt {
+        topic: String,
+        group: String,
+        seq: u64,
+    },
+    PurgeDlt {
+        topic: String,
+        group: String,
+    },
 }
 
 impl StreamCommand {
@@ -54,14 +114,28 @@ impl StreamCommand {
             OP_S_CREATE => {
                 let topic = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let max_age_ms = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_AGE != 0 { Some(cursor.read_u64()?) } else { None };
-                let max_bytes = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_BYTES != 0 { Some(cursor.read_u64()?) } else { None };
-                let retention = if max_age_ms.is_some() || max_bytes.is_some() {
-                    Some(RetentionOptions { max_age_ms, max_bytes })
+                let max_age_ms = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_AGE != 0 {
+                    Some(cursor.read_u64()?)
                 } else {
                     None
                 };
-                Ok(Self::Create { topic, options: StreamCreateOptions { retention } })
+                let max_bytes = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_BYTES != 0 {
+                    Some(cursor.read_u64()?)
+                } else {
+                    None
+                };
+                let retention = if max_age_ms.is_some() || max_bytes.is_some() {
+                    Some(RetentionOptions {
+                        max_age_ms,
+                        max_bytes,
+                    })
+                } else {
+                    None
+                };
+                Ok(Self::Create {
+                    topic,
+                    options: StreamCreateOptions { retention },
+                })
             }
             OP_S_PUB => {
                 let topic = cursor.read_string()?;
@@ -81,7 +155,11 @@ impl StreamCommand {
                 let mut items = Vec::with_capacity(count);
                 for _ in 0..count {
                     let key_len = cursor.read_u16()? as usize;
-                    let key = if key_len > 0 { Some(cursor.read_bytes(key_len)?) } else { None };
+                    let key = if key_len > 0 {
+                        Some(cursor.read_bytes(key_len)?)
+                    } else {
+                        None
+                    };
                     let payload_len = cursor.read_u32()? as usize;
                     let payload = cursor.read_bytes(payload_len)?;
                     items.push(PubItem { key, payload });
@@ -95,7 +173,14 @@ impl StreamCommand {
                 let generation = cursor.read_u64()?;
                 let limit = cursor.read_u32()?;
                 let wait_ms = cursor.read_u32()?;
-                Ok(Self::Fetch { topic, group, consumer_id, generation, limit, wait_ms })
+                Ok(Self::Fetch {
+                    topic,
+                    group,
+                    consumer_id,
+                    generation,
+                    limit,
+                    wait_ms,
+                })
             }
             OP_S_JOIN => {
                 let topic = cursor.read_string()?;
@@ -108,7 +193,13 @@ impl StreamCommand {
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
                 let seq = cursor.read_u64()?;
-                Ok(Self::Ack { topic, group, consumer_id, generation, seq })
+                Ok(Self::Ack {
+                    topic,
+                    group,
+                    consumer_id,
+                    generation,
+                    seq,
+                })
             }
             OP_S_SEEK => {
                 let topic = cursor.read_string()?;
@@ -117,13 +208,26 @@ impl StreamCommand {
                 let target = match target_byte {
                     0 => SeekTarget::Beginning,
                     1 => SeekTarget::End,
-                    _ => return Err(ParseError::Invalid(format!("Invalid seek target: {}", target_byte))),
+                    _ => {
+                        return Err(ParseError::Invalid(format!(
+                            "Invalid seek target: {}",
+                            target_byte
+                        )))
+                    }
                 };
-                Ok(Self::Seek { topic, group, target })
+                Ok(Self::Seek {
+                    topic,
+                    group,
+                    target,
+                })
             }
             OP_S_EXISTS => {
                 let topic = cursor.read_string()?;
                 Ok(Self::Exists { topic })
+            }
+            OP_S_DESCRIBE => {
+                let topic = cursor.read_string()?;
+                Ok(Self::Describe { topic })
             }
             OP_S_DELETE => {
                 let topic = cursor.read_string()?;
@@ -134,14 +238,24 @@ impl StreamCommand {
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
-                Ok(Self::Leave { topic, group, consumer_id, generation })
+                Ok(Self::Leave {
+                    topic,
+                    group,
+                    consumer_id,
+                    generation,
+                })
             }
             OP_S_PEEK_DLT => {
                 let topic = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let limit = cursor.read_u32()?;
                 let offset = cursor.read_u32()?;
-                Ok(Self::PeekDlt { topic, group, limit, offset })
+                Ok(Self::PeekDlt {
+                    topic,
+                    group,
+                    limit,
+                    offset,
+                })
             }
             OP_S_MOVE_TO_STREAM => {
                 let topic = cursor.read_string()?;
@@ -160,7 +274,10 @@ impl StreamCommand {
                 let group = cursor.read_string()?;
                 Ok(Self::PurgeDlt { topic, group })
             }
-            _ => Err(ParseError::Invalid(format!("Unknown Stream opcode: 0x{:02X}", opcode))),
+            _ => Err(ParseError::Invalid(format!(
+                "Unknown Stream opcode: 0x{:02X}",
+                opcode
+            ))),
         }
     }
 }
@@ -213,7 +330,9 @@ fn encode_fetch(messages: &[Message]) -> Bytes {
         w.put_u64(msg.timestamp);
         let key_len = msg.key.as_ref().map_or(0, |k| k.len());
         w.put_u16(key_len as u16);
-        if let Some(k) = &msg.key { w.put_raw(k); }
+        if let Some(k) = &msg.key {
+            w.put_raw(k);
+        }
         w.put_bytes(&msg.payload);
     }
     w.into_bytes()
@@ -242,7 +361,9 @@ fn encode_peek_dlt(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
         w.put_u32(*attempts);
         let key_len = key.as_ref().map_or(0, |k| k.len());
         w.put_u16(key_len as u16);
-        if let Some(k) = key { w.put_raw(k); }
+        if let Some(k) = key {
+            w.put_raw(k);
+        }
     }
     w.into_bytes()
 }
@@ -251,6 +372,48 @@ fn encode_purge_dlt(count: usize) -> Bytes {
     let mut w = PayloadWriter::with_capacity(4);
     w.put_u32(count as u32);
     w.into_bytes()
+}
+
+fn put_definition(writer: &mut PayloadWriter, definition: &StreamDefinition) {
+    let max_age = definition.config.retention.max_age_ms;
+    let max_bytes = definition.config.retention.max_bytes;
+    let flags = (if max_age.is_some() {
+        FLAG_STREAM_S_CREATE_HAS_MAX_AGE
+    } else {
+        0
+    }) | (if max_bytes.is_some() {
+        FLAG_STREAM_S_CREATE_HAS_MAX_BYTES
+    } else {
+        0
+    });
+    writer.put_str(&definition.name).put_u8(flags);
+    if let Some(max_age) = max_age {
+        writer.put_u64(max_age);
+    }
+    if let Some(max_bytes) = max_bytes {
+        writer.put_u64(max_bytes);
+    }
+    writer
+        .put_u64(definition.config.max_segment_size)
+        .put_u64(definition.config.max_ack_pending as u64)
+        .put_u64(definition.config.ack_wait_ms)
+        .put_u32(definition.config.max_deliveries);
+}
+
+fn encode_definition(definition: &StreamDefinition) -> Bytes {
+    let mut writer = PayloadWriter::new();
+    put_definition(&mut writer, definition);
+    writer.into_bytes()
+}
+
+fn encode_provision_result(result: &ProvisionResult<StreamDefinition>) -> Bytes {
+    let mut writer = PayloadWriter::new();
+    writer.put_u8(match result.outcome {
+        ProvisionOutcome::Created => ProvisionStatus::Created as u8,
+        ProvisionOutcome::Unchanged => ProvisionStatus::Unchanged as u8,
+    });
+    put_definition(&mut writer, &result.definition);
+    writer.into_bytes()
 }
 
 // ==========================================
@@ -265,16 +428,17 @@ pub async fn handle(
 ) -> Response {
     let cmd = match StreamCommand::parse(opcode, cursor) {
         Ok(c) => c,
-        Err(e) => return Response::Error(e.to_string()),
+        Err(error) => return Response::error(ErrorCode::ProtocolError, error.to_string()),
     };
 
     let stream = &engine.stream;
     let client = session_id.to_owned();
 
     match cmd {
-        StreamCommand::Create { topic, options } => match stream.create_topic(topic, options).await {
-            Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
+        StreamCommand::Create { topic, options } => match stream.create_topic(topic, options).await
+        {
+            Ok(result) => Response::Data(encode_provision_result(&result)),
+            Err(error) => error_response(error),
         },
         StreamCommand::Publish { topic, items } => {
             let batch: Vec<(Option<Bytes>, Bytes)> = items
@@ -283,58 +447,114 @@ pub async fn handle(
                 .collect();
             match stream.publish_batch(&topic, batch).await {
                 Ok(seqs) => Response::Data(encode_publish_batch(&seqs)),
-                Err(e) => Response::Error(e),
-            }
-        },
-        StreamCommand::Fetch { topic, group, consumer_id, generation, limit, wait_ms } => {
-            match stream.fetch(&group, &consumer_id, generation, limit as usize, &topic, wait_ms as u64).await {
-                Ok(messages) => Response::Data(encode_fetch(&messages)),
-                Err(e) => Response::Error(e),
+                Err(error) => error_response(error),
             }
         }
-        StreamCommand::Join { topic, group } => match stream.join_group(&group, &topic, &client).await {
-            Ok(result) => Response::Data(encode_join_group(
-                result.ack_floor,
-                result.generation,
-                &result.consumer_id,
-            )),
-            Err(e) => Response::Error(e),
-        },
-        StreamCommand::Ack { topic, group, consumer_id, generation, seq } => match stream.ack(&group, &topic, &consumer_id, generation, seq).await {
+        StreamCommand::Fetch {
+            topic,
+            group,
+            consumer_id,
+            generation,
+            limit,
+            wait_ms,
+        } => {
+            match stream
+                .fetch(
+                    &group,
+                    &consumer_id,
+                    generation,
+                    limit as usize,
+                    &topic,
+                    wait_ms as u64,
+                )
+                .await
+            {
+                Ok(messages) => Response::Data(encode_fetch(&messages)),
+                Err(error) => error_response(error),
+            }
+        }
+        StreamCommand::Join { topic, group } => {
+            match stream.join_group(&group, &topic, &client).await {
+                Ok(result) => Response::Data(encode_join_group(
+                    result.ack_floor,
+                    result.generation,
+                    &result.consumer_id,
+                )),
+                Err(error) => error_response(error),
+            }
+        }
+        StreamCommand::Ack {
+            topic,
+            group,
+            consumer_id,
+            generation,
+            seq,
+        } => match stream
+            .ack(&group, &topic, &consumer_id, generation, seq)
+            .await
+        {
             Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
-        StreamCommand::Seek { topic, group, target } => match stream.seek(&group, &topic, target).await {
+        StreamCommand::Seek {
+            topic,
+            group,
+            target,
+        } => match stream.seek(&group, &topic, target).await {
             Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
-        StreamCommand::Leave { topic, group, consumer_id, generation } => match stream.leave_group(&group, &topic, &consumer_id, generation).await {
+        StreamCommand::Leave {
+            topic,
+            group,
+            consumer_id,
+            generation,
+        } => match stream
+            .leave_group(&group, &topic, &consumer_id, generation)
+            .await
+        {
             Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
         StreamCommand::Exists { topic } => {
             let found = stream.exists(&topic).await;
             Response::Data(encode_bool(found))
         }
+        StreamCommand::Describe { topic } => match stream.describe(&topic).await {
+            Ok(definition) => Response::Data(encode_definition(&definition)),
+            Err(error) => error_response(error),
+        },
         StreamCommand::Delete { topic } => match stream.delete_topic(topic).await {
             Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
-        StreamCommand::PeekDlt { topic, group, limit, offset } => match stream.peek_dlt(&topic, &group, limit as usize, offset as usize).await {
+        StreamCommand::PeekDlt {
+            topic,
+            group,
+            limit,
+            offset,
+        } => match stream
+            .peek_dlt(&topic, &group, limit as usize, offset as usize)
+            .await
+        {
             Ok(entries) => Response::Data(encode_peek_dlt(&entries)),
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
-        StreamCommand::MoveToStream { topic, group, seq } => match stream.move_to_stream(&topic, &group, seq).await {
-            Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
-        },
-        StreamCommand::DeleteDlt { topic, group, seq } => match stream.delete_dlt(&topic, &group, seq).await {
-            Ok(_) => Response::Ok,
-            Err(e) => Response::Error(e),
-        },
+        StreamCommand::MoveToStream { topic, group, seq } => {
+            match stream.move_to_stream(&topic, &group, seq).await {
+                Ok(_) => Response::Ok,
+                Err(error) => error_response(error),
+            }
+        }
+        StreamCommand::DeleteDlt { topic, group, seq } => {
+            match stream.delete_dlt(&topic, &group, seq).await {
+                Ok(_) => Response::Ok,
+                Err(error) => error_response(error),
+            }
+        }
         StreamCommand::PurgeDlt { topic, group } => match stream.purge_dlt(&topic, &group).await {
             Ok(count) => Response::Data(encode_purge_dlt(count)),
-            Err(e) => Response::Error(e),
+            Err(error) => error_response(error),
         },
     }
 }

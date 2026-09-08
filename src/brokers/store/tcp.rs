@@ -2,8 +2,10 @@
 
 use bytes::Bytes;
 
+use crate::brokers::BrokerError;
 use crate::protocol::wire::PayloadCursor;
-use crate::protocol::{DATA_TYPE_INT, FLAG_STORE_MAP_SET_HAS_TTL, ParseError, Response};
+use crate::protocol::{ErrorCode, ParseError, Response, DATA_TYPE_INT, FLAG_STORE_MAP_SET_HAS_TTL};
+use crate::transport::tcp::error_response;
 use crate::NexoEngine;
 
 // ==========================================
@@ -26,12 +28,25 @@ pub enum StoreCommand {
 
 #[derive(Debug)]
 pub enum MapCmd {
-    Set { key: String, ttl: Option<u64>, value: Bytes },
-    Get { key: String },
-    Del { key: String },
-    Incr { key: String, delta: i64 },
+    Set {
+        key: String,
+        ttl: Option<u64>,
+        value: Bytes,
+    },
+    Get {
+        key: String,
+    },
+    Del {
+        key: String,
+    },
+    Incr {
+        key: String,
+        delta: i64,
+    },
     ClearAll,
-    ClearPrefix { prefix: String },
+    ClearPrefix {
+        prefix: String,
+    },
 }
 
 impl MapCmd {
@@ -40,7 +55,11 @@ impl MapCmd {
             OP_MAP_SET => {
                 let key = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
-                let ttl = if flags & FLAG_STORE_MAP_SET_HAS_TTL != 0 { Some(cursor.read_u64()?) } else { None };
+                let ttl = if flags & FLAG_STORE_MAP_SET_HAS_TTL != 0 {
+                    Some(cursor.read_u64()?)
+                } else {
+                    None
+                };
                 let value = cursor.read_remaining();
                 Ok(Self::Set { key, ttl, value })
             }
@@ -62,7 +81,10 @@ impl MapCmd {
                 let prefix = cursor.read_string()?;
                 Ok(Self::ClearPrefix { prefix })
             }
-            _ => Err(ParseError::Invalid(format!("Unknown Map opcode: 0x{:02X}", opcode))),
+            _ => Err(ParseError::Invalid(format!(
+                "Unknown Map opcode: 0x{:02X}",
+                opcode
+            ))),
         }
     }
 }
@@ -71,7 +93,10 @@ impl StoreCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_MAP_SET..=OP_MAP_CLEAR_PREFIX => Ok(Self::Map(MapCmd::parse(opcode, cursor)?)),
-            _ => Err(ParseError::Invalid(format!("Unknown Store opcode: 0x{:02X}", opcode))),
+            _ => Err(ParseError::Invalid(format!(
+                "Unknown Store opcode: 0x{:02X}",
+                opcode
+            ))),
         }
     }
 }
@@ -83,17 +108,15 @@ impl StoreCommand {
 pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Response {
     let cmd = match StoreCommand::parse(opcode, cursor) {
         Ok(c) => c,
-        Err(e) => return Response::Error(e.to_string()),
+        Err(error) => return Response::error(ErrorCode::ProtocolError, error.to_string()),
     };
 
     match cmd {
         StoreCommand::Map(c) => match c {
-            MapCmd::Set { key, ttl, value } => {
-                match engine.store.map.set(key, value, ttl) {
-                    Ok(()) => Response::Ok,
-                    Err(msg) => Response::Error(msg),
-                }
-            }
+            MapCmd::Set { key, ttl, value } => match engine.store.map.set(key, value, ttl) {
+                Ok(()) => Response::Ok,
+                Err(message) => error_response(BrokerError::invalid_argument(message)),
+            },
             MapCmd::Get { key } => engine
                 .store
                 .map
@@ -104,12 +127,10 @@ pub fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine) -> Re
                 engine.store.map.del(&key);
                 Response::Ok
             }
-            MapCmd::Incr { key, delta } => {
-                match engine.store.map.incr(&key, delta) {
-                    Ok(new_val) => Response::Data(new_val),
-                    Err(msg) => Response::Error(msg),
-                }
-            }
+            MapCmd::Incr { key, delta } => match engine.store.map.incr(&key, delta) {
+                Ok(new_val) => Response::Data(new_val),
+                Err(message) => error_response(BrokerError::invalid_argument(message)),
+            },
             MapCmd::ClearAll => {
                 let count = engine.store.map.clear_all();
                 let mut buf = vec![DATA_TYPE_INT];

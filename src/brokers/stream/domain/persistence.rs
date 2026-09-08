@@ -7,17 +7,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use lru::LruCache;
 use bytes::Bytes;
+use crc32fast::Hasher;
+use lru::LruCache;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncRead, AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, OwnedRwLockReadGuard};
 use tracing::{error, info};
-use crc32fast::Hasher;
 
-use crate::brokers::stream::options::RetentionOptions;
-use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::domain::group::DltEntry;
+use crate::brokers::stream::domain::message::Message;
+use crate::brokers::stream::options::RetentionOptions;
 
 pub const MAX_STREAM_RECORD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_RECORD_BYTES: usize = 256 * 1024 * 1024;
@@ -68,7 +68,7 @@ pub enum StorageCommand {
         messages: Vec<Message>,
         complete: Box<dyn FnOnce(io::Result<()>) + Send>,
     },
-    
+
     /// Read messages from a topic by reading specific byte offsets from segment files.
     ReadRange {
         segments: Arc<Vec<Segment>>,
@@ -96,7 +96,7 @@ pub enum StorageCommand {
 
     Shutdown {
         reply: oneshot::Sender<()>,
-    }
+    },
 }
 
 pub struct StorageManager {
@@ -145,14 +145,26 @@ impl StorageManager {
 
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
-            StorageCommand::Append { file_path, messages, complete } => {
+            StorageCommand::Append {
+                file_path,
+                messages,
+                complete,
+            } => {
                 let result = self.handle_append(file_path.clone(), messages).await;
                 if let Err(error) = &result {
-                    error!("StorageManager: Failed to append to {:?}: {}", file_path, error);
+                    error!(
+                        "StorageManager: Failed to append to {:?}: {}",
+                        file_path, error
+                    );
                 }
                 complete(result);
             }
-            StorageCommand::ReadRange { segments, retention_guard, offsets, reply } => {
+            StorageCommand::ReadRange {
+                segments,
+                retention_guard,
+                offsets,
+                reply,
+            } => {
                 tokio::spawn(async move {
                     let _retention_guard = retention_guard;
                     let result = read_range(&segments, offsets).await;
@@ -165,14 +177,22 @@ impl StorageManager {
                     error!("Failed to save state for {}: {}", topic_name, e);
                 }
             }
-            StorageCommand::ApplyRetention { topic_name, retention, reply } => {
+            StorageCommand::ApplyRetention {
+                topic_name,
+                retention,
+                reply,
+            } => {
                 let base_path = self.base_path.join(&topic_name);
-                let outcome = self.apply_retention(&topic_name, &base_path, &retention).await;
+                let outcome = self
+                    .apply_retention(&topic_name, &base_path, &retention)
+                    .await;
                 let _ = reply.send(outcome);
             }
             StorageCommand::DropTopic { topic_name, reply } => {
                 let topic_path = self.base_path.join(&topic_name);
-                let to_remove: Vec<PathBuf> = self.open_files.iter()
+                let to_remove: Vec<PathBuf> = self
+                    .open_files
+                    .iter()
                     .filter(|(p, _)| p.starts_with(&topic_path))
                     .map(|(p, _)| p.clone())
                     .collect();
@@ -197,7 +217,9 @@ impl StorageManager {
         file_path: PathBuf,
         messages: Vec<Message>,
     ) -> io::Result<()> {
-        if messages.is_empty() { return Ok(()); }
+        if messages.is_empty() {
+            return Ok(());
+        }
 
         if let Some(parent) = file_path.parent() {
             if !parent.exists() {
@@ -207,7 +229,13 @@ impl StorageManager {
 
         let mut buffer = Vec::new();
         for msg in &messages {
-            serialize_message(&mut buffer, msg.seq, msg.timestamp, msg.key.as_deref(), &msg.payload);
+            serialize_message(
+                &mut buffer,
+                msg.seq,
+                msg.timestamp,
+                msg.key.as_deref(),
+                &msg.payload,
+            );
         }
 
         let result = {
@@ -215,18 +243,16 @@ impl StorageManager {
             let original_len = writer.metadata().await?.len();
             match writer.write_all(&buffer).await {
                 Ok(()) => Ok(()),
-                Err(write_error) => {
-                    match writer.set_len(original_len).await {
-                        Ok(()) => Err(write_error),
-                        Err(rollback_error) => Err(io::Error::new(
-                            write_error.kind(),
-                            format!(
-                                "write failed: {}; rollback to {} bytes failed: {}",
-                                write_error, original_len, rollback_error
-                            ),
-                        )),
-                    }
-                }
+                Err(write_error) => match writer.set_len(original_len).await {
+                    Ok(()) => Err(write_error),
+                    Err(rollback_error) => Err(io::Error::new(
+                        write_error.kind(),
+                        format!(
+                            "write failed: {}; rollback to {} bytes failed: {}",
+                            write_error, original_len, rollback_error
+                        ),
+                    )),
+                },
             }
         };
 
@@ -241,15 +267,31 @@ impl StorageManager {
             if self.open_files.len() == self.open_files.cap().get() {
                 let _ = self.open_files.pop_lru();
             }
-            let file = OpenOptions::new().read(true).write(true).create(true).append(true).open(path).await?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .append(true)
+                .open(path)
+                .await?;
             self.open_files.put(path.clone(), file);
         }
         Ok(self.open_files.get_mut(path).unwrap())
     }
 
-    async fn apply_retention(&mut self, _topic_name: &str, base_path: &PathBuf, retention: &RetentionOptions) -> u64 {
+    async fn apply_retention(
+        &mut self,
+        _topic_name: &str,
+        base_path: &PathBuf,
+        retention: &RetentionOptions,
+    ) -> u64 {
         if retention.max_age_ms.is_none() && retention.max_bytes.is_none() {
-            return find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1);
+            return find_segments(base_path)
+                .await
+                .unwrap_or_default()
+                .first()
+                .map(|s| s.start_seq)
+                .unwrap_or(1);
         }
         let mut segments = find_segments(base_path).await.unwrap_or_default();
         if segments.len() <= 1 {
@@ -273,7 +315,9 @@ impl StorageManager {
                         }
                     }
                 }
-                if !deleted { survivors.push(seg); }
+                if !deleted {
+                    survivors.push(seg);
+                }
             }
             segments = survivors;
         }
@@ -281,12 +325,18 @@ impl StorageManager {
         if let Some(max_bytes) = retention.max_bytes {
             let mut current_total: u64 = 0;
             for seg in &segments {
-                current_total += tokio::fs::metadata(&seg.path).await.map(|m| m.len()).unwrap_or(0);
+                current_total += tokio::fs::metadata(&seg.path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
             }
             let mut i = 0;
             while current_total > max_bytes && i < segments.len().saturating_sub(1) {
                 let seg = &segments[i];
-                let size = tokio::fs::metadata(&seg.path).await.map(|m| m.len()).unwrap_or(0);
+                let size = tokio::fs::metadata(&seg.path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
                 self.open_files.pop(&seg.path);
                 let _ = tokio::fs::remove_file(&seg.path).await;
                 current_total = current_total.saturating_sub(size);
@@ -294,16 +344,26 @@ impl StorageManager {
             }
         }
 
-        find_segments(base_path).await.unwrap_or_default().first().map(|s| s.start_seq).unwrap_or(1)
+        find_segments(base_path)
+            .await
+            .unwrap_or_default()
+            .first()
+            .map(|s| s.start_seq)
+            .unwrap_or(1)
     }
 }
 
 /// Read messages from segment files at specific byte offsets.
 /// Called from spawned tasks — must not access StorageManager state.
 async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Result<Vec<Message>> {
-    if offsets.is_empty() { return Ok(Vec::new()); }
+    if offsets.is_empty() {
+        return Ok(Vec::new());
+    }
     if segments.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "stream segment catalog is empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "stream segment catalog is empty",
+        ));
     }
 
     // Group offsets by segment to open each file once
@@ -312,10 +372,12 @@ async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Resul
         let idx = segments
             .partition_point(|segment| segment.start_seq <= seq)
             .checked_sub(1)
-            .ok_or_else(|| io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("no segment found for sequence {}", seq),
-            ))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("no segment found for sequence {}", seq),
+                )
+            })?;
         by_segment.entry(idx).or_default().push((seq, byte_offset));
     }
 
@@ -329,10 +391,12 @@ async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Resul
             reader.seek(std::io::SeekFrom::Start(byte_offset)).await?;
             match read_record(&mut reader, MAX_STREAM_RECORD_BYTES).await {
                 ReadOutcome::Record(content_buf) => {
-                    let msg = parse_message(&content_buf).ok_or_else(|| io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid record at sequence {}", seq),
-                    ))?;
+                    let msg = parse_message(&content_buf).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("invalid record at sequence {}", seq),
+                        )
+                    })?;
                     if msg.seq != seq {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -341,19 +405,25 @@ async fn read_range(segments: &[Segment], offsets: Vec<(u64, u64)>) -> io::Resul
                     }
                     result.push(msg);
                 }
-                ReadOutcome::Corrupted => return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("CRC mismatch at sequence {}", seq),
-                )),
-                ReadOutcome::TooLarge(len) => return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("record at sequence {} is too large: {} bytes", seq, len),
-                )),
+                ReadOutcome::Corrupted => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("CRC mismatch at sequence {}", seq),
+                    ))
+                }
+                ReadOutcome::TooLarge(len) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("record at sequence {} is too large: {} bytes", seq, len),
+                    ))
+                }
                 ReadOutcome::Io(error) => return Err(error),
-                ReadOutcome::Eof | ReadOutcome::UnexpectedEof => return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!("incomplete record at sequence {}", seq),
-                )),
+                ReadOutcome::Eof | ReadOutcome::UnexpectedEof => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("incomplete record at sequence {}", seq),
+                    ))
+                }
             }
         }
     }
@@ -372,7 +442,13 @@ pub fn record_len(key: Option<&[u8]>, payload: &[u8]) -> u64 {
 }
 
 /// Serialize a message into a buffer (does NOT write to disk).
-pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Option<&[u8]>, payload: &[u8]) {
+pub fn serialize_message(
+    buf: &mut Vec<u8>,
+    seq: u64,
+    timestamp: u64,
+    key: Option<&[u8]>,
+    payload: &[u8],
+) {
     use bytes::BufMut;
     let key_len = key.map_or(0, |k| k.len()) as u16;
     let len = 8 + 8 + 2 + key_len as u32 + payload.len() as u32;
@@ -380,7 +456,9 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Optio
     hasher.update(&seq.to_be_bytes());
     hasher.update(&timestamp.to_be_bytes());
     hasher.update(&key_len.to_be_bytes());
-    if let Some(k) = key { hasher.update(k); }
+    if let Some(k) = key {
+        hasher.update(k);
+    }
     hasher.update(payload);
     let crc = hasher.finalize();
 
@@ -389,7 +467,9 @@ pub fn serialize_message(buf: &mut Vec<u8>, seq: u64, timestamp: u64, key: Optio
     buf.put_u64(seq);
     buf.put_u64(timestamp);
     buf.put_u16(key_len);
-    if let Some(k) = key { buf.put_slice(k); }
+    if let Some(k) = key {
+        buf.put_slice(k);
+    }
     buf.put_slice(payload);
 }
 
@@ -445,7 +525,9 @@ async fn read_record<R: AsyncRead + Unpin>(reader: &mut R, max_len: usize) -> Re
 
     let mut hasher = Hasher::new();
     hasher.update(&content_buf);
-    if hasher.finalize() != stored_crc { return ReadOutcome::Corrupted; }
+    if hasher.finalize() != stored_crc {
+        return ReadOutcome::Corrupted;
+    }
 
     ReadOutcome::Record(content_buf)
 }
@@ -453,13 +535,17 @@ async fn read_record<R: AsyncRead + Unpin>(reader: &mut R, max_len: usize) -> Re
 /// Parse a message from a framed record content buffer.
 fn parse_message(content: &[u8]) -> Option<Message> {
     use bytes::Buf;
-    if content.len() < 18 { return None; }
+    if content.len() < 18 {
+        return None;
+    }
     let mut cursor = std::io::Cursor::new(content);
     let seq = cursor.get_u64();
     let timestamp = cursor.get_u64();
     let key_len = cursor.get_u16();
     let key = if key_len > 0 {
-        if cursor.remaining() < key_len as usize { return None; }
+        if cursor.remaining() < key_len as usize {
+            return None;
+        }
         let key_bytes = cursor.copy_to_bytes(key_len as usize);
         Some(Bytes::copy_from_slice(&key_bytes))
     } else {
@@ -467,7 +553,12 @@ fn parse_message(content: &[u8]) -> Option<Message> {
     };
     let payload_len = cursor.remaining();
     let payload = Bytes::copy_from_slice(&cursor.copy_to_bytes(payload_len));
-    Some(Message { seq, timestamp, key, payload })
+    Some(Message {
+        seq,
+        timestamp,
+        key,
+        payload,
+    })
 }
 
 /// Build a seq→byte_offset index by scanning a segment file.
@@ -484,7 +575,8 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
             ReadOutcome::Record(content_buf) => {
                 let len = 4 + 4 + content_buf.len() as u64;
                 if let Some(msg) = parse_message(&content_buf) {
-                    if previous_seq.is_some_and(|previous| previous.checked_add(1) != Some(msg.seq)) {
+                    if previous_seq.is_some_and(|previous| previous.checked_add(1) != Some(msg.seq))
+                    {
                         if let Err(e) = reader.get_ref().set_len(valid_bytes).await {
                             error!("Failed to truncate non-monotonic segment {:?}: {}", path, e);
                         }
@@ -520,7 +612,9 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
 pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
     let base_path = base_path.join(topic_name);
     let mut state = RecoveredState::default();
-    if !base_path.exists() { return state; }
+    if !base_path.exists() {
+        return state;
+    }
 
     if let Ok(segments) = find_segments(&base_path).await {
         state.head_seq = segments.first().map(|seg| seg.start_seq).unwrap_or(1);
@@ -590,8 +684,14 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
         }
 
         state.segments = valid_segments;
-        state.next_seq = if max_seq > 0 { max_seq + 1 } else { state.head_seq.max(1) };
-        state.last_segment_size = state.segments.last()
+        state.next_seq = if max_seq > 0 {
+            max_seq + 1
+        } else {
+            state.head_seq.max(1)
+        };
+        state.last_segment_size = state
+            .segments
+            .last()
             .and_then(|seg| std::fs::metadata(&seg.path).ok())
             .map(|m| m.len())
             .unwrap_or(0);
@@ -609,12 +709,16 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
 /// Find all segment files for a topic, sorted by start_seq.
 pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
     let mut segments = Vec::new();
-    if !base_path.exists() { return Ok(segments); }
+    if !base_path.exists() {
+        return Ok(segments);
+    }
 
     let mut entries = tokio::fs::read_dir(base_path).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
         let fname = entry.file_name().to_string_lossy().to_string();
         if fname.ends_with(".log") && fname != "state.log" {
             let name_part = &fname[..fname.len() - 4];
@@ -628,7 +732,10 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
 }
 
 /// Write the state.log file (ack_floor + DLT entries + parked_keys per group). Atomic write via temp file + rename.
-pub async fn save_state_file(base_path: &Path, groups: &BTreeMap<String, GroupPersistentState>) -> std::io::Result<()> {
+pub async fn save_state_file(
+    base_path: &Path,
+    groups: &BTreeMap<String, GroupPersistentState>,
+) -> std::io::Result<()> {
     let tmp_path = base_path.join("state.log.tmp");
     let final_path = base_path.join("state.log");
 
@@ -643,7 +750,11 @@ pub async fn save_state_file(base_path: &Path, groups: &BTreeMap<String, GroupPe
     Ok(())
 }
 
-async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer: &mut W, group_id: &str, state: &GroupPersistentState) -> std::io::Result<()> {
+async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(
+    writer: &mut W,
+    group_id: &str,
+    state: &GroupPersistentState,
+) -> std::io::Result<()> {
     use bytes::{BufMut, BytesMut};
     let group_bytes = group_id.as_bytes();
     let group_len = group_bytes.len() as u16;
@@ -658,7 +769,12 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
     }
     for (_seq, entry) in &state.dlt_entries {
         let reason_bytes = entry.reason.as_bytes();
-        content_len += 8 + 2 + entry.key.as_ref().map_or(0, |k| k.len()) as u32 + 2 + reason_bytes.len() as u32 + 4;
+        content_len += 8
+            + 2
+            + entry.key.as_ref().map_or(0, |k| k.len()) as u32
+            + 2
+            + reason_bytes.len() as u32
+            + 4;
     }
     content_len += redeliver_count * 12;
 
@@ -677,7 +793,9 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
         content_buf.put_u64(*seq);
         let key_len = entry.key.as_ref().map_or(0, |k| k.len()) as u16;
         content_buf.put_u16(key_len);
-        if let Some(k) = &entry.key { content_buf.put_slice(k); }
+        if let Some(k) = &entry.key {
+            content_buf.put_slice(k);
+        }
         let reason_bytes = entry.reason.as_bytes();
         content_buf.put_u16(reason_bytes.len() as u16);
         content_buf.put_slice(reason_bytes);
@@ -702,7 +820,9 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(writer
     Ok(())
 }
 
-async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersistentState>, std::io::Error> {
+async fn load_state_file(
+    path: &PathBuf,
+) -> Result<BTreeMap<String, GroupPersistentState>, std::io::Error> {
     use bytes::Buf;
     let mut groups: BTreeMap<String, GroupPersistentState> = BTreeMap::new();
     let file = File::open(path).await?;
@@ -712,11 +832,15 @@ async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersist
         match read_record(&mut reader, MAX_STATE_RECORD_BYTES).await {
             ReadOutcome::Record(content_buf) => {
                 let mut cursor = std::io::Cursor::new(content_buf);
-                if cursor.remaining() < 10 { continue; }
+                if cursor.remaining() < 10 {
+                    continue;
+                }
 
                 let ack_floor = cursor.get_u64();
                 let group_len = cursor.get_u16();
-                if cursor.remaining() < group_len as usize { continue; }
+                if cursor.remaining() < group_len as usize {
+                    continue;
+                }
                 let group_bytes = cursor.copy_to_bytes(group_len as usize);
                 let group_id = String::from_utf8_lossy(&group_bytes).to_string();
 
@@ -727,40 +851,75 @@ async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersist
                     redeliver_entries: BTreeMap::new(),
                 };
 
-                if cursor.remaining() < 4 { continue; }
+                if cursor.remaining() < 4 {
+                    continue;
+                }
                 let parked_keys_count = cursor.get_u32();
                 for _ in 0..parked_keys_count {
-                    if cursor.remaining() < 2 { break; }
+                    if cursor.remaining() < 2 {
+                        break;
+                    }
                     let key_len = cursor.get_u16();
-                    if cursor.remaining() < key_len as usize { break; }
+                    if cursor.remaining() < key_len as usize {
+                        break;
+                    }
                     let key = Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize));
                     state.parked_keys.insert(key);
                 }
 
-                if cursor.remaining() < 4 { continue; }
+                if cursor.remaining() < 4 {
+                    continue;
+                }
                 let dlt_count = cursor.get_u32();
                 for _ in 0..dlt_count {
-                    if cursor.remaining() < 8 { break; }
+                    if cursor.remaining() < 8 {
+                        break;
+                    }
                     let seq = cursor.get_u64();
-                    if cursor.remaining() < 2 { break; }
+                    if cursor.remaining() < 2 {
+                        break;
+                    }
                     let key_len = cursor.get_u16();
                     let key = if key_len > 0 {
-                        if cursor.remaining() < key_len as usize { break; }
-                        Some(Bytes::copy_from_slice(&cursor.copy_to_bytes(key_len as usize)))
-                    } else { None };
-                    if cursor.remaining() < 2 { break; }
+                        if cursor.remaining() < key_len as usize {
+                            break;
+                        }
+                        Some(Bytes::copy_from_slice(
+                            &cursor.copy_to_bytes(key_len as usize),
+                        ))
+                    } else {
+                        None
+                    };
+                    if cursor.remaining() < 2 {
+                        break;
+                    }
                     let reason_len = cursor.get_u16();
-                    if cursor.remaining() < reason_len as usize { break; }
-                    let reason = String::from_utf8_lossy(&cursor.copy_to_bytes(reason_len as usize)).to_string();
-                    if cursor.remaining() < 4 { break; }
+                    if cursor.remaining() < reason_len as usize {
+                        break;
+                    }
+                    let reason =
+                        String::from_utf8_lossy(&cursor.copy_to_bytes(reason_len as usize))
+                            .to_string();
+                    if cursor.remaining() < 4 {
+                        break;
+                    }
                     let attempts = cursor.get_u32();
-                    state.dlt_entries.insert(seq, DltEntry { reason, attempts, key });
+                    state.dlt_entries.insert(
+                        seq,
+                        DltEntry {
+                            reason,
+                            attempts,
+                            key,
+                        },
+                    );
                 }
 
                 if cursor.remaining() >= 4 {
                     let redeliver_count = cursor.get_u32();
                     for _ in 0..redeliver_count {
-                        if cursor.remaining() < 12 { break; }
+                        if cursor.remaining() < 12 {
+                            break;
+                        }
                         let seq = cursor.get_u64();
                         let attempts = cursor.get_u32();
                         state.redeliver_entries.insert(seq, attempts);
@@ -769,7 +928,10 @@ async fn load_state_file(path: &PathBuf) -> Result<BTreeMap<String, GroupPersist
 
                 groups.insert(group_id, state);
             }
-            ReadOutcome::Corrupted | ReadOutcome::TooLarge(_) | ReadOutcome::Eof | ReadOutcome::UnexpectedEof => break,
+            ReadOutcome::Corrupted
+            | ReadOutcome::TooLarge(_)
+            | ReadOutcome::Eof
+            | ReadOutcome::UnexpectedEof => break,
             ReadOutcome::Io(error) => return Err(error),
         }
     }

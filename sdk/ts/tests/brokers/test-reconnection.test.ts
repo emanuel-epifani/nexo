@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nexo } from '../nexo';
+import { createQueue, createStream, nexo } from '../nexo';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
 
@@ -35,20 +35,20 @@ describe('SOCKET RECONNECTION', () => {
         const topic = `reconnect-pubsub-${randomUUID()}`;
         const received: string[] = [];
 
-        await nexo.pubsub(topic).subscribe(m => received.push(m));
+        await nexo.pubsub.topic(topic).subscribe(m => received.push(m));
 
         await destroyAndReconnect();
 
         // PubSub re-subscribe happens in 'reconnect' event handler.
         // Publish after reconnect — server must know about subscription again.
-        await sendWithRetry(() => nexo.pubsub(topic).publish('after-crash'));
+        await sendWithRetry(() => nexo.pubsub.topic(topic).publish('after-crash'));
 
         await waitFor(() => expect(received).toContain('after-crash'));
     });
 
     it('QUEUE: Should resume consuming after connection loss', async () => {
         const qName = `reconnect-queue-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
         const received: any[] = [];
 
         await q.subscribe(msg => received.push(msg));
@@ -63,14 +63,14 @@ describe('SOCKET RECONNECTION', () => {
     it('STREAM: Should resume consuming after connection loss (Rejoin Group)', async () => {
         const streamName = `reconnect-stream-${randomUUID()}`;
         const group = `g-${randomUUID()}`;
-        await nexo.stream(streamName).create();
+        const stream = await createStream(streamName);
         const received: any[] = [];
 
-        await nexo.stream(streamName).subscribe(group, m => received.push(m));
+        await stream.group(group).subscribe(m => received.push(m));
 
         await destroyAndReconnect();
 
-        await sendWithRetry(() => nexo.stream(streamName).publish({ status: 'recovered' }));
+        await sendWithRetry(() => stream.publish({ status: 'recovered' }));
 
         await waitFor(() => expect(received).toContainEqual({ status: 'recovered' }), { timeout: 10000 });
     });
@@ -81,7 +81,7 @@ describe('SOCKET RECONNECTION', () => {
 
     it('QUEUE: In-flight message should be redelivered after crash (at-least-once)', async () => {
         const qName = `reconnect-inflight-${randomUUID()}`;
-        const q = await nexo.queue(qName).create({ visibilityTimeoutMs: 2000 });
+        const q = await createQueue(qName, { visibilityTimeoutMs: 2000 });
 
         // Push a message BEFORE subscribing
         await q.push({ important: true });
@@ -117,7 +117,7 @@ describe('SOCKET RECONNECTION', () => {
 
     it('QUEUE: push() during disconnect should fail with predictable error', async () => {
         const qName = `reconnect-push-err-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
 
         (nexo as any).conn.socket.destroy();
         await waitFor(() => expect((nexo as any).conn.isConnected).toBe(false));
@@ -136,7 +136,7 @@ describe('SOCKET RECONNECTION', () => {
 
     it('QUEUE: Should survive double crash without duplicating consumer loops', async () => {
         const qName = `reconnect-double-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
         const received: any[] = [];
 
         await q.subscribe(msg => received.push(msg));
@@ -165,7 +165,7 @@ describe('SOCKET RECONNECTION', () => {
 
     it('QUEUE: stop() during disconnect should prevent loop from resuming', async () => {
         const qName = `reconnect-stop-${randomUUID()}`;
-        const q = await nexo.queue(qName).create();
+        const q = await createQueue(qName);
         const received: any[] = [];
 
         const sub = await q.subscribe(msg => received.push(msg));
@@ -199,16 +199,16 @@ describe('SOCKET RECONNECTION', () => {
         const receivedAfter: string[] = [];
 
         // Subscribe to first topic before crash
-        await nexo.pubsub(topicBefore).subscribe(m => receivedBefore.push(m));
+        await nexo.pubsub.topic(topicBefore).subscribe(m => receivedBefore.push(m));
 
         await destroyAndReconnect();
 
         // Subscribe to second topic after crash
-        await nexo.pubsub(topicAfter).subscribe(m => receivedAfter.push(m));
+        await nexo.pubsub.topic(topicAfter).subscribe(m => receivedAfter.push(m));
 
         // Publish to both
-        await sendWithRetry(() => nexo.pubsub(topicBefore).publish('msg-before'));
-        await nexo.pubsub(topicAfter).publish('msg-after');
+        await sendWithRetry(() => nexo.pubsub.topic(topicBefore).publish('msg-before'));
+        await nexo.pubsub.topic(topicAfter).publish('msg-after');
 
         await waitFor(() => expect(receivedBefore).toContain('msg-before'));
         await waitFor(() => expect(receivedAfter).toContain('msg-after'));
@@ -221,15 +221,15 @@ describe('SOCKET RECONNECTION', () => {
     it('STREAM: In-flight message should be redelivered after crash (at-least-once)', async () => {
         const streamName = `reconnect-stream-inflight-${randomUUID()}`;
         const group = `g-inflight-${randomUUID()}`;
-        await nexo.stream(streamName).create();
+        const stream = await createStream(streamName);
 
         // Publish a message BEFORE subscribing
-        await nexo.stream(streamName).publish({ important: true });
+        await stream.publish({ important: true });
 
         const received: any[] = [];
         let firstDelivery = true;
 
-        await nexo.stream(streamName).subscribe(group, async (msg) => {
+        await stream.group(group).subscribe(async (msg) => {
             received.push(msg);
             if (firstDelivery) {
                 firstDelivery = false;
@@ -258,17 +258,17 @@ describe('SOCKET RECONNECTION', () => {
     it('STREAM: Same-key messages should be delivered serially via TCP', async () => {
         const streamName = `key-order-tcp-${randomUUID()}`;
         const group = `g-key-order-${randomUUID()}`;
-        await nexo.stream(streamName).create();
+        const stream = await createStream(streamName);
 
         // Publish 3 messages with same key
-        await nexo.stream(streamName).publish({ n: 1 }, { key: 'order-key' });
-        await nexo.stream(streamName).publish({ n: 2 }, { key: 'order-key' });
-        await nexo.stream(streamName).publish({ n: 3 }, { key: 'order-key' });
+        await stream.publish({ n: 1 }, { key: 'order-key' });
+        await stream.publish({ n: 2 }, { key: 'order-key' });
+        await stream.publish({ n: 3 }, { key: 'order-key' });
 
         const received: number[] = [];
         let inFlight = false;
 
-        const sub = await nexo.stream(streamName).subscribe(group, async (data: any) => {
+        const sub = await stream.group(group).subscribe(async (data: any) => {
             // If key ordering works, we should never have concurrent same-key processing
             if (inFlight) throw new Error('Concurrent same-key delivery detected');
             inFlight = true;

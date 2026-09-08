@@ -234,45 +234,47 @@ This exposes:
 npm install @emanuelepifani/nexo-client
 ```
 
-### 3. Usage Example
-Connect and execute operations.
+### 3. Provision Durable Resources
+
+Queue and Stream are created by deployment or administrative code. Provisioning is idempotent when the effective configuration matches and returns the authoritative server definition.
+
+```typescript
+const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
+
+const queueResult = await client.queue.create('emails');
+const streamResult = await client.stream.create('user-events');
+
+console.log(queueResult.status, queueResult.definition.config);
+console.log(streamResult.status, streamResult.definition.config);
+```
+
+### 4. Usage Example
+
+Application code retrieves durable resources with fail-fast `get()` calls.
 
 ```typescript
 import { NexoClient } from '@emanuelepifani/nexo-client';
-// Connect once
+
 const client = await NexoClient.connect({ host: 'localhost', port: 7654 });
+const mailQueue = await client.queue.get<MailJob>('emails');
+const stream = await client.stream.get<UserEvent>('user-events');
 
+await client.store.map.set('user:1', { name: 'Max', role: 'admin' });
+const user = await client.store.map.get<User>('user:1');
+await client.store.map.delete('user:1');
 
-// --- 1. Store (Shared state Redis-like) ---
-await client.store.map.set("user:1", { name: "Max", role: "admin" });
-const user = await client.store.map.get<User>("user:1");
-await client.store.map.del("user:1");
+const heartbeat = client.pubsub.topic<Heartbeat>('edge/42/hb');
+const edgeHeartbeats = client.pubsub.pattern<Heartbeat>('edge/+/hb');
+await edgeHeartbeats.subscribe((event) => console.log('edge alive:', event.ts));
+await heartbeat.publish({ ts: Date.now() });
 
+await mailQueue.push({ to: 'test@test.com' });
+await mailQueue.subscribe((message) => console.log(message));
 
-// --- 2. Pub/Sub (Realtime events MQTT-style + wildcards) ---
-client.pubsub<Heartbeat>('edge/42/hb').publish({ ts: Date.now() });
-await client.pubsub<Heartbeat>('edge/+/hb').subscribe(hb => console.log('edge alive:', hb.ts));
-await client.pubsub<EdgeEvent>('edge/42/#').subscribe(ev => console.log('edge event:', ev.type));
-
-
-// --- 3. Queue (Reliable background jobs) ---
-const mailQ = await client.queue<MailJob>("emails").create();
-await mailQ.push({ to: "test@test.com" });
-await mailQ.subscribe((msg) => console.log(msg));
-
-
-// --- 4. Stream (Durable history Event Log) ---
-const stream = await client.stream<UserEvent>('user-events').create();
 await stream.publish({ type: 'login', userId: 'u1' });
-await stream.subscribe('analytics', (msg, meta) => {console.log(`User ${msg.userId} performed ${msg.type}`); });
-
-
-//Every broker support Binary format (zero JSON overhead)
-const chunk = Buffer.alloc(1024 * 1024);
-await client.store.map.set("blob", chunk);
-client.pubsub<Buffer>('edge/42/video').publish(chunk);
-client.stream<Buffer>('video-archive').publish(chunk);
-client.queue<Buffer>('video-processing').push(chunk);
+await stream.group('analytics').subscribe((message) => {
+  console.log(`User ${message.userId} performed ${message.type}`);
+});
 ```
 
 > **📚 Full Documentation:** For detailed API usage, configuration, and advanced patterns, visit the [**Nexo Docs**](https://nexo-docs-hub.vercel.app/).

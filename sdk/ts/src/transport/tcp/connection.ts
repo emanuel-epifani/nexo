@@ -2,9 +2,9 @@ import * as net from 'net';
 import { EventEmitter } from 'events';
 import { Logger } from '../../utils/logger';
 import { NexoConnectionConfig } from '../../config';
-import { FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from '../../protocol/generated';
+import { ErrorCode, FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HEADER_OFFSET } from '../../protocol/generated';
 import { Cursor, FrameWriter } from '../../protocol/codec';
-import { ConnectionClosedError, NotConnectedError, RequestTimeoutError, RequestCancelledError } from '../../errors';
+import { ConnectionClosedError, decodeErrorPayload, NotConnectedError, RequestTimeoutError, RequestCancelledError } from '../../errors';
 
 /** @internal */
 export class NexoConnection extends EventEmitter {
@@ -231,13 +231,12 @@ export class NexoConnection extends EventEmitter {
           clearTimeout(timer);
           cleanupAbort();
           if (res.status === ResponseStatus.ERR) {
-            // Error payload is the raw utf8 message (read to end of frame).
-            const errMsg = res.data.toString('utf8');
-            // Silence common expected errors
-            if (!errMsg.includes('FENCED') && !errMsg.includes('REBALANCE') && !errMsg.includes('NOT_MEMBER') && !errMsg.includes('not found')) {
-              this.logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${errMsg})`);
+            const error = decodeErrorPayload(res.data);
+            // Silence common expected errors by their stable protocol code.
+            if (error.code !== ErrorCode.FENCED && error.code !== ErrorCode.NOT_MEMBER && error.code !== ErrorCode.RESOURCE_NOT_FOUND) {
+              this.logger.error(`<- ERROR 0x${opcode.toString(16).padStart(2, '0')} (${error.message})`);
             }
-            reject(new Error(errMsg));
+            reject(error);
             return;
           }
           resolve({ status: res.status, cursor: new Cursor(res.data) });

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import struct
 import time
 from typing import Any, Callable, Optional
@@ -11,9 +12,12 @@ from ...errors import (
     ConnectionClosedError,
     NexoError,
     NotConnectedError,
+    ProtocolError,
     RequestTimeoutError,
+    server_error,
 )
 from ...protocol.generated import (
+    ErrorCode,
     FrameType,
     ResponseStatus,
     PROTOCOL_VERSION,
@@ -25,6 +29,28 @@ from ...protocol.generated import (
     HEADER_OFFSET_PAYLOAD_LEN,
 )
 from ...utils.logger import Logger
+
+
+def _decode_server_error(data: bytes) -> NexoError:
+    if len(data) < 5:
+        return ProtocolError("Malformed error response")
+    code = data[0]
+    message_length = struct.unpack_from(">I", data, 1)[0]
+    message_end = 5 + message_length
+    if message_end > len(data):
+        return ProtocolError("Malformed error response")
+    try:
+        message = data[5:message_end].decode("utf-8")
+    except UnicodeDecodeError:
+        return ProtocolError("Malformed UTF-8 error message")
+    details_data = data[message_end:]
+    details: Any = None
+    if details_data:
+        try:
+            details = json.loads(details_data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return ProtocolError("Malformed JSON error details")
+    return server_error(code, message, details=details)
 
 
 class NexoConnection:
@@ -235,13 +261,14 @@ class NexoConnection:
             raise
 
         if status == ResponseStatus.ERR:
-            err_msg = data.decode("utf-8")
-            if not any(
-                x in err_msg
-                for x in ("FENCED", "REBALANCE", "NOT_MEMBER", "not found")
-            ):
-                self._logger.error(f"<- ERROR 0x{opcode:02x} ({err_msg})")
-            raise NexoError(err_msg)
+            error = _decode_server_error(data)
+            if error.code not in {
+                ErrorCode.FENCED,
+                ErrorCode.NOT_MEMBER,
+                ErrorCode.RESOURCE_NOT_FOUND,
+            }:
+                self._logger.error(f"<- ERROR 0x{opcode:02x} ({error})")
+            raise error
 
         return status, Cursor(data)
 

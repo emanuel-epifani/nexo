@@ -1,10 +1,10 @@
 //! Topic: Pure domain logic for stream topic configuration.
 
-use crate::brokers::stream::options::{StreamCreateOptions, RetentionOptions};
 use crate::brokers::stream::config::SystemStreamConfig;
+use crate::brokers::stream::options::{RetentionOptions, StreamCreateOptions};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicConfig {
     pub max_segment_size: u64,
     pub retention: RetentionOptions,
@@ -13,23 +13,37 @@ pub struct TopicConfig {
     pub max_deliveries: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamDefinition {
+    pub name: String,
+    pub config: TopicConfig,
+}
+
 impl TopicConfig {
     pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
         let retention = match opts.retention {
             Some(r) => RetentionOptions {
-                max_age_ms: r.max_age_ms.map_or(
-                    Some(sys.default_retention_age_ms),
-                    |v| if v == 0 { None } else { Some(v) }
-                ),
-                max_bytes: r.max_bytes.map_or(
-                    Some(sys.default_retention_bytes),
-                    |v| if v == 0 { None } else { Some(v) }
-                ),
+                max_age_ms: r
+                    .max_age_ms
+                    .map_or(Some(sys.default_retention_age_ms), |v| {
+                        if v == 0 {
+                            None
+                        } else {
+                            Some(v)
+                        }
+                    }),
+                max_bytes: r.max_bytes.map_or(Some(sys.default_retention_bytes), |v| {
+                    if v == 0 {
+                        None
+                    } else {
+                        Some(v)
+                    }
+                }),
             },
             None => RetentionOptions {
                 max_age_ms: Some(sys.default_retention_age_ms),
                 max_bytes: Some(sys.default_retention_bytes),
-            }
+            },
         };
 
         Self {

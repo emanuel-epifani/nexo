@@ -41,6 +41,9 @@ export const DEFAULT_CONFIG = {
     concurrency: 1,
     stopTimeoutMs: 30000,
   },
+  pubsub: {
+    listenerQueueCapacity: 1024,
+  },
   logger: {
     level: 'ERROR',
   },

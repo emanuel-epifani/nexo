@@ -22,7 +22,9 @@ pub(crate) fn init_db(path: &str) -> std::result::Result<Connection, rusqlite::E
     Ok(conn)
 }
 
-pub(crate) fn load_all(conn: &Connection) -> std::result::Result<Vec<(String, RetainedMessage)>, rusqlite::Error> {
+pub(crate) fn load_all(
+    conn: &Connection,
+) -> std::result::Result<Vec<(String, RetainedMessage)>, rusqlite::Error> {
     let mut stmt = conn.prepare("SELECT path, data, expires_at FROM retained")?;
     let entries = stmt.query_map([], |row| {
         let path: String = row.get(0)?;
@@ -42,13 +44,15 @@ pub(crate) fn load_all(conn: &Connection) -> std::result::Result<Vec<(String, Re
     Ok(results)
 }
 
-pub(crate) fn flush(conn: &mut Connection, entries: &[(String, Bytes, Option<i64>)]) -> std::result::Result<(), rusqlite::Error> {
+pub(crate) fn flush(
+    conn: &mut Connection,
+    entries: &[(String, Bytes, Option<i64>)],
+) -> std::result::Result<(), rusqlite::Error> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM retained", [])?;
     {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO retained (path, data, expires_at) VALUES (?, ?, ?)"
-        )?;
+        let mut stmt =
+            tx.prepare_cached("INSERT INTO retained (path, data, expires_at) VALUES (?, ?, ?)")?;
         for (path, data, expires) in entries {
             stmt.execute(params![path, data.as_ref(), expires])?;
         }

@@ -15,7 +15,7 @@ describe('STORE (KV)', () => {
         expect(result).toBe(value);
 
         // Delete
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
 
         // Should be gone
         expect(await nexo.store.map.get(key)).toBeNull();
@@ -60,7 +60,7 @@ describe('STORE (KV)', () => {
 
     it('should succeed del on non-existent key (idempotent)', async () => {
         const key = `del-missing:${randomUUID()}`;
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
         expect(await nexo.store.map.get(key)).toBeNull();
     });
 
@@ -72,7 +72,7 @@ describe('STORE (KV)', () => {
         await nexo.store.map.set(key, 'second');
         expect(await nexo.store.map.get(key)).toBe('second');
 
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should handle large values (1MB)', async () => {
@@ -81,7 +81,7 @@ describe('STORE (KV)', () => {
         await nexo.store.map.set(key, largeValue);
         const result = await nexo.store.map.get(key);
         expect(result).toBe(largeValue);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     // ── INCR ───────────────────────────────────────────────────
@@ -90,7 +90,7 @@ describe('STORE (KV)', () => {
         const key = `incr:new:${randomUUID()}`;
         const result = await nexo.store.map.incr(key);
         expect(result).toBe(1);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should increment an existing integer value', async () => {
@@ -98,7 +98,7 @@ describe('STORE (KV)', () => {
         await nexo.store.map.set(key, 10);
         const result = await nexo.store.map.incr(key, 5);
         expect(result).toBe(15);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should decrement with negative delta', async () => {
@@ -106,14 +106,14 @@ describe('STORE (KV)', () => {
         await nexo.store.map.set(key, 10);
         const result = await nexo.store.map.incr(key, -3);
         expect(result).toBe(7);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should error on non-integer value', async () => {
         const key = `incr:str:${randomUUID()}`;
         await nexo.store.map.set(key, 'hello');
         await expect(nexo.store.map.incr(key, 1)).rejects.toThrow();
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should preserve TTL after incr', async () => {
@@ -123,14 +123,14 @@ describe('STORE (KV)', () => {
         // Should still exist after short wait (TTL=60)
         await new Promise(r => setTimeout(r, 200));
         expect(await nexo.store.map.get(key)).toBe(6);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should handle negative delta on new key', async () => {
         const key = `incr:negnew:${randomUUID()}`;
         const result = await nexo.store.map.incr(key, -5);
         expect(result).toBe(-5);
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     it('should return number from get after incr on new key', async () => {
@@ -139,7 +139,7 @@ describe('STORE (KV)', () => {
         const result = await nexo.store.map.get(key);
         expect(result).toBe(42);
         expect(typeof result).toBe('number');
-        await nexo.store.map.del(key);
+        await nexo.store.map.delete(key);
     });
 
     // ── CLEAR ──────────────────────────────────────────────────
@@ -171,7 +171,7 @@ describe('STORE (KV)', () => {
         expect(await nexo.store.map.get(`${prefix}a`)).toBeNull();
         expect(await nexo.store.map.get(`${prefix}b`)).toBeNull();
         expect(await nexo.store.map.get(otherKey)).toBe('keep');
-        await nexo.store.map.del(otherKey);
+        await nexo.store.map.delete(otherKey);
     });
 
     it('should return 0 when clearWithPrefix matches nothing', async () => {

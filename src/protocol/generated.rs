@@ -1,4 +1,4 @@
-pub const PROTOCOL_VERSION: u8 = 0x06;
+pub const PROTOCOL_VERSION: u8 = 0x07;
 pub const HEADER_SIZE: usize = 11;
 pub const HEADER_OFFSET_VERSION: usize = 0;
 pub const HEADER_OFFSET_TYPE: usize = 1;
@@ -15,6 +15,28 @@ pub const STATUS_OK: u8 = 0x00;
 pub const STATUS_ERR: u8 = 0x01;
 pub const STATUS_NULL: u8 = 0x02;
 pub const STATUS_DATA: u8 = 0x03;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    Internal = 0x00,
+    InvalidArgument = 0x01,
+    ResourceNotFound = 0x02,
+    ResourceConfigConflict = 0x03,
+    NotAuthorized = 0x04,
+    Fenced = 0x05,
+    NotMember = 0x06,
+    SlowConsumer = 0x07,
+    StorageError = 0x08,
+    ProtocolError = 0x09,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisionStatus {
+    Created = 0x01,
+    Unchanged = 0x02,
+}
 
 pub const DATA_TYPE_RAW: u8 = 0x00;
 pub const DATA_TYPE_STRING: u8 = 0x01;
@@ -45,6 +67,7 @@ pub const OP_Q_MOVE_TO_QUEUE: u8 = 0x17;
 pub const OP_Q_DELETE_DLQ: u8 = 0x18;
 pub const OP_Q_PURGE_DLQ: u8 = 0x19;
 pub const OP_Q_NACK: u8 = 0x1A;
+pub const OP_Q_DESCRIBE: u8 = 0x1B;
 
 pub const PUBSUB_OPCODE_MIN: u8 = 0x21;
 pub const PUBSUB_OPCODE_MAX: u8 = 0x2F;
@@ -61,6 +84,7 @@ pub const OP_S_JOIN: u8 = 0x33;
 pub const OP_S_ACK: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
+pub const OP_S_DESCRIBE: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
 pub const OP_S_LEAVE: u8 = 0x39;
 pub const OP_S_PEEK_DLT: u8 = 0x3A;

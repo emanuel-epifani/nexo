@@ -1,7 +1,7 @@
 //! PubSub Retained Message: Last Value Caching with TTL support
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub(crate) struct RetainedMessage {
@@ -12,14 +12,20 @@ pub(crate) struct RetainedMessage {
 
 impl RetainedMessage {
     pub(crate) fn new(data: Bytes, ttl_seconds: Option<u32>) -> Self {
-        let expires_at = ttl_seconds.map(|secs| Instant::now() + std::time::Duration::from_secs(secs as u64));
+        let expires_at =
+            ttl_seconds.map(|secs| Instant::now() + std::time::Duration::from_secs(secs as u64));
         let expires_at_unix = ttl_seconds.map(|secs| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs() + secs as u64
+                .as_secs()
+                + secs as u64
         });
-        Self { data, expires_at, expires_at_unix }
+        Self {
+            data,
+            expires_at,
+            expires_at_unix,
+        }
     }
 
     pub(crate) fn is_expired(&self) -> bool {
@@ -30,7 +36,8 @@ impl RetainedMessage {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs() >= unix
+                    .as_secs()
+                    >= unix
             })
         }
     }
@@ -48,6 +55,10 @@ impl RetainedMessage {
                 None
             }
         });
-        Self { data, expires_at, expires_at_unix }
+        Self {
+            data,
+            expires_at,
+            expires_at_unix,
+        }
     }
 }

@@ -1,11 +1,11 @@
 #![allow(clippy::too_many_arguments)]
 //! DLQ State: LinkedHashMap for O(1) lookup + insertion-ordered iteration + pagination.
 
-use hashlink::LinkedHashMap;
-use uuid::Uuid;
+use crate::brokers::queue::domain::queue::{current_time_ms, Message};
 use bytes::Bytes;
+use hashlink::LinkedHashMap;
 use serde::{Deserialize, Serialize};
-use crate::brokers::queue::domain::queue::{Message, current_time_ms};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlqMessage {
@@ -95,14 +95,16 @@ impl DlqState {
     /// Items are ordered from MOST RECENT failure to OLDEST (Reverse insertion order).
     pub fn peek(&self, offset: usize, limit: usize) -> (usize, Vec<DlqMessage>) {
         let total = self.messages.len();
-        
-        let items = self.messages.values()
+
+        let items = self
+            .messages
+            .values()
             .rev()
             .skip(offset)
             .take(limit)
             .cloned()
             .collect();
-            
+
         (total, items)
     }
 }

@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use rusqlite::{params, types::Type, Connection, ErrorCode, Result};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use rusqlite::{params, types::Type, Connection, Result, ErrorCode};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::brokers::queue::domain::queue::Message;
 use crate::brokers::queue::domain::dlq::DlqMessage;
+use crate::brokers::queue::domain::queue::Message;
 
 // ==========================================
 // STORAGE OPERATIONS
@@ -57,8 +57,12 @@ impl QueueStore {
         // This prevents race conditions where recover() runs before Writer creates tables.
         let conn = Connection::open(&db_path)
             .map_err(|e| format!("Failed to open Queue DB at {:?}: {}", db_path, e))?;
-        init_db(&conn)
-            .map_err(|e| format!("Failed to initialize Queue DB schema at {:?}: {}", db_path, e))?;
+        init_db(&conn).map_err(|e| {
+            format!(
+                "Failed to initialize Queue DB schema at {:?}: {}",
+                db_path, e
+            )
+        })?;
 
         let (tx, rx) = mpsc::channel(storage_channel_capacity);
 
@@ -80,11 +84,11 @@ impl QueueStore {
         let conn = Connection::open(&self.db_path)
             .map_err(|e| format!("Failed to open DB for recovery: {}", e))?;
 
-        let main_messages = load_all_messages(&conn)
-            .map_err(|e| format!("Failed to load main messages: {}", e))?;
-        
-        let dlq_messages = load_dlq_messages(&conn)
-            .map_err(|e| format!("Failed to load DLQ messages: {}", e))?;
+        let main_messages =
+            load_all_messages(&conn).map_err(|e| format!("Failed to load main messages: {}", e))?;
+
+        let dlq_messages =
+            load_dlq_messages(&conn).map_err(|e| format!("Failed to load DLQ messages: {}", e))?;
 
         Ok((main_messages, dlq_messages))
     }
@@ -95,9 +99,10 @@ impl QueueStore {
     pub async fn execute(&self, op: StorageOp) -> Result<(), String> {
         let sender = self.sender.lock().as_ref().cloned();
         match sender {
-            Some(s) => s.send(op).await.map_err(|e| {
-                format!("Writer channel closed, op lost: {:?}", e.0)
-            }),
+            Some(s) => s
+                .send(op)
+                .await
+                .map_err(|e| format!("Writer channel closed, op lost: {:?}", e.0)),
             None => Err("Writer channel closed".into()),
         }
     }
@@ -136,7 +141,7 @@ async fn run_writer(
          PRAGMA synchronous = OFF;
          PRAGMA cache_size = -64000;
          PRAGMA temp_store = MEMORY;
-         PRAGMA mmap_size = 268435456;"
+         PRAGMA mmap_size = 268435456;",
     ) {
         error!("Failed to set writer pragmas: {}", e);
     }
@@ -202,7 +207,7 @@ async fn run_writer(
                     }
                 }
             }
-            
+
             _ = flush_timer.tick() => {
                 if !batch.is_empty() {
                     flush_batch(&mut conn, &mut batch);
@@ -241,7 +246,10 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
                 batch.clear();
                 return;
             }
-            error!("Failed to exec op {:?}: {} — rolling back entire batch", op, e);
+            error!(
+                "Failed to exec op {:?}: {} — rolling back entire batch",
+                op, e
+            );
             drop(tx); // explicit rollback
             return;
         }
@@ -251,12 +259,17 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
         if is_constraint_error(&e) {
             error!(
                 "Fatal constraint error on commit ({} ops), discarding batch: {}",
-                batch.len(), e
+                batch.len(),
+                e
             );
             batch.clear();
             return;
         }
-        error!("Failed to commit batch ({} ops retained for retry): {}", batch.len(), e);
+        error!(
+            "Failed to commit batch ({} ops retained for retry): {}",
+            batch.len(),
+            e
+        );
         return;
     }
 
@@ -281,7 +294,7 @@ fn init_db(conn: &Connection) -> Result<()> {
          PRAGMA foreign_keys = ON;
          PRAGMA cache_size = -64000;
          PRAGMA temp_store = MEMORY;
-         "
+         ",
     )?;
 
     // Main Queue Table
@@ -335,17 +348,17 @@ fn load_all_messages(conn: &Connection) -> Result<Vec<Message>> {
         let delivery_token = row.get::<_, i64>(7)? as u64;
         let error: Option<String> = row.get(8)?;
 
-         Ok(Message {
-             id,
-             payload: bytes::Bytes::from(payload),
-             priority,
-             attempts,
-             created_at,
-             visible_at,
-             ready_seq,
-             delivery_token,
-             failure_reason: error,
-         })
+        Ok(Message {
+            id,
+            payload: bytes::Bytes::from(payload),
+            priority,
+            attempts,
+            created_at,
+            visible_at,
+            ready_seq,
+            delivery_token,
+            failure_reason: error,
+        })
     })?;
 
     let mut messages = Vec::new();
@@ -430,7 +443,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
                 ])?;
             }
         }
-        
+
         // DLQ Operations
         StorageOp::DeleteDLQ(id) => {
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
@@ -440,7 +453,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             // Atomic: delete from queue, insert into DLQ
             let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
             stmt.execute(params![msg.id.as_bytes()])?;
-            
+
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, dlq_seq, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
@@ -460,7 +473,7 @@ fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
             // Atomic: delete from DLQ, insert into queue
             let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
             stmt.execute(params![msg.id.as_bytes()])?;
-            
+
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
@@ -500,8 +513,14 @@ mod tests {
 
         // Send two inserts with the same ID — second will fail with PK violation.
         // Both ops land in the same batch (bounded channel + try_recv drain).
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
 
         // Wait for flush timer (10ms) to fire
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -529,7 +548,10 @@ mod tests {
         let msg1 = Message::new(Bytes::from("a"), 0, 0);
         let msg2 = Message::new(Bytes::from("b"), 0, 0);
 
-        store.execute(StorageOp::Insert(vec![msg1.clone(), msg2.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg1.clone(), msg2.clone()]))
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         store.shutdown().await;
@@ -545,7 +567,10 @@ mod tests {
     fn test_queue_store_new_fails_on_invalid_path() {
         // A path inside /dev/null should fail to open as a SQLite DB
         let result = QueueStore::new(PathBuf::from("/dev/null/cannot_create.db"), 10, 100, 1024);
-        assert!(result.is_err(), "QueueStore::new should fail on invalid path");
+        assert!(
+            result.is_err(),
+            "QueueStore::new should fail on invalid path"
+        );
     }
 
     #[tokio::test]
@@ -557,13 +582,22 @@ mod tests {
 
         let msg = Message::new(Bytes::from("dlq_payload"), 0, 0);
         // First insert the message into queue so MoveToDLQ can delete it
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let dlq_msg = DlqMessage::from_message(msg, "test_reason".to_string());
         // Send MoveToDLQ twice — second should not fail (INSERT OR REPLACE)
-        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
-        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
+        store
+            .execute(StorageOp::MoveToDLQ(dlq_msg.clone()))
+            .await
+            .unwrap();
+        store
+            .execute(StorageOp::MoveToDLQ(dlq_msg.clone()))
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         store.shutdown().await;
@@ -572,12 +606,18 @@ mod tests {
         let dlq_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dlq_messages", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(dlq_count, 1, "Duplicate MoveToDLQ should result in exactly 1 DLQ row");
+        assert_eq!(
+            dlq_count, 1,
+            "Duplicate MoveToDLQ should result in exactly 1 DLQ row"
+        );
 
         let queue_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(queue_count, 0, "Message should have been removed from main queue");
+        assert_eq!(
+            queue_count, 0,
+            "Message should have been removed from main queue"
+        );
     }
 
     #[tokio::test]
@@ -590,14 +630,23 @@ mod tests {
         // Insert a message into DLQ first
         let msg = Message::new(Bytes::from("replay"), 0, 0);
         let dlq_msg = DlqMessage::from_message(msg.clone(), "reason".to_string());
-        store.execute(StorageOp::MoveToDLQ(dlq_msg.clone())).await.unwrap();
+        store
+            .execute(StorageOp::MoveToDLQ(dlq_msg.clone()))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Now MoveToMain twice — second should not fail (INSERT OR REPLACE)
         let mut new_msg = dlq_msg.to_message();
         new_msg.ready_seq = 1;
-        store.execute(StorageOp::MoveToMain(new_msg.clone())).await.unwrap();
-        store.execute(StorageOp::MoveToMain(new_msg.clone())).await.unwrap();
+        store
+            .execute(StorageOp::MoveToMain(new_msg.clone()))
+            .await
+            .unwrap();
+        store
+            .execute(StorageOp::MoveToMain(new_msg.clone()))
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         store.shutdown().await;
@@ -606,7 +655,10 @@ mod tests {
         let queue_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM queue", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(queue_count, 1, "Duplicate MoveToMain should result in exactly 1 queue row");
+        assert_eq!(
+            queue_count, 1,
+            "Duplicate MoveToMain should result in exactly 1 queue row"
+        );
 
         let dlq_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dlq_messages", [], |row| row.get(0))
@@ -624,15 +676,24 @@ mod tests {
         let msg = Message::new(Bytes::from("payload"), 0, 0);
 
         // Send two inserts with the same ID — second will fail with PK violation.
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
 
         // Wait for flush — constraint error should cause batch discard
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Send a valid insert — it should succeed (writer not stuck)
         let msg2 = Message::new(Bytes::from("valid"), 0, 0);
-        store.execute(StorageOp::Insert(vec![msg2.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg2.clone()]))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         store.shutdown().await;
 
@@ -648,7 +709,10 @@ mod tests {
         let payload: Vec<u8> = conn
             .query_row("SELECT payload FROM queue", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(payload, b"valid", "Only the valid message should be persisted");
+        assert_eq!(
+            payload, b"valid",
+            "Only the valid message should be persisted"
+        );
     }
 
     #[tokio::test]
@@ -660,7 +724,10 @@ mod tests {
 
         // Push a message — it will be in the batch when shutdown is called
         let msg = Message::new(Bytes::from("shutdown_survivor"), 0, 0);
-        store.execute(StorageOp::Insert(vec![msg.clone()])).await.unwrap();
+        store
+            .execute(StorageOp::Insert(vec![msg.clone()]))
+            .await
+            .unwrap();
 
         // Shutdown immediately — batch hasn't been flushed by timer yet (10s flush_ms)
         // The shutdown retry loop should flush it successfully

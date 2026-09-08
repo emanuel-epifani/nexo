@@ -1,17 +1,18 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::brokers::pub_sub::config::PubSubConfig;
 use crate::brokers::pub_sub::domain::persistence;
 use crate::brokers::pub_sub::domain::radix_tree::Node;
 use crate::brokers::pub_sub::domain::retained::RetainedMessage;
 use crate::brokers::pub_sub::domain::types::{ClientInfo, ClientRegistry, PubSubMessage};
+use crate::brokers::{BrokerError, BrokerErrorKind};
 
 pub struct PubSubManager {
     tree: Arc<RwLock<Node>>,
@@ -36,7 +37,11 @@ impl PubSubManager {
                 }
             },
             Err(e) => {
-                tracing::warn!("Failed to initialize SQLite for retained at {}: {}", persistence_path, e);
+                tracing::warn!(
+                    "Failed to initialize SQLite for retained at {}: {}",
+                    persistence_path,
+                    e
+                );
                 Vec::new()
             }
         };
@@ -54,7 +59,7 @@ impl PubSubManager {
         let flush_dirty = retained_dirty.clone();
         let flush_path = persistence_path;
         let flush_ms = config.retained_flush_ms;
-        
+
         tokio::spawn(async move {
             if let Ok(mut conn) = persistence::init_db(&flush_path) {
                 let mut interval = tokio::time::interval(Duration::from_millis(flush_ms));
@@ -124,10 +129,13 @@ impl PubSubManager {
     }
 
     pub fn connect(&self, client_id: &str, sender: mpsc::Sender<Arc<PubSubMessage>>) {
-        self.clients.insert(Arc::from(client_id), ClientInfo {
-            sender,
-            subscriptions: HashSet::new(),
-        });
+        self.clients.insert(
+            Arc::from(client_id),
+            ClientInfo {
+                sender,
+                subscriptions: HashSet::new(),
+            },
+        );
     }
 
     pub fn push_channel_capacity(&self) -> usize {
@@ -148,40 +156,64 @@ impl PubSubManager {
         }
     }
 
-    fn validate_subscribe_pattern(pattern: &str) -> Result<(), String> {
+    fn validate_subscribe_pattern(pattern: &str) -> Result<(), BrokerError> {
         if pattern.is_empty() {
-            return Err("Subscribe pattern cannot be empty".into());
+            return Err(BrokerError::invalid_argument(
+                "Subscribe pattern cannot be empty",
+            ));
         }
         let parts: Vec<&str> = pattern.split('/').collect();
         for (i, part) in parts.iter().enumerate() {
             if part.is_empty() {
-                return Err("Subscribe pattern contains empty segments".into());
+                return Err(BrokerError::invalid_argument(
+                    "Subscribe pattern contains empty segments",
+                ));
+            }
+            if part.contains('+') && *part != "+" {
+                return Err(BrokerError::invalid_argument(
+                    "+ wildcard must occupy an entire segment",
+                ));
+            }
+            if part.contains('#') && *part != "#" {
+                return Err(BrokerError::invalid_argument(
+                    "# wildcard must occupy an entire segment",
+                ));
             }
             if *part == "#" && i != parts.len() - 1 {
-                return Err("# wildcard must be the last segment".into());
+                return Err(BrokerError::invalid_argument(
+                    "# wildcard must be the last segment",
+                ));
             }
         }
         Ok(())
     }
 
-    fn validate_publish_topic(topic: &str) -> Result<(), String> {
+    fn validate_publish_topic(topic: &str) -> Result<(), BrokerError> {
         if topic.is_empty() {
-            return Err("Publish topic cannot be empty".into());
+            return Err(BrokerError::invalid_argument(
+                "Publish topic cannot be empty",
+            ));
         }
         for part in topic.split('/') {
             if part.is_empty() {
-                return Err("Publish topic contains empty segments".into());
+                return Err(BrokerError::invalid_argument(
+                    "Publish topic contains empty segments",
+                ));
             }
-            if part == "+" || part == "#" {
-                return Err("Publish topic cannot contain wildcards (+ or #)".into());
+            if part.contains('+') || part.contains('#') {
+                return Err(BrokerError::invalid_argument(
+                    "Publish topic cannot contain wildcards (+ or #)",
+                ));
             }
         }
         Ok(())
     }
 
-    pub fn subscribe(&self, client_id: &str, pattern: &str) -> Result<(), String> {
+    pub fn subscribe(&self, client_id: &str, pattern: &str) -> Result<(), BrokerError> {
         Self::validate_subscribe_pattern(pattern)?;
-        let Some(mut info) = self.clients.get_mut(client_id) else { return Ok(()); };
+        let Some(mut info) = self.clients.get_mut(client_id) else {
+            return Ok(());
+        };
         info.subscriptions.insert(pattern.to_string());
         let sender = info.sender.clone();
         drop(info);
@@ -205,13 +237,18 @@ impl PubSubManager {
 
         if zombie {
             self.disconnect(client_id);
-            return Err("Subscriber buffer full, disconnected".into());
+            return Err(BrokerError::new(
+                BrokerErrorKind::SlowConsumer,
+                "Subscriber buffer full, disconnected",
+            ));
         }
         Ok(())
     }
 
     pub fn unsubscribe(&self, client_id: &str, pattern: &str) {
-        let Some(mut info) = self.clients.get_mut(client_id) else { return; };
+        let Some(mut info) = self.clients.get_mut(client_id) else {
+            return;
+        };
         info.subscriptions.remove(pattern);
         drop(info);
 
@@ -220,7 +257,14 @@ impl PubSubManager {
         root.remove_subscriber(&parts, client_id);
     }
 
-    pub fn publish(&self, topic: &str, data: Bytes, retain: bool, clear: bool, ttl_seconds: Option<u32>) -> Result<usize, String> {
+    pub fn publish(
+        &self,
+        topic: &str,
+        data: Bytes,
+        retain: bool,
+        clear: bool,
+        ttl_seconds: Option<u32>,
+    ) -> Result<usize, BrokerError> {
         Self::validate_publish_topic(topic)?;
 
         let parts: Vec<String> = topic.split('/').map(|s| s.to_string()).collect();
@@ -229,7 +273,10 @@ impl PubSubManager {
             let retained = if clear {
                 None
             } else {
-                Some(RetainedMessage::new(data.clone(), Some(ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds))))
+                Some(RetainedMessage::new(
+                    data.clone(),
+                    Some(ttl_seconds.unwrap_or(self.config.default_retained_ttl_seconds)),
+                ))
             };
             let mut root = self.tree.write();
             root.set_retained(&parts, retained);
@@ -267,5 +314,4 @@ impl PubSubManager {
 
         Ok(sent_count)
     }
-
 }

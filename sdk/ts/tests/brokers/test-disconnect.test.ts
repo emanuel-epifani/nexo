@@ -7,7 +7,7 @@ describe('DISCONNECT', () => {
     it('should reject pending requests on disconnect', async () => {
         const client = await NexoClient.connect();
         const qName = `disconnect-pending-${randomUUID()}`;
-        await client.queue(qName).create();
+        await client.queue.create(qName);
 
         // Consume with long waitMs → request is guaranteed in-flight
         // (no messages in queue, server holds the request for 5s)

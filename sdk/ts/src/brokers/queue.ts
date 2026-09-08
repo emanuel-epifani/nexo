@@ -1,43 +1,109 @@
 import { NexoConnection } from '../transport/tcp/connection';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
-import { ConnectionClosedError, RequestTimeoutError, RequestCancelledError } from '../errors';
+import { ConnectionClosedError, ProtocolError, RequestTimeoutError, RequestCancelledError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
-import { FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES, FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT, FLAG_QUEUE_Q_PUSH_HAS_PRIORITY, QueueOpcode } from '../protocol/generated';
+import { ProvisionOutcome, ProvisionResult } from '../provisioning';
+import {
+  FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES,
+  FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT,
+  FLAG_QUEUE_Q_PUSH_HAS_PRIORITY,
+  ProvisionStatus as WireProvisionStatus,
+  QueueOpcode,
+} from '../protocol/generated';
+import { Cursor } from '../protocol/codec';
 
 const CONSUME_TIMEOUT_MARGIN_MS = 5000;
 
+export interface QueueCreateOptions {
+  visibilityTimeoutMs?: number;
+  maxDeliveries?: number;
+}
+
+export interface QueueConfiguration {
+  visibilityTimeoutMs: number;
+  maxDeliveries: number;
+}
+
+export interface QueueDefinition {
+  name: string;
+  config: QueueConfiguration;
+}
+
+export interface QueueSubscribeOptions {
+  batchSize?: number;
+  waitMs?: number;
+  concurrency?: number;
+}
+
+export interface QueuePushOptions {
+  priority?: number;
+}
+
+export interface QueueMessageMeta {
+  id: string;
+}
+
+export type QueueHandler<T> = (data: T, meta: QueueMessageMeta) => unknown | Promise<unknown>;
+
+export interface DlqPeekOptions {
+  limit?: number;
+  offset?: number;
+}
+
+function readQueueDefinition(cursor: Cursor): QueueDefinition {
+  return {
+    name: cursor.readString(),
+    config: {
+      visibilityTimeoutMs: Number(cursor.readU64()),
+      maxDeliveries: cursor.readU32(),
+    },
+  };
+}
+
+function readProvisionStatus(cursor: Cursor): ProvisionOutcome {
+  const status = cursor.readU8();
+  if (status === WireProvisionStatus.CREATED) return 'created';
+  if (status === WireProvisionStatus.UNCHANGED) return 'unchanged';
+  throw new ProtocolError(`Unknown queue provision status: ${status}`);
+}
+
 const QueueCommands = {
-  create: (conn: NexoConnection, name: string, config: QueueConfig) => {
-    const hasVto = config?.visibilityTimeoutMs !== undefined;
-    const hasRetries = config?.maxDeliveries !== undefined;
-    const flags = (hasVto ? FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT : 0x00) | (hasRetries ? FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES : 0x00);
-    return conn.send(QueueOpcode.Q_CREATE, w => {
+  create: async (conn: NexoConnection, name: string, options: QueueCreateOptions): Promise<ProvisionResult<QueueDefinition>> => {
+    const hasVto = options.visibilityTimeoutMs !== undefined;
+    const hasDeliveries = options.maxDeliveries !== undefined;
+    const flags = (hasVto ? FLAG_QUEUE_Q_CREATE_HAS_VISIBILITY_TIMEOUT : 0x00) | (hasDeliveries ? FLAG_QUEUE_Q_CREATE_HAS_MAX_DELIVERIES : 0x00);
+    const res = await conn.send(QueueOpcode.Q_CREATE, w => {
       w.string(name).u8(flags);
-      if (hasVto) w.u64(config!.visibilityTimeoutMs!);
-      if (hasRetries) w.u32(config!.maxDeliveries!);
+      if (hasVto) w.u64(options.visibilityTimeoutMs!);
+      if (hasDeliveries) w.u32(options.maxDeliveries!);
     });
+    return {
+      status: readProvisionStatus(res.cursor),
+      definition: readQueueDefinition(res.cursor),
+    };
   },
 
-  exists: async (conn: NexoConnection, name: string) => {
-    try {
-      const res = await conn.send(QueueOpcode.Q_EXISTS, w => w.string(name));
-      return res.cursor.readU8() === 1;
-    } catch {
-      return false;
-    }
+  describe: async (conn: NexoConnection, name: string): Promise<QueueDefinition> => {
+    const res = await conn.send(QueueOpcode.Q_DESCRIBE, w => w.string(name));
+    return readQueueDefinition(res.cursor);
+  },
+
+  exists: async (conn: NexoConnection, name: string): Promise<boolean> => {
+    const res = await conn.send(QueueOpcode.Q_EXISTS, w => w.string(name));
+    return res.cursor.readU8() === 1;
   },
 
   delete: (conn: NexoConnection, name: string) =>
     conn.send(QueueOpcode.Q_DELETE, w => w.string(name)),
 
   push: (conn: NexoConnection, name: string, data: any, options: QueuePushOptions) => {
-    const hasPriority = options?.priority !== undefined;
+    const hasPriority = options.priority !== undefined;
     const flags = hasPriority ? FLAG_QUEUE_Q_PUSH_HAS_PRIORITY : 0x00;
     return conn.send(QueueOpcode.Q_PUSH, w => {
       w.string(name).u32(1).u8(flags);
-      if (hasPriority) w.u8(options!.priority!);
+      if (hasPriority) w.u8(options.priority!);
       w.anyWithLen(data);
     });
   },
@@ -130,21 +196,6 @@ const QueueCommands = {
   },
 };
 
-export interface QueueConfig {
-  visibilityTimeoutMs?: number;
-  maxDeliveries?: number;
-}
-
-export interface QueueSubscribeOptions {
-  batchSize?: number;
-  waitMs?: number;
-  concurrency?: number;
-}
-
-export interface QueuePushOptions {
-  priority?: number;
-}
-
 /**
  * Dead Letter Queue (DLQ) management for a queue.
  * Provides methods to inspect, replay, delete, and purge failed messages.
@@ -158,11 +209,12 @@ export class NexoDLQ<T = any> {
 
   /**
    * Peek messages in the DLQ without consuming them.
-   * @param limit Maximum number of messages to return (default 10)
-   * @param offset Pagination offset (default: 0)
+   * @param options Pagination options
    * @returns Object containing total count and array of messages
    */
-  async peek(limit: number = DEFAULT_CONFIG.queue.peek.limit, offset: number = DEFAULT_CONFIG.queue.peek.offset): Promise<{ total: number, items: { id: string; data: T; attempts: number; failureReason: string }[] }> {
+  async peek(options: DlqPeekOptions = {}): Promise<{ total: number, items: { id: string; data: T; attempts: number; failureReason: string }[] }> {
+    const limit = options.limit ?? DEFAULT_CONFIG.queue.peek.limit;
+    const offset = options.offset ?? DEFAULT_CONFIG.queue.peek.offset;
     this.logger.debug(`[DLQ:${this.queueName}] Peeking ${limit} messages at offset ${offset}`);
     return QueueCommands.peekDLQ<T>(this.conn, this.queueName, limit, offset);
   }
@@ -173,7 +225,7 @@ export class NexoDLQ<T = any> {
    * @param messageId ID of the message to move
    * @returns true if the message was moved, false if not found
    */
-  async moveToQueue(messageId: string): Promise<boolean> {
+  async replay(messageId: string): Promise<boolean> {
     this.logger.debug(`[DLQ:${this.queueName}] Moving message ${messageId} to main queue`);
     return QueueCommands.moveToQueue(this.conn, this.queueName, messageId);
   }
@@ -202,37 +254,54 @@ class QueueSubscription<T> {
   active = false;
   private loopPromise: Promise<void> = Promise.resolve();
   private abortController: AbortController | null = null;
+  private terminalError: unknown = null;
 
   constructor(
     private readonly conn: NexoConnection,
     private readonly queueName: string,
     private readonly logger: Logger,
-    private readonly callback: (data: T) => Promise<any> | any,
+    private readonly callback: QueueHandler<T>,
     private readonly batchSize: number,
     private readonly waitMs: number,
     private readonly concurrency: number,
     private readonly stopTimeoutMs: number,
   ) { }
 
+  get closed(): Promise<void> {
+    return this.loopPromise;
+  }
+
+  get error(): unknown {
+    return this.terminalError;
+  }
+
   start(): void {
     this.active = true;
-    this.loopPromise = this.loop().catch(err => {
-      this.logger.error(`[CRITICAL] Queue loop crashed for ${this.queueName}`, err);
+    this.loopPromise = this.loop().catch(error => {
+      this.terminalError = error;
+      this.logger.error(`[CRITICAL] Queue loop crashed for ${this.queueName}`, error);
+    }).finally(() => {
+      this.active = false;
     });
   }
 
   async stop(): Promise<void> {
     this.active = false;
     this.abortController?.abort();
+    let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         this.loopPromise,
-        new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error(`stop() drain timeout after ${this.stopTimeoutMs}ms`)), this.stopTimeoutMs)
-        ),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`stop() drain timeout after ${this.stopTimeoutMs}ms`)), this.stopTimeoutMs);
+          timer.unref();
+        }),
       ]);
-    } catch (e: any) {
-      this.logger.warn(`[Queue:${this.queueName}] ${e.message}`);
+    } catch (error: any) {
+      this.logger.warn(`[Queue:${this.queueName}] ${error.message}`);
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -255,7 +324,7 @@ class QueueSubscription<T> {
         await runConcurrent(messages, this.concurrency, async (msg) => {
           if (!this.active) return;
           try {
-            await this.callback(msg.data);
+            await this.callback(msg.data, { id: msg.id });
             QueueCommands.ack(this.conn, this.queueName, msg.id, msg.deliveryToken);
           } catch (e: any) {
             if (!this.conn.isConnected) return;
@@ -266,12 +335,14 @@ class QueueSubscription<T> {
         });
 
       } catch (e: any) {
+        this.abortController = null;
         if (!this.active) break;
         if (e instanceof RequestCancelledError) break;
         if (!this.conn.isConnected || e instanceof ConnectionClosedError || e instanceof RequestTimeoutError || e.code === 'ECONNRESET') {
           await new Promise(r => setTimeout(r, DEFAULT_CONFIG.connection.backoff.short));
           continue;
         }
+        this.terminalError = e;
         this.logger.error(`[Queue:${this.queueName}] Consumer stopping:`, e.message);
         break;
       }
@@ -280,12 +351,12 @@ class QueueSubscription<T> {
 }
 
 export class NexoQueue<T = any> {
-  private _dlq: NexoDLQ<T>;
+  private readonly _dlq: NexoDLQ<T>;
 
   constructor(
-    private conn: NexoConnection,
+    private readonly conn: NexoConnection,
     public readonly name: string,
-    private logger: Logger
+    private readonly logger: Logger
   ) {
     this._dlq = new NexoDLQ<T>(conn, name, logger);
   }
@@ -296,19 +367,6 @@ export class NexoQueue<T = any> {
    */
   get dlq(): NexoDLQ<T> {
     return this._dlq;
-  }
-
-  async create(config: QueueConfig = {}): Promise<this> {
-    await QueueCommands.create(this.conn, this.name, config);
-    return this;
-  }
-
-  async exists(): Promise<boolean> {
-    return QueueCommands.exists(this.conn, this.name);
-  }
-
-  async delete(): Promise<void> {
-    await QueueCommands.delete(this.conn, this.name);
   }
 
   async push(data: T, options: QueuePushOptions = {}): Promise<void> {
@@ -325,7 +383,7 @@ export class NexoQueue<T = any> {
    * calling subscribe() N times produces N parallel consumers sharing the queue,
    * with messages split between them by the server.
    */
-  async subscribe(callback: (data: T) => Promise<any> | any, options: QueueSubscribeOptions = {}): Promise<Subscription> {
+  async subscribe(callback: QueueHandler<T>, options: QueueSubscribeOptions = {}): Promise<Subscription> {
     const batchSize = options.batchSize ?? DEFAULT_CONFIG.queue.batchSize;
     const waitMs = options.waitMs ?? DEFAULT_CONFIG.queue.waitMs;
     const concurrency = options.concurrency ?? DEFAULT_CONFIG.queue.concurrency;
@@ -333,13 +391,43 @@ export class NexoQueue<T = any> {
     if (batchSize < 1) throw new Error(`batchSize must be >= 1, got ${batchSize}`);
     if (concurrency < 1) throw new Error(`concurrency must be >= 1, got ${concurrency}`);
 
+    await QueueCommands.describe(this.conn, this.name);
     const sub = new QueueSubscription<T>(this.conn, this.name, this.logger, callback, batchSize, waitMs, concurrency, DEFAULT_CONFIG.queue.stopTimeoutMs);
     sub.start();
 
     return new Subscription(
       () => sub.stop(),
       () => sub.active,
+      sub.closed,
+      () => sub.error,
     );
   }
+}
 
+export class NexoQueueFacade {
+  constructor(
+    private readonly conn: NexoConnection,
+    private readonly logger: Logger,
+  ) { }
+
+  create(name: string, options: QueueCreateOptions = {}): Promise<ProvisionResult<QueueDefinition>> {
+    return QueueCommands.create(this.conn, name, options);
+  }
+
+  describe(name: string): Promise<QueueDefinition> {
+    return QueueCommands.describe(this.conn, name);
+  }
+
+  async get<T = any>(name: string): Promise<NexoQueue<T>> {
+    await QueueCommands.describe(this.conn, name);
+    return new NexoQueue<T>(this.conn, name, this.logger);
+  }
+
+  exists(name: string): Promise<boolean> {
+    return QueueCommands.exists(this.conn, name);
+  }
+
+  async delete(name: string): Promise<void> {
+    await QueueCommands.delete(this.conn, name);
+  }
 }

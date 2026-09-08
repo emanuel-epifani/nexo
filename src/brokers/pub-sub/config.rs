@@ -23,11 +23,26 @@ impl PubSubConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            persistence_path: crate::config::get_env("PUBSUB_ROOT_PERSISTENCE_PATH", default.persistence_path),
-            default_retained_ttl_seconds: crate::config::get_env("PUBSUB_DEFAULT_RETAINED_TTL_SECS", default.default_retained_ttl_seconds),
-            cleanup_interval_seconds: crate::config::get_env("PUBSUB_CLEANUP_INTERVAL_SECS", default.cleanup_interval_seconds),
-            retained_flush_ms: crate::config::get_env("PUBSUB_RETAINED_FLUSH_MS", default.retained_flush_ms),
-            push_channel_capacity: crate::config::get_env("PUBSUB_PUSH_CHANNEL_CAPACITY", default.push_channel_capacity),
+            persistence_path: crate::config::get_env(
+                "PUBSUB_ROOT_PERSISTENCE_PATH",
+                default.persistence_path,
+            ),
+            default_retained_ttl_seconds: crate::config::get_env(
+                "PUBSUB_DEFAULT_RETAINED_TTL_SECS",
+                default.default_retained_ttl_seconds,
+            ),
+            cleanup_interval_seconds: crate::config::get_env(
+                "PUBSUB_CLEANUP_INTERVAL_SECS",
+                default.cleanup_interval_seconds,
+            ),
+            retained_flush_ms: crate::config::get_env(
+                "PUBSUB_RETAINED_FLUSH_MS",
+                default.retained_flush_ms,
+            ),
+            push_channel_capacity: crate::config::get_env(
+                "PUBSUB_PUSH_CHANNEL_CAPACITY",
+                default.push_channel_capacity,
+            ),
         }
     }
 }

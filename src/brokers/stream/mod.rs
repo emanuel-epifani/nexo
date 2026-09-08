@@ -1,9 +1,10 @@
+pub mod config;
 mod domain;
 pub mod manager;
-pub mod config;
 pub mod options;
 pub mod tcp;
 
-pub use manager::StreamManager;
 pub use domain::message::Message;
-pub use domain::persistence::{serialize_message, recover_topic};
+pub use domain::persistence::{recover_topic, serialize_message};
+pub use domain::topic::{StreamDefinition, TopicConfig};
+pub use manager::StreamManager;

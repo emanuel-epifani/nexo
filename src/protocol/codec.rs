@@ -1,13 +1,13 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::config::Config;
 use super::errors::ParseError;
 use super::frame::{FrameHeader, InboundFrame, OutboundFrame, Response};
 use super::generated::{
     PROTOCOL_VERSION, STATUS_DATA, STATUS_ERR, STATUS_NULL, STATUS_OK, TYPE_PUSH_PUBSUB,
     TYPE_RESPONSE,
 };
+use crate::config::Config;
 
 #[derive(Debug, Default)]
 pub struct NexoCodec;
@@ -47,7 +47,8 @@ impl Decoder for NexoCodec {
         let max_payload_size = Config::global().server.max_payload_size;
         if payload_len > max_payload_size {
             return Err(ParseError::Invalid(format!(
-                "Payload too large: {} bytes (max: {})", payload_len, max_payload_size
+                "Payload too large: {} bytes (max: {})",
+                payload_len, max_payload_size
             )));
         }
 
@@ -74,9 +75,24 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 let (status, payload) = match response {
                     Response::Ok => (STATUS_OK, Bytes::new()),
                     Response::Null => (STATUS_NULL, Bytes::new()),
-                    // Error message is the whole payload (read to end), mirroring
-                    // STATUS_DATA — the length is already in the header.
-                    Response::Error(msg) => (STATUS_ERR, Bytes::from(msg.into_bytes())),
+                    // Error payload carries a stable code, a length-prefixed message, and optional JSON details.
+                    // The frame payload length bounds the details bytes.
+                    Response::Error {
+                        code,
+                        message,
+                        details,
+                    } => {
+                        let mut payload = BytesMut::with_capacity(
+                            5 + message.len() + details.as_ref().map_or(0, Bytes::len),
+                        );
+                        payload.put_u8(code as u8);
+                        payload.put_u32(message.len() as u32);
+                        payload.extend_from_slice(message.as_bytes());
+                        if let Some(details) = details {
+                            payload.extend_from_slice(&details);
+                        }
+                        (STATUS_ERR, payload.freeze())
+                    }
                     Response::Data(data) => (STATUS_DATA, data),
                 };
 
@@ -87,10 +103,7 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);
             }
-            OutboundFrame::PushPubSub {
-                id,
-                payload,
-            } => {
+            OutboundFrame::PushPubSub { id, payload } => {
                 dst.put_u8(PROTOCOL_VERSION);
                 dst.put_u8(TYPE_PUSH_PUBSUB);
                 dst.put_u8(0); // meta byte unused for pushes
@@ -106,8 +119,9 @@ impl Encoder<OutboundFrame> for NexoCodec {
 
 #[cfg(test)]
 mod tests {
+    use super::super::generated::{ErrorCode, STATUS_DATA, STATUS_ERR, TYPE_RESPONSE};
+    use super::super::wire::PayloadCursor;
     use super::*;
-    use super::super::generated::{STATUS_DATA, TYPE_RESPONSE};
 
     const TEST_ID: u32 = 42;
     const TEST_PAYLOAD: &[u8] = b"nexo-test-payload";
@@ -141,6 +155,38 @@ mod tests {
     }
 
     #[test]
+    fn structured_error_encodes_code_message_and_details() {
+        let details = Bytes::from_static(br#"{"resourceName":"emails"}"#);
+        let response = Response::error_with_details(
+            ErrorCode::ResourceConfigConflict,
+            "configuration conflict",
+            details.clone(),
+        );
+        let mut codec = NexoCodec::new();
+        let mut encoded = BytesMut::new();
+
+        codec
+            .encode(
+                OutboundFrame::Response {
+                    id: TEST_ID,
+                    response,
+                },
+                &mut encoded,
+            )
+            .unwrap();
+        let frame = codec.decode(&mut encoded).unwrap().unwrap();
+        assert_eq!(frame.header.meta, STATUS_ERR);
+
+        let mut cursor = PayloadCursor::new(frame.payload);
+        assert_eq!(
+            cursor.read_u8().unwrap(),
+            ErrorCode::ResourceConfigConflict as u8
+        );
+        assert_eq!(cursor.read_string().unwrap(), "configuration conflict");
+        assert_eq!(cursor.read_remaining(), details);
+    }
+
+    #[test]
     fn parse_frame_returns_none_for_incomplete_header() {
         const INCOMPLETE_HEADER_SIZE: usize = FrameHeader::SIZE - 1;
         let mut codec = NexoCodec::new();
@@ -170,9 +216,7 @@ mod tests {
         let truncated_len = FrameHeader::SIZE + 1;
         let mut truncated = BytesMut::from(&encoded[..truncated_len]);
 
-        let parsed = codec
-            .decode(&mut truncated)
-            .expect("decode should succeed");
+        let parsed = codec.decode(&mut truncated).expect("decode should succeed");
 
         assert!(parsed.is_none());
     }

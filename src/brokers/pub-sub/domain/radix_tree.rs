@@ -1,19 +1,19 @@
 //! PubSub Radix Tree Node: Topic routing data structure
 
+use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use bytes::Bytes;
 
 use super::retained::RetainedMessage;
 
 pub(crate) struct Node {
     // Exact match children: "kitchen" -> Node
     pub(crate) children: HashMap<String, Node>,
-    
+
     // Wildcard '+' child: matches any single token at this level
     // Note: Used for routing messages TO subscribers who used '+'
     pub(crate) plus_child: Option<Box<Node>>,
-    
+
     // Wildcard '#' child: matches everything remaining
     // Note: Used for routing messages TO subscribers who used '#'
     pub(crate) hash_child: Option<Box<Node>>,
@@ -54,15 +54,23 @@ impl Node {
         for part in parts {
             match part.as_str() {
                 "#" => {
-                    current.hash_child.get_or_insert_with(|| Box::new(Node::new()))
-                        .subscribers.insert(Arc::from(client));
+                    current
+                        .hash_child
+                        .get_or_insert_with(|| Box::new(Node::new()))
+                        .subscribers
+                        .insert(Arc::from(client));
                     return;
                 }
                 "+" => {
-                    current = current.plus_child.get_or_insert_with(|| Box::new(Node::new()));
+                    current = current
+                        .plus_child
+                        .get_or_insert_with(|| Box::new(Node::new()));
                 }
                 _ => {
-                    current = current.children.entry(part.clone()).or_insert_with(Node::new);
+                    current = current
+                        .children
+                        .entry(part.clone())
+                        .or_insert_with(Node::new);
                 }
             }
         }
@@ -129,12 +137,20 @@ impl Node {
     pub(crate) fn set_retained(&mut self, parts: &[String], retained: Option<RetainedMessage>) {
         let mut current = self;
         for part in parts {
-            current = current.children.entry(part.clone()).or_insert_with(Node::new);
+            current = current
+                .children
+                .entry(part.clone())
+                .or_insert_with(Node::new);
         }
         current.retained = retained;
     }
 
-    pub(crate) fn collect_retained_for_pattern(&self, pattern: &[String], current_path: &str, results: &mut Vec<(String, Bytes)>) {
+    pub(crate) fn collect_retained_for_pattern(
+        &self,
+        pattern: &[String],
+        current_path: &str,
+        results: &mut Vec<(String, Bytes)>,
+    ) {
         if pattern.is_empty() {
             if let Some(retained) = &self.retained {
                 if !retained.is_expired() {
@@ -166,7 +182,11 @@ impl Node {
         }
     }
 
-    pub(crate) fn collect_all_retained_for_subscribe(&self, current_path: &str, results: &mut Vec<(String, Bytes)>) {
+    pub(crate) fn collect_all_retained_for_subscribe(
+        &self,
+        current_path: &str,
+        results: &mut Vec<(String, Bytes)>,
+    ) {
         if let Some(retained) = &self.retained {
             if !retained.is_expired() {
                 results.push((current_path.to_string(), retained.data.clone()));
@@ -178,10 +198,18 @@ impl Node {
         }
     }
 
-    pub(crate) fn collect_all_retained(&self, current_path: &str, results: &mut Vec<(String, Bytes, Option<i64>)>) {
+    pub(crate) fn collect_all_retained(
+        &self,
+        current_path: &str,
+        results: &mut Vec<(String, Bytes, Option<i64>)>,
+    ) {
         if let Some(retained) = &self.retained {
             if !retained.is_expired() {
-                results.push((current_path.to_string(), retained.data.clone(), retained.expires_at_unix.map(|v| v as i64)));
+                results.push((
+                    current_path.to_string(),
+                    retained.data.clone(),
+                    retained.expires_at_unix.map(|v| v as i64),
+                ));
             }
         }
         for (key, child) in &self.children {

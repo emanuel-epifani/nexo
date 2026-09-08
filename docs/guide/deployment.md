@@ -8,7 +8,7 @@ Nexo stores all data under `./data/` by default:
 data/
 ├── queues/     ← Queue messages (SQLite WAL)
 ├── streams/    ← Stream segments (append-only files)
-└── pubsub/     ← Pub/Sub retained messages (JSON files)
+└── pubsub/     ← Pub/Sub retained messages (SQLite)
 ```
 
 In Docker, this directory lives **inside the container** — meaning data is **lost when the container is removed**. To persist data across restarts, mount a Docker volume:
@@ -44,6 +44,18 @@ docker run -d \
 ```
 
 For most deployments, a single volume is sufficient.
+
+## Resource Provisioning
+
+Provision Queue and Stream resources after the Nexo server becomes ready and before application workloads start. Run this from a deployment job or administrative process; application code should use `get()` and fail fast when a required resource is missing.
+
+```typescript
+const client = await NexoClient.connect();
+await client.queue.create('emails', { visibilityTimeoutMs: 30_000, maxDeliveries: 5 });
+await client.stream.create('events', { retention: { maxAgeMs: 604_800_000 } });
+```
+
+Provisioning is safe to repeat when the effective configuration is identical. A different effective configuration raises `ResourceConfigurationConflictError` with the requested configuration, active configuration, and field-level differences.
 
 ## Max Payload Size
 

@@ -27,7 +27,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { BenchmarkProbe } from "../utils/benchmark-misure";
-import { nexo } from "../nexo";
+import { createQueue, createStream, nexo } from "../nexo";
 import { runConcurrent } from "../../src/utils/concurrent";
 
 
@@ -79,8 +79,8 @@ describe('Stress test', () => {
             probe.printResult();
         });
         it('QUEUE - PUSH - concurrent workers', async () => {
-            const q = nexo.queue('bench-queue-throughput');
-            await q.create();
+            const qName = 'bench-queue-throughput';
+            const q = await createQueue(qName);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -101,11 +101,11 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await q.delete();
+            await nexo.queue.delete(qName);
         });
         it('QUEUE - PUSH BATCH - concurrent workers', async () => {
-            const q = nexo.queue('bench-queue-batch-throughput');
-            await q.create();
+            const qName = 'bench-queue-batch-throughput';
+            const q = await createQueue(qName);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -128,11 +128,11 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await q.delete();
+            await nexo.queue.delete(qName);
         });
         it('STREAM - PUBLISH - concurrent workers', async () => {
             const topic = 'bench-stream-throughput';
-            await nexo.stream(topic).create();
+            const stream = await createStream(topic);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -145,7 +145,7 @@ describe('Stress test', () => {
             const worker = async (workerId: number) => {
                 for (let i = 0; i < OPS_PER_WORKER; i++) {
                     const t0 = performance.now();
-                    await nexo.stream(topic).publish(payload);
+                    await stream.publish(payload);
                     probe.record(performance.now() - t0);
                 }
             };
@@ -153,11 +153,11 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await nexo.stream(topic).delete();
+            await nexo.stream.delete(topic);
         });
         it('STREAM - PUBLISH BATCH - concurrent workers', async () => {
             const topic = 'bench-stream-batch-throughput';
-            await nexo.stream(topic).create();
+            const stream = await createStream(topic);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -172,7 +172,7 @@ describe('Stress test', () => {
                 const batch = Array.from({ length: BATCH_SIZE }, () => ({ data: payload }));
                 for (let i = 0; i < BATCHES_PER_WORKER; i++) {
                     const t0 = performance.now();
-                    await nexo.stream(topic).publishBatch(batch);
+                    await stream.publishBatch(batch);
                     probe.recordBatch(BATCH_SIZE, performance.now() - t0);
                 }
             };
@@ -180,10 +180,10 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await nexo.stream(topic).delete();
+            await nexo.stream.delete(topic);
         });
         it('PUBSUB - PUBLISH - concurrent workers', async () => {
-            const topic = nexo.pubsub('bench/pubsub-throughput');
+            const topic = nexo.pubsub.topic('bench/pubsub-throughput');
             const payload = { op: 'ping', data: 'x', t: Date.now() };
 
             const TOTAL = 50_000;
@@ -205,8 +205,8 @@ describe('Stress test', () => {
             probe.printResult();
         });
         it('QUEUE - CONSUME+ACK - subscriber throughput', async () => {
-            const q = nexo.queue('bench-queue-consume');
-            await q.create();
+            const qName = 'bench-queue-consume';
+            const q = await createQueue(qName);
 
             const TOTAL = 50_000;
             const payload = { op: 'job', data: 'x', t: Date.now() };
@@ -226,23 +226,23 @@ describe('Stress test', () => {
             await sub.stop();
             probe.printResult();
 
-            await q.delete();
+            await nexo.queue.delete(qName);
         });
         it('STREAM - SUBSCRIBE+ACK - subscriber throughput', async () => {
             const topic = 'bench-stream-subscribe';
-            await nexo.stream(topic).create();
+            const stream = await createStream(topic);
 
             const TOTAL = 50_000;
             const payload = { op: 'event', data: 'x', t: Date.now() };
 
             // Pre-fill stream
-            for (let i = 0; i < TOTAL; i++) await nexo.stream(topic).publish(payload);
+            for (let i = 0; i < TOTAL; i++) await stream.publish(payload);
 
             const probe = new BenchmarkProbe('STREAM SUBSCRIBE+ACK', TOTAL);
             let consumed = 0;
             probe.startTimer();
 
-            const sub = await nexo.stream(topic).subscribe('bench-group', async () => {
+            const sub = await stream.group('bench-group').subscribe(async () => {
                 consumed++;
             }, { batchSize: 100, waitMs: 100, concurrency: 10 });
 
@@ -250,7 +250,7 @@ describe('Stress test', () => {
             await sub.stop();
             probe.printResult();
 
-            await nexo.stream(topic).delete();
+            await nexo.stream.delete(topic);
         });
     })
 
@@ -285,8 +285,8 @@ describe('Stress test', () => {
             probe.printResult();
         });
         it('QUEUE - PUSH - sequential', async () => {
-            const q = nexo.queue('bench-queue-latency');
-            await q.create();
+            const qName = 'bench-queue-latency';
+            const q = await createQueue(qName);
 
             const ITERATIONS = 100_000;
             const payload = { op: 'job', data: 'x', t: Date.now() };
@@ -301,11 +301,11 @@ describe('Stress test', () => {
 
             probe.printResult();
 
-            await q.delete();
+            await nexo.queue.delete(qName);
         });
         it('STREAM - PUBLISH - sequential', async () => {
             const topic = 'bench-stream-latency';
-            await nexo.stream(topic).create();
+            const stream = await createStream(topic);
 
             const ITERATIONS = 100_000;
             const payload = { op: 'event', data: 'x', t: Date.now() };
@@ -314,16 +314,16 @@ describe('Stress test', () => {
 
             for (let i = 0; i < ITERATIONS; i++) {
                 const t0 = performance.now();
-                await nexo.stream(topic).publish(payload);
+                await stream.publish(payload);
                 probe.record(performance.now() - t0);
             }
 
             probe.printResult();
 
-            await nexo.stream(topic).delete();
+            await nexo.stream.delete(topic);
         });
         it('PUBSUB -PUBLISH - sequential', async () => {
-            const topic = nexo.pubsub('bench/pubsub-latency');
+            const topic = nexo.pubsub.topic('bench/pubsub-latency');
             const payload = { op: 'ping', data: 'x', t: Date.now() };
 
             const ITERATIONS = 100_000;

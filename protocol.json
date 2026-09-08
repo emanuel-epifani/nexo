@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 6,
+  "protocolVersion": 7,
   "header": {
     "size": 11,
     "offsets": {
@@ -21,6 +21,22 @@
     "ERR": 1,
     "NULL": 2,
     "DATA": 3
+  },
+  "errorCodes": {
+    "INTERNAL": 0,
+    "INVALID_ARGUMENT": 1,
+    "RESOURCE_NOT_FOUND": 2,
+    "RESOURCE_CONFIG_CONFLICT": 3,
+    "NOT_AUTHORIZED": 4,
+    "FENCED": 5,
+    "NOT_MEMBER": 6,
+    "SLOW_CONSUMER": 7,
+    "STORAGE_ERROR": 8,
+    "PROTOCOL_ERROR": 9
+  },
+  "provisionStatuses": {
+    "CREATED": 1,
+    "UNCHANGED": 2
   },
   "dataTypes": {
     "RAW": 0,
@@ -58,7 +74,8 @@
         "Q_MOVE_TO_QUEUE": 23,
         "Q_DELETE_DLQ": 24,
         "Q_PURGE_DLQ": 25,
-        "Q_NACK": 26
+        "Q_NACK": 26,
+        "Q_DESCRIBE": 27
       }
     },
     "pubsub": {
@@ -79,6 +96,7 @@
         "S_ACK": 52,
         "S_EXISTS": 53,
         "S_DELETE": 54,
+        "S_DESCRIBE": 55,
         "S_SEEK": 56,
         "S_LEAVE": 57,
         "S_PEEK_DLT": 58,

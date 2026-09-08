@@ -29,14 +29,35 @@ impl SystemQueueConfig {
     pub fn load() -> Self {
         let default = Self::default();
         Self {
-            visibility_timeout_ms: crate::config::get_env("QUEUE_VISIBILITY_MS", default.visibility_timeout_ms),
-            max_deliveries:       crate::config::get_env("QUEUE_MAX_DELIVERIES", default.max_deliveries),
-            default_batch_size:    crate::config::get_env("QUEUE_DEFAULT_BATCH_SIZE", default.default_batch_size),
-            default_wait_ms:       crate::config::get_env("QUEUE_DEFAULT_WAIT_MS", default.default_wait_ms),
-            persistence_path:         crate::config::get_env("QUEUE_ROOT_PERSISTENCE_PATH", default.persistence_path),
-            default_flush_ms:         crate::config::get_env("QUEUE_DEFAULT_FLUSH_MS", default.default_flush_ms),
-            writer_batch_size:        crate::config::get_env("QUEUE_WRITER_BATCH_SIZE", default.writer_batch_size),
-            storage_channel_capacity: crate::config::get_env("QUEUE_STORAGE_CHANNEL_CAPACITY", default.storage_channel_capacity),
+            visibility_timeout_ms: crate::config::get_env(
+                "QUEUE_VISIBILITY_MS",
+                default.visibility_timeout_ms,
+            ),
+            max_deliveries: crate::config::get_env("QUEUE_MAX_DELIVERIES", default.max_deliveries),
+            default_batch_size: crate::config::get_env(
+                "QUEUE_DEFAULT_BATCH_SIZE",
+                default.default_batch_size,
+            ),
+            default_wait_ms: crate::config::get_env(
+                "QUEUE_DEFAULT_WAIT_MS",
+                default.default_wait_ms,
+            ),
+            persistence_path: crate::config::get_env(
+                "QUEUE_ROOT_PERSISTENCE_PATH",
+                default.persistence_path,
+            ),
+            default_flush_ms: crate::config::get_env(
+                "QUEUE_DEFAULT_FLUSH_MS",
+                default.default_flush_ms,
+            ),
+            writer_batch_size: crate::config::get_env(
+                "QUEUE_WRITER_BATCH_SIZE",
+                default.writer_batch_size,
+            ),
+            storage_channel_capacity: crate::config::get_env(
+                "QUEUE_STORAGE_CHANNEL_CAPACITY",
+                default.storage_channel_capacity,
+            ),
         }
     }
 }

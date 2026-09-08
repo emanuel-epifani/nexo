@@ -9,7 +9,7 @@ describe('CONNECTION', () => {
     it('should reject with RequestTimeoutError when server does not respond in time', async () => {
         const client = await NexoClient.connect();
         const qName = `timeout-test-${randomUUID()}`;
-        await client.queue(qName).create();
+        await client.queue.create(qName);
 
         // Consume with waitMs=10000 but timeoutMs=300 — server holds the request
         // for 10s, but the sweep interval must reject after 300ms
@@ -32,10 +32,11 @@ describe('CONNECTION', () => {
     it('sendFireAndForget should silently return when disconnected (no throw)', async () => {
         const client = await NexoClient.connect();
         const qName = `fire-forget-${randomUUID()}`;
-        await client.queue(qName).create();
+        await client.queue.create(qName);
 
         // Push a message and consume it to get a valid ID
-        await client.queue(qName).push('test-data');
+        const queue = await client.queue.get(qName);
+        await queue.push('test-data');
         const conn = (client as any).conn;
         const consumeRes = await conn.send(0x12, w => w.string(qName).u32(1).u32(1000));
         const msgId = consumeRes.cursor.readUUID();

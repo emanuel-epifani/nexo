@@ -70,19 +70,18 @@
 //! ```
 
 mod common;
-use common::{setup_store_manager, setup_queue_manager, setup_pubsub_manager};
 use bytes::Bytes;
+use common::{setup_pubsub_manager, setup_queue_manager, setup_store_manager};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use nexo::brokers::queue::options::QueueCreateOptions;
+use nexo::brokers::stream::config::SystemStreamConfig;
 use nexo::brokers::stream::options::StreamCreateOptions;
 use nexo::brokers::stream::StreamManager;
-use nexo::brokers::stream::config::SystemStreamConfig;
 use nexo::config::Config;
 use std::sync::Arc;
-
 
 // ==========================================
 // BENCHMARK UTILITY
@@ -117,17 +116,35 @@ impl Benchmark {
         self.samples.sort();
         let len = self.samples.len();
 
-        let p50 = self.samples.get(len * 50 / 100).unwrap_or(&Duration::ZERO).as_micros();
-        let p95 = self.samples.get(len * 95 / 100).unwrap_or(&Duration::ZERO).as_micros();
-        let p99 = self.samples.get(len * 99 / 100).unwrap_or(&Duration::ZERO).as_micros();
+        let p50 = self
+            .samples
+            .get(len * 50 / 100)
+            .unwrap_or(&Duration::ZERO)
+            .as_micros();
+        let p95 = self
+            .samples
+            .get(len * 95 / 100)
+            .unwrap_or(&Duration::ZERO)
+            .as_micros();
+        let p99 = self
+            .samples
+            .get(len * 99 / 100)
+            .unwrap_or(&Duration::ZERO)
+            .as_micros();
         let max = self.samples.last().unwrap_or(&Duration::ZERO).as_micros();
-        let avg = if len > 0 { self.samples.iter().sum::<Duration>().as_micros() as u64 / len as u64 } else { 0 };
+        let avg = if len > 0 {
+            self.samples.iter().sum::<Duration>().as_micros() as u64 / len as u64
+        } else {
+            0
+        };
 
         println!("\n📊 {}", self.name);
         println!("   Throughput:  {:.0} ops/sec", ops_sec);
         println!("   Total Time:  {:.2?}", total_duration);
-        println!("   Latency:     Avg: {}µs | p50: {}µs | p95: {}µs | p99: {}µs | Max: {}µs",
-                 avg, p50, p95, p99, max);
+        println!(
+            "   Latency:     Avg: {}µs | p50: {}µs | p95: {}µs | p99: {}µs | Max: {}µs",
+            avg, p50, p95, p99, max
+        );
         println!("   Count:       {}\n", self.count);
     }
 }
@@ -165,7 +182,7 @@ mod stress_tests {
             for i in 0..COUNT {
                 let start = Instant::now();
                 let key = i.to_string();
-                manager.map.set(key, Bytes::from("data"), None);
+                let _ = manager.map.set(key, Bytes::from("data"), None);
                 bench.record(start.elapsed());
             }
             bench.stop();
@@ -178,7 +195,7 @@ mod stress_tests {
             // Pre-fill
             for i in 0..COUNT {
                 let key = i.to_string();
-                manager.map.set(key, Bytes::from("data"), None);
+                let _ = manager.map.set(key, Bytes::from("data"), None);
             }
 
             let mut bench = Benchmark::start("STORE - Read (GET)", COUNT);
@@ -212,7 +229,10 @@ mod stress_tests {
             let mut bench = Benchmark::start("PUSH - Queue Throughput (Sequential)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
-                manager.push(q.clone(), Bytes::from("data"), 0).await.unwrap();
+                manager
+                    .push(q.clone(), Bytes::from("data"), 0)
+                    .await
+                    .unwrap();
                 bench.record(start.elapsed());
             }
             // Wait for flush to happen in background (optional, just to be fair to disk)
@@ -242,9 +262,7 @@ mod stress_tests {
             let payload = Bytes::from("fast_data");
 
             // Spawn consumer to drain channel
-            tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {}
-            });
+            tokio::spawn(async move { while let Some(_) = rx.recv().await {} });
 
             let mut bench = Benchmark::start("PUBSUB - Exact Match Throughput", MSG_COUNT);
 
@@ -268,15 +286,14 @@ mod stress_tests {
             manager.subscribe(&client_id, "bench/+/metric").unwrap();
             let payload = Bytes::from("data");
 
-            tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {}
-            });
+            tokio::spawn(async move { while let Some(_) = rx.recv().await {} });
 
             let mut bench = Benchmark::start("PUBSUB - Wildcard Match Throughput", MSG_COUNT);
 
             for _ in 0..MSG_COUNT {
                 let start = Instant::now();
-                let _ = manager.publish("bench/server1/metric", payload.clone(), false, false, None);
+                let _ =
+                    manager.publish("bench/server1/metric", payload.clone(), false, false, None);
                 bench.record(start.elapsed());
             }
 
@@ -296,9 +313,7 @@ mod stress_tests {
                 manager.connect(&client_id, tx);
                 manager.subscribe(&client_id, topic).unwrap();
 
-                tokio::spawn(async move {
-                    while let Some(_) = rx.recv().await {}
-                });
+                tokio::spawn(async move { while let Some(_) = rx.recv().await {} });
             }
 
             let payload = Bytes::from("broadcast");
@@ -332,12 +347,18 @@ mod stress_tests {
 
             let manager = build_stream_manager(config).await;
             let topic = "bench-write-confirmed";
-            manager.create_topic(topic.to_string(), StreamCreateOptions::default()).await.unwrap();
+            manager
+                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
 
             let mut bench = Benchmark::start("STREAM PUBLISH (Write Confirmed)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
-                manager.publish(topic, None, Bytes::from("data")).await.unwrap();
+                manager
+                    .publish(topic, None, Bytes::from("data"))
+                    .await
+                    .unwrap();
                 bench.record(start.elapsed());
             }
             bench.stop();

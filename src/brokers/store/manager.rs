@@ -1,7 +1,7 @@
 //! Store Manager: In-memory data store orchestrator
 
-use crate::brokers::store::domain::map::Map;
 use crate::brokers::store::config::StoreConfig;
+use crate::brokers::store::domain::map::Map;
 use std::sync::Arc;
 
 pub struct StoreManager {
@@ -14,5 +14,4 @@ impl StoreManager {
             map: Map::new(config),
         }
     }
-
 }
