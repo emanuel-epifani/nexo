@@ -78,6 +78,27 @@ describe('PUBSUB', () => {
         await secondSub.stop();
     });
 
+    it('should not deliver a spurious message to current subscribers on clearRetained', async () => {
+        const topic = `clear-spurious-${randomUUID()}`;
+
+        await nexo.pubsub.topic<string>(topic).publish('dark', { retain: true });
+
+        const received: string[] = [];
+        const sub = await nexo.pubsub.topic<string>(topic).subscribe((data) => received.push(data));
+        await waitFor(() => expect(received.length).toBe(1));
+        expect(received[0]).toBe('dark');
+
+        // Clear retained while the subscriber is still active.
+        await nexo.pubsub.topic<string>(topic).clearRetained();
+
+        // The active subscriber must NOT receive a spurious empty message.
+        await new Promise(r => setTimeout(r, 300));
+        expect(received.length).toBe(1);
+
+        await sub.stop();
+        await nexo.pubsub.topic(topic).clearRetained();
+    });
+
     it('should reject invalid ttl values', async () => {
         const topic = `ttl-invalid-${randomUUID()}`;
 

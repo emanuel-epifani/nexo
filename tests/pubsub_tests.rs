@@ -977,6 +977,90 @@ mod pubsub_tests {
         use super::*;
 
         #[tokio::test]
+        async fn test_clear_retained_does_not_deliver_to_current_subscribers() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let topic = "clear/spurious";
+
+            manager
+                .publish(topic, Bytes::from("dark"), true, false, None)
+                .unwrap();
+
+            let client_id = "sub1".to_string();
+            let (tx, mut rx) = mpsc::channel(8192);
+            manager.connect(&client_id, tx);
+            manager.subscribe(&client_id, topic).unwrap();
+
+            // Drain the retained delivery.
+            let retained = rx.recv().await.expect("Should receive retained");
+            assert_eq!(retained.payload, Bytes::from("dark"));
+
+            // Clear retained while the subscriber is still active.
+            manager
+                .publish(topic, Bytes::from(""), false, true, None)
+                .unwrap();
+
+            // The active subscriber must NOT receive a spurious empty message.
+            let received = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+            assert!(
+                received.is_err(),
+                "clearRetained must not deliver to current subscribers"
+            );
+
+            // A later subscriber must not receive the cleared retained.
+            let client_id2 = "sub2".to_string();
+            let (tx2, mut rx2) = mpsc::channel(8192);
+            manager.connect(&client_id2, tx2);
+            manager.subscribe(&client_id2, topic).unwrap();
+            let later = tokio::time::timeout(Duration::from_millis(100), rx2.recv()).await;
+            assert!(later.is_err(), "Cleared retained must not be redelivered");
+        }
+
+        #[tokio::test]
+        async fn test_unsubscribe_invalid_pattern_does_not_remove_valid_subscription() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let client_id = "sub1".to_string();
+            let (tx, mut rx) = mpsc::channel(8192);
+            manager.connect(&client_id, tx);
+
+            // Subscribe to a valid multi-level wildcard.
+            manager.subscribe(&client_id, "unsub/bug/#").unwrap();
+
+            // Unsubscribe with an invalid pattern that shares the '#' prefix.
+            // The server must not let this corrupt the valid subscription.
+            manager.unsubscribe(&client_id, "unsub/bug/#/b");
+
+            // The valid "unsub/bug/#" subscription must still match.
+            let count =
+                manager.publish("unsub/bug/x", Bytes::from("data"), false, false, None);
+            assert_eq!(count, Ok(1), "Valid subscription must survive bogus unsubscribe");
+
+            let msg = rx.recv().await.expect("Should still receive messages");
+            assert_eq!(msg.topic, "unsub/bug/x");
+            assert_eq!(msg.payload, Bytes::from("data"));
+        }
+
+        #[tokio::test]
+        async fn test_unsubscribe_never_subscribed_is_noop() {
+            let (manager, _tmp) = setup_pubsub_manager().await;
+            let client_id = "sub1".to_string();
+            let (tx, mut rx) = mpsc::channel(8192);
+            manager.connect(&client_id, tx);
+
+            manager.subscribe(&client_id, "noop/a").unwrap();
+
+            // Unsubscribe from a pattern never subscribed to.
+            manager.unsubscribe(&client_id, "noop/b");
+
+            // The "noop/a" subscription must still work.
+            let count =
+                manager.publish("noop/a", Bytes::from("data"), false, false, None);
+            assert_eq!(count, Ok(1), "Unrelated unsubscribe must not break subscriptions");
+
+            let msg = rx.recv().await.expect("Should receive message");
+            assert_eq!(msg.payload, Bytes::from("data"));
+        }
+
+        #[tokio::test]
         async fn test_shutdown_flushes_retained_messages() {
             let temp_dir = tempfile::tempdir().unwrap();
             let path = temp_dir.path().to_str().unwrap().to_string();

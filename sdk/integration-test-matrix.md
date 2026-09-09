@@ -32,6 +32,7 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | pubsub_wildcard_plus | Subscribe with `+`, receive from matching single-level | should handle Single-Level Wildcard (+) with strict isolation | single_level_wildcard |
 | pubsub_wildcard_hash | Subscribe with `#`, receive from matching multi-level | should handle Multi-Level Wildcard (#) correctly | multi_level_wildcard |
 | pubsub_clear_retained | Publish empty payload to clear retained message | should clear retained messages | clear_retained |
+| pubsub_clear_no_spurious_delivery | clearRetained does not deliver a spurious empty message to current subscribers | should not deliver a spurious message to current subscribers on clearRetained | clear_retained_does_not_deliver_to_current_subscribers |
 | pubsub_reject_invalid_ttl | Invalid TTL values are rejected | should reject invalid ttl values | reject_invalid_ttl |
 | pubsub_async_callbacks | Async callbacks work correctly | should support async callbacks | async_callback |
 | pubsub_slow_callback_no_block | Slow callback doesn't block other operations | should not block other operations when callback is slow | slow_callback_does_not_block_store |

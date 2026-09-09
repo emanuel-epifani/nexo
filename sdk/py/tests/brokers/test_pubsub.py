@@ -65,6 +65,28 @@ class TestPubSub:
         assert after_clear == []
         await second.stop()
 
+    async def test_clear_retained_does_not_deliver_to_current_subscribers(self, nexo: NexoClient):
+        topic = f"clear-spurious-{uuid.uuid4()}"
+
+        await nexo.pubsub.topic(topic).publish("dark", retain=True)
+
+        received: list[str] = []
+        sub = await nexo.pubsub.topic(topic).subscribe(
+            lambda data: received.append(data)
+        )
+        await wait_for(lambda: len(received) == 1)
+        assert received[0] == "dark"
+
+        # Clear retained while the subscriber is still active.
+        await nexo.pubsub.topic(topic).clear_retained()
+
+        # The active subscriber must NOT receive a spurious empty message.
+        await asyncio.sleep(0.3)
+        assert len(received) == 1
+
+        await sub.stop()
+        await nexo.pubsub.topic(topic).clear_retained()
+
     async def test_reject_invalid_ttl(self, nexo: NexoClient):
         topic = f"ttl-invalid-{uuid.uuid4()}"
 

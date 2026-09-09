@@ -249,8 +249,17 @@ impl PubSubManager {
         let Some(mut info) = self.clients.get_mut(client_id) else {
             return;
         };
-        info.subscriptions.remove(pattern);
+        let was_subscribed = info.subscriptions.remove(pattern);
         drop(info);
+
+        // Only touch the routing tree for a pattern this client actually held.
+        // Without this guard, an unsubscribe for a never-subscribed (or invalid)
+        // pattern could silently remove a *different* subscription: e.g.
+        // unsubscribing "a/#/b" strips the client from the "a/#" hash node because
+        // remove_subscriber stops descending after "#".
+        if !was_subscribed {
+            return;
+        }
 
         let parts: Vec<String> = pattern.split('/').map(|s| s.to_string()).collect();
         let mut root = self.tree.write();
@@ -281,6 +290,12 @@ impl PubSubManager {
             let mut root = self.tree.write();
             root.set_retained(&parts, retained);
             self.retained_dirty.store(true, Ordering::Relaxed);
+        }
+
+        // `clear` is a retained-metadata operation, not a message: it must not
+        // deliver a (empty) payload to current subscribers.
+        if clear {
+            return Ok(0);
         }
 
         let mut matched = Vec::new();
