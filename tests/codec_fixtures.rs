@@ -308,10 +308,10 @@ fn stream_fixtures() {
         assert_eq!(c.len(), 0, "leftover bytes for {id}");
 
         let inp = &f["input"];
-        let topic = inp["stream"].as_str().unwrap();
+        let name = inp["stream"].as_str().unwrap();
         match cmd {
-            StreamCommand::Create { topic: t, options } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::Create { name: t, options } => {
+                assert_eq!(t, name, "{id}: name");
                 let ret = options.retention;
                 assert_eq!(
                     ret.as_ref().and_then(|r| r.max_age_ms),
@@ -324,8 +324,8 @@ fn stream_fixtures() {
                     "{id}: max_bytes",
                 );
             }
-            StreamCommand::Publish { topic: t, items } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::Publish { name: t, items } => {
+                assert_eq!(t, name, "{id}: name");
                 let exp_items = inp["items"].as_array().unwrap();
                 assert_eq!(items.len(), exp_items.len(), "{id}: item count");
                 for (i, (actual, exp)) in items.iter().zip(exp_items).enumerate() {
@@ -346,14 +346,14 @@ fn stream_fixtures() {
                 }
             }
             StreamCommand::Fetch {
-                topic: t,
+                name: t,
                 group,
                 consumer_id,
                 generation,
                 limit,
                 wait_ms,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(
                     consumer_id,
@@ -376,18 +376,18 @@ fn stream_fixtures() {
                     "{id}: wait_ms"
                 );
             }
-            StreamCommand::Join { topic: t, group } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::Join { name: t, group } => {
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
             }
             StreamCommand::Ack {
-                topic: t,
+                name: t,
                 group,
                 consumer_id,
                 generation,
                 seq,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(
                     consumer_id,
@@ -402,11 +402,11 @@ fn stream_fixtures() {
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
             StreamCommand::Seek {
-                topic: t,
+                name: t,
                 group,
                 target,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 let exp_target = match inp["target"].as_str().unwrap() {
                     "beginning" => SeekTarget::Beginning,
@@ -415,19 +415,19 @@ fn stream_fixtures() {
                 };
                 assert_eq!(target, exp_target, "{id}: target");
             }
-            StreamCommand::Exists { topic: t } | StreamCommand::Describe { topic: t } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::Exists { name: t } | StreamCommand::Describe { name: t } => {
+                assert_eq!(t, name, "{id}: name");
             }
-            StreamCommand::Delete { topic: t } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::Delete { name: t } => {
+                assert_eq!(t, name, "{id}: name");
             }
             StreamCommand::Leave {
-                topic: t,
+                name: t,
                 group,
                 consumer_id,
                 generation,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(
                     consumer_id,
@@ -440,13 +440,13 @@ fn stream_fixtures() {
                     "{id}: generation"
                 );
             }
-            StreamCommand::PeekDlt {
-                topic: t,
+            StreamCommand::PeekDls {
+                name: t,
                 group,
                 limit,
                 offset,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(limit, inp["limit"].as_u64().unwrap() as u32, "{id}: limit");
                 assert_eq!(
@@ -456,25 +456,25 @@ fn stream_fixtures() {
                 );
             }
             StreamCommand::MoveToStream {
-                topic: t,
+                name: t,
                 group,
                 seq,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
-            StreamCommand::DeleteDlt {
-                topic: t,
+            StreamCommand::DeleteDls {
+                name: t,
                 group,
                 seq,
             } => {
-                assert_eq!(t, topic, "{id}: topic");
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
             }
-            StreamCommand::PurgeDlt { topic: t, group } => {
-                assert_eq!(t, topic, "{id}: topic");
+            StreamCommand::PurgeDls { name: t, group } => {
+                assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
             }
         }

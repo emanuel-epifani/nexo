@@ -531,7 +531,7 @@
     "expected_bytes": "BwE5AAAAAQAAADwAAAAGZXZlbnRzAAAAAmcxAAAAIGRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmAAAAAAAAAAE="
   },
   {
-    "id": "STREAM_PEEK_DLT",
+    "id": "STREAM_PEEK_DLS",
     "broker": "stream",
     "opcode": 58,
     "frame_type": "REQUEST",
@@ -558,7 +558,7 @@
     "expected_bytes": "BwE7AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
   },
   {
-    "id": "STREAM_DELETE_DLT",
+    "id": "STREAM_DELETE_DLS",
     "broker": "stream",
     "opcode": 60,
     "frame_type": "REQUEST",
@@ -571,7 +571,7 @@
     "expected_bytes": "BwE8AAAAAQAAABgAAAAGZXZlbnRzAAAAAmcxAAAAAAAAACo="
   },
   {
-    "id": "STREAM_PURGE_DLT",
+    "id": "STREAM_PURGE_DLS",
     "broker": "stream",
     "opcode": 61,
     "frame_type": "REQUEST",

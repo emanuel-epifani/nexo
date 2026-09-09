@@ -99,10 +99,10 @@
         "S_DESCRIBE": 55,
         "S_SEEK": 56,
         "S_LEAVE": 57,
-        "S_PEEK_DLT": 58,
+        "S_PEEK_DLS": 58,
         "S_MOVE_TO_STREAM": 59,
-        "S_DELETE_DLT": 60,
-        "S_PURGE_DLT": 61
+        "S_DELETE_DLS": 60,
+        "S_PURGE_DLS": 61
       }
     }
   },

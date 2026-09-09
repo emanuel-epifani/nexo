@@ -2,7 +2,7 @@
 //!
 //! Each group tracks:
 //! - ack_floor: highest seq such that ALL seqs 1..=ack_floor are acked
-//! - msgs: unified state map (Pending / Redeliver / Dlt)
+//! - msgs: unified state map (Pending / Redeliver / Dls)
 //! - keys: unified key state (in_flight / blocked / poisoned)
 
 use priority_queue::PriorityQueue;
@@ -24,7 +24,7 @@ pub enum GroupError {
     NotMember,
     NotOwner,
     SequenceNotPending(u64),
-    SequenceNotInDlt(u64),
+    SequenceNotInDls(u64),
 }
 
 impl fmt::Display for GroupError {
@@ -36,8 +36,8 @@ impl fmt::Display for GroupError {
             Self::SequenceNotPending(sequence) => {
                 write!(formatter, "Sequence {} is not pending", sequence)
             }
-            Self::SequenceNotInDlt(sequence) => {
-                write!(formatter, "Sequence {} is not in the DLT", sequence)
+            Self::SequenceNotInDls(sequence) => {
+                write!(formatter, "Sequence {} is not in the DLS", sequence)
             }
         }
     }
@@ -50,8 +50,8 @@ impl From<GroupError> for BrokerError {
         match error {
             GroupError::Fenced => BrokerError::fenced(),
             GroupError::NotMember => BrokerError::not_member(),
-            GroupError::SequenceNotInDlt(sequence) => {
-                BrokerError::not_found(format!("Sequence {} is not in the DLT", sequence))
+            GroupError::SequenceNotInDls(sequence) => {
+                BrokerError::not_found(format!("Sequence {} is not in the DLS", sequence))
             }
             other => BrokerError::invalid_argument(other.to_string()),
         }
@@ -59,13 +59,13 @@ impl From<GroupError> for BrokerError {
 }
 
 #[derive(Clone, Debug)]
-pub struct DltEntry {
+pub struct DlsEntry {
     pub reason: String,
     pub attempts: u32,
     pub key: Option<Bytes>,
 }
 
-/// Unified message state — Pending, Redeliver, or Dlt
+/// Unified message state — Pending, Redeliver, or Dls
 #[derive(Clone, Debug)]
 enum MsgState {
     Pending {
@@ -76,7 +76,7 @@ enum MsgState {
     Redeliver {
         attempts: u32,
     },
-    Dlt(DltEntry),
+    Dls(DlsEntry),
 }
 
 /// Unified key state — in_flight, blocked, or poisoned
@@ -96,7 +96,7 @@ pub struct ConsumerGroup {
     msgs: BTreeMap<u64, MsgState>,
     redeliver_idx: BTreeSet<u64>, // O(1) index of Redeliver seqs — avoids O(N) scan of msgs
     keys: HashMap<Bytes, KeyState>,
-    dlt_key_counts: HashMap<Bytes, usize>,
+    dls_key_counts: HashMap<Bytes, usize>,
     pending_count: usize,
     // === Config ===
     pub max_ack_pending: usize,
@@ -127,7 +127,7 @@ impl ConsumerGroup {
             msgs: BTreeMap::new(),
             redeliver_idx: BTreeSet::new(),
             keys: HashMap::new(),
-            dlt_key_counts: HashMap::new(),
+            dls_key_counts: HashMap::new(),
             pending_count: 0,
             max_ack_pending,
             ack_wait,
@@ -151,14 +151,14 @@ impl ConsumerGroup {
         max_ack_pending: usize,
         ack_wait: Duration,
         max_deliveries: u32,
-        dlt_entries: BTreeMap<u64, DltEntry>,
+        dls_entries: BTreeMap<u64, DlsEntry>,
         parked_keys: HashSet<Bytes>,
         redeliver_entries: BTreeMap<u64, u32>,
     ) -> Self {
         let normalized_floor = ack_floor.max(head_seq.saturating_sub(1));
         let mut msgs = BTreeMap::new();
         let mut keys: HashMap<Bytes, KeyState> = HashMap::new();
-        let mut dlt_key_counts = HashMap::new();
+        let mut dls_key_counts = HashMap::new();
         let mut redeliver_idx = BTreeSet::new();
         for (seq, attempts) in redeliver_entries {
             if seq >= head_seq {
@@ -166,12 +166,12 @@ impl ConsumerGroup {
                 redeliver_idx.insert(seq);
             }
         }
-        for (seq, entry) in &dlt_entries {
-            msgs.insert(*seq, MsgState::Dlt(entry.clone()));
+        for (seq, entry) in &dls_entries {
+            msgs.insert(*seq, MsgState::Dls(entry.clone()));
             redeliver_idx.remove(seq);
             if let Some(k) = &entry.key {
                 keys.entry(k.clone()).or_default().poisoned = true;
-                *dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
+                *dls_key_counts.entry(k.clone()).or_insert(0) += 1;
             }
         }
         for k in &parked_keys {
@@ -184,7 +184,7 @@ impl ConsumerGroup {
             msgs,
             redeliver_idx,
             keys,
-            dlt_key_counts,
+            dls_key_counts,
             pending_count: 0,
             max_ack_pending,
             ack_wait,
@@ -378,12 +378,12 @@ impl ConsumerGroup {
                     self.deadlines.remove(seq);
                     self.pending_count -= 1;
                 }
-                if let MsgState::Dlt(entry) = &state {
+                if let MsgState::Dls(entry) = &state {
                     if let Some(key) = &entry.key {
-                        match self.dlt_key_counts.get_mut(key) {
+                        match self.dls_key_counts.get_mut(key) {
                             Some(count) if *count > 1 => *count -= 1,
                             Some(_) => {
-                                self.dlt_key_counts.remove(key);
+                                self.dls_key_counts.remove(key);
                             }
                             None => {}
                         }
@@ -395,7 +395,7 @@ impl ConsumerGroup {
         }
 
         // Clean up keys: remove in_flight and blocked below head_seq, un-poison stale keys
-        let dlt_key_counts = &self.dlt_key_counts;
+        let dls_key_counts = &self.dls_key_counts;
 
         self.keys.retain(|key, ks| {
             if let Some(seq) = ks.in_flight {
@@ -408,7 +408,7 @@ impl ConsumerGroup {
                 changed = true;
             }
             ks.blocked = valid;
-            if ks.poisoned && !dlt_key_counts.contains_key(key) {
+            if ks.poisoned && !dls_key_counts.contains_key(key) {
                 ks.poisoned = false;
                 changed = true;
             }
@@ -458,7 +458,7 @@ impl ConsumerGroup {
         self.msgs.clear();
         self.redeliver_idx.clear();
         self.keys.clear();
-        self.dlt_key_counts.clear();
+        self.dls_key_counts.clear();
         self.pending_count = 0;
         self.members.clear();
         self.generation = self.generation.saturating_add(1);
@@ -524,11 +524,11 @@ impl ConsumerGroup {
 
     // --- Accessors ---
 
-    pub fn dlt_snapshot(&self) -> BTreeMap<u64, DltEntry> {
+    pub fn dls_snapshot(&self) -> BTreeMap<u64, DlsEntry> {
         self.msgs
             .iter()
             .filter_map(|(seq, state)| match state {
-                MsgState::Dlt(e) => Some((*seq, e.clone())),
+                MsgState::Dls(e) => Some((*seq, e.clone())),
                 _ => None,
             })
             .collect()
@@ -579,8 +579,8 @@ impl ConsumerGroup {
     }
 
     fn issue_delivery(&mut self, consumer_id: &str, msg: Message) -> Option<Message> {
-        // Already in DLT — skip
-        if matches!(self.msgs.get(&msg.seq), Some(MsgState::Dlt(_))) {
+        // Already in DLS — skip
+        if matches!(self.msgs.get(&msg.seq), Some(MsgState::Dls(_))) {
             return None;
         }
 
@@ -588,7 +588,7 @@ impl ConsumerGroup {
         if let Some(key) = &msg.key {
             if let Some(ks) = self.keys.get_mut(key) {
                 if ks.poisoned {
-                    self.move_to_dlt(
+                    self.move_to_dls(
                         msg.seq,
                         "auto-parked (poisoned key)".to_string(),
                         0,
@@ -642,10 +642,10 @@ impl ConsumerGroup {
         Some(msg)
     }
 
-    fn move_to_dlt(&mut self, seq: u64, reason: String, attempts: u32, key: Option<Bytes>) {
+    fn move_to_dls(&mut self, seq: u64, reason: String, attempts: u32, key: Option<Bytes>) {
         self.msgs.insert(
             seq,
-            MsgState::Dlt(DltEntry {
+            MsgState::Dls(DlsEntry {
                 reason,
                 attempts,
                 key: key.clone(),
@@ -654,21 +654,21 @@ impl ConsumerGroup {
         self.redeliver_idx.remove(&seq);
 
         if let Some(k) = &key {
-            *self.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
+            *self.dls_key_counts.entry(k.clone()).or_insert(0) += 1;
             if let Some(ks) = self.keys.get_mut(k) {
                 ks.in_flight = None;
                 ks.poisoned = true;
-                // Move all blocked messages for this key to DLT
+                // Move all blocked messages for this key to DLS
                 for blocked_seq in ks.blocked.iter() {
                     self.msgs.insert(
                         *blocked_seq,
-                        MsgState::Dlt(DltEntry {
+                        MsgState::Dls(DlsEntry {
                             reason: "auto-parked (poisoned key)".to_string(),
                             attempts: 0,
                             key: key.clone(),
                         }),
                     );
-                    *self.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
+                    *self.dls_key_counts.entry(k.clone()).or_insert(0) += 1;
                 }
                 ks.blocked.clear();
             }
@@ -681,7 +681,7 @@ impl ConsumerGroup {
             Some(MsgState::Pending { delivery_count, .. }) => *delivery_count,
             _ => 0,
         };
-        self.move_to_dlt(
+        self.move_to_dls(
             msg.seq,
             format!("max_deliveries exceeded ({})", self.max_deliveries),
             attempts,
@@ -691,7 +691,7 @@ impl ConsumerGroup {
 
     fn release_seq(&mut self, seq: u64, delivery_count: u32, key: Option<Bytes>) {
         if delivery_count >= self.max_deliveries {
-            self.move_to_dlt(
+            self.move_to_dls(
                 seq,
                 format!("max_deliveries exceeded ({})", self.max_deliveries),
                 delivery_count,
@@ -733,13 +733,13 @@ impl ConsumerGroup {
         self.try_advance_floor();
     }
 
-    // --- DLT Operations ---
+    // --- DLS Operations ---
 
-    pub fn peek_dlt(&self, limit: usize, offset: usize) -> Vec<(u64, DltEntry)> {
+    pub fn peek_dls(&self, limit: usize, offset: usize) -> Vec<(u64, DlsEntry)> {
         self.msgs
             .iter()
             .filter_map(|(seq, state)| match state {
-                MsgState::Dlt(e) => Some((*seq, e.clone())),
+                MsgState::Dls(e) => Some((*seq, e.clone())),
                 _ => None,
             })
             .skip(offset)
@@ -747,49 +747,49 @@ impl ConsumerGroup {
             .collect()
     }
 
-    /// Move a message from DLT back to redeliver queue. Returns true if a key was unblocked.
+    /// Move a message from DLS back to redeliver queue. Returns true if a key was unblocked.
     pub fn move_to_stream(&mut self, seq: u64) -> Result<bool, GroupError> {
         let entry = match self.msgs.remove(&seq) {
-            Some(MsgState::Dlt(e)) => e,
-            _ => return Err(GroupError::SequenceNotInDlt(seq)),
+            Some(MsgState::Dls(e)) => e,
+            _ => return Err(GroupError::SequenceNotInDls(seq)),
         };
 
         self.msgs.insert(seq, MsgState::Redeliver { attempts: 0 });
         self.redeliver_idx.insert(seq);
 
-        let key_unblocked = self.release_dlt_key(&entry.key);
+        let key_unblocked = self.release_dls_key(&entry.key);
         Ok(key_unblocked)
     }
 
-    /// Remove a message from DLT permanently. Returns true if a key was unblocked.
-    pub fn delete_dlt(&mut self, seq: u64) -> Result<bool, GroupError> {
+    /// Remove a message from DLS permanently. Returns true if a key was unblocked.
+    pub fn delete_dls(&mut self, seq: u64) -> Result<bool, GroupError> {
         let entry = match self.msgs.remove(&seq) {
-            Some(MsgState::Dlt(e)) => e,
-            _ => return Err(GroupError::SequenceNotInDlt(seq)),
+            Some(MsgState::Dls(e)) => e,
+            _ => return Err(GroupError::SequenceNotInDls(seq)),
         };
 
-        let key_unblocked = self.release_dlt_key(&entry.key);
+        let key_unblocked = self.release_dls_key(&entry.key);
         Ok(key_unblocked)
     }
 
-    /// Clear all DLT entries and parked keys. Returns count of removed entries.
-    pub fn purge_dlt(&mut self) -> usize {
-        let dlt_seqs: Vec<u64> = self
+    /// Clear all DLS entries and parked keys. Returns count of removed entries.
+    pub fn purge_dls(&mut self) -> usize {
+        let dls_seqs: Vec<u64> = self
             .msgs
             .iter()
             .filter_map(|(seq, s)| {
-                if matches!(s, MsgState::Dlt(_)) {
+                if matches!(s, MsgState::Dls(_)) {
                     Some(*seq)
                 } else {
                     None
                 }
             })
             .collect();
-        let count = dlt_seqs.len();
-        for seq in dlt_seqs {
+        let count = dls_seqs.len();
+        for seq in dls_seqs {
             self.msgs.remove(&seq);
         }
-        self.dlt_key_counts.clear();
+        self.dls_key_counts.clear();
         for ks in self.keys.values_mut() {
             ks.poisoned = false;
         }
@@ -798,21 +798,21 @@ impl ConsumerGroup {
         count
     }
 
-    /// Decrement a key's DLT references and un-poison it when the last entry is removed.
-    fn release_dlt_key(&mut self, key: &Option<Bytes>) -> bool {
+    /// Decrement a key's DLS references and un-poison it when the last entry is removed.
+    fn release_dls_key(&mut self, key: &Option<Bytes>) -> bool {
         let Some(k) = key else { return false };
-        let no_dlt_entries = match self.dlt_key_counts.get_mut(k) {
+        let no_dls_entries = match self.dls_key_counts.get_mut(k) {
             Some(count) if *count > 1 => {
                 *count -= 1;
                 false
             }
             Some(_) => {
-                self.dlt_key_counts.remove(k);
+                self.dls_key_counts.remove(k);
                 true
             }
             None => true,
         };
-        if no_dlt_entries {
+        if no_dls_entries {
             let mut remove_key_state = false;
             let was_poisoned = if let Some(ks) = self.keys.get_mut(k) {
                 let was_poisoned = ks.poisoned;
@@ -867,8 +867,8 @@ mod tests {
     fn is_redeliver(g: &ConsumerGroup, seq: u64) -> bool {
         matches!(g.msgs.get(&seq), Some(MsgState::Redeliver { .. }))
     }
-    fn is_dlt(g: &ConsumerGroup, seq: u64) -> bool {
-        matches!(g.msgs.get(&seq), Some(MsgState::Dlt(_)))
+    fn is_dls(g: &ConsumerGroup, seq: u64) -> bool {
+        matches!(g.msgs.get(&seq), Some(MsgState::Dls(_)))
     }
     fn pending_count(g: &ConsumerGroup) -> usize {
         g.msgs
@@ -879,10 +879,10 @@ mod tests {
     fn redeliver_count(g: &ConsumerGroup) -> usize {
         g.redeliver_idx.len()
     }
-    fn dlt_count(g: &ConsumerGroup) -> usize {
+    fn dls_count(g: &ConsumerGroup) -> usize {
         g.msgs
             .values()
-            .filter(|s| matches!(s, MsgState::Dlt(_)))
+            .filter(|s| matches!(s, MsgState::Dls(_)))
             .count()
     }
     fn redeliver_seqs(g: &ConsumerGroup) -> Vec<u64> {
@@ -903,12 +903,12 @@ mod tests {
         g.msgs.insert(seq, MsgState::Redeliver { attempts: 0 });
         g.redeliver_idx.insert(seq);
     }
-    fn insert_dlt(g: &mut ConsumerGroup, seq: u64, entry: DltEntry) {
+    fn insert_dls(g: &mut ConsumerGroup, seq: u64, entry: DlsEntry) {
         if let Some(k) = &entry.key {
             g.keys.entry(k.clone()).or_default().poisoned = true;
-            *g.dlt_key_counts.entry(k.clone()).or_insert(0) += 1;
+            *g.dls_key_counts.entry(k.clone()).or_insert(0) += 1;
         }
-        g.msgs.insert(seq, MsgState::Dlt(entry));
+        g.msgs.insert(seq, MsgState::Dls(entry));
     }
     fn insert_parked_key(g: &mut ConsumerGroup, key: Bytes) {
         g.keys.entry(key).or_default().poisoned = true;
@@ -1086,28 +1086,28 @@ mod tests {
     fn test_move_to_stream_inserts_in_order() {
         let mut g = make_group(100, 30000, 5);
 
-        insert_dlt(
+        insert_dls(
             &mut g,
             5,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             3,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             7,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
@@ -1224,30 +1224,30 @@ mod tests {
     }
 
     #[test]
-    fn test_clamp_head_removes_stale_dlt() {
+    fn test_clamp_head_removes_stale_dls() {
         let mut g = make_group(100, 30000, 5);
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             3,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             7,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 1,
                 key: None,
@@ -1255,9 +1255,9 @@ mod tests {
         );
 
         g.clamp_head(5);
-        assert!(!is_dlt(&g, 1));
-        assert!(!is_dlt(&g, 3));
-        assert!(is_dlt(&g, 7));
+        assert!(!is_dls(&g, 1));
+        assert!(!is_dls(&g, 3));
+        assert!(is_dls(&g, 7));
     }
 
     #[test]
@@ -1283,40 +1283,40 @@ mod tests {
         assert_eq!(g.next_deliver_seq, 10);
     }
 
-    // === DLT tests ===
+    // === DLS tests ===
 
     #[test]
-    fn test_peek_dlt_returns_sorted() {
+    fn test_peek_dls_returns_sorted() {
         let mut g = make_group(100, 30000, 5);
-        insert_dlt(
+        insert_dls(
             &mut g,
             5,
-            DltEntry {
+            DlsEntry {
                 reason: "r5".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "r1".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             3,
-            DltEntry {
+            DlsEntry {
                 reason: "r3".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
 
-        let entries = g.peek_dlt(10, 0);
+        let entries = g.peek_dls(10, 0);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].0, 1);
         assert_eq!(entries[1].0, 3);
@@ -1324,13 +1324,13 @@ mod tests {
     }
 
     #[test]
-    fn test_peek_dlt_with_offset_and_limit() {
+    fn test_peek_dls_with_offset_and_limit() {
         let mut g = make_group(100, 30000, 5);
         for i in 1..=10 {
-            insert_dlt(
+            insert_dls(
                 &mut g,
                 i,
-                DltEntry {
+                DlsEntry {
                     reason: format!("r{}", i),
                     attempts: 1,
                     key: None,
@@ -1338,7 +1338,7 @@ mod tests {
             );
         }
 
-        let page = g.peek_dlt(3, 2);
+        let page = g.peek_dls(3, 2);
         assert_eq!(page.len(), 3);
         assert_eq!(page[0].0, 3);
         assert_eq!(page[1].0, 4);
@@ -1346,21 +1346,21 @@ mod tests {
     }
 
     #[test]
-    fn test_purge_dlt_clears_all() {
+    fn test_purge_dls_clears_all() {
         let mut g = make_group(100, 30000, 5);
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             2,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: None,
@@ -1368,50 +1368,50 @@ mod tests {
         );
         insert_parked_key(&mut g, Bytes::from("key1"));
 
-        let count = g.purge_dlt();
+        let count = g.purge_dls();
         assert_eq!(count, 2);
-        assert_eq!(dlt_count(&g), 0);
+        assert_eq!(dls_count(&g), 0);
         assert!(!g.keys.values().any(|ks| ks.poisoned));
     }
 
     #[test]
-    fn test_delete_dlt_removes_entry() {
+    fn test_delete_dls_removes_entry() {
         let mut g = make_group(100, 30000, 5);
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             2,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: None,
             },
         );
 
-        assert!(g.delete_dlt(1).is_ok());
-        assert!(!is_dlt(&g, 1));
-        assert!(is_dlt(&g, 2));
+        assert!(g.delete_dls(1).is_ok());
+        assert!(!is_dls(&g, 1));
+        assert!(is_dls(&g, 2));
 
-        let err = g.delete_dlt(99).unwrap_err();
-        assert_eq!(err, GroupError::SequenceNotInDlt(99));
+        let err = g.delete_dls(99).unwrap_err();
+        assert_eq!(err, GroupError::SequenceNotInDls(99));
     }
 
     #[test]
-    fn test_delete_dlt_unparks_key_when_no_more_entries() {
+    fn test_delete_dls_unparks_key_when_no_more_entries() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key1");
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: Some(key.clone()),
@@ -1420,28 +1420,28 @@ mod tests {
         insert_parked_key(&mut g, key.clone());
 
         // Delete the only entry with this key → key should be unparked
-        let unblocked = g.delete_dlt(1).unwrap();
+        let unblocked = g.delete_dls(1).unwrap();
         assert!(unblocked);
         assert!(!is_key_poisoned(&g, &key));
     }
 
     #[test]
-    fn test_delete_dlt_keeps_key_when_other_entries_exist() {
+    fn test_delete_dls_keeps_key_when_other_entries_exist() {
         let mut g = make_group(100, 30000, 5);
         let key = Bytes::from("key1");
-        insert_dlt(
+        insert_dls(
             &mut g,
             1,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: Some(key.clone()),
             },
         );
-        insert_dlt(
+        insert_dls(
             &mut g,
             2,
-            DltEntry {
+            DlsEntry {
                 reason: "r".to_string(),
                 attempts: 1,
                 key: Some(key.clone()),
@@ -1449,7 +1449,7 @@ mod tests {
         );
         insert_parked_key(&mut g, key.clone());
 
-        let unblocked = g.delete_dlt(1).unwrap();
+        let unblocked = g.delete_dls(1).unwrap();
         assert!(!unblocked);
         assert!(is_key_poisoned(&g, &key));
     }
@@ -1618,12 +1618,12 @@ mod tests {
     // === restore tests ===
 
     #[test]
-    fn test_restore_preserves_dlt_and_parked_keys() {
-        let mut dlt = BTreeMap::new();
+    fn test_restore_preserves_dls_and_parked_keys() {
+        let mut dls = BTreeMap::new();
         let key = Bytes::from("key1");
-        dlt.insert(
+        dls.insert(
             5,
-            DltEntry {
+            DlsEntry {
                 reason: "test".to_string(),
                 attempts: 2,
                 key: Some(key.clone()),
@@ -1639,14 +1639,14 @@ mod tests {
             1000,
             Duration::from_millis(30000),
             5,
-            dlt,
+            dls,
             parked,
             BTreeMap::new(),
         );
 
         assert_eq!(g.ack_floor, 4); // max(3, 5-1)
         assert_eq!(g.next_deliver_seq, 5);
-        assert!(is_dlt(&g, 5));
+        assert!(is_dls(&g, 5));
         assert!(is_key_poisoned(&g, &key));
         assert_eq!(pending_count(&g), 0);
         assert_eq!(redeliver_count(&g), 0);
@@ -1654,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_per_key_dlt_restore_seek_lifecycle() {
+    fn test_per_key_dls_restore_seek_lifecycle() {
         let key_a = Bytes::from("key-A");
         let key_b = Bytes::from("key-B");
         let mut log = vec![
@@ -1683,7 +1683,7 @@ mod tests {
         assert!(group.check_redelivery());
         assert_eq!(
             group
-                .peek_dlt(10, 0)
+                .peek_dls(10, 0)
                 .into_iter()
                 .map(|(seq, _)| seq)
                 .collect::<Vec<_>>(),
@@ -1709,12 +1709,12 @@ mod tests {
             group.max_ack_pending,
             group.ack_wait,
             group.max_deliveries,
-            group.dlt_snapshot(),
+            group.dls_snapshot(),
             group.parked_keys_snapshot(),
             group.redeliver_snapshot(),
         );
         assert_eq!(group.ack_floor, 6);
-        assert_eq!(dlt_count(&group), 3);
+        assert_eq!(dls_count(&group), 3);
         assert!(is_key_poisoned(&group, &key_a));
 
         log.push(make_msg(7, Some(key_a.clone())));
@@ -1730,13 +1730,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![8, 9]
         );
-        assert_eq!(dlt_count(&group), 4);
-        assert!(is_dlt(&group, 7));
+        assert_eq!(dls_count(&group), 4);
+        assert!(is_dls(&group, 7));
         group.ack(&consumer, generation, 8).unwrap();
         group.ack(&consumer, generation, 9).unwrap();
 
         group.seek_beginning(1);
-        assert_eq!(dlt_count(&group), 0);
+        assert_eq!(dls_count(&group), 0);
         assert!(!is_key_poisoned(&group, &key_a));
         assert_eq!(group.ack_floor, 0);
 
@@ -1761,7 +1761,7 @@ mod tests {
             );
             delivered_key_a = expected_seq;
         }
-        assert_eq!(dlt_count(&group), 0);
+        assert_eq!(dls_count(&group), 0);
     }
 
     // === Invariant: pending ↔ deadlines sync ===
@@ -1985,20 +1985,20 @@ mod bench {
     }
 
     #[test]
-    fn bench_dlt_snapshot_500() {
+    fn bench_dls_snapshot_500() {
         let n = 500;
-        let mut dlt = BTreeMap::new();
+        let mut dls = BTreeMap::new();
         for i in 1..=n {
-            dlt.insert(
+            dls.insert(
                 i as u64,
-                DltEntry {
+                DlsEntry {
                     reason: "test".into(),
                     attempts: 3,
                     key: Some(Bytes::from(format!("key-{}", i))),
                 },
             );
         }
-        let parked: HashSet<Bytes> = dlt.values().filter_map(|e| e.key.clone()).collect();
+        let parked: HashSet<Bytes> = dls.values().filter_map(|e| e.key.clone()).collect();
         let g = ConsumerGroup::restore(
             "bench".into(),
             0,
@@ -2006,21 +2006,21 @@ mod bench {
             100000,
             Duration::from_secs(60),
             5,
-            dlt,
+            dls,
             parked,
             BTreeMap::new(),
         );
 
         let start = Instant::now();
-        let _snap = g.dlt_snapshot();
+        let _snap = g.dls_snapshot();
         let snap_dur = start.elapsed();
 
         let start = Instant::now();
         let _parked = g.parked_keys_snapshot();
         let parked_dur = start.elapsed();
 
-        println!("\n=== bench_dlt_snapshot_500 ===");
-        println!("dlt_snapshot({n} entries): {:?}", snap_dur);
+        println!("\n=== bench_dls_snapshot_500 ===");
+        println!("dls_snapshot({n} entries): {:?}", snap_dur);
         println!("parked_keys_snapshot({n} keys): {:?}", parked_dur);
     }
 }

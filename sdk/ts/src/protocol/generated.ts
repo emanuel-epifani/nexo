@@ -89,10 +89,10 @@ export enum StreamOpcode {
   S_DESCRIBE = 0x37,
   S_SEEK = 0x38,
   S_LEAVE = 0x39,
-  S_PEEK_DLT = 0x3A,
+  S_PEEK_DLS = 0x3A,
   S_MOVE_TO_STREAM = 0x3B,
-  S_DELETE_DLT = 0x3C,
-  S_PURGE_DLT = 0x3D,
+  S_DELETE_DLS = 0x3C,
+  S_PURGE_DLS = 0x3D,
 }
 
 export const QUEUE_MAX_PUSH_ITEMS = 10_000;

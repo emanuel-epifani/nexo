@@ -1,4 +1,4 @@
-//! Storage Manager: handles all file I/O for stream topics (append, read, retention, state).
+//! Storage Manager: handles all file I/O for streams (append, read, retention, state).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader}
 use tokio::sync::{mpsc, oneshot, OwnedRwLockReadGuard};
 use tracing::{error, info};
 
-use crate::brokers::stream::domain::group::DltEntry;
+use crate::brokers::stream::domain::group::DlsEntry;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::options::RetentionOptions;
 
@@ -26,11 +26,11 @@ const MAX_STATE_RECORD_BYTES: usize = 256 * 1024 * 1024;
 // DATA STRUCTURES
 // ==========================================
 
-/// Per-group persistent state (ack_floor + DLT entries + parked_keys)
+/// Per-group persistent state (ack_floor + DLS entries + parked_keys)
 #[derive(Default, Clone)]
 pub struct GroupPersistentState {
     pub ack_floor: u64,
-    pub dlt_entries: BTreeMap<u64, DltEntry>,
+    pub dls_entries: BTreeMap<u64, DlsEntry>,
     pub parked_keys: HashSet<Bytes>,
     pub redeliver_entries: BTreeMap<u64, u32>,
 }
@@ -62,14 +62,14 @@ pub struct Segment {
 // ==========================================
 
 pub enum StorageCommand {
-    /// Append messages to a topic's log file and report when write_all completes.
+    /// Append messages to a stream's log file and report when write_all completes.
     Append {
         file_path: PathBuf,
         messages: Vec<Message>,
         complete: Box<dyn FnOnce(io::Result<()>) + Send>,
     },
 
-    /// Read messages from a topic by reading specific byte offsets from segment files.
+    /// Read messages from a stream by reading specific byte offsets from segment files.
     ReadRange {
         segments: Arc<Vec<Segment>>,
         retention_guard: OwnedRwLockReadGuard<()>,
@@ -79,18 +79,18 @@ pub enum StorageCommand {
     },
 
     SaveState {
-        topic_name: String,
+        stream_name: String,
         groups: BTreeMap<String, GroupPersistentState>,
     },
 
     ApplyRetention {
-        topic_name: String,
+        stream_name: String,
         retention: RetentionOptions,
         reply: oneshot::Sender<u64>,
     },
 
-    DropTopic {
-        topic_name: String,
+    DropStream {
+        stream_name: String,
         reply: oneshot::Sender<io::Result<()>>,
     },
 
@@ -171,36 +171,36 @@ impl StorageManager {
                     let _ = reply.send(result);
                 });
             }
-            StorageCommand::SaveState { topic_name, groups } => {
-                let base_path = self.base_path.join(&topic_name);
+            StorageCommand::SaveState { stream_name, groups } => {
+                let base_path = self.base_path.join(&stream_name);
                 if let Err(e) = save_state_file(&base_path, &groups).await {
-                    error!("Failed to save state for {}: {}", topic_name, e);
+                    error!("Failed to save state for {}: {}", stream_name, e);
                 }
             }
             StorageCommand::ApplyRetention {
-                topic_name,
+                stream_name,
                 retention,
                 reply,
             } => {
-                let base_path = self.base_path.join(&topic_name);
+                let base_path = self.base_path.join(&stream_name);
                 let outcome = self
-                    .apply_retention(&topic_name, &base_path, &retention)
+                    .apply_retention(&stream_name, &base_path, &retention)
                     .await;
                 let _ = reply.send(outcome);
             }
-            StorageCommand::DropTopic { topic_name, reply } => {
-                let topic_path = self.base_path.join(&topic_name);
+            StorageCommand::DropStream { stream_name, reply } => {
+                let stream_path = self.base_path.join(&stream_name);
                 let to_remove: Vec<PathBuf> = self
                     .open_files
                     .iter()
-                    .filter(|(p, _)| p.starts_with(&topic_path))
+                    .filter(|(p, _)| p.starts_with(&stream_path))
                     .map(|(p, _)| p.clone())
                     .collect();
                 for p in to_remove {
                     self.open_files.pop(&p);
                 }
-                let result = match tokio::fs::metadata(&topic_path).await {
-                    Ok(_) => tokio::fs::remove_dir_all(&topic_path).await,
+                let result = match tokio::fs::metadata(&stream_path).await {
+                    Ok(_) => tokio::fs::remove_dir_all(&stream_path).await,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                     Err(error) => Err(error),
                 };
@@ -281,7 +281,7 @@ impl StorageManager {
 
     async fn apply_retention(
         &mut self,
-        _topic_name: &str,
+        _stream_name: &str,
         base_path: &PathBuf,
         retention: &RetentionOptions,
     ) -> u64 {
@@ -607,10 +607,10 @@ async fn build_segment_index(path: &PathBuf) -> std::io::Result<BTreeMap<u64, u6
     Ok(index)
 }
 
-/// Recover topic state from filesystem.
+/// Recover stream state from filesystem.
 /// Rebuilds the seq→byte_offset index by scanning all segment files.
-pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredState {
-    let base_path = base_path.join(topic_name);
+pub async fn recover_stream(stream_name: &str, base_path: PathBuf) -> RecoveredState {
+    let base_path = base_path.join(stream_name);
     let mut state = RecoveredState::default();
     if !base_path.exists() {
         return state;
@@ -706,7 +706,7 @@ pub async fn recover_topic(topic_name: &str, base_path: PathBuf) -> RecoveredSta
     state
 }
 
-/// Find all segment files for a topic, sorted by start_seq.
+/// Find all segment files for a stream, sorted by start_seq.
 pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
     let mut segments = Vec::new();
     if !base_path.exists() {
@@ -731,7 +731,7 @@ pub async fn find_segments(base_path: &Path) -> std::io::Result<Vec<Segment>> {
     Ok(segments)
 }
 
-/// Write the state.log file (ack_floor + DLT entries + parked_keys per group). Atomic write via temp file + rename.
+/// Write the state.log file (ack_floor + DLS entries + parked_keys per group). Atomic write via temp file + rename.
 pub async fn save_state_file(
     base_path: &Path,
     groups: &BTreeMap<String, GroupPersistentState>,
@@ -759,7 +759,7 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(
     let group_bytes = group_id.as_bytes();
     let group_len = group_bytes.len() as u16;
     let parked_keys_count = state.parked_keys.len() as u32;
-    let dlt_count = state.dlt_entries.len() as u32;
+    let dls_count = state.dls_entries.len() as u32;
     let redeliver_count = state.redeliver_entries.len() as u32;
 
     // Calculate total content length
@@ -767,7 +767,7 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(
     for key in &state.parked_keys {
         content_len += 2 + key.len() as u32;
     }
-    for (_seq, entry) in &state.dlt_entries {
+    for (_seq, entry) in &state.dls_entries {
         let reason_bytes = entry.reason.as_bytes();
         content_len += 8
             + 2
@@ -788,8 +788,8 @@ async fn write_state_entry<W: tokio::io::AsyncWrite + std::marker::Unpin>(
         content_buf.put_u16(key.len() as u16);
         content_buf.put_slice(key);
     }
-    content_buf.put_u32(dlt_count);
-    for (seq, entry) in &state.dlt_entries {
+    content_buf.put_u32(dls_count);
+    for (seq, entry) in &state.dls_entries {
         content_buf.put_u64(*seq);
         let key_len = entry.key.as_ref().map_or(0, |k| k.len()) as u16;
         content_buf.put_u16(key_len);
@@ -846,7 +846,7 @@ async fn load_state_file(
 
                 let mut state = GroupPersistentState {
                     ack_floor,
-                    dlt_entries: BTreeMap::new(),
+                    dls_entries: BTreeMap::new(),
                     parked_keys: HashSet::new(),
                     redeliver_entries: BTreeMap::new(),
                 };
@@ -870,8 +870,8 @@ async fn load_state_file(
                 if cursor.remaining() < 4 {
                     continue;
                 }
-                let dlt_count = cursor.get_u32();
-                for _ in 0..dlt_count {
+                let dls_count = cursor.get_u32();
+                for _ in 0..dls_count {
                     if cursor.remaining() < 8 {
                         break;
                     }
@@ -904,9 +904,9 @@ async fn load_state_file(
                         break;
                     }
                     let attempts = cursor.get_u32();
-                    state.dlt_entries.insert(
+                    state.dls_entries.insert(
                         seq,
-                        DltEntry {
+                        DlsEntry {
                             reason,
                             attempts,
                             key,

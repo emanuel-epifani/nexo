@@ -218,7 +218,7 @@ function encodeFixture(fixture: Fixture): Buffer {
     case 'STREAM_DELETE':
       w.string(inp.stream);
       break;
-    case 'STREAM_PURGE_DLT':
+    case 'STREAM_PURGE_DLS':
       w.string(inp.stream).string(inp.group);
       break;
     case 'STREAM_PUB_JSON':
@@ -253,11 +253,11 @@ function encodeFixture(fixture: Fixture): Buffer {
     case 'STREAM_LEAVE':
       w.string(inp.stream).string(inp.group).string(inp.consumer_id).u64(BigInt(inp.generation));
       break;
-    case 'STREAM_PEEK_DLT':
+    case 'STREAM_PEEK_DLS':
       w.string(inp.stream).string(inp.group).u32(inp.limit).u32(inp.offset);
       break;
     case 'STREAM_MOVE_TO_STREAM':
-    case 'STREAM_DELETE_DLT':
+    case 'STREAM_DELETE_DLS':
       w.string(inp.stream).string(inp.group).u64(BigInt(inp.seq));
       break;
 
@@ -381,7 +381,7 @@ function decodeFixture(fixture: Fixture): any {
     case 'STREAM_DESCRIBE':
     case 'STREAM_DELETE':
       return { stream: c.readString() };
-    case 'STREAM_PURGE_DLT':
+    case 'STREAM_PURGE_DLS':
       return { stream: c.readString(), group: c.readString() };
     case 'STREAM_PUB_JSON':
     case 'STREAM_PUB_STRING_KEY':
@@ -424,10 +424,10 @@ function decodeFixture(fixture: Fixture): any {
         consumer_id: c.readString(),
         generation: Number(c.readU64()),
       };
-    case 'STREAM_PEEK_DLT':
+    case 'STREAM_PEEK_DLS':
       return { stream: c.readString(), group: c.readString(), limit: c.readU32(), offset: c.readU32() };
     case 'STREAM_MOVE_TO_STREAM':
-    case 'STREAM_DELETE_DLT': {
+    case 'STREAM_DELETE_DLS': {
       const stream = c.readString();
       const group = c.readString();
       const seq = Number(c.readU64());

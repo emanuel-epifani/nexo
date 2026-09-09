@@ -86,14 +86,14 @@ export interface StreamMessage<T> extends StreamMessageMeta {
   data: T;
 }
 
-export interface DltEntry {
+export interface DlsEntry {
   seq: bigint;
   reason: string;
   attempts: number;
   key?: Uint8Array;
 }
 
-export interface DltPeekOptions {
+export interface DlsPeekOptions {
   limit?: number;
   offset?: number;
 }
@@ -365,25 +365,25 @@ class StreamSubscription<T> {
   }
 }
 
-export class NexoStreamDLT {
+export class NexoStreamDLS {
   constructor(
     private readonly conn: NexoConnection,
     private readonly streamName: string,
     private readonly groupName: string,
   ) { }
 
-  /** Peek at Dead Letter Topic entries for a consumer group. */
-  async peek(options: DltPeekOptions = {}): Promise<DltEntry[]> {
+  /** Peek at DLS entries for a consumer group. */
+  async peek(options: DlsPeekOptions = {}): Promise<DlsEntry[]> {
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
-    const res = await this.conn.send(StreamOpcode.S_PEEK_DLT, w => w
+    const res = await this.conn.send(StreamOpcode.S_PEEK_DLS, w => w
       .string(this.streamName)
       .string(this.groupName)
       .u32(limit)
       .u32(offset)
     );
     const count = res.cursor.readU32();
-    const entries: DltEntry[] = [];
+    const entries: DlsEntry[] = [];
     for (let i = 0; i < count; i++) {
       const seq = res.cursor.readU64();
       const reason = res.cursor.readString();
@@ -395,7 +395,7 @@ export class NexoStreamDLT {
     return entries;
   }
 
-  /** Move a message from DLT back to the stream for redelivery. */
+  /** Move a message from DLS back to the stream for redelivery. */
   async replay(seq: bigint): Promise<void> {
     await this.conn.send(StreamOpcode.S_MOVE_TO_STREAM, w => w
       .string(this.streamName)
@@ -404,18 +404,18 @@ export class NexoStreamDLT {
     );
   }
 
-  /** Delete a message from the DLT permanently. */
+  /** Delete a message from the DLS permanently. */
   async delete(seq: bigint): Promise<void> {
-    await this.conn.send(StreamOpcode.S_DELETE_DLT, w => w
+    await this.conn.send(StreamOpcode.S_DELETE_DLS, w => w
       .string(this.streamName)
       .string(this.groupName)
       .u64(seq)
     );
   }
 
-  /** Purge all messages from the DLT. Returns the count of removed entries. */
+  /** Purge all messages from the DLS. Returns the count of removed entries. */
   async purge(): Promise<number> {
-    const res = await this.conn.send(StreamOpcode.S_PURGE_DLT, w => w
+    const res = await this.conn.send(StreamOpcode.S_PURGE_DLS, w => w
       .string(this.streamName)
       .string(this.groupName)
     );
@@ -424,7 +424,7 @@ export class NexoStreamDLT {
 }
 
 export class NexoStreamGroup<T = any> {
-  public readonly dlt: NexoStreamDLT;
+  public readonly dls: NexoStreamDLS;
 
   constructor(
     private readonly conn: NexoConnection,
@@ -432,7 +432,7 @@ export class NexoStreamGroup<T = any> {
     public readonly name: string,
     private readonly logger: Logger,
   ) {
-    this.dlt = new NexoStreamDLT(conn, streamName, name);
+    this.dls = new NexoStreamDLS(conn, streamName, name);
   }
 
   async subscribe(

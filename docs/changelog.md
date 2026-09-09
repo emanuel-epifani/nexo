@@ -258,14 +258,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - BufReader once per segment in read_range, fix docs env vars
 - Clean up read_range and add fd cache regression test
-- Simplify to single Mutex&lt;TopicState&gt;
-- Remove lock_topic wrapper, use .lock() directly
+- Simplify to single Mutex&lt;StreamState&gt;
+- Remove lock_stream wrapper, use .lock() directly
 - Optimize ConsumerGroup data structures for O(log n) hot paths
 - Unified stress tests of all brokers
 
 ### Fixed
 
-- Move next_seq to TopicState, fix parse_message truncation, split ReadOutcome
+- Move next_seq to StreamState, fix parse_message truncation, split ReadOutcome
 - Fix 6 issues (P1-P6) in storage and manager
 - Fix 5 bugs from review
 
@@ -363,8 +363,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Batch push for queue and stream publish
 - Add REQUEST_NO_RESPONSE frame type for fire-and-forget commands
 - Add clear functionality for retained messages and enforce TTL validation
-- Enhance configuration management with per-topic settings and environment variable support
-- Add Dead Letter Topic (DLT) with persistence and auto-unblock
+- Enhance configuration management with per-stream settings and environment variable support
+- Add Dead Letter Stream (DLS) with persistence and auto-unblock
 - Add per-key delivery ordering
 
 ### Changed
@@ -614,10 +614,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Batch msgs on writer stream
-- Add routing on topic with dahmap on streamanagre
+- Add routing on stream with dahmap on streamanagre
 - Removed tokio::spawn by every publish
 - Add global stream persister to avoid too much FD opened
-- Edit stream from kafka style (with partitions) to jetbrains style (1 big log) &amp; unified persistency inside same actor of topic
+- Edit stream from kafka style (with partitions) to jetbrains style (1 big log) &amp; unified persistency inside same actor of stream
 - Edit stream from kafka style (with partitions) to jetbrains style (1 big log)
 
 ### Fixed
@@ -909,14 +909,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [refactor] default partitions number
 - [refactor] add retention policy sdk readme
 - [refactor] request once broker at time on FE
-- [refactor] add deelte example to topic/stream
+- [refactor] add deelte example to stream
 - [refactor] utilities queue tests
 - [refactor] ever broker manager accept config on constructor
 - [feat] add editable config for queue on manager
 - [feat] revert comment test stream
 - [feat] add eviction RAM stream
 - [feat] add lazy loading stream
-- [feat] add delete topic
+- [feat] add delete stream
 - [feat-wip] add disk retention log file
 - [feat] add segmentation log file
 - [feat] cadd ompaction commits.log file
@@ -1005,7 +1005,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [refactor] add struct to HEADER legend
 - [refactor] add partitions logic to stream server-side
 - refactor client sdk for maintenance
-- refactor topic from Vec to BTreeMap for efficient scan clients
+- refactor stream from Vec to BTreeMap for efficient scan clients
 - refactor queue
 - card perfect!!
 - updated dashboard web
@@ -1033,8 +1033,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - WIP - implement consumerGrup- offset - rebalancing features
 - implement consumerGrup- offset - rebalancing features
 - implement consumerGrup- offset - rebalancing features
-- wip - align queue &amp; topics to intial create methods
-- wip - align queue &amp; topics to intial create methods
+- wip - align queue &amp; streams to intial create methods
+- wip - align queue &amp; streams to intial create methods
 - draft stream
 - refactor client sdk for latency &gt; throughput
 - refactor test file

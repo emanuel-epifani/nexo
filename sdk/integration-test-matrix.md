@@ -123,8 +123,8 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
 | stream_publish_storage_failure | Storage write failure rejects publish instead of returning a sequence | should fail publish when storage cannot write the message | publish_storage_write_failure |
 | stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |
-| stream_peek_dlt_empty | `group.dlt.peek()` returns an empty array when DLT is empty | should expose group DLT peek when the DLT is empty | peek_dlt_empty_returns_empty |
-| stream_purge_dlt_empty | `group.dlt.purge()` returns 0 when DLT is empty | should expose group DLT purge when the DLT is empty | purge_dlt_empty_returns_zero |
+| stream_peek_dls_empty | `group.dls.peek()` returns an empty array when DLS is empty | should expose group DLS peek when the DLS is empty | peek_dls_empty_returns_empty |
+| stream_purge_dls_empty | `group.dls.purge()` returns 0 when DLS is empty | should expose group DLS purge when the DLS is empty | purge_dls_empty_returns_zero |
 | stream_resubscribe_after_stop | Resubscribe same group after stop receives only new messages | should resubscribe same group after stop and receive only new messages | resubscribe_same_group_after_stop |
 | stream_multi_groups_simultaneous | Multiple independent groups receive all messages simultaneously | should deliver messages to multiple independent groups simultaneously | multiple_groups_simultaneous_delivery |
 

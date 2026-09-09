@@ -58,38 +58,38 @@ describe('STREAM', () => {
     });
 
     it('should support Happy Path (Publish/Subscribe)', async () => {
-        const topic = `stream-basic-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-basic-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: any[] = [];
-        const sub = await subscribe(clientA, topic, 'g1', (data) => received.push(data));
+        const sub = await subscribe(clientA, name, 'g1', (data) => received.push(data));
 
-        await publish(topic, { id: 1 });
-        await publish(topic, { id: 2 });
+        await publish(name, { id: 1 });
+        await publish(name, { id: 2 });
 
         await waitFor(() => expect(received.length).toBe(2));
         await sub.stop();
     });
 
     it('should fail subscribe when stream does not exist', async () => {
-        const topic = `stream-missing-${randomUUID()}`;
+        const name = `stream-missing-${randomUUID()}`;
         await expect(
-            subscribe(clientA, topic, 'missing-group', () => {
+            subscribe(clientA, name, 'missing-group', () => {
             })
         ).rejects.toBeInstanceOf(ResourceNotFoundError);
     });
 
     it('Independent CONSUMER GROUPS => should deliver all messages to each group', async () => {
-        const topic = `stream-groups-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-groups-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const recvA: any[] = [];
         const recvB: any[] = [];
 
-        const subA = await subscribe(clientA, topic, 'group_A', (d) => recvA.push(d));
-        const subB = await subscribe(clientB, topic, 'group_B', (d) => recvB.push(d));
+        const subA = await subscribe(clientA, name, 'group_A', (d) => recvA.push(d));
+        const subB = await subscribe(clientB, name, 'group_B', (d) => recvB.push(d));
 
-        await publish(topic, { msg: 'hello' });
+        await publish(name, { msg: 'hello' });
 
         await waitFor(() => {
             expect(recvA.length).toBe(1);
@@ -101,27 +101,27 @@ describe('STREAM', () => {
     });
 
     it('Same CONSUMER GROUP => should distribute messages without duplicates', async () => {
-        const topic = `parallel-consumers-${randomUUID()}`;
+        const name = `parallel-consumers-${randomUUID()}`;
         const group = 'parallel_group';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
         const receivedA = new Set<number>();
         const receivedB = new Set<number>();
 
         // Start 2 consumers in same group
-        const subA = await subscribe(clientA, topic, group, (d) => {
+        const subA = await subscribe(clientA, name, group, (d) => {
             if (receivedA.has(d.id)) throw new Error(`Duplicate in A: ${d.id}`);
             receivedA.add(d.id);
         });
 
-        const subB = await subscribe(clientB, topic, group, (d) => {
+        const subB = await subscribe(clientB, name, group, (d) => {
             if (receivedB.has(d.id)) throw new Error(`Duplicate in B: ${d.id}`);
             receivedB.add(d.id);
         });
 
         // Publish messages
         for (let i = 0; i < 100; i++) {
-            await publish(topic, { id: i });
+            await publish(name, { id: i });
         }
 
         await waitFor(() => expect(receivedA.size + receivedB.size).toBe(100));
@@ -138,17 +138,17 @@ describe('STREAM', () => {
         const tempClientA = await NexoClient.connect();
         const tempClientB = await NexoClient.connect();
 
-        const topic = `stream-disconnect-${randomUUID()}`;
+        const name = `stream-disconnect-${randomUUID()}`;
         const group = 'group_disconnect';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
-        const producer = await getStream(nexo, topic);
+        const producer = await getStream(nexo, name);
         const allReceivedIds = new Set<number>();
         const track = (d: any) => allReceivedIds.add(d.i);
 
         // 1. Start A & B 
-        const subA = await subscribe(tempClientA, topic, group, track);
-        const subB = await subscribe(tempClientB, topic, group, track);
+        const subA = await subscribe(tempClientA, name, group, track);
+        const subB = await subscribe(tempClientB, name, group, track);
 
         // 2. Warm up (0-19)
         for (let i = 0; i < 20; i++) await producer.publish({ i });
@@ -177,17 +177,17 @@ describe('STREAM', () => {
     });
 
     it('should support History Sync (new groups start from beginning)', async () => {
-        const topic = `stream-history-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-history-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         // 1. Publish 5 messages before anyone joins
         for (let i = 0; i < 5; i++) {
-            await publish(topic, { i });
+            await publish(name, { i });
         }
 
         // 2. Join with a new group
         const received: any[] = [];
-        const sub = await subscribe(clientA, topic, 'history-group', (d) => received.push(d));
+        const sub = await subscribe(clientA, name, 'history-group', (d) => received.push(d));
 
         // 3. Should receive all 5 messages
         await waitFor(() => expect(received.length).toBe(5));
@@ -198,10 +198,10 @@ describe('STREAM', () => {
     });
 
     it('should stop subscription quickly (not wait for long-poll timeout)', async () => {
-        const topic = `stream-fast-stop-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-fast-stop-${randomUUID()}`;
+        await nexo.stream.create(name);
 
-        const sub = await subscribe(clientA, topic, 'fast-stop-group', () => { });
+        const sub = await subscribe(clientA, name, 'fast-stop-group', () => { });
 
         const start = Date.now();
         await sub.stop();
@@ -211,22 +211,22 @@ describe('STREAM', () => {
     });
 
     it('should commit a started callback before leaving the group', async () => {
-        const topic = `stream-stop-processing-${randomUUID()}`;
+        const name = `stream-stop-processing-${randomUUID()}`;
         const group = 'stop-processing-group';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
         let callbackCount = 0;
         let signalStarted!: () => void;
         let releaseCallback!: () => void;
         const started = new Promise<void>(resolve => { signalStarted = resolve; });
         const released = new Promise<void>(resolve => { releaseCallback = resolve; });
-        const sub = await subscribe(clientA, topic, group, async () => {
+        const sub = await subscribe(clientA, name, group, async () => {
             callbackCount++;
             signalStarted();
             await released;
         });
 
-        await publish(topic, { id: 1 });
+        await publish(name, { id: 1 });
         await started;
 
         let stopCompleted = false;
@@ -238,48 +238,48 @@ describe('STREAM', () => {
         await stopping;
 
         const redelivered: any[] = [];
-        const resumed = await subscribe(clientA, topic, group, data => redelivered.push(data));
+        const resumed = await subscribe(clientA, name, group, data => redelivered.push(data));
         await new Promise(resolve => setTimeout(resolve, 200));
         await resumed.stop();
 
         expect(callbackCount).toBe(1);
         expect(redelivered).toEqual([]);
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should fail stop when a started callback exceeds the stop timeout', async () => {
-        const topic = `stream-stop-timeout-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-stop-timeout-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         let signalStarted!: () => void;
         let releaseCallback!: () => void;
         const started = new Promise<void>(resolve => { signalStarted = resolve; });
         const released = new Promise<void>(resolve => { releaseCallback = resolve; });
-        const sub = await subscribe(clientA, topic, 'stop-timeout-group', async () => {
+        const sub = await subscribe(clientA, name, 'stop-timeout-group', async () => {
             signalStarted();
             await released;
         }, { stopTimeoutMs: 100 });
 
-        await publish(topic, { id: 1 });
+        await publish(name, { id: 1 });
         await started;
 
         await expect(sub.stop()).rejects.toThrow('stop timed out');
         releaseCallback();
         await new Promise(resolve => setTimeout(resolve, 100));
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should expose an ACK failure during stop', async () => {
-        const topic = `stream-stop-ack-failure-${randomUUID()}`;
+        const name = `stream-stop-ack-failure-${randomUUID()}`;
         const group = 'stop-ack-failure-group';
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
 
         let signalStarted!: () => void;
         let releaseCallback!: () => void;
         const started = new Promise<void>(resolve => { signalStarted = resolve; });
         const released = new Promise<void>(resolve => { releaseCallback = resolve; });
-        const sub = await subscribe(clientA, topic, group, async () => {
+        const sub = await subscribe(clientA, name, group, async () => {
             signalStarted();
             await released;
         });
@@ -291,21 +291,21 @@ describe('STREAM', () => {
         const stopping = sub.stop();
         releaseCallback();
         await expect(stopping).rejects.toThrow('stream ACK request(s) failed');
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should rejoin and redeliver after an ACK failure while active', async () => {
-        const topic = `stream-active-ack-failure-${randomUUID()}`;
+        const name = `stream-active-ack-failure-${randomUUID()}`;
         const group = 'active-ack-failure-group';
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
 
         let attempts = 0;
         let signalFirstStarted!: () => void;
         let releaseFirst!: () => void;
         const firstStarted = new Promise<void>(resolve => { signalFirstStarted = resolve; });
         const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
-        const sub = await subscribe(clientA, topic, group, async () => {
+        const sub = await subscribe(clientA, name, group, async () => {
             attempts++;
             if (attempts === 1) {
                 signalFirstStarted();
@@ -320,19 +320,19 @@ describe('STREAM', () => {
 
         await waitFor(() => expect(attempts).toBe(2), { timeout: 5000 });
         await sub.stop();
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should preserve ordering with default concurrency=1', async () => {
-        const topic = `stream-order-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-order-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: number[] = [];
-        const sub = await subscribe(clientA, topic, 'order-group', async (d: any) => {
+        const sub = await subscribe(clientA, name, 'order-group', async (d: any) => {
             received.push(d.i);
         });
 
-        for (let i = 0; i < 30; i++) await publish(topic, { i });
+        for (let i = 0; i < 30; i++) await publish(name, { i });
 
         await waitFor(() => expect(received.length).toBe(30), { timeout: 10000 });
 
@@ -344,8 +344,8 @@ describe('STREAM', () => {
     });
 
     it('should process messages in parallel with concurrency > 1', async () => {
-        const topic = `stream-concurrent-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-concurrent-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const CALLBACK_DELAY = 100;
         const COUNT = 20;
@@ -355,7 +355,7 @@ describe('STREAM', () => {
         let inFlight = 0;
         let maxInFlight = 0;
 
-        const sub = await subscribe(clientA, topic, 'concurrent-group', async (d: any) => {
+        const sub = await subscribe(clientA, name, 'concurrent-group', async (d: any) => {
             inFlight++;
             maxInFlight = Math.max(maxInFlight, inFlight);
             await new Promise(r => setTimeout(r, CALLBACK_DELAY));
@@ -363,7 +363,7 @@ describe('STREAM', () => {
             inFlight--;
         }, { batchSize: COUNT, concurrency: CONCURRENCY });
 
-        for (let i = 0; i < COUNT; i++) await publish(topic, { i });
+        for (let i = 0; i < COUNT; i++) await publish(name, { i });
 
         const start = Date.now();
         await waitFor(() => expect(received.length).toBe(COUNT), { timeout: 10000 });
@@ -383,10 +383,10 @@ describe('STREAM', () => {
     });
 
     it('should ACK a fast callback without waiting for a slow callback in the same batch', async () => {
-        const topic = `stream-incremental-ack-${randomUUID()}`;
+        const name = `stream-incremental-ack-${randomUUID()}`;
         const group = 'incremental-ack-group';
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
         await stream.publishBatch([
             { data: { id: 1 }, key: 'A' },
             { data: { id: 2 }, key: 'B' },
@@ -400,7 +400,7 @@ describe('STREAM', () => {
         const slowStarted = new Promise<void>(resolve => { signalSlowStarted = resolve; });
         const slowReleased = new Promise<void>(resolve => { releaseSlow = resolve; });
 
-        const first = await subscribe(clientA, topic, group, async (data: any) => {
+        const first = await subscribe(clientA, name, group, async (data: any) => {
             if (data.id === 1) {
                 signalFastFinished();
                 return;
@@ -414,7 +414,7 @@ describe('STREAM', () => {
         await Promise.all([fastFinished, slowStarted]);
 
         const receivedBySecond: number[] = [];
-        const second = await subscribe(clientB, topic, group, (data: any) => {
+        const second = await subscribe(clientB, name, group, (data: any) => {
             receivedBySecond.push(data.id);
         }, { batchSize: 1 });
 
@@ -422,34 +422,34 @@ describe('STREAM', () => {
         releaseSlow();
         await first.stop();
         await second.stop();
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should support Seek (Beginning/End)', async () => {
-        const topic = `stream-seek-${randomUUID()}`;
+        const name = `stream-seek-${randomUUID()}`;
         const group = 'seek-group';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
         // 1. Push 10 messages
-        for (let i = 0; i < 10; i++) await publish(topic, { i });
+        for (let i = 0; i < 10; i++) await publish(name, { i });
 
         // 2. Scenario: Group joins and skips to END
-        await seek(clientA, topic, group, 'end');
+        await seek(clientA, name, group, 'end');
 
         const receivedEnd: any[] = [];
-        const subEnd = await subscribe(clientA, topic, group, (d) => receivedEnd.push(d));
+        const subEnd = await subscribe(clientA, name, group, (d) => receivedEnd.push(d));
 
         // 3. Publish #11, only #11 should be received
-        await publish(topic, { i: 10 });
+        await publish(name, { i: 10 });
         await waitFor(() => expect(receivedEnd.length).toBe(1));
         expect(receivedEnd[0].i).toBe(10);
         await subEnd.stop();
 
         // 4. Scenario: Seek back to BEGINNING
-        await seek(clientA, topic, group, 'beginning');
+        await seek(clientA, name, group, 'beginning');
 
         const receivedStart: any[] = [];
-        const subStart = await subscribe(clientA, topic, group, (d) => receivedStart.push(d));
+        const subStart = await subscribe(clientA, name, group, (d) => receivedStart.push(d));
 
         // 5. Should receive ALL 11 messages
         await waitFor(() => expect(receivedStart.length).toBe(11));
@@ -459,15 +459,15 @@ describe('STREAM', () => {
         await subStart.stop();
     });
 
-    // DLT mechanism (redelivery → park → peek/delete/purge/move) is tested
+    // DLS mechanism (redelivery → park → peek/delete/purge/move) is tested
     // comprehensively in Rust tests with per-test config (ack_wait_ms=50, max_deliveries=2).
     // No need to duplicate here — it would require either slow timeouts or env var hacks.
 
     it('should stop quickly during long-poll wait (no messages available)', async () => {
-        const topic = `stream-stop-idle-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-stop-idle-${randomUUID()}`;
+        await nexo.stream.create(name);
 
-        const sub = await subscribe(clientA, topic, 'idle-stop-group', () => { });
+        const sub = await subscribe(clientA, name, 'idle-stop-group', () => { });
 
         // Let the consumer enter long-poll (no messages published)
         await new Promise(r => setTimeout(r, 200));
@@ -481,29 +481,29 @@ describe('STREAM', () => {
     });
 
     it('should not deliver messages after stop() returns', async () => {
-        const topic = `stream-stop-nodeliver-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-stop-nodeliver-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: any[] = [];
-        const sub = await subscribe(clientA, topic, 'nodeliver-group', (d) => received.push(d));
+        const sub = await subscribe(clientA, name, 'nodeliver-group', (d) => received.push(d));
 
-        await publish(topic, { id: 1 });
+        await publish(name, { id: 1 });
         await waitFor(() => expect(received.length).toBe(1));
 
         await sub.stop();
 
         // Publish after stop — should not be received
-        await publish(topic, { id: 2 });
+        await publish(name, { id: 2 });
         await new Promise(r => setTimeout(r, 500));
 
         expect(received.length).toBe(1);
     });
 
     it('should publish batch and return seq numbers', async () => {
-        const topic = `stream-batch-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-batch-${randomUUID()}`;
+        await nexo.stream.create(name);
 
-        const seqs = await publishBatch(topic, [
+        const seqs = await publishBatch(name, [
             { data: 'msg1' },
             { data: 'msg2' },
             { data: 'msg3' },
@@ -516,15 +516,15 @@ describe('STREAM', () => {
     });
 
     it('should publish batch with keys', async () => {
-        const topic = `stream-batch-keys-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-batch-keys-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: { data: any, key?: Uint8Array }[] = [];
-        const sub = await subscribe(clientA, topic, 'g-batch-keys', (data, meta) => {
+        const sub = await subscribe(clientA, name, 'g-batch-keys', (data, meta) => {
             received.push({ data, key: meta.key });
         });
 
-        await publishBatch(topic, [
+        await publishBatch(name, [
             { data: 'msg1', key: 'key-A' },
             { data: 'msg2', key: 'key-B' },
             { data: 'msg3' },
@@ -535,15 +535,15 @@ describe('STREAM', () => {
     });
 
     it('should publish with string key and verify receipt', async () => {
-        const topic = `stream-pub-key-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-pub-key-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: { data: any, key?: Uint8Array }[] = [];
-        const sub = await subscribe(clientA, topic, 'g-pub-key', (data, meta) => {
+        const sub = await subscribe(clientA, name, 'g-pub-key', (data, meta) => {
             received.push({ data, key: meta.key });
         });
 
-        const seq = await publish(topic, { x: 1 }, { key: 'my-key' });
+        const seq = await publish(name, { x: 1 }, { key: 'my-key' });
         expect(seq).toBeGreaterThan(0n);
 
         await waitFor(() => expect(received.length).toBe(1));
@@ -553,20 +553,20 @@ describe('STREAM', () => {
         expect(received[0].key).toBeDefined();
         expect(Buffer.from(received[0].key!).toString('utf8')).toBe('my-key');
 
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should publish with Uint8Array key and verify receipt', async () => {
-        const topic = `stream-pub-rawkey-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-pub-rawkey-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: { data: any, key?: Uint8Array }[] = [];
-        const sub = await subscribe(clientA, topic, 'g-pub-rawkey', (data, meta) => {
+        const sub = await subscribe(clientA, name, 'g-pub-rawkey', (data, meta) => {
             received.push({ data, key: meta.key });
         });
 
         const rawKey = new Uint8Array([0x01, 0x02, 0xFF]);
-        await publish(topic, 'payload', { key: rawKey });
+        await publish(name, 'payload', { key: rawKey });
 
         await waitFor(() => expect(received.length).toBe(1));
         await sub.stop();
@@ -575,20 +575,20 @@ describe('STREAM', () => {
         expect(received[0].key).toBeDefined();
         expect(Buffer.from(received[0].key!)).toEqual(Buffer.from(rawKey));
 
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should publish Uint8Array data and receive raw bytes back', async () => {
-        const topic = `stream-pub-uint8-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-pub-uint8-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: any[] = [];
-        const sub = await subscribe(clientA, topic, 'g-pub-uint8', (data) => {
+        const sub = await subscribe(clientA, name, 'g-pub-uint8', (data) => {
             received.push(data);
         });
 
         const payload = new Uint8Array([0x01, 0x02, 0xFF, 0x00]);
-        await publish(topic, payload);
+        await publish(name, payload);
 
         await waitFor(() => expect(received.length).toBe(1));
         await sub.stop();
@@ -596,21 +596,21 @@ describe('STREAM', () => {
         expect(received[0]).toBeInstanceOf(Uint8Array);
         expect(Buffer.from(received[0])).toEqual(Buffer.from(payload));
 
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should publish ArrayBuffer data and receive raw bytes back', async () => {
-        const topic = `stream-pub-arraybuf-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-pub-arraybuf-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const received: any[] = [];
-        const sub = await subscribe(clientA, topic, 'g-pub-arraybuf', (data) => {
+        const sub = await subscribe(clientA, name, 'g-pub-arraybuf', (data) => {
             received.push(data);
         });
 
         const payload = new ArrayBuffer(3);
         new Uint8Array(payload).set([0x41, 0x42, 0x43]);
-        await publish(topic, payload);
+        await publish(name, payload);
 
         await waitFor(() => expect(received.length).toBe(1));
         await sub.stop();
@@ -618,73 +618,73 @@ describe('STREAM', () => {
         expect(received[0]).toBeInstanceOf(Uint8Array);
         expect(Buffer.from(received[0])).toEqual(Buffer.from(new Uint8Array(payload)));
 
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should handle empty publishBatch gracefully', async () => {
-        const topic = `stream-batch-empty-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-batch-empty-${randomUUID()}`;
+        await nexo.stream.create(name);
 
-        const seqs = await publishBatch(topic, []);
+        const seqs = await publishBatch(name, []);
         expect(seqs.length).toBe(0);
     });
 
     it('should reject empty stream keys', async () => {
-        const topic = `stream-empty-key-${randomUUID()}`;
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
+        const name = `stream-empty-key-${randomUUID()}`;
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
         await expect(stream.publish({ x: 1 }, { key: '' })).rejects.toThrow('must not be empty');
         await expect(stream.publishBatch([{ data: { x: 1 }, key: new Uint8Array() }]))
             .rejects.toThrow('must not be empty');
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should reject publish batches above the protocol limit', async () => {
-        const topic = `stream-large-batch-${randomUUID()}`;
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
+        const name = `stream-large-batch-${randomUUID()}`;
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
         const items = Array.from({ length: 65_537 }, () => ({ data: null }));
         await expect(stream.publishBatch(items)).rejects.toThrow('Publish batch too large');
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     // ── Edge cases ──────────────────────────────────────────────
 
     it('should return exists=true after create, false before', async () => {
-        const topic = `stream-exists-${randomUUID()}`;
-        expect(await nexo.stream.exists(topic)).toBe(false);
-        await nexo.stream.create(topic);
-        expect(await nexo.stream.exists(topic)).toBe(true);
-        await nexo.stream.delete(topic);
-        expect(await nexo.stream.exists(topic)).toBe(false);
+        const name = `stream-exists-${randomUUID()}`;
+        expect(await nexo.stream.exists(name)).toBe(false);
+        await nexo.stream.create(name);
+        expect(await nexo.stream.exists(name)).toBe(true);
+        await nexo.stream.delete(name);
+        expect(await nexo.stream.exists(name)).toBe(false);
     });
 
     it('should return provisioning results and reject configuration conflicts', async () => {
-        const topic = `stream-provision-${randomUUID()}`;
+        const name = `stream-provision-${randomUUID()}`;
         const options = { retention: { maxAgeMs: 5000, maxBytes: 100000 } };
 
-        const created = await nexo.stream.create(topic, options);
+        const created = await nexo.stream.create(name, options);
         expect(created.status).toBe('created');
-        expect(created.definition).toMatchObject({ name: topic, config: options });
+        expect(created.definition).toMatchObject({ name: name, config: options });
 
-        const unchanged = await nexo.stream.create(topic, options);
+        const unchanged = await nexo.stream.create(name, options);
         expect(unchanged.status).toBe('unchanged');
         expect(unchanged.definition).toEqual(created.definition);
 
         try {
-            await nexo.stream.create(topic, { retention: { ...options.retention, maxAgeMs: 6000 } });
+            await nexo.stream.create(name, { retention: { ...options.retention, maxAgeMs: 6000 } });
             throw new Error('Expected stream configuration conflict');
         } catch (error) {
             expect(error).toBeInstanceOf(ResourceConfigurationConflictError);
             expect((error as ResourceConfigurationConflictError).details).toMatchObject({
                 resourceKind: 'stream',
-                resourceName: topic,
+                resourceName: name,
                 differences: [{ path: 'config.retention.maxAgeMs', requested: 6000, actual: 5000 }],
             });
         }
 
-        expect(await nexo.stream.describe(topic)).toEqual(created.definition);
-        await nexo.stream.delete(topic);
+        expect(await nexo.stream.describe(name)).toEqual(created.definition);
+        await nexo.stream.delete(name);
     });
 
     it('should reject stream names that escape the stream directory', async () => {
@@ -692,9 +692,9 @@ describe('STREAM', () => {
     });
 
     it('should reject invalid seek and subscription polling options', async () => {
-        const topic = `stream-invalid-options-${randomUUID()}`;
-        await nexo.stream.create(topic);
-        const group = (await getStream(nexo, topic)).group('group');
+        const name = `stream-invalid-options-${randomUUID()}`;
+        await nexo.stream.create(name);
+        const group = (await getStream(nexo, name)).group('group');
         await expect(group.seek('invalid' as any)).rejects.toThrow('Invalid seek target');
         await expect(group.subscribe(() => { }, { batchSize: 0 }))
             .rejects.toThrow('batchSize must be an integer between');
@@ -702,12 +702,12 @@ describe('STREAM', () => {
             .rejects.toThrow('waitMs must be a positive integer');
         await expect(group.subscribe(() => { }, { stopTimeoutMs: 0 }))
             .rejects.toThrow('stopTimeoutMs must be a positive integer');
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should fail fast when getting a non-existent stream', async () => {
-        const topic = `stream-get-missing-${randomUUID()}`;
-        await expect(nexo.stream.get(topic)).rejects.toBeInstanceOf(ResourceNotFoundError);
+        const name = `stream-get-missing-${randomUUID()}`;
+        await expect(nexo.stream.get(name)).rejects.toBeInstanceOf(ResourceNotFoundError);
     });
 
     it('should propagate connection errors from exists', async () => {
@@ -720,97 +720,97 @@ describe('STREAM', () => {
     });
 
     it('should fail publish when storage cannot write the message', async () => {
-        const topic = `stream-write-failure-${randomUUID()}`;
-        const topicPath = path.join(STREAM_DATA_DIR, topic);
-        await nexo.stream.create(topic);
-        const stream = await getStream(nexo, topic);
-        await rm(topicPath, { recursive: true, force: true });
-        await writeFile(topicPath, 'not-a-directory');
+        const name = `stream-write-failure-${randomUUID()}`;
+        const streamPath = path.join(STREAM_DATA_DIR, name);
+        await nexo.stream.create(name);
+        const stream = await getStream(nexo, name);
+        await rm(streamPath, { recursive: true, force: true });
+        await writeFile(streamPath, 'not-a-directory');
 
         try {
             await expect(stream.publish({ x: 1 })).rejects.toThrow('Storage append failed');
         } finally {
-            await rm(topicPath, { force: true });
-            await nexo.stream.delete(topic);
+            await rm(streamPath, { force: true });
+            await nexo.stream.delete(name);
         }
     });
 
     it('should fail operations after delete', async () => {
-        const topic = `stream-del-ops-${randomUUID()}`;
-        await nexo.stream.create(topic);
-        await nexo.stream.delete(topic);
-        await expect(publish(topic, { x: 1 })).rejects.toThrow();
+        const name = `stream-del-ops-${randomUUID()}`;
+        await nexo.stream.create(name);
+        await nexo.stream.delete(name);
+        await expect(publish(name, { x: 1 })).rejects.toThrow();
         await expect(
-            subscribe(clientA, topic, 'g-del', () => { })
+            subscribe(clientA, name, 'g-del', () => { })
         ).rejects.toThrow();
     });
 
-    it('should expose group DLT peek when the DLT is empty', async () => {
-        const topic = `stream-dlt-empty-${randomUUID()}`;
-        const group = 'g-dlt-empty';
-        await nexo.stream.create(topic);
-        const groupHandle = (await getStream(clientA, topic)).group(group);
+    it('should expose group DLS peek when the DLS is empty', async () => {
+        const name = `stream-dls-empty-${randomUUID()}`;
+        const group = 'g-dls-empty';
+        await nexo.stream.create(name);
+        const groupHandle = (await getStream(clientA, name)).group(group);
         // Create the group by subscribing and immediately stopping
         const sub = await groupHandle.subscribe(() => { });
         await sub.stop();
-        const entries = await groupHandle.dlt.peek({ limit: 10, offset: 0 });
+        const entries = await groupHandle.dls.peek({ limit: 10, offset: 0 });
         expect(entries).toEqual([]);
-        expect(groupHandle.dlt.replay).toBeTypeOf('function');
-        expect(groupHandle.dlt.delete).toBeTypeOf('function');
-        await nexo.stream.delete(topic);
+        expect(groupHandle.dls.replay).toBeTypeOf('function');
+        expect(groupHandle.dls.delete).toBeTypeOf('function');
+        await nexo.stream.delete(name);
     });
 
-    it('should expose group DLT purge when the DLT is empty', async () => {
-        const topic = `stream-dlt-purge-empty-${randomUUID()}`;
-        const group = 'g-dlt-purge';
-        await nexo.stream.create(topic);
-        const groupHandle = (await getStream(clientA, topic)).group(group);
+    it('should expose group DLS purge when the DLS is empty', async () => {
+        const name = `stream-dls-purge-empty-${randomUUID()}`;
+        const group = 'g-dls-purge';
+        await nexo.stream.create(name);
+        const groupHandle = (await getStream(clientA, name)).group(group);
         // Create the group by subscribing and immediately stopping
         const sub = await groupHandle.subscribe(() => { });
         await sub.stop();
-        const count = await groupHandle.dlt.purge();
+        const count = await groupHandle.dls.purge();
         expect(count).toBe(0);
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should resubscribe same group after stop and receive only new messages', async () => {
-        const topic = `stream-resub-${randomUUID()}`;
+        const name = `stream-resub-${randomUUID()}`;
         const group = 'g-resub';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
         const recv1: any[] = [];
-        const sub1 = await subscribe(clientA, topic, group, (d) => recv1.push(d));
-        await publish(topic, { i: 1 });
-        await publish(topic, { i: 2 });
+        const sub1 = await subscribe(clientA, name, group, (d) => recv1.push(d));
+        await publish(name, { i: 1 });
+        await publish(name, { i: 2 });
         await waitFor(() => expect(recv1.length).toBe(2));
         await sub1.stop();
 
         // Publish while no consumer is active
-        await publish(topic, { i: 3 });
+        await publish(name, { i: 3 });
 
         // Resubscribe — should receive only msg 3 (msgs 1-2 were acked)
         const recv2: any[] = [];
-        const sub2 = await subscribe(clientA, topic, group, (d) => recv2.push(d));
+        const sub2 = await subscribe(clientA, name, group, (d) => recv2.push(d));
         await waitFor(() => expect(recv2.length).toBe(1));
         expect(recv2[0].i).toBe(3);
         await sub2.stop();
 
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     it('should deliver messages to multiple independent groups simultaneously', async () => {
-        const topic = `stream-multi-groups-${randomUUID()}`;
-        await nexo.stream.create(topic);
+        const name = `stream-multi-groups-${randomUUID()}`;
+        await nexo.stream.create(name);
 
         const recvA: any[] = [];
         const recvB: any[] = [];
         const recvC: any[] = [];
 
-        const subA = await subscribe(clientA, topic, 'multi-a', (d) => recvA.push(d));
-        const subB = await subscribe(clientB, topic, 'multi-b', (d) => recvB.push(d));
-        const subC = await subscribe(clientA, topic, 'multi-c', (d) => recvC.push(d));
+        const subA = await subscribe(clientA, name, 'multi-a', (d) => recvA.push(d));
+        const subB = await subscribe(clientB, name, 'multi-b', (d) => recvB.push(d));
+        const subC = await subscribe(clientA, name, 'multi-c', (d) => recvC.push(d));
 
-        for (let i = 0; i < 5; i++) await publish(topic, { i });
+        for (let i = 0; i < 5; i++) await publish(name, { i });
 
         await waitFor(() => {
             expect(recvA.length).toBe(5);
@@ -821,25 +821,25 @@ describe('STREAM', () => {
         await subA.stop();
         await subB.stop();
         await subC.stop();
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 
     // ── Per-key ordering end-to-end ──────────────────────────────
 
     it('should enforce per-key ordering: same key delivered one at a time, different keys in parallel', async () => {
-        const topic = `stream-perkey-order-${randomUUID()}`;
+        const name = `stream-perkey-order-${randomUUID()}`;
         const group = 'perkey-order-group';
-        await nexo.stream.create(topic);
+        await nexo.stream.create(name);
 
         // Publish all messages BEFORE subscribing so the first fetch sees all 6
         // and per-key blocking is active immediately.
         // Interleaved: A0, B0, A1, no-key, B1, A2
-        await publish(topic, { i: 0 }, { key: 'user-A' });
-        await publish(topic, { i: 0 }, { key: 'user-B' });
-        await publish(topic, { i: 1 }, { key: 'user-A' });
-        await publish(topic, { i: 0 });
-        await publish(topic, { i: 1 }, { key: 'user-B' });
-        await publish(topic, { i: 2 }, { key: 'user-A' });
+        await publish(name, { i: 0 }, { key: 'user-A' });
+        await publish(name, { i: 0 }, { key: 'user-B' });
+        await publish(name, { i: 1 }, { key: 'user-A' });
+        await publish(name, { i: 0 });
+        await publish(name, { i: 1 }, { key: 'user-B' });
+        await publish(name, { i: 2 }, { key: 'user-A' });
 
         // Track delivery order per key. Use a gate to hold ACKs until we verify
         // the first batch, preventing the server from unblocking the next message.
@@ -850,7 +850,7 @@ describe('STREAM', () => {
         const gateReleased = new Promise<void>(r => { releaseGate = r; });
         let count = 0;
 
-        const sub = await subscribe(clientA, topic, group, async (d: any, meta: { key?: Uint8Array }) => {
+        const sub = await subscribe(clientA, name, group, async (d: any, meta: { key?: Uint8Array }) => {
             const key = meta.key ? Buffer.from(meta.key).toString('utf-8') : 'none';
             delivered.push({ key, i: d.i });
             count++;
@@ -876,6 +876,6 @@ describe('STREAM', () => {
         releaseGate!();
 
         await sub.stop();
-        await nexo.stream.delete(topic);
+        await nexo.stream.delete(name);
     });
 });

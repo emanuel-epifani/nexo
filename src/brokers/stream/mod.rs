@@ -5,6 +5,6 @@ pub mod options;
 pub mod tcp;
 
 pub use domain::message::Message;
-pub use domain::persistence::{recover_topic, serialize_message};
-pub use domain::topic::{StreamDefinition, TopicConfig};
+pub use domain::definition::{StreamConfig, StreamDefinition};
+pub use domain::persistence::{recover_stream, serialize_message};
 pub use manager::StreamManager;

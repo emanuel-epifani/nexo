@@ -346,9 +346,9 @@ mod stress_tests {
             let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
 
             let manager = build_stream_manager(config).await;
-            let topic = "bench-write-confirmed";
+            let name = "bench-write-confirmed";
             manager
-                .create_topic(topic.to_string(), StreamCreateOptions::default())
+                .create_stream(name.to_string(), StreamCreateOptions::default())
                 .await
                 .unwrap();
 
@@ -356,7 +356,7 @@ mod stress_tests {
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager
-                    .publish(topic, None, Bytes::from("data"))
+                    .publish(name, None, Bytes::from("data"))
                     .await
                     .unwrap();
                 bench.record(start.elapsed());

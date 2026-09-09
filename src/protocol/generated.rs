@@ -87,10 +87,10 @@ pub const OP_S_DELETE: u8 = 0x36;
 pub const OP_S_DESCRIBE: u8 = 0x37;
 pub const OP_S_SEEK: u8 = 0x38;
 pub const OP_S_LEAVE: u8 = 0x39;
-pub const OP_S_PEEK_DLT: u8 = 0x3A;
+pub const OP_S_PEEK_DLS: u8 = 0x3A;
 pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
-pub const OP_S_DELETE_DLT: u8 = 0x3C;
-pub const OP_S_PURGE_DLT: u8 = 0x3D;
+pub const OP_S_DELETE_DLS: u8 = 0x3C;
+pub const OP_S_PURGE_DLS: u8 = 0x3D;
 
 pub const QUEUE_MAX_PUSH_ITEMS: usize = 10_000;
 pub const STREAM_MAX_PUBLISH_BATCH: usize = 65_536;

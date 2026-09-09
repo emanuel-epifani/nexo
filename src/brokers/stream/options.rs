@@ -1,5 +1,5 @@
 //! Stream option types shared between the manager and the TCP adapter.
-//! `RetentionOptions` is also persisted inside `TopicConfig` (hence `Serialize`).
+//! `RetentionOptions` is also persisted inside `StreamConfig` (hence `Serialize`).
 
 use serde::{Deserialize, Serialize};
 

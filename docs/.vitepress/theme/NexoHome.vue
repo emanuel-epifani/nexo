@@ -51,13 +51,13 @@ await mailQ.delete();`,
   {
     key: 'stream',
     label: 'Stream',
-    code: `// Create topic
+    code: `// Create stream
 const stream = await client.stream<UserEvent>('user-events').create();
 // Publish
 await stream.publish({ type: 'login', userId: 'u1' });
 // Consume
 await stream.subscribe('analytics', (msg) => { console.log(\`User \${msg.userId} performed \${msg.type}\`); });
-// Delete topic
+// Delete stream
 await stream.delete();`,
   },
 ]

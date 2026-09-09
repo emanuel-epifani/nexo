@@ -66,7 +66,7 @@ class StreamPublishItem(Generic[T]):
     key: str | bytes | None = None
 
 
-class DLTEntry(TypedDict):
+class DLSEntry(TypedDict):
     seq: int
     reason: str
     attempts: int
@@ -260,22 +260,22 @@ class StreamCommands:
         )
 
     @staticmethod
-    async def peek_dlt(
+    async def peek_dls(
         conn: NexoConnection,
         stream_name: str,
         group_name: str,
         limit: int,
         offset: int,
-    ) -> list[DLTEntry]:
+    ) -> list[DLSEntry]:
         _, cursor = await conn.send(
-            StreamOpcode.S_PEEK_DLT,
+            StreamOpcode.S_PEEK_DLS,
             lambda writer: writer.string(stream_name)
             .string(group_name)
             .u32(limit)
             .u32(offset),
         )
         count = cursor.read_u32()
-        entries: list[DLTEntry] = []
+        entries: list[DLSEntry] = []
         for _ in range(count):
             seq = cursor.read_u64()
             reason = cursor.read_string()
@@ -305,25 +305,25 @@ class StreamCommands:
         )
 
     @staticmethod
-    async def delete_dlt(
+    async def delete_dls(
         conn: NexoConnection,
         stream_name: str,
         group_name: str,
         seq: int,
     ) -> None:
         await conn.send(
-            StreamOpcode.S_DELETE_DLT,
+            StreamOpcode.S_DELETE_DLS,
             lambda writer: writer.string(stream_name).string(group_name).u64(seq),
         )
 
     @staticmethod
-    async def purge_dlt(
+    async def purge_dls(
         conn: NexoConnection,
         stream_name: str,
         group_name: str,
     ) -> int:
         _, cursor = await conn.send(
-            StreamOpcode.S_PURGE_DLT,
+            StreamOpcode.S_PURGE_DLS,
             lambda writer: writer.string(stream_name).string(group_name),
         )
         return cursor.read_u32()
@@ -559,7 +559,7 @@ class StreamSubscription(Generic[T]):
             self._phase = "idle"
 
 
-class NexoStreamDLT:
+class NexoStreamDLS:
     def __init__(
         self,
         conn: NexoConnection,
@@ -575,8 +575,8 @@ class NexoStreamDLT:
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[DLTEntry]:
-        return await StreamCommands.peek_dlt(
+    ) -> list[DLSEntry]:
+        return await StreamCommands.peek_dls(
             self._conn,
             self._stream_name,
             self._group_name,
@@ -593,7 +593,7 @@ class NexoStreamDLT:
         )
 
     async def delete(self, seq: int) -> None:
-        await StreamCommands.delete_dlt(
+        await StreamCommands.delete_dls(
             self._conn,
             self._stream_name,
             self._group_name,
@@ -601,7 +601,7 @@ class NexoStreamDLT:
         )
 
     async def purge(self) -> int:
-        return await StreamCommands.purge_dlt(
+        return await StreamCommands.purge_dls(
             self._conn,
             self._stream_name,
             self._group_name,
@@ -622,11 +622,11 @@ class NexoStreamGroup(Generic[T]):
         self._stream_name = stream_name
         self.name = name
         self._logger = logger
-        self._dlt = NexoStreamDLT(conn, stream_name, name)
+        self._dls = NexoStreamDLS(conn, stream_name, name)
 
     @property
-    def dlt(self) -> NexoStreamDLT:
-        return self._dlt
+    def dls(self) -> NexoStreamDLS:
+        return self._dls
 
     async def subscribe(
         self,

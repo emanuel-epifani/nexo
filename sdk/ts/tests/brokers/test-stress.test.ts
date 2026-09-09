@@ -131,8 +131,8 @@ describe('Stress test', () => {
             await nexo.queue.delete(qName);
         });
         it('STREAM - PUBLISH - concurrent workers', async () => {
-            const topic = 'bench-stream-throughput';
-            const stream = await createStream(topic);
+            const name = 'bench-stream-throughput';
+            const stream = await createStream(name);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -153,11 +153,11 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await nexo.stream.delete(topic);
+            await nexo.stream.delete(name);
         });
         it('STREAM - PUBLISH BATCH - concurrent workers', async () => {
-            const topic = 'bench-stream-batch-throughput';
-            const stream = await createStream(topic);
+            const name = 'bench-stream-batch-throughput';
+            const stream = await createStream(name);
 
             const TOTAL = 50_000;
             const WORKERS = 50;
@@ -180,7 +180,7 @@ describe('Stress test', () => {
             await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
             probe.printResult();
 
-            await nexo.stream.delete(topic);
+            await nexo.stream.delete(name);
         });
         it('PUBSUB - PUBLISH - concurrent workers', async () => {
             const topic = nexo.pubsub.topic('bench/pubsub-throughput');
@@ -229,8 +229,8 @@ describe('Stress test', () => {
             await nexo.queue.delete(qName);
         });
         it('STREAM - SUBSCRIBE+ACK - subscriber throughput', async () => {
-            const topic = 'bench-stream-subscribe';
-            const stream = await createStream(topic);
+            const name = 'bench-stream-subscribe';
+            const stream = await createStream(name);
 
             const TOTAL = 50_000;
             const payload = { op: 'event', data: 'x', t: Date.now() };
@@ -250,7 +250,7 @@ describe('Stress test', () => {
             await sub.stop();
             probe.printResult();
 
-            await nexo.stream.delete(topic);
+            await nexo.stream.delete(name);
         });
     })
 
@@ -304,8 +304,8 @@ describe('Stress test', () => {
             await nexo.queue.delete(qName);
         });
         it('STREAM - PUBLISH - sequential', async () => {
-            const topic = 'bench-stream-latency';
-            const stream = await createStream(topic);
+            const name = 'bench-stream-latency';
+            const stream = await createStream(name);
 
             const ITERATIONS = 100_000;
             const payload = { op: 'event', data: 'x', t: Date.now() };
@@ -320,7 +320,7 @@ describe('Stress test', () => {
 
             probe.printResult();
 
-            await nexo.stream.delete(topic);
+            await nexo.stream.delete(name);
         });
         it('PUBSUB -PUBLISH - sequential', async () => {
             const topic = nexo.pubsub.topic('bench/pubsub-latency');

@@ -127,9 +127,9 @@ class TestStressThroughput:
         await nexo.queue.delete(q_name)
 
     async def test_stream_publish_concurrent(self, nexo: NexoClient):
-        topic = f"bench-stream-pub-{uuid.uuid4()}"
-        await nexo.stream.create(topic)
-        stream = await nexo.stream.get(topic)
+        name = f"bench-stream-pub-{uuid.uuid4()}"
+        await nexo.stream.create(name)
+        stream = await nexo.stream.get(name)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -147,12 +147,12 @@ class TestStressThroughput:
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await nexo.stream.delete(topic)
+        await nexo.stream.delete(name)
 
     async def test_stream_publish_batch_concurrent(self, nexo: NexoClient):
-        topic = f"bench-stream-batch-{uuid.uuid4()}"
-        await nexo.stream.create(topic)
-        stream = await nexo.stream.get(topic)
+        name = f"bench-stream-batch-{uuid.uuid4()}"
+        await nexo.stream.create(name)
+        stream = await nexo.stream.get(name)
 
         TOTAL = 50_000
         WORKERS = 50
@@ -172,7 +172,7 @@ class TestStressThroughput:
 
         await asyncio.gather(*[worker(i) for i in range(WORKERS)])
         probe.print_result()
-        await nexo.stream.delete(topic)
+        await nexo.stream.delete(name)
 
     async def test_pubsub_publish_concurrent(self, nexo: NexoClient):
         topic_name = f"bench/pubsub-pub-{uuid.uuid4()}"
@@ -228,9 +228,9 @@ class TestStressThroughput:
         await nexo.queue.delete(q_name)
 
     async def test_stream_subscribe_ack_throughput(self, nexo: NexoClient):
-        topic = f"bench-stream-sub-{uuid.uuid4()}"
-        await nexo.stream.create(topic)
-        stream = await nexo.stream.get(topic)
+        name = f"bench-stream-sub-{uuid.uuid4()}"
+        await nexo.stream.create(name)
+        stream = await nexo.stream.get(name)
 
         TOTAL = 50_000
         payload = {"op": "event", "data": "x", "t": time.time()}
@@ -253,7 +253,7 @@ class TestStressThroughput:
         await wait_for(lambda: consumed[0] >= TOTAL, timeout=60.0)
         await sub.stop()
         probe.print_result()
-        await nexo.stream.delete(topic)
+        await nexo.stream.delete(name)
 
 
 @pytest.mark.asyncio
@@ -305,9 +305,9 @@ class TestStressLatency:
         await nexo.queue.delete(q_name)
 
     async def test_stream_publish_sequential(self, nexo: NexoClient):
-        topic = f"bench-stream-lat-{uuid.uuid4()}"
-        await nexo.stream.create(topic)
-        stream = await nexo.stream.get(topic)
+        name = f"bench-stream-lat-{uuid.uuid4()}"
+        await nexo.stream.create(name)
+        stream = await nexo.stream.get(name)
 
         ITERATIONS = 100_000
         payload = {"op": "event", "data": "x", "t": time.time()}
@@ -320,7 +320,7 @@ class TestStressLatency:
             probe.record((time.perf_counter() - t0) * 1000)
 
         probe.print_result()
-        await nexo.stream.delete(topic)
+        await nexo.stream.delete(name)
 
     async def test_pubsub_publish_sequential(self, nexo: NexoClient):
         topic_name = f"bench/pubsub-lat-{uuid.uuid4()}"

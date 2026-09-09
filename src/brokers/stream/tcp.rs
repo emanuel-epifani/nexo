@@ -4,7 +4,7 @@
 use bytes::Bytes;
 
 use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::topic::StreamDefinition;
+use crate::brokers::stream::domain::definition::StreamDefinition;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
 use crate::brokers::{ProvisionOutcome, ProvisionResult};
 use crate::protocol::wire::{PayloadCursor, PayloadWriter};
@@ -21,8 +21,8 @@ use crate::NexoEngine;
 
 use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 pub use crate::protocol::{
-    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLT, OP_S_DESCRIBE, OP_S_EXISTS, OP_S_FETCH,
-    OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLT, OP_S_PUB, OP_S_PURGE_DLT, OP_S_SEEK,
+    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLS, OP_S_DESCRIBE, OP_S_EXISTS, OP_S_FETCH,
+    OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLS, OP_S_PUB, OP_S_PURGE_DLS, OP_S_SEEK,
     STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
 };
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
@@ -40,15 +40,15 @@ pub struct PubItem {
 #[derive(Debug)]
 pub enum StreamCommand {
     Create {
-        topic: String,
+        name: String,
         options: StreamCreateOptions,
     },
     Publish {
-        topic: String,
+        name: String,
         items: Vec<PubItem>,
     },
     Fetch {
-        topic: String,
+        name: String,
         group: String,
         consumer_id: String,
         generation: u64,
@@ -56,54 +56,54 @@ pub enum StreamCommand {
         wait_ms: u32,
     },
     Join {
-        topic: String,
+        name: String,
         group: String,
     },
     Ack {
-        topic: String,
+        name: String,
         group: String,
         consumer_id: String,
         generation: u64,
         seq: u64,
     },
     Seek {
-        topic: String,
+        name: String,
         group: String,
         target: SeekTarget,
     },
     Exists {
-        topic: String,
+        name: String,
     },
     Describe {
-        topic: String,
+        name: String,
     },
     Delete {
-        topic: String,
+        name: String,
     },
     Leave {
-        topic: String,
+        name: String,
         group: String,
         consumer_id: String,
         generation: u64,
     },
-    PeekDlt {
-        topic: String,
+    PeekDls {
+        name: String,
         group: String,
         limit: u32,
         offset: u32,
     },
     MoveToStream {
-        topic: String,
+        name: String,
         group: String,
         seq: u64,
     },
-    DeleteDlt {
-        topic: String,
+    DeleteDls {
+        name: String,
         group: String,
         seq: u64,
     },
-    PurgeDlt {
-        topic: String,
+    PurgeDls {
+        name: String,
         group: String,
     },
 }
@@ -112,7 +112,7 @@ impl StreamCommand {
     pub fn parse(opcode: u8, cursor: &mut PayloadCursor) -> Result<Self, ParseError> {
         match opcode {
             OP_S_CREATE => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let flags = cursor.read_u8()?;
                 let max_age_ms = if flags & FLAG_STREAM_S_CREATE_HAS_MAX_AGE != 0 {
                     Some(cursor.read_u64()?)
@@ -133,12 +133,12 @@ impl StreamCommand {
                     None
                 };
                 Ok(Self::Create {
-                    topic,
+                    name,
                     options: StreamCreateOptions { retention },
                 })
             }
             OP_S_PUB => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let count = cursor.read_u32()? as usize;
                 if count > MAX_PUBLISH_BATCH {
                     return Err(ParseError::Invalid(format!(
@@ -164,17 +164,17 @@ impl StreamCommand {
                     let payload = cursor.read_bytes(payload_len)?;
                     items.push(PubItem { key, payload });
                 }
-                Ok(Self::Publish { topic, items })
+                Ok(Self::Publish { name, items })
             }
             OP_S_FETCH => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
                 let limit = cursor.read_u32()?;
                 let wait_ms = cursor.read_u32()?;
                 Ok(Self::Fetch {
-                    topic,
+                    name,
                     group,
                     consumer_id,
                     generation,
@@ -183,18 +183,18 @@ impl StreamCommand {
                 })
             }
             OP_S_JOIN => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
-                Ok(Self::Join { topic, group })
+                Ok(Self::Join { name, group })
             }
             OP_S_ACK => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
                 let seq = cursor.read_u64()?;
                 Ok(Self::Ack {
-                    topic,
+                    name,
                     group,
                     consumer_id,
                     generation,
@@ -202,7 +202,7 @@ impl StreamCommand {
                 })
             }
             OP_S_SEEK => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let target_byte = cursor.read_u8()?;
                 let target = match target_byte {
@@ -216,63 +216,63 @@ impl StreamCommand {
                     }
                 };
                 Ok(Self::Seek {
-                    topic,
+                    name,
                     group,
                     target,
                 })
             }
             OP_S_EXISTS => {
-                let topic = cursor.read_string()?;
-                Ok(Self::Exists { topic })
+                let name = cursor.read_string()?;
+                Ok(Self::Exists { name })
             }
             OP_S_DESCRIBE => {
-                let topic = cursor.read_string()?;
-                Ok(Self::Describe { topic })
+                let name = cursor.read_string()?;
+                Ok(Self::Describe { name })
             }
             OP_S_DELETE => {
-                let topic = cursor.read_string()?;
-                Ok(Self::Delete { topic })
+                let name = cursor.read_string()?;
+                Ok(Self::Delete { name })
             }
             OP_S_LEAVE => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
                 Ok(Self::Leave {
-                    topic,
+                    name,
                     group,
                     consumer_id,
                     generation,
                 })
             }
-            OP_S_PEEK_DLT => {
-                let topic = cursor.read_string()?;
+            OP_S_PEEK_DLS => {
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let limit = cursor.read_u32()?;
                 let offset = cursor.read_u32()?;
-                Ok(Self::PeekDlt {
-                    topic,
+                Ok(Self::PeekDls {
+                    name,
                     group,
                     limit,
                     offset,
                 })
             }
             OP_S_MOVE_TO_STREAM => {
-                let topic = cursor.read_string()?;
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let seq = cursor.read_u64()?;
-                Ok(Self::MoveToStream { topic, group, seq })
+                Ok(Self::MoveToStream { name, group, seq })
             }
-            OP_S_DELETE_DLT => {
-                let topic = cursor.read_string()?;
+            OP_S_DELETE_DLS => {
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let seq = cursor.read_u64()?;
-                Ok(Self::DeleteDlt { topic, group, seq })
+                Ok(Self::DeleteDls { name, group, seq })
             }
-            OP_S_PURGE_DLT => {
-                let topic = cursor.read_string()?;
+            OP_S_PURGE_DLS => {
+                let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
-                Ok(Self::PurgeDlt { topic, group })
+                Ok(Self::PurgeDls { name, group })
             }
             _ => Err(ParseError::Invalid(format!(
                 "Unknown Stream opcode: 0x{:02X}",
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn publish_parser_rejects_huge_count_before_allocation() {
         let mut writer = PayloadWriter::new();
-        writer.put_str("topic").put_u32(u32::MAX);
+        writer.put_str("name").put_u32(u32::MAX);
         let mut cursor = PayloadCursor::new(writer.into_bytes());
 
         let error = StreamCommand::parse(OP_S_PUB, &mut cursor).unwrap_err();
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn publish_parser_rejects_count_larger_than_payload() {
         let mut writer = PayloadWriter::new();
-        writer.put_str("topic").put_u32(2);
+        writer.put_str("name").put_u32(2);
         let mut cursor = PayloadCursor::new(writer.into_bytes());
 
         let error = StreamCommand::parse(OP_S_PUB, &mut cursor).unwrap_err();
@@ -352,7 +352,7 @@ fn encode_bool(value: bool) -> Bytes {
     w.into_bytes()
 }
 
-fn encode_peek_dlt(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
+fn encode_peek_dls(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
     let mut w = PayloadWriter::new();
     w.put_u32(entries.len() as u32);
     for (seq, reason, attempts, key) in entries {
@@ -368,7 +368,7 @@ fn encode_peek_dlt(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
     w.into_bytes()
 }
 
-fn encode_purge_dlt(count: usize) -> Bytes {
+fn encode_purge_dls(count: usize) -> Bytes {
     let mut w = PayloadWriter::with_capacity(4);
     w.put_u32(count as u32);
     w.into_bytes()
@@ -435,23 +435,23 @@ pub async fn handle(
     let client = session_id.to_owned();
 
     match cmd {
-        StreamCommand::Create { topic, options } => match stream.create_topic(topic, options).await
+        StreamCommand::Create { name, options } => match stream.create_stream(name, options).await
         {
             Ok(result) => Response::Data(encode_provision_result(&result)),
             Err(error) => error_response(error),
         },
-        StreamCommand::Publish { topic, items } => {
+        StreamCommand::Publish { name, items } => {
             let batch: Vec<(Option<Bytes>, Bytes)> = items
                 .into_iter()
                 .map(|item| (item.key, item.payload))
                 .collect();
-            match stream.publish_batch(&topic, batch).await {
+            match stream.publish_batch(&name, batch).await {
                 Ok(seqs) => Response::Data(encode_publish_batch(&seqs)),
                 Err(error) => error_response(error),
             }
         }
         StreamCommand::Fetch {
-            topic,
+            name,
             group,
             consumer_id,
             generation,
@@ -464,7 +464,7 @@ pub async fn handle(
                     &consumer_id,
                     generation,
                     limit as usize,
-                    &topic,
+                    &name,
                     wait_ms as u64,
                 )
                 .await
@@ -473,8 +473,8 @@ pub async fn handle(
                 Err(error) => error_response(error),
             }
         }
-        StreamCommand::Join { topic, group } => {
-            match stream.join_group(&group, &topic, &client).await {
+        StreamCommand::Join { name, group } => {
+            match stream.join_group(&group, &name, &client).await {
                 Ok(result) => Response::Data(encode_join_group(
                     result.ack_floor,
                     result.generation,
@@ -484,76 +484,76 @@ pub async fn handle(
             }
         }
         StreamCommand::Ack {
-            topic,
+            name,
             group,
             consumer_id,
             generation,
             seq,
         } => match stream
-            .ack(&group, &topic, &consumer_id, generation, seq)
+            .ack(&group, &name, &consumer_id, generation, seq)
             .await
         {
             Ok(_) => Response::Ok,
             Err(error) => error_response(error),
         },
         StreamCommand::Seek {
-            topic,
+            name,
             group,
             target,
-        } => match stream.seek(&group, &topic, target).await {
+        } => match stream.seek(&group, &name, target).await {
             Ok(_) => Response::Ok,
             Err(error) => error_response(error),
         },
         StreamCommand::Leave {
-            topic,
+            name,
             group,
             consumer_id,
             generation,
         } => match stream
-            .leave_group(&group, &topic, &consumer_id, generation)
+            .leave_group(&group, &name, &consumer_id, generation)
             .await
         {
             Ok(_) => Response::Ok,
             Err(error) => error_response(error),
         },
-        StreamCommand::Exists { topic } => {
-            let found = stream.exists(&topic).await;
+        StreamCommand::Exists { name } => {
+            let found = stream.exists(&name).await;
             Response::Data(encode_bool(found))
         }
-        StreamCommand::Describe { topic } => match stream.describe(&topic).await {
+        StreamCommand::Describe { name } => match stream.describe(&name).await {
             Ok(definition) => Response::Data(encode_definition(&definition)),
             Err(error) => error_response(error),
         },
-        StreamCommand::Delete { topic } => match stream.delete_topic(topic).await {
+        StreamCommand::Delete { name } => match stream.delete_stream(name).await {
             Ok(_) => Response::Ok,
             Err(error) => error_response(error),
         },
-        StreamCommand::PeekDlt {
-            topic,
+        StreamCommand::PeekDls {
+            name,
             group,
             limit,
             offset,
         } => match stream
-            .peek_dlt(&topic, &group, limit as usize, offset as usize)
+            .peek_dls(&name, &group, limit as usize, offset as usize)
             .await
         {
-            Ok(entries) => Response::Data(encode_peek_dlt(&entries)),
+            Ok(entries) => Response::Data(encode_peek_dls(&entries)),
             Err(error) => error_response(error),
         },
-        StreamCommand::MoveToStream { topic, group, seq } => {
-            match stream.move_to_stream(&topic, &group, seq).await {
+        StreamCommand::MoveToStream { name, group, seq } => {
+            match stream.move_to_stream(&name, &group, seq).await {
                 Ok(_) => Response::Ok,
                 Err(error) => error_response(error),
             }
         }
-        StreamCommand::DeleteDlt { topic, group, seq } => {
-            match stream.delete_dlt(&topic, &group, seq).await {
+        StreamCommand::DeleteDls { name, group, seq } => {
+            match stream.delete_dls(&name, &group, seq).await {
                 Ok(_) => Response::Ok,
                 Err(error) => error_response(error),
             }
         }
-        StreamCommand::PurgeDlt { topic, group } => match stream.purge_dlt(&topic, &group).await {
-            Ok(count) => Response::Data(encode_purge_dlt(count)),
+        StreamCommand::PurgeDls { name, group } => match stream.purge_dls(&name, &group).await {
+            Ok(count) => Response::Data(encode_purge_dls(count)),
             Err(error) => error_response(error),
         },
     }

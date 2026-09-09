@@ -187,9 +187,9 @@ def _encode_fixture(fixture: dict) -> bytes:
         if has_bytes:
             w.u64(inp["max_bytes"])
 
-    elif fid in ("STREAM_EXISTS", "STREAM_DESCRIBE", "STREAM_DELETE", "STREAM_PURGE_DLT"):
+    elif fid in ("STREAM_EXISTS", "STREAM_DESCRIBE", "STREAM_DELETE", "STREAM_PURGE_DLS"):
         w.string(inp["stream"])
-        if fid == "STREAM_PURGE_DLT":
+        if fid == "STREAM_PURGE_DLS":
             w.string(inp["group"])
 
     elif fid in ("STREAM_PUB_JSON", "STREAM_PUB_STRING_KEY", "STREAM_PUB_BATCH"):
@@ -227,10 +227,10 @@ def _encode_fixture(fixture: dict) -> bytes:
     elif fid == "STREAM_LEAVE":
         w.string(inp["stream"]).string(inp["group"]).string(inp["consumer_id"]).u64(inp["generation"])
 
-    elif fid == "STREAM_PEEK_DLT":
+    elif fid == "STREAM_PEEK_DLS":
         w.string(inp["stream"]).string(inp["group"]).u32(inp["limit"]).u32(inp["offset"])
 
-    elif fid in ("STREAM_MOVE_TO_STREAM", "STREAM_DELETE_DLT"):
+    elif fid in ("STREAM_MOVE_TO_STREAM", "STREAM_DELETE_DLS"):
         w.string(inp["stream"]).string(inp["group"]).u64(inp["seq"])
 
     else:
@@ -334,7 +334,7 @@ def _decode_fixture(fixture: dict) -> object:
     if fid in ("STREAM_EXISTS", "STREAM_DESCRIBE", "STREAM_DELETE"):
         return {"stream": c.read_string()}
 
-    if fid == "STREAM_PURGE_DLT":
+    if fid == "STREAM_PURGE_DLS":
         return {"stream": c.read_string(), "group": c.read_string()}
 
     if fid in ("STREAM_PUB_JSON", "STREAM_PUB_STRING_KEY", "STREAM_PUB_BATCH"):
@@ -381,7 +381,7 @@ def _decode_fixture(fixture: dict) -> object:
             "generation": c.read_u64(),
         }
 
-    if fid == "STREAM_PEEK_DLT":
+    if fid == "STREAM_PEEK_DLS":
         return {
             "stream": c.read_string(),
             "group": c.read_string(),
@@ -389,7 +389,7 @@ def _decode_fixture(fixture: dict) -> object:
             "offset": c.read_u32(),
         }
 
-    if fid in ("STREAM_MOVE_TO_STREAM", "STREAM_DELETE_DLT"):
+    if fid in ("STREAM_MOVE_TO_STREAM", "STREAM_DELETE_DLS"):
         return {
             "stream": c.read_string(),
             "group": c.read_string(),

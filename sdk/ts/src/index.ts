@@ -15,10 +15,10 @@ export {
    QueueSubscribeOptions,
 } from './brokers/queue';
 export {
-   DltEntry,
-   DltPeekOptions,
+   DlsEntry,
+   DlsPeekOptions,
    NexoStream,
-   NexoStreamDLT,
+   NexoStreamDLS,
    NexoStreamFacade,
    NexoStreamGroup,
    RetentionOptions,

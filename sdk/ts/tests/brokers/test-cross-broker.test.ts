@@ -47,8 +47,8 @@ describe('CROSS-BROKER FEATURES', () => {
         });
 
         it('STREAM: Should stream raw Buffer', async () => {
-            const topic = `bin-stream-${randomUUID()}`;
-            const stream = await createStream(topic);
+            const name = `bin-stream-${randomUUID()}`;
+            const stream = await createStream(name);
 
             await stream.publish(binaryPayload);
 

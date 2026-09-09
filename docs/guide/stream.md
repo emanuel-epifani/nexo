@@ -101,7 +101,7 @@ Nexo streams are single, unified logs. The broker dynamically coordinates messag
 ```text
 KAFKA (Static)                      NEXO (Dynamic)
 ┌──────────────────────────┐        ┌──────────────────────────┐
-│ Topic: [P0] [P1] [P2]    │        │ Topic: [ Unified Log ]   │
+│ Topic: [P0] [P1] [P2]    │        │ Stream: [ Unified Log ]  │
 └────┬─────┬─────┬─────────┘        └────┬─────┬─────┬─────┬───┘
      │     │     │                       │     │     │     │
    [C1]  [C2]  [C3]  [C4:Idle]        [C1]  [C2]  [C3]  [C4]  [C5...]
@@ -127,10 +127,10 @@ Every message you publish can optionally carry a **key**. The presence or absenc
 | **Webhook fan-out** | No key | Webhooks are independent; ordering adds unnecessary serialization |
 | **Metrics/telemetry** | No key | Data points are aggregated, not sequenced |
 | **Event sourcing** | No key + `concurrency: 1` | The full log order matters, not per-key subsets |
-| **Task queue on log** | No key | Tasks are independent; need at-least-once + DLT, not ordering |
+| **Task queue on log** | No key | Tasks are independent; need at-least-once + DLS, not ordering |
 
 > [!TIP]
-> If you need ordering, use per-key. If you need durability and reliability (at-least-once, DLT, redelivery) but not ordering, use no-key. If you need neither, consider [PubSub](./pubsub.md) — it's fire-and-forget with no persistence overhead.
+> If you need ordering, use per-key. If you need durability and reliability (at-least-once, DLS, redelivery) but not ordering, use no-key. If you need neither, consider [PubSub](./pubsub.md) — it's fire-and-forget with no persistence overhead.
 
 ### Model 1: No Key — Full Parallelism
 
@@ -582,7 +582,7 @@ Nexo provides **at-least-once delivery**. Every message **will** be delivered at
 
 - **Ack**: Successful processing. Move forward.
 - **Timeout**: If a worker crashes or does not respond, the message is automatically redelivered after `ack_wait` (default 30s).
-- **Max Deliveries**: After exceeding the configured retry limit, the message is moved to a **Dead Letter Topic (DLT)** and requires manual intervention.
+- **Max Deliveries**: After exceeding the configured retry limit, the message is moved to a **Dead Letter Stream (DLS)** and requires manual intervention.
 
 ```text
 Published ──▶ Delivered ──▶ [ Processing ] ──┬──▶ Ack (Done)
@@ -590,72 +590,72 @@ Published ──▶ Delivered ──▶ [ Processing ] ──┬──▶ Ack (D
                                └─────────────┴──▶ Timeout (Retry)
                                                      │
                                                      ▼ (after max retries)
-                                                  DLT (Manual)
+                                                  DLS (Manual)
 ```
 
-### Poison Messages: Dead Letter Topic (DLT)
+### Poison Messages: Dead Letter Stream (DLS)
 
-When a message exceeds `max_deliveries` (default: 5), it is moved to the **Dead Letter Topic (DLT)** — removed from the delivery cycle and stored for inspection and manual recovery.
+When a message exceeds `max_deliveries` (default: 5), it is moved to the **Dead Letter Stream (DLS)** — removed from the delivery cycle and stored for inspection and manual recovery.
 
-Nexo uses a **park-all** strategy for keys: when a message with key `K` is moved to the DLT, **all subsequent messages with key `K` are also moved to the DLT immediately**. This prevents a poison message from blocking the key forever while new messages pile up behind it.
+Nexo uses a **park-all** strategy for keys: when a message with key `K` is moved to the DLS, **all subsequent messages with key `K` are also moved to the DLS immediately**. This prevents a poison message from blocking the key forever while new messages pile up behind it.
 
 ```text
-msg-1 (key=A) → delivered 5 times → DLT
-msg-2 (key=A) → auto-parked in DLT (same key is poisoned)
-msg-3 (key=A) → auto-parked in DLT (same key is poisoned)
+msg-1 (key=A) → delivered 5 times → DLS
+msg-2 (key=A) → auto-parked in DLS (same key is poisoned)
+msg-3 (key=A) → auto-parked in DLS (same key is poisoned)
 msg-4 (key=B) → delivered normally (different key, unaffected)
 ```
 
-Moving a message to the DLT also **acks** it — the `ack_floor` advances past it, so it never blocks the consumer group's progress.
+Moving a message to the DLS also **acks** it — the `ack_floor` advances past it, so it never blocks the consumer group's progress.
 
-#### DLT API
+#### DLS API
 
-The DLT is internal to each consumer group. You can inspect and manage it with four operations:
+The DLS is internal to each consumer group. You can inspect and manage it with four operations:
 
 ::: code-group
 
 ```typescript
 const consumerGroup = stream.group('analytics');
 
-// List entries in the DLT (paginated)
-const entries = await consumerGroup.dlt.peek(limit?, offset?);
+// List entries in the DLS (paginated)
+const entries = await consumerGroup.dls.peek(limit?, offset?);
 // → [{ seq: 1n, reason: "max_deliveries exceeded (5)", attempts: 5, key: Uint8Array }]
 
 // Move a message back to the stream for redelivery
-await consumerGroup.dlt.replay(seq);
+await consumerGroup.dls.replay(seq);
 
-// Delete a message from the DLT permanently
-await consumerGroup.dlt.delete(seq);
+// Delete a message from the DLS permanently
+await consumerGroup.dls.delete(seq);
 
-// Purge all entries from the DLT
-const count = await consumerGroup.dlt.purge();
+// Purge all entries from the DLS
+const count = await consumerGroup.dls.purge();
 ```
 
 ```python
 consumer_group = stream.group("analytics")
 
-# List entries in the DLT (paginated)
-entries = await consumer_group.dlt.peek(limit=100, offset=0)
+# List entries in the DLS (paginated)
+entries = await consumer_group.dls.peek(limit=100, offset=0)
 # -> [{"seq": 1, "reason": "max_deliveries exceeded (5)", "attempts": 5, "key": b"..."}]
 
 # Move a message back to the stream for redelivery
-await consumer_group.dlt.replay(seq)
+await consumer_group.dls.replay(seq)
 
-# Delete a message from the DLT permanently
-await consumer_group.dlt.delete(seq)
+# Delete a message from the DLS permanently
+await consumer_group.dls.delete(seq)
 
-# Purge all entries from the DLT
-count = await consumer_group.dlt.purge()
+# Purge all entries from the DLS
+count = await consumer_group.dls.purge()
 ```
 
 :::
 
 #### Auto-Unblock
 
-A key is automatically **unparked** only when the **last DLT entry** for that key is removed (via `dlt.replay()` or `dlt.delete()`). This ensures that all poison messages for a key are resolved before new messages with that key can be delivered.
+A key is automatically **unparked** only when the **last DLS entry** for that key is removed (via `dls.replay()` or `dls.delete()`). This ensures that all poison messages for a key are resolved before new messages with that key can be delivered.
 
 ```text
-DLT contains: msg-1 (key=A), msg-2 (key=A), msg-3 (key=A)
+DLS contains: msg-1 (key=A), msg-2 (key=A), msg-3 (key=A)
 → delete msg-1: key A still parked (msg-2, msg-3 remain)
 → delete msg-2: key A still parked (msg-3 remains)
 → delete msg-3: key A unblocked! New messages with key A can be delivered
@@ -663,10 +663,10 @@ DLT contains: msg-1 (key=A), msg-2 (key=A), msg-3 (key=A)
 
 #### Persistence
 
-DLT state, redelivery entries, and parked keys are persisted in `state.log` alongside the group's `ack_floor`. They survive broker restarts, ensuring that poisoned keys remain blocked and `dlt.replay()` redrives remain deliverable after a crash or planned downtime.
+DLS state, redelivery entries, and parked keys are persisted in `state.log` alongside the group's `ack_floor`. They survive broker restarts, ensuring that poisoned keys remain blocked and `dls.replay()` redrives remain deliverable after a crash or planned downtime.
 
 > [!NOTE]
-> `seek` clears all DLT entries and parked keys for the group, in addition to resetting the consumer position. It is a full reset.
+> `seek` clears all DLS entries and parked keys for the group, in addition to resetting the consumer position. It is a full reset.
 
 ---
 
@@ -679,7 +679,7 @@ Nexo uses a single ordered storage writer backed by the operating system page ca
 - **Batching**: `publishBatch` writes multiple messages as one storage operation and is the preferred API for high-throughput ingestion.
 - **Limits**: A publish batch may contain at most 65,536 messages and each encoded record may be at most 64 MiB. Limits are checked before allocation.
 - **Recovery**: Nexo recovers only a contiguous sequence prefix. Partial or invalid tails are truncated; segment files after a sequence gap are renamed with `.corrupt` so they remain available for diagnosis but cannot be appended again.
-- **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLT entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
+- **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLS entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
 
 ### High-Cardinality: Treat Streams like Keys
 
@@ -689,14 +689,14 @@ Stream names are 1–255 ASCII bytes and may contain letters, digits, `.`, `_`, 
 
 - **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used writer handles open, evicting and closing the least-recently-used ones when the cap is reached.
 - **Controlled by `STREAM_MAX_OPEN_FILES`** (Default: 256): only the most active streams hold an open handle at any given moment.
-- **Reads**: Readers use independent temporary handles so concurrent seeks cannot interfere with the append cursor. Segment locations come from the in-memory topic catalog; read handles close when the request completes.
+- **Reads**: Readers use independent temporary handles so concurrent seeks cannot interfere with the append cursor. Segment locations come from the in-memory stream catalog; read handles close when the request completes.
 
 ::: tip BEST PERFORMANCE
-Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active* topics to limit unnecessary rotation overhead.
+Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active* streams to limit unnecessary rotation overhead.
 :::
 
 ```text
-    [ Topic 1 ] [ Topic 2 ] [ Topic 3 ] ... [ Topic 999 ]
+    [ Stream 1 ] [ Stream 2 ] [ Stream 3 ] ... [ Stream 999 ]
           \          |           /                /
            \         |          /                /
          ┌──────────────────────────────────────────┐
@@ -714,11 +714,11 @@ Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active
 ### How it works
 
 1. Server starts → reads env vars (global defaults)
-2. Topic created → server snapshots defaults into `config.json` (per-topic)
+2. Stream created → server snapshots defaults into `config.json` (per-stream)
 3. SDK can override `retention` at creation — everything else uses system defaults
-4. On restart → each topic reads its own `config.json` (ignores current env vars)
+4. On restart → each stream reads its own `config.json` (ignores current env vars)
 
-> **Existing topics are not affected by env var changes.** Only new topics pick up new defaults.
+> **Existing streams are not affected by env var changes.** Only new streams pick up new defaults.
 
 ### Environment Variables
 
@@ -736,7 +736,7 @@ Global, set at server startup.
 | `STREAM_MAX_ACK_PENDING` | `10000` | Max unacked messages per consumer group |
 | `STREAM_MAX_OPEN_FILES` | `256` | Max open file handles (LRU cache) |
 | `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |
-| `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLT |
+| `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLS |
 
 ### SDK Overrides
 
@@ -749,7 +749,7 @@ Fields settable at `create()` time. If omitted, system defaults apply.
 ::: code-group
 
 ```typescript
-const result = await client.stream.create('my-topic', {
+const result = await client.stream.create('my-stream', {
   retention: { maxAgeMs: 3_600_000, maxBytes: 100_000_000 }  // 1h, 100MB
 });
 console.log(result.definition.config);
@@ -757,7 +757,7 @@ console.log(result.definition.config);
 
 ```python
 result = await client.stream.create(
-    "my-topic",
+    "my-stream",
     max_age_ms=3_600_000,
     max_bytes=100_000_000,
 )

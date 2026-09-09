@@ -1,11 +1,11 @@
-//! Topic: Pure domain logic for stream topic configuration.
+//! Stream definition: Pure domain logic for stream configuration.
 
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::options::{RetentionOptions, StreamCreateOptions};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TopicConfig {
+pub struct StreamConfig {
     pub max_segment_size: u64,
     pub retention: RetentionOptions,
     pub max_ack_pending: usize,
@@ -16,10 +16,10 @@ pub struct TopicConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamDefinition {
     pub name: String,
-    pub config: TopicConfig,
+    pub config: StreamConfig,
 }
 
-impl TopicConfig {
+impl StreamConfig {
     pub fn from_options(opts: StreamCreateOptions, sys: &SystemStreamConfig) -> Self {
         let retention = match opts.retention {
             Some(r) => RetentionOptions {

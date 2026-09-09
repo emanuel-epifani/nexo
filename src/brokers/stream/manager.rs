@@ -16,16 +16,16 @@ use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::domain::persistence::{
-    record_len, recover_topic, GroupPersistentState, Segment, StorageCommand, StorageManager,
+    record_len, recover_stream, GroupPersistentState, Segment, StorageCommand, StorageManager,
     MAX_STREAM_RECORD_BYTES,
 };
-use crate::brokers::stream::domain::topic::{StreamDefinition, TopicConfig};
+use crate::brokers::stream::domain::definition::{StreamDefinition, StreamConfig};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::{BrokerError, BrokerErrorKind, ProvisionOutcome, ProvisionResult};
 use crate::protocol::STREAM_MAX_KEY_BYTES;
 
-struct TopicShared {
-    state: Mutex<TopicState>,
+struct StreamShared {
+    state: Mutex<StreamState>,
     append_gate: Arc<AsyncMutex<()>>,
     retention_gate: Arc<RwLock<()>>,
     wake_tx: watch::Sender<u64>,
@@ -37,14 +37,14 @@ struct ConsumerBinding {
     consumer_id: String,
 }
 
-struct TopicState {
+struct StreamState {
     head_seq: u64,
     next_seq: u64,
     index: BTreeMap<u64, u64>,
     groups: HashMap<String, ConsumerGroup>,
     client_map: HashMap<String, Vec<ConsumerBinding>>,
     groups_dirty: bool,
-    full_config: TopicConfig,
+    full_config: StreamConfig,
     file_offset: u64,
     active_path: PathBuf,
     segments: Arc<Vec<Segment>>,
@@ -57,8 +57,8 @@ pub struct JoinGroupResult {
 }
 
 pub struct StreamManager {
-    topics: Arc<DashMap<String, Arc<TopicShared>>>,
-    deleted_topics: Arc<DashMap<String, ()>>,
+    streams: Arc<DashMap<String, Arc<StreamShared>>>,
+    deleted_streams: Arc<DashMap<String, ()>>,
     lifecycle_gate: AsyncMutex<()>,
     storage_tx: mpsc::Sender<StorageCommand>,
     config: Arc<SystemStreamConfig>,
@@ -66,13 +66,13 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    const MAX_TOPIC_NAME_BYTES: usize = 255;
+    const MAX_STREAM_NAME_BYTES: usize = 255;
 
-    fn validate_topic_name(name: &str) -> Result<(), BrokerError> {
-        if name.is_empty() || name.len() > Self::MAX_TOPIC_NAME_BYTES {
+    fn validate_stream_name(name: &str) -> Result<(), BrokerError> {
+        if name.is_empty() || name.len() > Self::MAX_STREAM_NAME_BYTES {
             return Err(BrokerError::invalid_argument(format!(
                 "Invalid stream name: length must be between 1 and {} bytes",
-                Self::MAX_TOPIC_NAME_BYTES
+                Self::MAX_STREAM_NAME_BYTES
             )));
         }
         if name == "."
@@ -88,7 +88,7 @@ impl StreamManager {
         Ok(())
     }
 
-    fn config_json(config: &TopicConfig) -> serde_json::Value {
+    fn config_json(config: &StreamConfig) -> serde_json::Value {
         serde_json::json!({
             "retention": {
                 "maxAgeMs": config.retention.max_age_ms,
@@ -101,7 +101,7 @@ impl StreamManager {
         })
     }
 
-    fn config_conflict(name: &str, requested: &TopicConfig, actual: &TopicConfig) -> BrokerError {
+    fn config_conflict(name: &str, requested: &StreamConfig, actual: &StreamConfig) -> BrokerError {
         let mut differences = Vec::with_capacity(6);
         if requested.retention.max_age_ms != actual.retention.max_age_ms {
             differences.push(serde_json::json!({
@@ -161,8 +161,8 @@ impl StreamManager {
     }
 
     pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
-        let topics = Arc::new(DashMap::new());
-        let deleted_topics = Arc::new(DashMap::new());
+        let streams = Arc::new(DashMap::new());
+        let deleted_streams = Arc::new(DashMap::new());
         let (storage_tx, storage_rx) = mpsc::channel(config.storage_queue_capacity.max(1));
 
         let storage_manager = StorageManager::new(
@@ -173,8 +173,8 @@ impl StreamManager {
         tokio::spawn(storage_manager.run());
 
         let manager = Self {
-            topics,
-            deleted_topics,
+            streams,
+            deleted_streams,
             lifecycle_gate: AsyncMutex::new(()),
             storage_tx,
             config,
@@ -190,9 +190,9 @@ impl StreamManager {
         self.cancel.cancel();
 
         // Final group state flush
-        for (topic_name, topic_ref) in Self::collect_topics(&self.topics) {
+        for (stream_name, stream_ref) in Self::collect_streams(&self.streams) {
             let groups_data = {
-                let state = topic_ref.state.lock();
+                let state = stream_ref.state.lock();
                 state
                     .groups
                     .iter()
@@ -201,7 +201,7 @@ impl StreamManager {
                             id.clone(),
                             GroupPersistentState {
                                 ack_floor: group.ack_floor,
-                                dlt_entries: group.dlt_snapshot(),
+                                dls_entries: group.dls_snapshot(),
                                 parked_keys: group.parked_keys_snapshot(),
                                 redeliver_entries: group.redeliver_snapshot(),
                             },
@@ -212,7 +212,7 @@ impl StreamManager {
             let _ = self
                 .storage_tx
                 .send(StorageCommand::SaveState {
-                    topic_name,
+                    stream_name,
                     groups: groups_data,
                 })
                 .await;
@@ -227,18 +227,18 @@ impl StreamManager {
         let _ = rx.await;
     }
 
-    pub async fn create_topic(
+    pub async fn create_stream(
         &self,
         name: String,
         options: StreamCreateOptions,
     ) -> Result<ProvisionResult<StreamDefinition>, BrokerError> {
-        Self::validate_topic_name(&name)?;
+        Self::validate_stream_name(&name)?;
         let _lifecycle_guard = self.lifecycle_gate.lock().await;
-        self.deleted_topics.remove(&name);
-        let requested = TopicConfig::from_options(options, &self.config);
+        self.deleted_streams.remove(&name);
+        let requested = StreamConfig::from_options(options, &self.config);
 
-        if let Some(topic_ref) = self.get_topic(&name) {
-            let actual = topic_ref.state.lock().full_config.clone();
+        if let Some(stream_ref) = self.get_stream(&name) {
+            let actual = stream_ref.state.lock().full_config.clone();
             if actual != requested {
                 return Err(Self::config_conflict(&name, &requested, &actual));
             }
@@ -290,7 +290,7 @@ impl StreamManager {
                 .map_err(|error| {
                     BrokerError::storage(format!("Failed to read stream configuration: {}", error))
                 })?;
-            serde_json::from_str::<TopicConfig>(&data).map_err(|error| {
+            serde_json::from_str::<StreamConfig>(&data).map_err(|error| {
                 BrokerError::storage(format!("Failed to parse stream configuration: {}", error))
             })?
         } else {
@@ -313,9 +313,9 @@ impl StreamManager {
         }
 
         let shared =
-            Self::build_topic_shared(name.clone(), actual.clone(), &self.config.persistence_path)
+            Self::build_stream_shared(name.clone(), actual.clone(), &self.config.persistence_path)
                 .await;
-        self.topics.insert(name.clone(), shared);
+        self.streams.insert(name.clone(), shared);
         Ok(ProvisionResult {
             outcome: ProvisionOutcome::Created,
             definition: StreamDefinition {
@@ -325,33 +325,33 @@ impl StreamManager {
         })
     }
 
-    pub async fn delete_topic(&self, name: String) -> Result<(), BrokerError> {
-        Self::validate_topic_name(&name)?;
+    pub async fn delete_stream(&self, name: String) -> Result<(), BrokerError> {
+        Self::validate_stream_name(&name)?;
         let _lifecycle_guard = self.lifecycle_gate.lock().await;
-        self.deleted_topics.insert(name.clone(), ());
+        self.deleted_streams.insert(name.clone(), ());
 
-        let topic_path = PathBuf::from(&self.config.persistence_path).join(&name);
-        let topic_ref = self.get_topic(&name);
-        let _append_guard = match &topic_ref {
-            Some(topic_ref) => Some(topic_ref.append_gate.clone().lock_owned().await),
+        let stream_path = PathBuf::from(&self.config.persistence_path).join(&name);
+        let stream_ref = self.get_stream(&name);
+        let _append_guard = match &stream_ref {
+            Some(stream_ref) => Some(stream_ref.append_gate.clone().lock_owned().await),
             None => None,
         };
-        let _retention_guard = match &topic_ref {
-            Some(topic_ref) => Some(topic_ref.retention_gate.write().await),
+        let _retention_guard = match &stream_ref {
+            Some(stream_ref) => Some(stream_ref.retention_gate.write().await),
             None => None,
         };
 
-        if let Some(topic_ref) = &topic_ref {
+        if let Some(stream_ref) = &stream_ref {
             if self
-                .topics
+                .streams
                 .get(&name)
-                .is_some_and(|current| Arc::ptr_eq(current.value(), topic_ref))
+                .is_some_and(|current| Arc::ptr_eq(current.value(), stream_ref))
             {
-                self.topics.remove(&name);
+                self.streams.remove(&name);
             }
         }
 
-        let exists_on_disk = match tokio::fs::symlink_metadata(&topic_path).await {
+        let exists_on_disk = match tokio::fs::symlink_metadata(&stream_path).await {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(BrokerError::invalid_argument(
                     "Invalid stream path: symbolic links are not allowed",
@@ -367,11 +367,11 @@ impl StreamManager {
             }
         };
 
-        if topic_ref.is_some() || exists_on_disk {
+        if stream_ref.is_some() || exists_on_disk {
             let (del_tx, del_rx) = oneshot::channel();
             self.storage_tx
-                .send(StorageCommand::DropTopic {
-                    topic_name: name,
+                .send(StorageCommand::DropStream {
+                    stream_name: name,
                     reply: del_tx,
                 })
                 .await
@@ -388,7 +388,7 @@ impl StreamManager {
 
     pub async fn publish_batch(
         &self,
-        topic: &str,
+        name: &str,
         items: Vec<(Option<Bytes>, Bytes)>,
     ) -> Result<Vec<u64>, BrokerError> {
         if items.is_empty() {
@@ -417,17 +417,17 @@ impl StreamManager {
                 )));
             }
         }
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
-        let append_guard = topic_ref.append_gate.clone().lock_owned().await;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
+        let append_guard = stream_ref.append_gate.clone().lock_owned().await;
         if !self
-            .get_topic(topic)
-            .is_some_and(|current| Arc::ptr_eq(&current, &topic_ref))
+            .get_stream(name)
+            .is_some_and(|current| Arc::ptr_eq(&current, &stream_ref))
         {
             return Err(BrokerError::not_found(format!(
                 "Stream '{}' not found",
-                topic
+                name
             )));
         }
         let permit = self
@@ -444,7 +444,7 @@ impl StreamManager {
         let n = items.len() as u64;
 
         let (first_seq, seqs, messages, file_path, offsets, file_offset_after, starts_new_segment) = {
-            let state = topic_ref.state.lock();
+            let state = stream_ref.state.lock();
             let first_seq = state.next_seq;
             let mut seqs = Vec::with_capacity(items.len());
             let mut messages = Vec::with_capacity(items.len());
@@ -473,7 +473,7 @@ impl StreamManager {
             };
             let starts_new_segment = write_offset == 0;
             let file_path = if starts_new_segment {
-                let base_path = PathBuf::from(&self.config.persistence_path).join(topic);
+                let base_path = PathBuf::from(&self.config.persistence_path).join(name);
                 base_path.join(format!("{}.log", first_seq))
             } else {
                 state.active_path.clone()
@@ -502,7 +502,7 @@ impl StreamManager {
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        let commit_topic = topic_ref.clone();
+        let commit_stream = stream_ref.clone();
         let commit_path = file_path.clone();
         permit.send(StorageCommand::Append {
             file_path,
@@ -511,7 +511,7 @@ impl StreamManager {
                 let response = match result {
                     Ok(()) => {
                         {
-                            let mut state = commit_topic.state.lock();
+                            let mut state = commit_stream.state.lock();
                             state.next_seq = first_seq + n;
                             state.file_offset = file_offset_after;
                             state.active_path = commit_path.clone();
@@ -530,7 +530,7 @@ impl StreamManager {
                                 state.index.insert(seq, offset);
                             }
                         }
-                        commit_topic.wake_tx.send_modify(|version| *version += 1);
+                        commit_stream.wake_tx.send_modify(|version| *version += 1);
                         Ok(())
                     }
                     Err(error) => Err(format!("Storage append failed: {}", error)),
@@ -548,29 +548,29 @@ impl StreamManager {
 
     pub async fn publish(
         &self,
-        topic: &str,
+        name: &str,
         key: Option<Bytes>,
         payload: Bytes,
     ) -> Result<u64, BrokerError> {
-        let seqs = self.publish_batch(topic, vec![(key, payload)]).await?;
+        let seqs = self.publish_batch(name, vec![(key, payload)]).await?;
         Ok(seqs.into_iter().next().unwrap_or(0))
     }
 
-    pub async fn peek_dlt(
+    pub async fn peek_dls(
         &self,
-        topic: &str,
+        name: &str,
         group: &str,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
-        let state = topic_ref.state.lock();
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
+        let state = stream_ref.state.lock();
         let group_ref = state.groups.get(group).ok_or_else(|| {
             BrokerError::not_found(format!("Consumer group '{}' not found", group))
         })?;
-        let entries = group_ref.peek_dlt(limit, offset);
+        let entries = group_ref.peek_dls(limit, offset);
         Ok(entries
             .into_iter()
             .map(|(seq, e)| (seq, e.reason, e.attempts, e.key))
@@ -579,15 +579,15 @@ impl StreamManager {
 
     pub async fn move_to_stream(
         &self,
-        topic: &str,
+        name: &str,
         group: &str,
         seq: u64,
     ) -> Result<bool, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         let key_unblocked = {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let group_ref = state.groups.get_mut(group).ok_or_else(|| {
                 BrokerError::not_found(format!("Consumer group '{}' not found", group))
             })?;
@@ -595,62 +595,62 @@ impl StreamManager {
             state.groups_dirty = true;
             key_unblocked
         };
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(key_unblocked)
     }
 
-    pub async fn delete_dlt(
+    pub async fn delete_dls(
         &self,
-        topic: &str,
+        name: &str,
         group: &str,
         seq: u64,
     ) -> Result<bool, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         let key_unblocked = {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let group_ref = state.groups.get_mut(group).ok_or_else(|| {
                 BrokerError::not_found(format!("Consumer group '{}' not found", group))
             })?;
-            let key_unblocked = group_ref.delete_dlt(seq)?;
+            let key_unblocked = group_ref.delete_dls(seq)?;
             state.groups_dirty = true;
             key_unblocked
         };
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(key_unblocked)
     }
 
-    pub async fn purge_dlt(&self, topic: &str, group: &str) -> Result<usize, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+    pub async fn purge_dls(&self, name: &str, group: &str) -> Result<usize, BrokerError> {
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         let count = {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let group_ref = state.groups.get_mut(group).ok_or_else(|| {
                 BrokerError::not_found(format!("Consumer group '{}' not found", group))
             })?;
-            let count = group_ref.purge_dlt();
+            let count = group_ref.purge_dls();
             state.groups_dirty = true;
             count
         };
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(count)
     }
 
     pub async fn read(
         &self,
-        topic: &str,
+        name: &str,
         from_seq: u64,
         limit: usize,
     ) -> Result<Vec<Message>, BrokerError> {
-        let Some(topic_ref) = self.get_topic(topic) else {
+        let Some(stream_ref) = self.get_stream(name) else {
             return Ok(Vec::new());
         };
-        let retention_guard = topic_ref.retention_gate.clone().read_owned().await;
+        let retention_guard = stream_ref.retention_gate.clone().read_owned().await;
 
         let (offsets, segments) = {
-            let state = topic_ref.state.lock();
+            let state = stream_ref.state.lock();
             let offsets = state
                 .index
                 .range(from_seq..)
@@ -685,15 +685,15 @@ impl StreamManager {
         consumer_id: &str,
         generation: u64,
         limit: usize,
-        topic: &str,
+        name: &str,
         wait_ms: u64,
     ) -> Result<Vec<Message>, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
 
         let group_cancel = {
-            let state = topic_ref.state.lock();
+            let state = stream_ref.state.lock();
             match state.groups.get(group) {
                 Some(g) => g.cancel_token(),
                 None => {
@@ -708,7 +708,7 @@ impl StreamManager {
         if wait_ms == 0 {
             return self
                 .try_fetch_once(
-                    &topic_ref,
+                    &stream_ref,
                     group,
                     consumer_id,
                     generation,
@@ -719,14 +719,14 @@ impl StreamManager {
         }
 
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
-        let mut wake_rx = topic_ref.wake_tx.subscribe();
+        let mut wake_rx = stream_ref.wake_tx.subscribe();
 
         loop {
             let wake_ver = *wake_rx.borrow();
 
             match self
                 .try_fetch_once(
-                    &topic_ref,
+                    &stream_ref,
                     group,
                     consumer_id,
                     generation,
@@ -741,7 +741,7 @@ impl StreamManager {
                     if matches!(
                         error.kind,
                         BrokerErrorKind::NotMember | BrokerErrorKind::Fenced
-                    ) && !self.is_active_member(&topic_ref, group, consumer_id) =>
+                    ) && !self.is_active_member(&stream_ref, group, consumer_id) =>
                 {
                     return Ok(Vec::new());
                 }
@@ -766,11 +766,11 @@ impl StreamManager {
 
     fn is_active_member(
         &self,
-        topic_ref: &Arc<TopicShared>,
+        stream_ref: &Arc<StreamShared>,
         group: &str,
         consumer_id: &str,
     ) -> bool {
-        let state = topic_ref.state.lock();
+        let state = stream_ref.state.lock();
         state
             .groups
             .get(group)
@@ -780,16 +780,16 @@ impl StreamManager {
     pub async fn ack(
         &self,
         group: &str,
-        topic: &str,
+        name: &str,
         consumer_id: &str,
         generation: u64,
         seq: u64,
     ) -> Result<(), BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let head_seq = state.head_seq;
             let Some(group_ref) = state.groups.get_mut(group) else {
                 return Err(BrokerError::not_found(format!(
@@ -802,21 +802,21 @@ impl StreamManager {
             group_ref.ack(consumer_id, generation, seq)?;
             state.groups_dirty = true;
         }
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(())
     }
 
     pub async fn seek(
         &self,
         group: &str,
-        topic: &str,
+        name: &str,
         target: SeekTarget,
     ) -> Result<(), BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let last_seq = state.next_seq.saturating_sub(1);
             let head_seq = state.head_seq;
             let max_ack_pending = state.full_config.max_ack_pending;
@@ -838,22 +838,22 @@ impl StreamManager {
             }
             state.groups_dirty = true;
         }
-        topic_ref.wake_tx.send_modify(|v| *v += 1);
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
         Ok(())
     }
 
     pub async fn leave_group(
         &self,
         group: &str,
-        topic: &str,
+        name: &str,
         consumer_id: &str,
         generation: u64,
     ) -> Result<(), BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
         let should_notify = {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let Some(group_ref) = state.groups.get_mut(group) else {
                 return Err(BrokerError::not_found(format!(
                     "Consumer group '{}' not found",
@@ -884,7 +884,7 @@ impl StreamManager {
             true
         };
         if should_notify {
-            topic_ref.wake_tx.send_modify(|v| *v += 1);
+            stream_ref.wake_tx.send_modify(|v| *v += 1);
         }
         Ok(())
     }
@@ -892,13 +892,13 @@ impl StreamManager {
     pub async fn join_group(
         &self,
         group: &str,
-        topic: &str,
+        name: &str,
         connection_client_id: &str,
     ) -> Result<JoinGroupResult, BrokerError> {
-        let topic_ref = self
-            .get_topic(topic)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", topic)))?;
-        let mut state = topic_ref.state.lock();
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
+        let mut state = stream_ref.state.lock();
         let head_seq = state.head_seq;
         let max_ack_pending = state.full_config.max_ack_pending;
         let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
@@ -949,10 +949,10 @@ impl StreamManager {
 
     pub async fn disconnect(&self, client_id: &str) {
         info!("[StreamManager] Disconnecting client: {}", client_id);
-        for (_, topic_ref) in Self::collect_topics(&self.topics) {
+        for (_, stream_ref) in Self::collect_streams(&self.streams) {
             let mut should_notify = false;
             {
-                let mut state = topic_ref.state.lock();
+                let mut state = stream_ref.state.lock();
                 if let Some(bindings) = state.client_map.remove(client_id) {
                     for binding in bindings {
                         if let Some(group_ref) = state.groups.get_mut(&binding.group_id) {
@@ -965,16 +965,16 @@ impl StreamManager {
                 }
             }
             if should_notify {
-                topic_ref.wake_tx.send_modify(|v| *v += 1);
+                stream_ref.wake_tx.send_modify(|v| *v += 1);
             }
         }
     }
 
     pub async fn exists(&self, name: &str) -> bool {
-        if Self::validate_topic_name(name).is_err() {
+        if Self::validate_stream_name(name).is_err() {
             return false;
         }
-        if self.topics.contains_key(name) {
+        if self.streams.contains_key(name) {
             return true;
         }
 
@@ -986,41 +986,41 @@ impl StreamManager {
     }
 
     pub async fn describe(&self, name: &str) -> Result<StreamDefinition, BrokerError> {
-        Self::validate_topic_name(name)?;
-        let topic_ref = self
-            .get_topic(name)
+        Self::validate_stream_name(name)?;
+        let stream_ref = self
+            .get_stream(name)
             .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let config = topic_ref.state.lock().full_config.clone();
+        let config = stream_ref.state.lock().full_config.clone();
         Ok(StreamDefinition {
             name: name.to_string(),
             config,
         })
     }
 
-    fn get_topic(&self, topic: &str) -> Option<Arc<TopicShared>> {
-        self.topics.get(topic).map(|entry| entry.value().clone())
+    fn get_stream(&self, name: &str) -> Option<Arc<StreamShared>> {
+        self.streams.get(name).map(|entry| entry.value().clone())
     }
 
-    fn collect_topics(
-        topics: &Arc<DashMap<String, Arc<TopicShared>>>,
-    ) -> Vec<(String, Arc<TopicShared>)> {
-        topics
+    fn collect_streams(
+        streams: &Arc<DashMap<String, Arc<StreamShared>>>,
+    ) -> Vec<(String, Arc<StreamShared>)> {
+        streams
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect()
     }
 
-    async fn load_topic_config(
+    async fn load_stream_config(
         base_path: &PathBuf,
         options: StreamCreateOptions,
         config: &SystemStreamConfig,
-    ) -> TopicConfig {
+    ) -> StreamConfig {
         let config_path = base_path.join("config.json");
         if let Ok(data) = tokio::fs::read_to_string(&config_path).await {
             serde_json::from_str(&data)
-                .unwrap_or_else(|_| TopicConfig::from_options(options, config))
+                .unwrap_or_else(|_| StreamConfig::from_options(options, config))
         } else {
-            TopicConfig::from_options(options, config)
+            StreamConfig::from_options(options, config)
         }
     }
 
@@ -1044,52 +1044,52 @@ impl StreamManager {
                 continue;
             }
 
-            let Some(topic_name) = path.file_name().and_then(|name| name.to_str()) else {
+            let Some(stream_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
 
-            let name = topic_name.to_string();
-            if Self::validate_topic_name(&name).is_err() || self.deleted_topics.contains_key(&name)
+            let name = stream_name.to_string();
+            if Self::validate_stream_name(&name).is_err() || self.deleted_streams.contains_key(&name)
             {
                 continue;
             }
 
-            let topic_config =
-                Self::load_topic_config(&path, StreamCreateOptions::default(), &self.config).await;
+            let stream_config =
+                Self::load_stream_config(&path, StreamCreateOptions::default(), &self.config).await;
 
             let config_path = path.join("config.json");
             if !config_path.exists() {
-                if let Ok(data) = serde_json::to_string_pretty(&topic_config) {
+                if let Ok(data) = serde_json::to_string_pretty(&stream_config) {
                     let _ = tokio::fs::write(&config_path, data).await;
                 }
             }
 
-            let topic_ref =
-                Self::build_topic_shared(name.clone(), topic_config, &self.config.persistence_path)
+            let stream_ref =
+                Self::build_stream_shared(name.clone(), stream_config, &self.config.persistence_path)
                     .await;
 
             use dashmap::mapref::entry::Entry;
-            match self.topics.entry(name.clone()) {
+            match self.streams.entry(name.clone()) {
                 Entry::Occupied(_) => {}
                 Entry::Vacant(v) => {
-                    v.insert(topic_ref);
-                    info!("[StreamManager] Restored topic '{}'", name);
+                    v.insert(stream_ref);
+                    info!("[StreamManager] Restored stream '{}'", name);
                 }
             }
         }
     }
 
-    async fn build_topic_shared(
+    async fn build_stream_shared(
         name: String,
-        config: TopicConfig,
+        config: StreamConfig,
         persistence_path: &str,
-    ) -> Arc<TopicShared> {
+    ) -> Arc<StreamShared> {
         let base_path = PathBuf::from(persistence_path).join(&name);
         if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-            tracing::error!("Failed to create topic directory at {:?}: {}", base_path, e);
+            tracing::error!("Failed to create stream directory at {:?}: {}", base_path, e);
         }
 
-        let recovered = recover_topic(&name, PathBuf::from(persistence_path)).await;
+        let recovered = recover_stream(&name, PathBuf::from(persistence_path)).await;
         let head_seq = recovered.head_seq.max(1);
         let next_seq = recovered.next_seq.max(head_seq);
 
@@ -1105,7 +1105,7 @@ impl StreamManager {
                     config.max_ack_pending,
                     ack_wait,
                     config.max_deliveries,
-                    group_state.dlt_entries,
+                    group_state.dls_entries,
                     group_state.parked_keys,
                     group_state.redeliver_entries,
                 ),
@@ -1119,8 +1119,8 @@ impl StreamManager {
             .unwrap_or_else(|| PathBuf::from(persistence_path).join(&name).join("1.log"));
         let segments = Arc::new(recovered.segments);
 
-        Arc::new(TopicShared {
-            state: Mutex::new(TopicState {
+        Arc::new(StreamShared {
+            state: Mutex::new(StreamState {
                 head_seq,
                 next_seq,
                 index: recovered.index,
@@ -1140,7 +1140,7 @@ impl StreamManager {
 
     fn spawn_background_tasks(&self) {
         let cancel = self.cancel.clone();
-        let topics = self.topics.clone();
+        let streams = self.streams.clone();
 
         // Task 1: Periodic group state save
         let storage_tx = self.storage_tx.clone();
@@ -1155,9 +1155,9 @@ impl StreamManager {
                         _ = cancel.cancelled() => break,
                         _ = timer.tick() => {}
                     }
-                    for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
+                    for (stream_name, stream_ref) in StreamManager::collect_streams(&streams) {
                         let groups_data = {
-                            let mut state = topic_ref.state.lock();
+                            let mut state = stream_ref.state.lock();
                             if !state.groups_dirty {
                                 None
                             } else {
@@ -1171,7 +1171,7 @@ impl StreamManager {
                                                 id.clone(),
                                                 GroupPersistentState {
                                                     ack_floor: group.ack_floor,
-                                                    dlt_entries: group.dlt_snapshot(),
+                                                    dls_entries: group.dls_snapshot(),
                                                     parked_keys: group.parked_keys_snapshot(),
                                                     redeliver_entries: group.redeliver_snapshot(),
                                                 },
@@ -1185,7 +1185,7 @@ impl StreamManager {
                         if let Some(groups_data) = groups_data {
                             let _ = storage_tx
                                 .send(StorageCommand::SaveState {
-                                    topic_name,
+                                    stream_name,
                                     groups: groups_data,
                                 })
                                 .await;
@@ -1196,7 +1196,7 @@ impl StreamManager {
         });
 
         // Task 2: Retention enforcement
-        let topics = self.topics.clone();
+        let streams = self.streams.clone();
         let storage_tx = self.storage_tx.clone();
         let retention_check_ms = self.config.retention_check_interval_ms;
         tokio::spawn({
@@ -1209,17 +1209,17 @@ impl StreamManager {
                         _ = cancel.cancelled() => break,
                         _ = timer.tick() => {}
                     }
-                    for (topic_name, topic_ref) in StreamManager::collect_topics(&topics) {
-                        let _retention_guard = topic_ref.retention_gate.write().await;
+                    for (stream_name, stream_ref) in StreamManager::collect_streams(&streams) {
+                        let _retention_guard = stream_ref.retention_gate.write().await;
                         let retention = {
-                            let state = topic_ref.state.lock();
+                            let state = stream_ref.state.lock();
                             state.full_config.retention.clone()
                         };
 
                         let (reply_tx, reply_rx) = oneshot::channel();
                         if storage_tx
                             .send(StorageCommand::ApplyRetention {
-                                topic_name,
+                                stream_name,
                                 retention,
                                 reply: reply_tx,
                             })
@@ -1235,7 +1235,7 @@ impl StreamManager {
 
                         let mut should_notify = false;
                         {
-                            let mut state = topic_ref.state.lock();
+                            let mut state = stream_ref.state.lock();
                             if new_head_seq != state.head_seq {
                                 state.head_seq = new_head_seq;
                                 // Trim index entries below new head_seq
@@ -1259,7 +1259,7 @@ impl StreamManager {
                             }
                         }
                         if should_notify {
-                            topic_ref.wake_tx.send_modify(|v| *v += 1);
+                            stream_ref.wake_tx.send_modify(|v| *v += 1);
                         }
                     }
                 }
@@ -1267,7 +1267,7 @@ impl StreamManager {
         });
 
         // Task 3: Redelivery check (ack timeouts)
-        let topics = self.topics.clone();
+        let streams = self.streams.clone();
         tokio::spawn({
             let cancel = cancel.clone();
             async move {
@@ -1278,10 +1278,10 @@ impl StreamManager {
                         _ = cancel.cancelled() => break,
                         _ = timer.tick() => {}
                     }
-                    for (_, topic_ref) in StreamManager::collect_topics(&topics) {
+                    for (_, stream_ref) in StreamManager::collect_streams(&streams) {
                         let mut should_notify = false;
                         {
-                            let mut state = topic_ref.state.lock();
+                            let mut state = stream_ref.state.lock();
                             let mut groups_changed = false;
                             for group in state.groups.values_mut() {
                                 if group.check_redelivery() {
@@ -1294,7 +1294,7 @@ impl StreamManager {
                             }
                         }
                         if should_notify {
-                            topic_ref.wake_tx.send_modify(|v| *v += 1);
+                            stream_ref.wake_tx.send_modify(|v| *v += 1);
                         }
                     }
                 }
@@ -1304,18 +1304,18 @@ impl StreamManager {
     /// Try to fetch messages for a consumer. Reads from storage via index if needed.
     async fn try_fetch_once(
         &self,
-        topic_ref: &Arc<TopicShared>,
+        stream_ref: &Arc<StreamShared>,
         group: &str,
         consumer_id: &str,
         generation: u64,
         limit: usize,
         group_cancel: &CancellationToken,
     ) -> Result<Vec<Message>, BrokerError> {
-        let retention_guard = topic_ref.retention_gate.clone().read_owned().await;
+        let retention_guard = stream_ref.retention_gate.clone().read_owned().await;
 
         // 1. Compute fetch plan under lock (which seqs to read)
         let (plan, was_clamped) = {
-            let mut state = topic_ref.state.lock();
+            let mut state = stream_ref.state.lock();
             let head_seq = state.head_seq;
             let Some(group_ref) = state.groups.get_mut(group) else {
                 return Err(BrokerError::not_found(format!(
@@ -1337,7 +1337,7 @@ impl StreamManager {
         };
 
         if was_clamped {
-            topic_ref.state.lock().groups_dirty = true;
+            stream_ref.state.lock().groups_dirty = true;
         }
 
         if plan.is_empty() {
@@ -1346,7 +1346,7 @@ impl StreamManager {
 
         // 2. Look up offsets in index (under lock, then released)
         let (offsets, segments) = {
-            let state = topic_ref.state.lock();
+            let state = stream_ref.state.lock();
             let offsets = plan
                 .iter()
                 .filter_map(|seq| state.index.get(seq).map(|off| (*seq, *off)))
@@ -1387,7 +1387,7 @@ impl StreamManager {
         }
 
         // 4. Deliver messages to the group (under lock)
-        let mut state = topic_ref.state.lock();
+        let mut state = stream_ref.state.lock();
         let head_seq = state.head_seq;
         let Some(group_ref) = state.groups.get_mut(group) else {
             return Err(BrokerError::not_found(format!(
@@ -1418,20 +1418,20 @@ mod tests {
         stream_config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
         let config = Arc::new(stream_config);
         let (storage_tx, mut storage_rx) = mpsc::channel(1);
-        let topics = Arc::new(DashMap::new());
-        let topic_name = "cancelled-publisher";
-        let topic_config = TopicConfig::from_options(StreamCreateOptions::default(), &config);
-        let topic_ref = StreamManager::build_topic_shared(
-            topic_name.to_string(),
-            topic_config,
+        let streams = Arc::new(DashMap::new());
+        let stream_name = "cancelled-publisher";
+        let stream_config = StreamConfig::from_options(StreamCreateOptions::default(), &config);
+        let stream_ref = StreamManager::build_stream_shared(
+            stream_name.to_string(),
+            stream_config,
             &config.persistence_path,
         )
         .await;
-        topics.insert(topic_name.to_string(), topic_ref.clone());
+        streams.insert(stream_name.to_string(), stream_ref.clone());
 
         let manager = Arc::new(StreamManager {
-            topics,
-            deleted_topics: Arc::new(DashMap::new()),
+            streams,
+            deleted_streams: Arc::new(DashMap::new()),
             lifecycle_gate: AsyncMutex::new(()),
             storage_tx,
             config,
@@ -1441,7 +1441,7 @@ mod tests {
         let first_manager = manager.clone();
         let first_publish = tokio::spawn(async move {
             first_manager
-                .publish(topic_name, None, Bytes::from_static(b"first"))
+                .publish(stream_name, None, Bytes::from_static(b"first"))
                 .await
         });
 
@@ -1456,7 +1456,7 @@ mod tests {
         let second_manager = manager.clone();
         let second_publish = tokio::spawn(async move {
             second_manager
-                .publish(topic_name, None, Bytes::from_static(b"second"))
+                .publish(stream_name, None, Bytes::from_static(b"second"))
                 .await
         });
         let second_command = storage_rx.recv().await.unwrap();
@@ -1466,46 +1466,46 @@ mod tests {
         }
 
         assert_eq!(second_publish.await.unwrap().unwrap(), 2);
-        let state = topic_ref.state.lock();
+        let state = stream_ref.state.lock();
         assert_eq!(state.next_seq, 3);
         assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
-    fn topic_names_cannot_escape_the_persistence_directory() {
+    fn stream_names_cannot_escape_the_persistence_directory() {
         for invalid in [
             "",
             ".",
             "..",
             "../outside",
-            "nested/topic",
-            "nested\\topic",
-            "/tmp/topic",
-            "topic name",
+            "nested/stream",
+            "nested\\stream",
+            "/tmp/stream",
+            "stream name",
         ] {
             assert!(
-                StreamManager::validate_topic_name(invalid).is_err(),
+                StreamManager::validate_stream_name(invalid).is_err(),
                 "{invalid:?} must be rejected"
             );
         }
-        assert!(StreamManager::validate_topic_name("topic_42-chat.events").is_ok());
+        assert!(StreamManager::validate_stream_name("stream_42-chat.events").is_ok());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn topic_directory_symlinks_are_rejected() {
+    async fn stream_directory_symlinks_are_rejected() {
         use std::os::unix::fs::symlink;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), temp_dir.path().join("linked-topic")).unwrap();
+        symlink(outside.path(), temp_dir.path().join("linked-stream")).unwrap();
 
         let mut config = SystemStreamConfig::default();
         config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
         let manager = StreamManager::new(Arc::new(config)).await;
 
         let error = manager
-            .create_topic("linked-topic".to_string(), StreamCreateOptions::default())
+            .create_stream("linked-stream".to_string(), StreamCreateOptions::default())
             .await
             .unwrap_err();
 

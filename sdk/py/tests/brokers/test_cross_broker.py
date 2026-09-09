@@ -50,9 +50,9 @@ class TestCrossBroker:
         await sub.stop()
 
     async def test_stream_binary_payload(self, nexo: NexoClient):
-        topic = f"bin-stream-{uuid.uuid4()}"
-        await nexo.stream.create(topic)
-        stream = await nexo.stream.get(topic)
+        name = f"bin-stream-{uuid.uuid4()}"
+        await nexo.stream.create(name)
+        stream = await nexo.stream.get(name)
         await stream.publish(self.BINARY_PAYLOAD)
 
         received: list = []

@@ -12,9 +12,9 @@ from .brokers.queue import (
 )
 from .brokers.store import NexoMap, NexoStore
 from .brokers.stream import (
-    DLTEntry,
+    DLSEntry,
     NexoStream,
-    NexoStreamDLT,
+    NexoStreamDLS,
     NexoStreamFacade,
     NexoStreamGroup,
     StreamConfig,
@@ -90,14 +90,14 @@ __all__ = [
     "NexoStreamFacade",
     "NexoStream",
     "NexoStreamGroup",
-    "NexoStreamDLT",
+    "NexoStreamDLS",
     "StreamRetention",
     "StreamConfig",
     "StreamDefinition",
     "StreamHandler",
     "StreamPublishItem",
     "StreamMessageMeta",
-    "DLTEntry",
+    "DLSEntry",
     "Subscription",
     "LogHandler",
     "LogLevel",
