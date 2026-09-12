@@ -13,15 +13,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::brokers::stream::config::SystemStreamConfig;
+use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
 use crate::brokers::stream::domain::group::ConsumerGroup;
 use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::domain::persistence::{
     record_len, recover_stream, GroupPersistentState, Segment, StorageCommand, StorageManager,
     MAX_STREAM_RECORD_BYTES,
 };
-use crate::brokers::stream::domain::definition::{StreamDefinition, StreamConfig};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
-use crate::brokers::{BrokerError, BrokerErrorKind, ProvisionOutcome, ProvisionResult};
+use crate::brokers::{
+    config_conflict_error, validate_resource_name, BrokerError, BrokerErrorKind, ProvisionOutcome,
+    ProvisionResult,
+};
 use crate::protocol::STREAM_MAX_KEY_BYTES;
 
 struct StreamShared {
@@ -50,6 +53,27 @@ struct StreamState {
     segments: Arc<Vec<Segment>>,
 }
 
+impl StreamState {
+    // What a group persists, single-sourced: used by both the periodic dirty
+    // flush and the final shutdown flush.
+    fn groups_snapshot(&self) -> BTreeMap<String, GroupPersistentState> {
+        self.groups
+            .iter()
+            .map(|(id, group)| {
+                (
+                    id.clone(),
+                    GroupPersistentState {
+                        ack_floor: group.ack_floor,
+                        dls_entries: group.dls_snapshot(),
+                        parked_keys: group.parked_keys_snapshot(),
+                        redeliver_entries: group.redeliver_snapshot(),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 pub struct JoinGroupResult {
     pub ack_floor: u64,
     pub consumer_id: String,
@@ -66,26 +90,8 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    const MAX_STREAM_NAME_BYTES: usize = 255;
-
     fn validate_stream_name(name: &str) -> Result<(), BrokerError> {
-        if name.is_empty() || name.len() > Self::MAX_STREAM_NAME_BYTES {
-            return Err(BrokerError::invalid_argument(format!(
-                "Invalid stream name: length must be between 1 and {} bytes",
-                Self::MAX_STREAM_NAME_BYTES
-            )));
-        }
-        if name == "."
-            || name == ".."
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
-            return Err(BrokerError::invalid_argument(
-                "Invalid stream name: only ASCII letters, digits, '.', '_' and '-' are allowed",
-            ));
-        }
-        Ok(())
+        validate_resource_name("stream", name)
     }
 
     fn config_json(config: &StreamConfig) -> serde_json::Value {
@@ -99,65 +105,6 @@ impl StreamManager {
             "ackWaitMs": config.ack_wait_ms,
             "maxDeliveries": config.max_deliveries,
         })
-    }
-
-    fn config_conflict(name: &str, requested: &StreamConfig, actual: &StreamConfig) -> BrokerError {
-        let mut differences = Vec::with_capacity(6);
-        if requested.retention.max_age_ms != actual.retention.max_age_ms {
-            differences.push(serde_json::json!({
-                "path": "config.retention.maxAgeMs",
-                "requested": requested.retention.max_age_ms,
-                "actual": actual.retention.max_age_ms,
-            }));
-        }
-        if requested.retention.max_bytes != actual.retention.max_bytes {
-            differences.push(serde_json::json!({
-                "path": "config.retention.maxBytes",
-                "requested": requested.retention.max_bytes,
-                "actual": actual.retention.max_bytes,
-            }));
-        }
-        if requested.max_segment_size != actual.max_segment_size {
-            differences.push(serde_json::json!({
-                "path": "config.maxSegmentSize",
-                "requested": requested.max_segment_size,
-                "actual": actual.max_segment_size,
-            }));
-        }
-        if requested.max_ack_pending != actual.max_ack_pending {
-            differences.push(serde_json::json!({
-                "path": "config.maxAckPending",
-                "requested": requested.max_ack_pending,
-                "actual": actual.max_ack_pending,
-            }));
-        }
-        if requested.ack_wait_ms != actual.ack_wait_ms {
-            differences.push(serde_json::json!({
-                "path": "config.ackWaitMs",
-                "requested": requested.ack_wait_ms,
-                "actual": actual.ack_wait_ms,
-            }));
-        }
-        if requested.max_deliveries != actual.max_deliveries {
-            differences.push(serde_json::json!({
-                "path": "config.maxDeliveries",
-                "requested": requested.max_deliveries,
-                "actual": actual.max_deliveries,
-            }));
-        }
-        BrokerError::config_conflict(
-            format!(
-                "Stream '{}' already exists with different configuration",
-                name
-            ),
-            serde_json::json!({
-                "resourceKind": "stream",
-                "resourceName": name,
-                "requested": Self::config_json(requested),
-                "actual": Self::config_json(actual),
-                "differences": differences,
-            }),
-        )
     }
 
     pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
@@ -191,24 +138,7 @@ impl StreamManager {
 
         // Final group state flush
         for (stream_name, stream_ref) in Self::collect_streams(&self.streams) {
-            let groups_data = {
-                let state = stream_ref.state.lock();
-                state
-                    .groups
-                    .iter()
-                    .map(|(id, group)| {
-                        (
-                            id.clone(),
-                            GroupPersistentState {
-                                ack_floor: group.ack_floor,
-                                dls_entries: group.dls_snapshot(),
-                                parked_keys: group.parked_keys_snapshot(),
-                                redeliver_entries: group.redeliver_snapshot(),
-                            },
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            };
+            let groups_data = stream_ref.state.lock().groups_snapshot();
             let _ = self
                 .storage_tx
                 .send(StorageCommand::SaveState {
@@ -240,7 +170,12 @@ impl StreamManager {
         if let Some(stream_ref) = self.get_stream(&name) {
             let actual = stream_ref.state.lock().full_config.clone();
             if actual != requested {
-                return Err(Self::config_conflict(&name, &requested, &actual));
+                return Err(config_conflict_error(
+                    "stream",
+                    &name,
+                    Self::config_json(&requested),
+                    Self::config_json(&actual),
+                ));
             }
             return Ok(ProvisionResult {
                 outcome: ProvisionOutcome::Unchanged,
@@ -309,7 +244,12 @@ impl StreamManager {
         };
 
         if actual != requested {
-            return Err(Self::config_conflict(&name, &requested, &actual));
+            return Err(config_conflict_error(
+                "stream",
+                &name,
+                Self::config_json(&requested),
+                Self::config_json(&actual),
+            ));
         }
 
         let shared =
@@ -583,59 +523,41 @@ impl StreamManager {
         group: &str,
         seq: u64,
     ) -> Result<bool, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let key_unblocked = {
-            let mut state = stream_ref.state.lock();
-            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
-                BrokerError::not_found(format!("Consumer group '{}' not found", group))
-            })?;
-            let key_unblocked = group_ref.move_to_stream(seq)?;
-            state.groups_dirty = true;
-            key_unblocked
-        };
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(key_unblocked)
+        self.with_state_mut(name, |state| {
+            state
+                .groups
+                .get_mut(group)
+                .ok_or_else(|| {
+                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
+                })?
+                .move_to_stream(seq)
+                .map_err(BrokerError::from)
+        })
     }
 
-    pub async fn delete_dls(
-        &self,
-        name: &str,
-        group: &str,
-        seq: u64,
-    ) -> Result<bool, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let key_unblocked = {
-            let mut state = stream_ref.state.lock();
-            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
-                BrokerError::not_found(format!("Consumer group '{}' not found", group))
-            })?;
-            let key_unblocked = group_ref.delete_dls(seq)?;
-            state.groups_dirty = true;
-            key_unblocked
-        };
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(key_unblocked)
+    pub async fn delete_dls(&self, name: &str, group: &str, seq: u64) -> Result<bool, BrokerError> {
+        self.with_state_mut(name, |state| {
+            state
+                .groups
+                .get_mut(group)
+                .ok_or_else(|| {
+                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
+                })?
+                .delete_dls(seq)
+                .map_err(BrokerError::from)
+        })
     }
 
     pub async fn purge_dls(&self, name: &str, group: &str) -> Result<usize, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let count = {
-            let mut state = stream_ref.state.lock();
-            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
-                BrokerError::not_found(format!("Consumer group '{}' not found", group))
-            })?;
-            let count = group_ref.purge_dls();
-            state.groups_dirty = true;
-            count
-        };
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(count)
+        self.with_state_mut(name, |state| {
+            Ok(state
+                .groups
+                .get_mut(group)
+                .ok_or_else(|| {
+                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
+                })?
+                .purge_dls())
+        })
     }
 
     pub async fn read(
@@ -785,25 +707,15 @@ impl StreamManager {
         generation: u64,
         seq: u64,
     ) -> Result<(), BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        {
-            let mut state = stream_ref.state.lock();
+        self.with_state_mut(name, |state| {
             let head_seq = state.head_seq;
-            let Some(group_ref) = state.groups.get_mut(group) else {
-                return Err(BrokerError::not_found(format!(
-                    "Consumer group '{}' not found",
-                    group
-                )));
-            };
-
+            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
+                BrokerError::not_found(format!("Consumer group '{}' not found", group))
+            })?;
             group_ref.clamp_head(head_seq);
             group_ref.ack(consumer_id, generation, seq)?;
-            state.groups_dirty = true;
-        }
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(())
+            Ok(())
+        })
     }
 
     pub async fn seek(
@@ -812,11 +724,7 @@ impl StreamManager {
         name: &str,
         target: SeekTarget,
     ) -> Result<(), BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        {
-            let mut state = stream_ref.state.lock();
+        self.with_state_mut(name, |state| {
             let last_seq = state.next_seq.saturating_sub(1);
             let head_seq = state.head_seq;
             let max_ack_pending = state.full_config.max_ack_pending;
@@ -831,15 +739,12 @@ impl StreamManager {
                     max_deliveries,
                 )
             });
-
             match target {
                 SeekTarget::Beginning => group_ref.seek_beginning(head_seq),
                 SeekTarget::End => group_ref.seek_end(last_seq),
             }
-            state.groups_dirty = true;
-        }
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(())
+            Ok(())
+        })
     }
 
     pub async fn leave_group(
@@ -849,17 +754,10 @@ impl StreamManager {
         consumer_id: &str,
         generation: u64,
     ) -> Result<(), BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let should_notify = {
-            let mut state = stream_ref.state.lock();
-            let Some(group_ref) = state.groups.get_mut(group) else {
-                return Err(BrokerError::not_found(format!(
-                    "Consumer group '{}' not found",
-                    group
-                )));
-            };
+        self.with_state_mut(name, |state| {
+            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
+                BrokerError::not_found(format!("Consumer group '{}' not found", group))
+            })?;
 
             if group_ref.generation() != generation {
                 return Err(BrokerError::fenced());
@@ -879,14 +777,8 @@ impl StreamManager {
             if remove_client_key {
                 state.client_map.remove(&connection_client_id);
             }
-
-            state.groups_dirty = true;
-            true
-        };
-        if should_notify {
-            stream_ref.wake_tx.send_modify(|v| *v += 1);
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub async fn join_group(
@@ -1001,6 +893,26 @@ impl StreamManager {
         self.streams.get(name).map(|entry| entry.value().clone())
     }
 
+    // Single mutation path for group state: lock → mutate → mark dirty → wake
+    // fetchers, so no call site can forget persistence or the wakeup.
+    fn with_state_mut<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut StreamState) -> Result<R, BrokerError>,
+    ) -> Result<R, BrokerError> {
+        let stream_ref = self
+            .get_stream(name)
+            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
+        let result = {
+            let mut state = stream_ref.state.lock();
+            let result = f(&mut state)?;
+            state.groups_dirty = true;
+            result
+        };
+        stream_ref.wake_tx.send_modify(|v| *v += 1);
+        Ok(result)
+    }
+
     fn collect_streams(
         streams: &Arc<DashMap<String, Arc<StreamShared>>>,
     ) -> Vec<(String, Arc<StreamShared>)> {
@@ -1049,7 +961,8 @@ impl StreamManager {
             };
 
             let name = stream_name.to_string();
-            if Self::validate_stream_name(&name).is_err() || self.deleted_streams.contains_key(&name)
+            if Self::validate_stream_name(&name).is_err()
+                || self.deleted_streams.contains_key(&name)
             {
                 continue;
             }
@@ -1064,9 +977,12 @@ impl StreamManager {
                 }
             }
 
-            let stream_ref =
-                Self::build_stream_shared(name.clone(), stream_config, &self.config.persistence_path)
-                    .await;
+            let stream_ref = Self::build_stream_shared(
+                name.clone(),
+                stream_config,
+                &self.config.persistence_path,
+            )
+            .await;
 
             use dashmap::mapref::entry::Entry;
             match self.streams.entry(name.clone()) {
@@ -1086,7 +1002,11 @@ impl StreamManager {
     ) -> Arc<StreamShared> {
         let base_path = PathBuf::from(persistence_path).join(&name);
         if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-            tracing::error!("Failed to create stream directory at {:?}: {}", base_path, e);
+            tracing::error!(
+                "Failed to create stream directory at {:?}: {}",
+                base_path,
+                e
+            );
         }
 
         let recovered = recover_stream(&name, PathBuf::from(persistence_path)).await;
@@ -1162,23 +1082,7 @@ impl StreamManager {
                                 None
                             } else {
                                 state.groups_dirty = false;
-                                Some(
-                                    state
-                                        .groups
-                                        .iter()
-                                        .map(|(id, group)| {
-                                            (
-                                                id.clone(),
-                                                GroupPersistentState {
-                                                    ack_floor: group.ack_floor,
-                                                    dls_entries: group.dls_snapshot(),
-                                                    parked_keys: group.parked_keys_snapshot(),
-                                                    redeliver_entries: group.redeliver_snapshot(),
-                                                },
-                                            )
-                                        })
-                                        .collect::<BTreeMap<_, _>>(),
-                                )
+                                Some(state.groups_snapshot())
                             }
                         };
 

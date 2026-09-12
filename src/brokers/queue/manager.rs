@@ -21,7 +21,9 @@ use crate::brokers::queue::domain::queue::{
     current_time_ms, Message, QueueConfig, QueueDefinition, QueueState,
 };
 use crate::brokers::queue::options::QueueCreateOptions;
-use crate::brokers::{BrokerError, ProvisionOutcome, ProvisionResult};
+use crate::brokers::{
+    config_conflict_error, validate_resource_name, BrokerError, ProvisionOutcome, ProvisionResult,
+};
 
 // ==========================================
 // SHARED STATE
@@ -52,26 +54,15 @@ pub struct QueueManager {
 }
 
 impl QueueManager {
-    const MAX_QUEUE_NAME_BYTES: usize = 255;
-
     fn validate_queue_name(name: &str) -> Result<(), BrokerError> {
-        if name.is_empty() || name.len() > Self::MAX_QUEUE_NAME_BYTES {
-            return Err(BrokerError::invalid_argument(format!(
-                "Invalid queue name: length must be between 1 and {} bytes",
-                Self::MAX_QUEUE_NAME_BYTES
-            )));
-        }
-        if name == "."
-            || name == ".."
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
-            return Err(BrokerError::invalid_argument(
-                "Invalid queue name: only ASCII letters, digits, '.', '_' and '-' are allowed",
-            ));
-        }
-        Ok(())
+        validate_resource_name("queue", name)
+    }
+
+    fn config_json(config: &QueueConfig) -> serde_json::Value {
+        serde_json::json!({
+            "visibilityTimeoutMs": config.visibility_timeout_ms,
+            "maxDeliveries": config.max_deliveries,
+        })
     }
 
     pub fn new(system_config: Arc<SystemQueueConfig>) -> Self {
@@ -324,39 +315,11 @@ impl QueueManager {
             Entry::Occupied(entry) => {
                 let actual = Self::lock(&entry.get().inner).config.clone();
                 if actual != requested {
-                    let mut differences = Vec::with_capacity(2);
-                    if actual.visibility_timeout_ms != requested.visibility_timeout_ms {
-                        differences.push(serde_json::json!({
-                            "path": "config.visibilityTimeoutMs",
-                            "requested": requested.visibility_timeout_ms,
-                            "actual": actual.visibility_timeout_ms,
-                        }));
-                    }
-                    if actual.max_deliveries != requested.max_deliveries {
-                        differences.push(serde_json::json!({
-                            "path": "config.maxDeliveries",
-                            "requested": requested.max_deliveries,
-                            "actual": actual.max_deliveries,
-                        }));
-                    }
-                    return Err(BrokerError::config_conflict(
-                        format!(
-                            "Queue '{}' already exists with different configuration",
-                            name
-                        ),
-                        serde_json::json!({
-                            "resourceKind": "queue",
-                            "resourceName": name,
-                            "requested": {
-                                "visibilityTimeoutMs": requested.visibility_timeout_ms,
-                                "maxDeliveries": requested.max_deliveries,
-                            },
-                            "actual": {
-                                "visibilityTimeoutMs": actual.visibility_timeout_ms,
-                                "maxDeliveries": actual.max_deliveries,
-                            },
-                            "differences": differences,
-                        }),
+                    return Err(config_conflict_error(
+                        "queue",
+                        &name,
+                        Self::config_json(&requested),
+                        Self::config_json(&actual),
                     ));
                 }
                 Ok(ProvisionResult {
