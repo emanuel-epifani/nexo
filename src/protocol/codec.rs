@@ -1,4 +1,4 @@
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use super::errors::ParseError;
@@ -7,14 +7,15 @@ use super::generated::{
     PROTOCOL_VERSION, STATUS_DATA, STATUS_ERR, STATUS_NULL, STATUS_OK, TYPE_PUSH_PUBSUB,
     TYPE_RESPONSE,
 };
-use crate::config::Config;
 
-#[derive(Debug, Default)]
-pub struct NexoCodec;
+#[derive(Debug)]
+pub struct NexoCodec {
+    max_payload_size: usize,
+}
 
 impl NexoCodec {
-    pub fn new() -> Self {
-        Self
+    pub fn new(max_payload_size: usize) -> Self {
+        Self { max_payload_size }
     }
 }
 
@@ -44,11 +45,10 @@ impl Decoder for NexoCodec {
         }
 
         let payload_len = header_ref.payload_len() as usize;
-        let max_payload_size = Config::global().server.max_payload_size;
-        if payload_len > max_payload_size {
+        if payload_len > self.max_payload_size {
             return Err(ParseError::Invalid(format!(
                 "Payload too large: {} bytes (max: {})",
-                payload_len, max_payload_size
+                payload_len, self.max_payload_size
             )));
         }
 
@@ -59,8 +59,8 @@ impl Decoder for NexoCodec {
         }
 
         let header = *header_ref;
-        let frame_bytes = src.split_to(total_len).freeze();
-        let payload = frame_bytes.slice(FrameHeader::SIZE..);
+        src.advance(FrameHeader::SIZE);
+        let payload = src.split_to(payload_len).freeze();
 
         Ok(Some(InboundFrame { header, payload }))
     }
@@ -103,11 +103,11 @@ impl Encoder<OutboundFrame> for NexoCodec {
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);
             }
-            OutboundFrame::PushPubSub { id, payload } => {
+            OutboundFrame::PushPubSub { payload } => {
                 dst.put_u8(PROTOCOL_VERSION);
                 dst.put_u8(TYPE_PUSH_PUBSUB);
                 dst.put_u8(0); // meta byte unused for pushes
-                dst.put_u32(id); // unused for pushes (always 0)
+                dst.put_u32(0); // pushes have no correlation id
                 dst.put_u32(payload.len() as u32);
                 dst.extend_from_slice(&payload);
             }
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn round_trip_encode_decode_response_data() {
         let response = Response::Data(Bytes::copy_from_slice(TEST_PAYLOAD));
-        let mut codec = NexoCodec::new();
+        let mut codec = NexoCodec::new(10 * 1024 * 1024);
         let mut encoded = BytesMut::new();
 
         codec
@@ -162,7 +162,7 @@ mod tests {
             "configuration conflict",
             details.clone(),
         );
-        let mut codec = NexoCodec::new();
+        let mut codec = NexoCodec::new(10 * 1024 * 1024);
         let mut encoded = BytesMut::new();
 
         codec
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn parse_frame_returns_none_for_incomplete_header() {
         const INCOMPLETE_HEADER_SIZE: usize = FrameHeader::SIZE - 1;
-        let mut codec = NexoCodec::new();
+        let mut codec = NexoCodec::new(10 * 1024 * 1024);
         let mut buf = BytesMut::from(&vec![0u8; INCOMPLETE_HEADER_SIZE][..]);
 
         let parsed = codec.decode(&mut buf).expect("decode should succeed");
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn parse_frame_returns_none_for_incomplete_payload() {
         let response = Response::Data(Bytes::copy_from_slice(TEST_PAYLOAD));
-        let mut codec = NexoCodec::new();
+        let mut codec = NexoCodec::new(10 * 1024 * 1024);
         let mut encoded = BytesMut::new();
 
         codec

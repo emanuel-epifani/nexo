@@ -7,14 +7,13 @@ use crate::protocol::{ErrorCode, Response};
 use crate::NexoEngine;
 use bytes::Bytes;
 
-/// Opcodes that mutate state and must be processed in TCP arrival order to
-/// prevent races (e.g. ACK processed after LEAVE, SUB processed after PUBLISH).
-/// These are fast, in-memory state mutations that do not perform I/O,
-/// long-polling, or large fan-out — safe to run inline.
+/// Opcodes that must complete in TCP arrival order and are cheap enough to
+/// execute without allocating a Tokio task.
 pub fn is_inline_opcode(opcode: u8) -> bool {
     matches!(
         opcode,
-        stream::tcp::OP_S_ACK
+        OP_DEBUG_ECHO
+            | stream::tcp::OP_S_ACK
             | stream::tcp::OP_S_SEEK
             | stream::tcp::OP_S_LEAVE
             | stream::tcp::OP_S_JOIN
@@ -22,47 +21,40 @@ pub fn is_inline_opcode(opcode: u8) -> bool {
             | store::tcp::OP_MAP_GET
             | store::tcp::OP_MAP_DEL
             | store::tcp::OP_MAP_INCR
+            | queue::tcp::OP_Q_EXISTS
             | pub_sub::tcp::OP_SUB
             | pub_sub::tcp::OP_UNSUB
     )
 }
 
-pub struct Dispatcher<'a> {
-    engine: &'a NexoEngine,
-    /// Opaque per-connection session id (transport-level). Brokers that need to
-    /// identify the caller (pubsub, stream) receive it as a plain `&str`.
-    session_id: &'a str,
-}
+pub async fn dispatch(
+    engine: &NexoEngine,
+    session_id: &str,
+    opcode: u8,
+    payload: Bytes,
+) -> Response {
+    let mut cursor = PayloadCursor::new(payload);
 
-impl<'a> Dispatcher<'a> {
-    pub fn new(engine: &'a NexoEngine, session_id: &'a str) -> Self {
-        Self { engine, session_id }
-    }
+    match opcode {
+        OP_DEBUG_ECHO => Response::Data(cursor.read_remaining()),
 
-    pub async fn dispatch(&self, opcode: u8, payload: Bytes) -> Response {
-        let mut cursor = PayloadCursor::new(payload);
-
-        match opcode {
-            OP_DEBUG_ECHO => Response::Data(cursor.read_remaining()),
-
-            op if (store::tcp::OPCODE_MIN..=store::tcp::OPCODE_MAX).contains(&op) => {
-                store::tcp::handle(op, &mut cursor, self.engine)
-            }
-            op if (queue::tcp::OPCODE_MIN..=queue::tcp::OPCODE_MAX).contains(&op) => {
-                queue::tcp::handle(op, &mut cursor, self.engine).await
-            }
-            op if (pub_sub::tcp::OPCODE_MIN..=pub_sub::tcp::OPCODE_MAX).contains(&op) => {
-                pub_sub::tcp::handle(op, &mut cursor, self.engine, self.session_id).await
-            }
-            op if (stream::tcp::OPCODE_MIN..=stream::tcp::OPCODE_MAX).contains(&op) => {
-                stream::tcp::handle(op, &mut cursor, self.engine, self.session_id).await
-            }
-
-            _ => Response::error(
-                ErrorCode::ProtocolError,
-                format!("Unknown opcode: 0x{:02X}", opcode),
-            ),
+        op if (store::tcp::OPCODE_MIN..=store::tcp::OPCODE_MAX).contains(&op) => {
+            store::tcp::handle(op, &mut cursor, engine)
         }
+        op if (queue::tcp::OPCODE_MIN..=queue::tcp::OPCODE_MAX).contains(&op) => {
+            queue::tcp::handle(op, &mut cursor, engine).await
+        }
+        op if (pub_sub::tcp::OPCODE_MIN..=pub_sub::tcp::OPCODE_MAX).contains(&op) => {
+            pub_sub::tcp::handle(op, &mut cursor, engine, session_id).await
+        }
+        op if (stream::tcp::OPCODE_MIN..=stream::tcp::OPCODE_MAX).contains(&op) => {
+            stream::tcp::handle(op, &mut cursor, engine, session_id).await
+        }
+
+        _ => Response::error(
+            ErrorCode::ProtocolError,
+            format!("Unknown opcode: 0x{:02X}", opcode),
+        ),
     }
 }
 
@@ -72,6 +64,8 @@ mod tests {
 
     #[test]
     fn test_inline_opcodes_are_classified_correctly() {
+        assert!(is_inline_opcode(OP_DEBUG_ECHO));
+
         // Stream opcodes that must be inline
         assert!(is_inline_opcode(stream::tcp::OP_S_ACK));
         assert!(is_inline_opcode(stream::tcp::OP_S_SEEK));
@@ -83,6 +77,8 @@ mod tests {
         assert!(is_inline_opcode(store::tcp::OP_MAP_GET));
         assert!(is_inline_opcode(store::tcp::OP_MAP_DEL));
         assert!(is_inline_opcode(store::tcp::OP_MAP_INCR));
+
+        assert!(is_inline_opcode(queue::tcp::OP_Q_EXISTS));
 
         // PubSub opcodes that must be ordered with publish
         assert!(is_inline_opcode(pub_sub::tcp::OP_SUB));
@@ -108,6 +104,5 @@ mod tests {
     #[test]
     fn test_unknown_opcode_is_not_inline() {
         assert!(!is_inline_opcode(0xFF));
-        assert!(!is_inline_opcode(0x00));
     }
 }

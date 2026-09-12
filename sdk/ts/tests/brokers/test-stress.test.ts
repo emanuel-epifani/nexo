@@ -1,29 +1,29 @@
 /**
  * Nexo TS SDK — Stress / Benchmark Suite
  *
- * Last full run: 2026-07-22 | Stream rows rerun: 2026-07-26
+ * Last full run: 2026-09-12 (direct-reader transport + writer batching)
  * MacBook Pro M4 Pro | Battery High Performance
  *
  * THROUGHPUT (50k ops, 50 concurrent workers):
- *   STORE SET            190,972 ops/sec | p50: 0.21ms | p99: 1.56ms | MAX: 4.05ms
- *   STORE GET            100,133 ops/sec | p50: 0.32ms | p99: 3.77ms | MAX: 12.51ms
- *   QUEUE PUSH           172,822 ops/sec | p50: 0.23ms | p99: 1.14ms | MAX: 2.27ms
- *   QUEUE PUSH BATCH   1,214,513 ops/sec | p50: 0.04ms | p99: 0.07ms | MAX: 0.08ms
- *   STREAM PUBLISH        49,371 ops/sec | p50: 0.96ms | p99: 1.73ms | MAX: 2.55ms
- *   STREAM PUB BATCH   1,855,554 ops/sec | p50: 0.02ms | p99: 0.04ms | MAX: 0.05ms
- *   PUBSUB PUBLISH       205,926 ops/sec | p50: 0.23ms | p99: 0.98ms | MAX: 2.00ms
- *   QUEUE CONSUME+ACK    165,630 ops/sec
- *   STREAM SUB+ACK        34,422 ops/sec
+ *   STORE SET            251,252 ops/sec | p50: 0.16ms | p99: 0.98ms | MAX: 1.77ms
+ *   STORE GET            290,500 ops/sec | p50: 0.15ms | p99: 0.95ms | MAX: 1.33ms
+ *   QUEUE PUSH           195,808 ops/sec | p50: 0.24ms | p99: 1.03ms | MAX: 1.28ms
+ *   QUEUE PUSH BATCH   1,354,677 ops/sec | p50: 0.03ms | p99: 0.07ms | MAX: 0.07ms
+ *   STREAM PUBLISH        54,547 ops/sec | p50: 0.91ms | p99: 1.27ms | MAX: 2.04ms
+ *   STREAM PUB BATCH   2,185,684 ops/sec | p50: 0.02ms | p99: 0.03ms | MAX: 0.03ms
+ *   PUBSUB PUBLISH       205,920 ops/sec | p50: 0.23ms | p99: 1.06ms | MAX: 1.37ms
+ *   QUEUE CONSUME+ACK    198,982 ops/sec
+ *   STREAM SUB+ACK        36,936 ops/sec
  *
  * LATENCY (100k sequential ops):
- *   STORE SET             29,712 ops/sec | p50: 0.02ms | p99: 0.13ms | MAX: 5.59ms
- *   STORE GET             30,223 ops/sec | p50: 0.02ms | p99: 0.12ms | MAX: 12.45ms
- *   QUEUE PUSH            25,939 ops/sec | p50: 0.03ms | p99: 0.14ms | MAX: 24.27ms
- *   STREAM PUBLISH        24,145 ops/sec | p50: 0.04ms | p99: 0.10ms | MAX: 1.64ms
- *   PUBSUB PUBLISH        30,390 ops/sec | p50: 0.02ms | p99: 0.12ms | MAX: 14.49ms
+ *   STORE SET             44,289 ops/sec | p50: 0.02ms | p99: 0.06ms | MAX: 1.00ms
+ *   STORE GET             48,647 ops/sec | p50: 0.02ms | p99: 0.04ms | MAX: 0.80ms
+ *   QUEUE PUSH            35,198 ops/sec | p50: 0.03ms | p99: 0.06ms | MAX: 5.69ms
+ *   STREAM PUBLISH        24,900 ops/sec | p50: 0.04ms | p99: 0.08ms | MAX: 1.85ms
+ *   PUBSUB PUBLISH        39,393 ops/sec | p50: 0.02ms | p99: 0.06ms | MAX: 0.64ms
  *
  * UTILS:
- *   runConcurrent     21,883,231 ops/sec
+ *   runConcurrent     26,987,523 ops/sec
  */
 import { describe, expect, it } from "vitest";
 import { BenchmarkProbe } from "../utils/benchmark-misure";

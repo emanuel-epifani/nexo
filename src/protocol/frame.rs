@@ -67,7 +67,7 @@ pub struct InboundFrame {
 #[derive(Debug)]
 pub enum OutboundFrame {
     Response { id: u32, response: Response },
-    PushPubSub { id: u32, payload: Bytes },
+    PushPubSub { payload: Bytes },
 }
 
 /// Represents a response to be sent back

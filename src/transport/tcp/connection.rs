@@ -2,7 +2,7 @@
 //! Owns broker registration, push bridge, and request dispatch.
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -14,7 +14,7 @@ use crate::protocol::{
     ErrorCode, InboundFrame, NexoCodec, OutboundFrame, ParseError, Response, TYPE_REQUEST,
     TYPE_REQUEST_NO_RESPONSE,
 };
-use crate::transport::tcp::dispatcher::{is_inline_opcode, Dispatcher};
+use crate::transport::tcp::dispatcher::{dispatch, is_inline_opcode};
 use crate::NexoEngine;
 
 pub async fn handle_connection(
@@ -29,13 +29,17 @@ pub async fn handle_connection(
     // ==========================================
     let session_id: Arc<str> = Arc::from(Uuid::new_v4().to_string());
 
-    // Channels to communicate with the raw TCP socket
-    let (inbound_tx, mut inbound_rx) = mpsc::channel(server_config.channel_capacity_socket_write);
+    // The write half runs in a dedicated task fed by the outbound channel.
+    // Reading remains independent until that bounded channel fills, at which
+    // point backpressure intentionally stops the session from buffering more.
     let (outbound_tx, outbound_rx) = mpsc::channel(server_config.channel_capacity_socket_write);
-
-    // Spawn the raw I/O task
     let (reader, writer) = socket.into_split();
-    let mut socket_task = tokio::spawn(run_socket(reader, writer, inbound_tx, outbound_rx));
+    let mut framed_reader = FramedRead::new(reader, NexoCodec::new(server_config.max_payload_size));
+    let mut writer_task = tokio::spawn(run_writer(
+        writer,
+        outbound_rx,
+        server_config.max_payload_size,
+    ));
 
     // ==========================================
     // ACT 2: PUBSUB PUSH BRIDGE
@@ -50,7 +54,7 @@ pub async fn handle_connection(
     let mut bridge_handle = tokio::spawn(async move {
         while let Some(msg_arc) = push_rx.recv().await {
             let payload = msg_arc.get_network_packet().clone();
-            let frame = OutboundFrame::PushPubSub { id: 0, payload };
+            let frame = OutboundFrame::PushPubSub { payload };
 
             if outbound_bridge.send(frame).await.is_err() {
                 break; // Socket closed, exit bridge
@@ -62,68 +66,57 @@ pub async fn handle_connection(
     // ACT 3: MAIN EVENT LOOP (ROUTING)
     // ==========================================
     let mut request_set = tokio::task::JoinSet::new();
+    let mut result = Ok(());
 
     loop {
         tokio::select! {
-            // EVENT A: We received a command from the Client
-            Some(frame) = inbound_rx.recv() => {
-                let id = frame.header.id();
-                let opcode = frame.header.meta;
-                let frame_type = frame.header.frame_type;
+            // EVENT A: We received a frame from the Client
+            frame = framed_reader.next() => {
+                let frame = match frame {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(err)) => {
+                        result = Err(format!("Protocol error: {err:?}"));
+                        break;
+                    }
+                    None => break, // Clean disconnect
+                };
 
-                if is_inline_opcode(opcode) {
-                    // Inline: preserve TCP arrival order for state mutations
-                    // (ACK/LEAVE/SEEK/JOIN). These are O(1) lock+mutate, never block.
-                    let dispatcher = Dispatcher::new(&engine, &session_id);
-                    match frame_type {
-                        TYPE_REQUEST => {
-                            let response = dispatcher.dispatch(opcode, frame.payload).await;
-                            let _ = outbound_tx.send(OutboundFrame::Response { id, response }).await;
-                        }
-                        TYPE_REQUEST_NO_RESPONSE => {
-                            let _ = dispatcher.dispatch(opcode, frame.payload).await;
-                        }
-                        _ => {
-                            let _ = outbound_tx.send(OutboundFrame::Response {
-                                id,
-                                response: Response::error(ErrorCode::ProtocolError, "Unsupported frame type"),
-                            }).await;
-                        }
+                let opcode = frame.header.meta;
+                let inline = !matches!(
+                    frame.header.frame_type,
+                    TYPE_REQUEST | TYPE_REQUEST_NO_RESPONSE
+                ) || is_inline_opcode(opcode);
+
+                if inline {
+                    if dispatch_frame(&engine, &session_id, &outbound_tx, frame)
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
                 } else {
-                    // Spawn: potentially blocking (FETCH long-poll, PUBLISH I/O, etc.)
-                    let tx_clone = outbound_tx.clone();
-                    let engine_clone = Arc::clone(&engine);
-                    let session_id_clone = Arc::clone(&session_id);
+                    let outbound_tx = outbound_tx.clone();
+                    let engine = Arc::clone(&engine);
+                    let session_id = Arc::clone(&session_id);
 
                     request_set.spawn(async move {
-                        match frame_type {
-                            TYPE_REQUEST => {
-                                let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
-                                let response = dispatcher.dispatch(opcode, frame.payload).await;
-                                let _ = tx_clone.send(OutboundFrame::Response { id, response }).await;
-                            }
-                            TYPE_REQUEST_NO_RESPONSE => {
-                                let dispatcher = Dispatcher::new(&engine_clone, &session_id_clone);
-                                let _ = dispatcher.dispatch(opcode, frame.payload).await;
-                            }
-                            _ => {
-                                let _ = tx_clone.send(OutboundFrame::Response {
-                                    id,
-                                    response: Response::error(ErrorCode::ProtocolError, "Unsupported frame type"),
-                                }).await;
-                            }
-                        }
+                        let _ = dispatch_frame(&engine, &session_id, &outbound_tx, frame).await;
                     });
                 }
             }
 
-            // EVENT B: The TCP Socket crashed or disconnected
-            socket_result = &mut socket_task => {
-                match socket_result {
-                    Ok(Ok(())) => break, // Clean disconnect
-                    Ok(Err(err)) => return Err(format!("Protocol error: {err:?}")),
-                    Err(err) => return Err(format!("Socket task panicked: {err:?}")),
+            // EVENT B: The write side died (socket write error or all senders dropped)
+            writer_result = &mut writer_task => {
+                match writer_result {
+                    Ok(Ok(())) => break,
+                    Ok(Err(err)) => {
+                        result = Err(format!("Socket write error: {err:?}"));
+                        break;
+                    }
+                    Err(err) => {
+                        result = Err(format!("Writer task panicked: {err:?}"));
+                        break;
+                    }
                 }
             }
 
@@ -140,50 +133,68 @@ pub async fn handle_connection(
     // ==========================================
     // ACT 4: CLEANUP & DISCONNECT
     // ==========================================
+    // Runs on every exit path — including protocol/write errors — otherwise the
+    // client's subscriptions, stream bindings and the bridge task would leak.
     tracing::debug!("Client {:?} disconnected", session_id);
 
     request_set.abort_all();
     bridge_handle.abort();
+    writer_task.abort();
     engine.pubsub.disconnect(&session_id);
     engine.stream.disconnect(&*session_id).await;
 
-    Ok(())
+    result
 }
 
-async fn run_socket(
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
-    inbound_tx: mpsc::Sender<InboundFrame>,
-    mut outbound_rx: mpsc::Receiver<OutboundFrame>,
-) -> Result<(), ParseError> {
-    let mut framed_reader = FramedRead::new(reader, NexoCodec::new());
-    let mut framed_writer = FramedWrite::new(writer, NexoCodec::new());
+async fn dispatch_frame(
+    engine: &NexoEngine,
+    session_id: &str,
+    outbound_tx: &mpsc::Sender<OutboundFrame>,
+    frame: InboundFrame,
+) -> Result<(), mpsc::error::SendError<OutboundFrame>> {
+    let id = frame.header.id();
+    let opcode = frame.header.meta;
 
-    loop {
-        tokio::select! {
-            // Read fram by socket
-            frame = framed_reader.next() => {
-                match frame {
-                    Some(Ok(frame)) => {
-                        if inbound_tx.send(frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Err(err)) => return Err(err),
-                    None => break,
-                }
-            }
-            outbound = outbound_rx.recv() => {
-                match outbound {
-                    Some(message) => {
-                        if let Err(err) = framed_writer.send(message).await {
-                            return Err(err);
-                        }
-                    }
-                    None => break,
-                }
-            }
+    match frame.header.frame_type {
+        TYPE_REQUEST => {
+            let response = dispatch(engine, session_id, opcode, frame.payload).await;
+            outbound_tx
+                .send(OutboundFrame::Response { id, response })
+                .await
         }
+        TYPE_REQUEST_NO_RESPONSE => {
+            let _ = dispatch(engine, session_id, opcode, frame.payload).await;
+            Ok(())
+        }
+        _ => {
+            outbound_tx
+                .send(OutboundFrame::Response {
+                    id,
+                    response: Response::error(ErrorCode::ProtocolError, "Unsupported frame type"),
+                })
+                .await
+        }
+    }
+}
+
+/// Drains the outbound channel to the socket. Exits when every sender is
+/// dropped or a write fails.
+async fn run_writer(
+    writer: OwnedWriteHalf,
+    mut outbound_rx: mpsc::Receiver<OutboundFrame>,
+    max_payload_size: usize,
+) -> Result<(), ParseError> {
+    let mut framed_writer = FramedWrite::new(writer, NexoCodec::new(max_payload_size));
+
+    while let Some(frame) = outbound_rx.recv().await {
+        framed_writer.feed(frame).await?;
+        for _ in 1..256 {
+            let Ok(frame) = outbound_rx.try_recv() else {
+                break;
+            };
+            framed_writer.feed(frame).await?;
+        }
+        framed_writer.flush().await?;
     }
 
     Ok(())
