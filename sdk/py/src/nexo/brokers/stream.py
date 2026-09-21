@@ -48,7 +48,6 @@ class StreamRetention:
 @dataclass(frozen=True)
 class StreamConfig:
     retention: StreamRetention
-    max_segment_size: int
     max_ack_pending: int
     ack_wait_ms: int
     max_deliveries: int
@@ -122,7 +121,6 @@ def _read_definition(cursor: Any) -> StreamDefinition:
                 max_age_ms=max_age_ms,
                 max_bytes=max_bytes,
             ),
-            max_segment_size=cursor.read_u64(),
             max_ack_pending=cursor.read_u64(),
             ack_wait_ms=cursor.read_u64(),
             max_deliveries=cursor.read_u32(),
@@ -504,12 +502,13 @@ class StreamSubscription(Generic[T]):
         batch: list[dict[str, Any]] = []
         for _ in range(count):
             seq = cursor.read_u64()
+            receipt = cursor.read_uuid()
             cursor.read_u64()  # skip timestamp
             key_length = cursor.read_u16()
             key = cursor.read_buffer(key_length) if key_length > 0 else None
             payload_length = cursor.read_u32()
             data = cursor.decode_any_from_buffer(payload_length)
-            batch.append({"seq": seq, "key": key, "data": data})
+            batch.append({"seq": seq, "receipt": receipt, "key": key, "data": data})
 
         ack_errors: list[Exception] = []
 
@@ -541,7 +540,8 @@ class StreamSubscription(Generic[T]):
                     .string(self._group_name)
                     .string(consumer_id)
                     .u64(generation)
-                    .u64(message["seq"]),
+                    .u64(message["seq"])
+                    .uuid(message["receipt"]),
                 )
             except Exception as error:
                 ack_errors.append(error)

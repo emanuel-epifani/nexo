@@ -82,6 +82,55 @@ pub async fn handle_connection(
                 };
 
                 let opcode = frame.header.meta;
+
+                // Stream commands submit on the reader (in TCP order, with
+                // admission backpressure) and complete on a spawned task.
+                if matches!(
+                    frame.header.frame_type,
+                    TYPE_REQUEST | TYPE_REQUEST_NO_RESPONSE
+                ) && (crate::brokers::stream::tcp::OPCODE_MIN
+                    ..=crate::brokers::stream::tcp::OPCODE_MAX)
+                    .contains(&opcode)
+                {
+                    let id = frame.header.id();
+                    let wants_response =
+                        matches!(frame.header.frame_type, TYPE_REQUEST);
+                    match crate::brokers::stream::tcp::submit(
+                        opcode,
+                        frame.payload,
+                        &engine,
+                        &session_id,
+                    )
+                    .await
+                    {
+                        Ok(call) => {
+                            if wants_response {
+                                let outbound_tx = outbound_tx.clone();
+                                request_set.spawn(async move {
+                                    let response = call.complete().await;
+                                    let _ = outbound_tx
+                                        .send(OutboundFrame::Response { id, response })
+                                        .await;
+                                });
+                            }
+                            // No-response requests still execute: dropping the
+                            // call closes its reply channel, which the writer
+                            // ignores.
+                        }
+                        Err(response) => {
+                            if wants_response
+                                && outbound_tx
+                                    .send(OutboundFrame::Response { id, response })
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let inline = !matches!(
                     frame.header.frame_type,
                     TYPE_REQUEST | TYPE_REQUEST_NO_RESPONSE

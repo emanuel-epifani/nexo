@@ -1,10 +1,17 @@
-//! Stream broker TCP surface: opcodes, command parsing, response wire
-//! encoding and the dispatch entry point `handle(...)`.
+//! Stream broker TCP surface: opcodes, request parsing, response encoding.
+//!
+//! Split-phase dispatch: `submit()` parses and enqueues on the connection's
+//! read path (preserving command order and applying admission backpressure),
+//! while `StreamCall::complete()` runs on a spawned task that awaits the
+//! writer's post-commit reply and encodes it. The reader never blocks on a
+//! SQLite commit.
 
 use bytes::Bytes;
 
-use crate::brokers::stream::domain::message::Message;
 use crate::brokers::stream::domain::definition::StreamDefinition;
+use crate::brokers::stream::domain::message::{Delivery, DlsEntry, PubItem};
+use crate::brokers::stream::domain::ops::{StreamReply, StreamRequest};
+use crate::brokers::stream::manager::PendingReply;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
 use crate::brokers::{ProvisionOutcome, ProvisionResult};
 use crate::protocol::wire::{PayloadCursor, PayloadWriter};
@@ -27,15 +34,10 @@ pub use crate::protocol::{
 };
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
 
+
 // ==========================================
 // COMMANDS
 // ==========================================
-
-#[derive(Debug)]
-pub struct PubItem {
-    pub key: Option<Bytes>,
-    pub payload: Bytes,
-}
 
 #[derive(Debug)]
 pub enum StreamCommand {
@@ -65,6 +67,7 @@ pub enum StreamCommand {
         consumer_id: String,
         generation: u64,
         seq: u64,
+        receipt: [u8; 16],
     },
     Seek {
         name: String,
@@ -156,9 +159,9 @@ impl StreamCommand {
                 for _ in 0..count {
                     let key_len = cursor.read_u16()? as usize;
                     let key = if key_len > 0 {
-                        Some(cursor.read_bytes(key_len)?)
+                        cursor.read_bytes(key_len)?
                     } else {
-                        None
+                        Bytes::new()
                     };
                     let payload_len = cursor.read_u32()? as usize;
                     let payload = cursor.read_bytes(payload_len)?;
@@ -193,12 +196,14 @@ impl StreamCommand {
                 let consumer_id = cursor.read_string()?;
                 let generation = cursor.read_u64()?;
                 let seq = cursor.read_u64()?;
+                let receipt = cursor.read_uuid_bytes()?;
                 Ok(Self::Ack {
                     name,
                     group,
                     consumer_id,
                     generation,
                     seq,
+                    receipt,
                 })
             }
             OP_S_SEEK => {
@@ -307,6 +312,34 @@ mod tests {
 
         assert!(error.to_string().contains("exceeds remaining payload"));
     }
+
+    #[test]
+    fn ack_parser_reads_receipt() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_u64(3)
+            .put_u64(9)
+            .put_uuid(&[0xAB; 16]);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        match StreamCommand::parse(OP_S_ACK, &mut cursor).unwrap() {
+            StreamCommand::Ack { receipt, seq, .. } => {
+                assert_eq!(seq, 9);
+                assert_eq!(receipt, [0xAB; 16]);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn ack_parser_rejects_truncated_receipt() {
+        let mut writer = PayloadWriter::new();
+        writer.put_str("s").put_str("g").put_str("c").put_u64(3).put_u64(9);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        assert!(StreamCommand::parse(OP_S_ACK, &mut cursor).is_err());
+    }
 }
 
 // ==========================================
@@ -322,18 +355,18 @@ fn encode_publish_batch(seqs: &[u64]) -> Bytes {
     w.into_bytes()
 }
 
-fn encode_fetch(messages: &[Message]) -> Bytes {
+/// FETCH item: seq u64 | receipt 16B | timestamp u64 | key_len u16 | key |
+/// payload_len u32 | payload. The receipt fences the lease and is echoed on ACK.
+fn encode_fetch(deliveries: &[Delivery]) -> Bytes {
     let mut w = PayloadWriter::new();
-    w.put_u32(messages.len() as u32);
-    for msg in messages {
-        w.put_u64(msg.seq);
-        w.put_u64(msg.timestamp);
-        let key_len = msg.key.as_ref().map_or(0, |k| k.len());
-        w.put_u16(key_len as u16);
-        if let Some(k) = &msg.key {
-            w.put_raw(k);
-        }
-        w.put_bytes(&msg.payload);
+    w.put_u32(deliveries.len() as u32);
+    for d in deliveries {
+        w.put_u64(d.message.seq);
+        w.put_uuid(&d.receipt);
+        w.put_u64(d.message.timestamp);
+        w.put_u16(d.message.key.len() as u16);
+        w.put_raw(&d.message.key);
+        w.put_bytes(&d.message.payload);
     }
     w.into_bytes()
 }
@@ -352,18 +385,15 @@ fn encode_bool(value: bool) -> Bytes {
     w.into_bytes()
 }
 
-fn encode_peek_dls(entries: &[(u64, String, u32, Option<Bytes>)]) -> Bytes {
+fn encode_peek_dls(entries: &[DlsEntry]) -> Bytes {
     let mut w = PayloadWriter::new();
     w.put_u32(entries.len() as u32);
-    for (seq, reason, attempts, key) in entries {
-        w.put_u64(*seq);
-        w.put_str(reason);
-        w.put_u32(*attempts);
-        let key_len = key.as_ref().map_or(0, |k| k.len());
-        w.put_u16(key_len as u16);
-        if let Some(k) = key {
-            w.put_raw(k);
-        }
+    for entry in entries {
+        w.put_u64(entry.seq);
+        w.put_str(&entry.reason);
+        w.put_u32(entry.attempts);
+        w.put_u16(entry.key.len() as u16);
+        w.put_raw(&entry.key);
     }
     w.into_bytes()
 }
@@ -394,7 +424,6 @@ fn put_definition(writer: &mut PayloadWriter, definition: &StreamDefinition) {
         writer.put_u64(max_bytes);
     }
     writer
-        .put_u64(definition.config.max_segment_size)
         .put_u64(definition.config.max_ack_pending as u64)
         .put_u64(definition.config.ack_wait_ms)
         .put_u32(definition.config.max_deliveries);
@@ -417,38 +446,99 @@ fn encode_provision_result(result: &ProvisionResult<StreamDefinition>) -> Bytes 
 }
 
 // ==========================================
-// DISPATCH ENTRY POINT
+// SUBMIT / COMPLETE SEAM
 // ==========================================
 
-pub async fn handle(
+/// Which reply encoding a submitted command needs at completion time.
+#[derive(Debug, Clone, Copy)]
+enum CallKind {
+    Provision,
+    Publish,
+    Fetch,
+    Join,
+    Bool,
+    Definition,
+    DlsPeek,
+    Count,
+    Unit,
+}
+
+pub struct StreamCall {
+    pending: PendingReply,
+    kind: CallKind,
+}
+
+impl StreamCall {
+    /// Runs on a spawned task: awaits the post-commit reply and encodes it.
+    pub async fn complete(self) -> Response {
+        match self.pending.wait().await {
+            Ok(reply) => encode_reply(self.kind, reply),
+            Err(error) => error_response(error),
+        }
+    }
+}
+
+fn encode_reply(kind: CallKind, reply: StreamReply) -> Response {
+    match (kind, reply) {
+        (CallKind::Provision, StreamReply::Provision(result)) => {
+            Response::Data(encode_provision_result(&result))
+        }
+        (CallKind::Publish, StreamReply::Published(seqs)) => {
+            Response::Data(encode_publish_batch(&seqs))
+        }
+        (CallKind::Fetch, StreamReply::Fetch(deliveries)) => {
+            Response::Data(encode_fetch(&deliveries))
+        }
+        (
+            CallKind::Join,
+            StreamReply::Join {
+                ack_floor,
+                consumer_id,
+                generation,
+            },
+        ) => Response::Data(encode_join_group(ack_floor, generation, &consumer_id)),
+        (CallKind::Bool, StreamReply::Bool(v)) => Response::Data(encode_bool(v)),
+        (CallKind::Definition, StreamReply::Definition(def)) => {
+            Response::Data(encode_definition(&def))
+        }
+        (CallKind::DlsPeek, StreamReply::DlsEntries(entries)) => {
+            Response::Data(encode_peek_dls(&entries))
+        }
+        (CallKind::Count, StreamReply::Count(n)) => Response::Data(encode_purge_dls(n)),
+        (CallKind::Unit, StreamReply::Unit) => Response::Ok,
+        _ => Response::error(ErrorCode::Internal, "Unexpected stream reply"),
+    }
+}
+
+/// Parse + submit in TCP read order. `Err` carries the response to send
+/// inline (parse/validation/admission failures); `Ok` carries the pending
+/// completion to detach onto `request_set`.
+pub async fn submit(
     opcode: u8,
-    cursor: &mut PayloadCursor,
+    payload: Bytes,
     engine: &NexoEngine,
     session_id: &str,
-) -> Response {
-    let cmd = match StreamCommand::parse(opcode, cursor) {
+) -> Result<StreamCall, Response> {
+    let mut cursor = PayloadCursor::new(payload);
+    let cmd = match StreamCommand::parse(opcode, &mut cursor) {
         Ok(c) => c,
-        Err(error) => return Response::error(ErrorCode::ProtocolError, error.to_string()),
+        Err(error) => {
+            return Err(Response::error(ErrorCode::ProtocolError, error.to_string()))
+        }
     };
-
     let stream = &engine.stream;
-    let client = session_id.to_owned();
+    let connection = session_id.to_string();
 
-    match cmd {
-        StreamCommand::Create { name, options } => match stream.create_stream(name, options).await
-        {
-            Ok(result) => Response::Data(encode_provision_result(&result)),
-            Err(error) => error_response(error),
-        },
+    let (request, kind) = match cmd {
+        StreamCommand::Create { name, options } => {
+            let requested = crate::brokers::stream::domain::definition::StreamConfig::from_options(
+                options,
+                &stream.config(),
+            );
+            (StreamRequest::CreateStream { name, requested }, CallKind::Provision)
+        }
         StreamCommand::Publish { name, items } => {
-            let batch: Vec<(Option<Bytes>, Bytes)> = items
-                .into_iter()
-                .map(|item| (item.key, item.payload))
-                .collect();
-            match stream.publish_batch(&name, batch).await {
-                Ok(seqs) => Response::Data(encode_publish_batch(&seqs)),
-                Err(error) => error_response(error),
-            }
+            (StreamRequest::Publish { name, items }, CallKind::Publish)
         }
         StreamCommand::Fetch {
             name,
@@ -458,103 +548,134 @@ pub async fn handle(
             limit,
             wait_ms,
         } => {
-            match stream
-                .fetch(
-                    &group,
-                    &consumer_id,
-                    generation,
-                    limit as usize,
-                    &name,
-                    wait_ms as u64,
-                )
-                .await
-            {
-                Ok(messages) => Response::Data(encode_fetch(&messages)),
-                Err(error) => error_response(error),
-            }
+            // Fetch is the only command that may long-poll: the wait loop is
+            // driven by a detached task so the reader never blocks.
+            return Ok(submit_fetch(
+                std::sync::Arc::clone(&engine.stream),
+                name,
+                group,
+                consumer_id,
+                generation,
+                limit,
+                wait_ms,
+                connection,
+            ));
         }
-        StreamCommand::Join { name, group } => {
-            match stream.join_group(&group, &name, &client).await {
-                Ok(result) => Response::Data(encode_join_group(
-                    result.ack_floor,
-                    result.generation,
-                    &result.consumer_id,
-                )),
-                Err(error) => error_response(error),
-            }
-        }
+        StreamCommand::Join { name, group } => (
+            StreamRequest::Join {
+                name,
+                group,
+                connection_id: connection,
+            },
+            CallKind::Join,
+        ),
         StreamCommand::Ack {
             name,
             group,
             consumer_id,
             generation,
             seq,
-        } => match stream
-            .ack(&group, &name, &consumer_id, generation, seq)
-            .await
-        {
-            Ok(_) => Response::Ok,
-            Err(error) => error_response(error),
-        },
+            receipt,
+        } => (
+            StreamRequest::Ack {
+                name,
+                group,
+                identity: crate::brokers::stream::domain::message::ConsumerIdentity {
+                    connection_id: connection,
+                    consumer_id,
+                    generation,
+                },
+                seq,
+                receipt,
+            },
+            CallKind::Unit,
+        ),
         StreamCommand::Seek {
             name,
             group,
             target,
-        } => match stream.seek(&group, &name, target).await {
-            Ok(_) => Response::Ok,
-            Err(error) => error_response(error),
-        },
+        } => (StreamRequest::Seek { name, group, target }, CallKind::Unit),
+        StreamCommand::Exists { name } => (StreamRequest::StreamExists { name }, CallKind::Bool),
+        StreamCommand::Describe { name } => {
+            (StreamRequest::DescribeStream { name }, CallKind::Definition)
+        }
+        StreamCommand::Delete { name } => (StreamRequest::DeleteStream { name }, CallKind::Unit),
         StreamCommand::Leave {
             name,
             group,
             consumer_id,
             generation,
-        } => match stream
-            .leave_group(&group, &name, &consumer_id, generation)
-            .await
-        {
-            Ok(_) => Response::Ok,
-            Err(error) => error_response(error),
-        },
-        StreamCommand::Exists { name } => {
-            let found = stream.exists(&name).await;
-            Response::Data(encode_bool(found))
-        }
-        StreamCommand::Describe { name } => match stream.describe(&name).await {
-            Ok(definition) => Response::Data(encode_definition(&definition)),
-            Err(error) => error_response(error),
-        },
-        StreamCommand::Delete { name } => match stream.delete_stream(name).await {
-            Ok(_) => Response::Ok,
-            Err(error) => error_response(error),
-        },
+        } => (
+            StreamRequest::Leave {
+                name,
+                group,
+                identity: crate::brokers::stream::domain::message::ConsumerIdentity {
+                    connection_id: connection,
+                    consumer_id,
+                    generation,
+                },
+            },
+            CallKind::Unit,
+        ),
         StreamCommand::PeekDls {
             name,
             group,
             limit,
             offset,
-        } => match stream
-            .peek_dls(&name, &group, limit as usize, offset as usize)
-            .await
-        {
-            Ok(entries) => Response::Data(encode_peek_dls(&entries)),
-            Err(error) => error_response(error),
-        },
-        StreamCommand::MoveToStream { name, group, seq } => {
-            match stream.move_to_stream(&name, &group, seq).await {
-                Ok(_) => Response::Ok,
-                Err(error) => error_response(error),
-            }
+        } => (
+            StreamRequest::PeekDls {
+                name,
+                group,
+                limit: limit as usize,
+                offset: offset as usize,
+            },
+            CallKind::DlsPeek,
+        ),
+        StreamCommand::MoveToStream { name, group, seq } => (
+            StreamRequest::ReplayDls { name, group, seq },
+            CallKind::Unit,
+        ),
+        StreamCommand::DeleteDls { name, group, seq } => (
+            StreamRequest::DeleteDls { name, group, seq },
+            CallKind::Unit,
+        ),
+        StreamCommand::PurgeDls { name, group } => {
+            (StreamRequest::PurgeDls { name, group }, CallKind::Count)
         }
-        StreamCommand::DeleteDls { name, group, seq } => {
-            match stream.delete_dls(&name, &group, seq).await {
-                Ok(_) => Response::Ok,
-                Err(error) => error_response(error),
-            }
-        }
-        StreamCommand::PurgeDls { name, group } => match stream.purge_dls(&name, &group).await {
-            Ok(count) => Response::Data(encode_purge_dls(count)),
-            Err(error) => error_response(error),
-        },
+    };
+
+    match stream.submit(request).await {
+        Ok(pending) => Ok(StreamCall { pending, kind }),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+/// FETCH drives the long-poll loop on a detached task: the read path stays
+/// free, and the delivery order guarantee is unaffected because fetches only
+/// observe committed state (leases are receipt-fenced).
+fn submit_fetch(
+    stream: std::sync::Arc<crate::brokers::stream::StreamManager>,
+    name: String,
+    group: String,
+    consumer_id: String,
+    generation: u64,
+    limit: u32,
+    wait_ms: u32,
+    connection: String,
+) -> StreamCall {
+    let identity = crate::brokers::stream::domain::message::ConsumerIdentity {
+        connection_id: connection,
+        consumer_id,
+        generation,
+    };
+    let wait = wait_ms as u64;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = stream.fetch(&name, &group, &identity, limit as usize, wait).await;
+        let _ = tx.send(result.map(StreamReply::Fetch));
+    });
+    StreamCall {
+        pending: PendingReply::wrap(rx),
+        kind: CallKind::Fetch,
     }
 }

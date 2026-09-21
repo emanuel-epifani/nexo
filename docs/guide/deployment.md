@@ -7,7 +7,7 @@ Nexo stores all data under `./data/` by default:
 ```
 data/
 ├── queues/     ← Queue messages (SQLite WAL)
-├── streams/    ← Stream segments (append-only files)
+├── streams/    ← Stream log + group state (single SQLite WAL database)
 └── pubsub/     ← Pub/Sub retained messages (SQLite)
 ```
 

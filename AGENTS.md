@@ -20,7 +20,10 @@ src/
   brokers/<broker>/            # store, queue, pub-sub, stream
     manager.rs                 # public API, returns neutral types (snapshot.rs)
     tcp.rs                     # Command parse, Response, handle()
-    domain/persistence.rs      # durable I/O (Queue SQLite, Stream log, PubSub retained)
+    worker.rs                  # stream only: dedicated SQLite writer thread
+    domain/persistence.rs      # durable I/O (Queue, PubSub retained)
+    domain/storage.rs          # stream only: shared SQLite DB lifecycle (lock, schema, recovery)
+    domain/recipes.rs          # stream only: transactions (publish/fetch/ack/dls/retention/gc)
 protocol.json                  # single source of truth for all protocol constants
 scripts/generate-protocol.js   # codegen: protocol.json → generated.{rs,ts,py}
 tests/                         # Rust integration tests, one file per broker

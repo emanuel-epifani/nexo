@@ -122,7 +122,6 @@ Test names are listed as `ts:` and `py:` for easy grep matching.
 | stream_invalid_name | Stream names cannot escape the persistence directory | should reject stream names that escape the stream directory | reject_invalid_stream_name |
 | stream_invalid_runtime_options | Invalid seek targets and zero polling options are rejected | should reject invalid seek and subscription polling options | reject_invalid_seek_and_subscription_options |
 | stream_publish_nonexistent_fails | Publish to non-existent stream fails | should fail publish to non-existent stream | publish_nonexistent_stream_fails |
-| stream_publish_storage_failure | Storage write failure rejects publish instead of returning a sequence | should fail publish when storage cannot write the message | publish_storage_write_failure |
 | stream_ops_after_delete_fail | Operations after delete fail | should fail operations after delete | operations_after_delete_fail |
 | stream_peek_dls_empty | `group.dls.peek()` returns an empty array when DLS is empty | should expose group DLS peek when the DLS is empty | peek_dls_empty_returns_empty |
 | stream_purge_dls_empty | `group.dls.purge()` returns 0 when DLS is empty | should expose group DLS purge when the DLS is empty | purge_dls_empty_returns_zero |

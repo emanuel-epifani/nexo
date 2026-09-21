@@ -8,15 +8,13 @@ use crate::NexoEngine;
 use bytes::Bytes;
 
 /// Opcodes that must complete in TCP arrival order and are cheap enough to
-/// execute without allocating a Tokio task.
+/// execute without allocating a Tokio task. Stream opcodes are NOT here:
+/// they take the dedicated ordered-submit path in `connection.rs` (submit on
+/// the reader, completion detached).
 pub fn is_inline_opcode(opcode: u8) -> bool {
     matches!(
         opcode,
         OP_DEBUG_ECHO
-            | stream::tcp::OP_S_ACK
-            | stream::tcp::OP_S_SEEK
-            | stream::tcp::OP_S_LEAVE
-            | stream::tcp::OP_S_JOIN
             | store::tcp::OP_MAP_SET
             | store::tcp::OP_MAP_GET
             | store::tcp::OP_MAP_DEL
@@ -47,8 +45,11 @@ pub async fn dispatch(
         op if (pub_sub::tcp::OPCODE_MIN..=pub_sub::tcp::OPCODE_MAX).contains(&op) => {
             pub_sub::tcp::handle(op, &mut cursor, engine, session_id).await
         }
+        // Stream opcodes are submitted on the read path (ordered) and
+        // complete on spawned tasks — see connection.rs.
         op if (stream::tcp::OPCODE_MIN..=stream::tcp::OPCODE_MAX).contains(&op) => {
-            stream::tcp::handle(op, &mut cursor, engine, session_id).await
+            let _ = op;
+            Response::error(ErrorCode::Internal, "Stream dispatch misrouted")
         }
 
         _ => Response::error(
@@ -66,12 +67,6 @@ mod tests {
     fn test_inline_opcodes_are_classified_correctly() {
         assert!(is_inline_opcode(OP_DEBUG_ECHO));
 
-        // Stream opcodes that must be inline
-        assert!(is_inline_opcode(stream::tcp::OP_S_ACK));
-        assert!(is_inline_opcode(stream::tcp::OP_S_SEEK));
-        assert!(is_inline_opcode(stream::tcp::OP_S_LEAVE));
-        assert!(is_inline_opcode(stream::tcp::OP_S_JOIN));
-
         // Store opcodes that are O(1) in-memory
         assert!(is_inline_opcode(store::tcp::OP_MAP_SET));
         assert!(is_inline_opcode(store::tcp::OP_MAP_GET));
@@ -87,7 +82,11 @@ mod tests {
 
     #[test]
     fn test_blocking_opcodes_are_not_inline() {
-        // These must NOT be inline — they can block (long-poll, I/O, fan-out, etc.)
+        // Stream opcodes take the ordered-submit path, not inline dispatch.
+        assert!(!is_inline_opcode(stream::tcp::OP_S_ACK));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_SEEK));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_LEAVE));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_JOIN));
         assert!(!is_inline_opcode(stream::tcp::OP_S_FETCH));
         assert!(!is_inline_opcode(stream::tcp::OP_S_PUB));
         assert!(!is_inline_opcode(stream::tcp::OP_S_CREATE));

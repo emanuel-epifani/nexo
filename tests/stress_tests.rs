@@ -162,7 +162,11 @@ mod stress_tests {
     }
 
     async fn build_stream_manager(config: SystemStreamConfig) -> Arc<StreamManager> {
-        Arc::new(StreamManager::new(Arc::new(config)).await)
+        Arc::new(
+            StreamManager::new(Arc::new(config))
+                .await
+                .expect("stream manager must open"),
+        )
     }
 
     // =========================================================================================
@@ -356,7 +360,7 @@ mod stress_tests {
             for _ in 0..COUNT {
                 let start = Instant::now();
                 manager
-                    .publish(name, None, Bytes::from("data"))
+                    .publish(name, Bytes::new(), Bytes::from("data"))
                     .await
                     .unwrap();
                 bench.record(start.elapsed());

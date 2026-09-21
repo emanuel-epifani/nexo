@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-import shutil
 import uuid
 
 import pytest
@@ -20,9 +18,6 @@ from tests.utils.wait_for import wait_for
 async def _create_stream(nexo: NexoClient, name: str, **retention):
     await nexo.stream.create(name, **retention)
     return await nexo.stream.get(name)
-
-
-STREAM_DATA_DIR = Path(__file__).resolve().parents[4] / "data" / "streams"
 
 
 @pytest.mark.asyncio
@@ -642,20 +637,6 @@ class TestStream:
                 await disconnected.stream.exists("stream-disconnected")
         finally:
             disconnected.disconnect()
-
-    async def test_publish_storage_write_failure(self, nexo: NexoClient):
-        name = f"stream-write-failure-{uuid.uuid4()}"
-        stream = await _create_stream(nexo, name)
-        stream_path = STREAM_DATA_DIR / name
-        shutil.rmtree(stream_path)
-        stream_path.write_text("not-a-directory")
-
-        try:
-            with pytest.raises(Exception, match="Storage append failed"):
-                await stream.publish({"x": 1})
-        finally:
-            stream_path.unlink(missing_ok=True)
-            await nexo.stream.delete(name)
 
     async def test_operations_after_delete_fail(self, nexo: NexoClient):
         name = f"stream-del-ops-{uuid.uuid4()}"

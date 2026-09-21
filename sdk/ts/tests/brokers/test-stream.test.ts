@@ -3,11 +3,8 @@ import { NexoClient } from '../../src/client';
 import { nexo } from '../nexo';
 import { waitFor } from '../utils/wait-for';
 import { randomUUID } from 'crypto';
-import { rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import { NotConnectedError, ResourceConfigurationConflictError, ResourceNotFoundError } from '../../src/errors';
 
-const STREAM_DATA_DIR = path.resolve(__dirname, '../../../../data/streams');
 const streamHandles = new WeakMap<NexoClient, Map<string, Promise<any>>>();
 
 function getStream(client: NexoClient, name: string): Promise<any> {
@@ -716,22 +713,6 @@ describe('STREAM', () => {
             await expect(disconnected.stream.exists('events')).rejects.toBeInstanceOf(NotConnectedError);
         } finally {
             disconnected.disconnect();
-        }
-    });
-
-    it('should fail publish when storage cannot write the message', async () => {
-        const name = `stream-write-failure-${randomUUID()}`;
-        const streamPath = path.join(STREAM_DATA_DIR, name);
-        await nexo.stream.create(name);
-        const stream = await getStream(nexo, name);
-        await rm(streamPath, { recursive: true, force: true });
-        await writeFile(streamPath, 'not-a-directory');
-
-        try {
-            await expect(stream.publish({ x: 1 })).rejects.toThrow('Storage append failed');
-        } finally {
-            await rm(streamPath, { force: true });
-            await nexo.stream.delete(name);
         }
     });
 

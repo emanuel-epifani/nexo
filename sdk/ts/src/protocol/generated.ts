@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 0x07;
+export const PROTOCOL_VERSION = 0x08;
 
 export enum FrameType {
   REQUEST = 0x01,

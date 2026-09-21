@@ -1,499 +1,557 @@
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+//! StreamManager: the public, transport-agnostic API of the stream engine.
+//!
+//! Structure: submitters enqueue `StreamRequest`s on a bounded channel with a
+//! byte-budget admission gate; a dedicated writer thread (`worker.rs`) owns
+//! the shared SQLite database and replies over oneshot channels after commit.
+//! Runtime memory holds only watches (long-poll wakeups), the closed flag and
+//! timers — all durable state lives in SQLite.
+//!
+//! Key flow: `submit()` validates, charges admission, sends the command, and
+//! returns a `PendingReply`; convenience methods (`publish`, `fetch`, ...)
+//! build requests on top of the same path. `fetch` additionally implements
+//! the long-poll loop: an empty page parks on a per-group watch and is woken
+//! by post-commit effects.
 
-use parking_lot::Mutex;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, RwLock};
-use tokio::time::{sleep_until, Instant};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::warn;
 
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
-use crate::brokers::stream::domain::group::ConsumerGroup;
-use crate::brokers::stream::domain::message::Message;
-use crate::brokers::stream::domain::persistence::{
-    record_len, recover_stream, GroupPersistentState, Segment, StorageCommand, StorageManager,
-    MAX_STREAM_RECORD_BYTES,
+use crate::brokers::stream::domain::message::{
+    ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
 };
+use crate::brokers::stream::domain::ops::{Command, StreamReply, StreamRequest};
+use crate::brokers::stream::domain::storage::Store;
+use crate::brokers::stream::domain::types::{event_logical_bytes, fetch_item_encoded_bytes};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
+use crate::brokers::stream::worker::{self, now_millis, Admission, WatchMap};
 use crate::brokers::{
-    config_conflict_error, validate_resource_name, BrokerError, BrokerErrorKind, ProvisionOutcome,
-    ProvisionResult,
+    validate_resource_name, BrokerError, BrokerErrorKind, ProvisionResult,
 };
-use crate::protocol::STREAM_MAX_KEY_BYTES;
+use crate::protocol::{STREAM_MAX_KEY_BYTES, STREAM_MAX_PUBLISH_BATCH};
 
-struct StreamShared {
-    state: Mutex<StreamState>,
-    append_gate: Arc<AsyncMutex<()>>,
-    retention_gate: Arc<RwLock<()>>,
-    wake_tx: watch::Sender<u64>,
-}
+/// Absolute per-record storage bound (defense in depth; the effective fetch
+/// budget is usually much tighter).
+const MAX_STREAM_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+/// Lease-expiry sweep cadence. Deadlines are evaluated against durable
+/// `deadline_ms` values inside the writer transaction, so this only bounds
+/// redelivery latency.
+const LEASE_SWEEP_MS: u64 = 50;
 
-#[derive(Clone)]
-struct ConsumerBinding {
-    group_id: String,
-    consumer_id: String,
-}
-
-struct StreamState {
-    head_seq: u64,
-    next_seq: u64,
-    index: BTreeMap<u64, u64>,
-    groups: HashMap<String, ConsumerGroup>,
-    client_map: HashMap<String, Vec<ConsumerBinding>>,
-    groups_dirty: bool,
-    full_config: StreamConfig,
-    file_offset: u64,
-    active_path: PathBuf,
-    segments: Arc<Vec<Segment>>,
-}
-
-impl StreamState {
-    // What a group persists, single-sourced: used by both the periodic dirty
-    // flush and the final shutdown flush.
-    fn groups_snapshot(&self) -> BTreeMap<String, GroupPersistentState> {
-        self.groups
-            .iter()
-            .map(|(id, group)| {
-                (
-                    id.clone(),
-                    GroupPersistentState {
-                        ack_floor: group.ack_floor,
-                        dls_entries: group.dls_snapshot(),
-                        parked_keys: group.parked_keys_snapshot(),
-                        redeliver_entries: group.redeliver_snapshot(),
-                    },
-                )
-            })
-            .collect()
-    }
-}
-
+#[derive(Debug)]
 pub struct JoinGroupResult {
     pub ack_floor: u64,
     pub consumer_id: String,
     pub generation: u64,
 }
 
+/// Completion handle for a submitted command.
+pub struct PendingReply {
+    rx: oneshot::Receiver<Result<StreamReply, BrokerError>>,
+}
+
+impl PendingReply {
+    /// Wrap a completion produced outside the submit path (the fetch
+    /// long-poll loop resolves through the same reply channel).
+    pub(crate) fn wrap(rx: oneshot::Receiver<Result<StreamReply, BrokerError>>) -> Self {
+        Self { rx }
+    }
+}
+
+impl PendingReply {
+    pub async fn wait(self) -> Result<StreamReply, BrokerError> {
+        self.rx
+            .await
+            .map_err(|_| BrokerError::storage("Stream storage unavailable"))?
+    }
+}
+
 pub struct StreamManager {
-    streams: Arc<DashMap<String, Arc<StreamShared>>>,
-    deleted_streams: Arc<DashMap<String, ()>>,
-    lifecycle_gate: AsyncMutex<()>,
-    storage_tx: mpsc::Sender<StorageCommand>,
+    cmd_tx: mpsc::Sender<Command>,
+    admission: Arc<Admission>,
+    watches: Arc<WatchMap>,
     config: Arc<SystemStreamConfig>,
     cancel: CancellationToken,
+    closed: AtomicBool,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl StreamManager {
-    fn validate_stream_name(name: &str) -> Result<(), BrokerError> {
-        validate_resource_name("stream", name)
-    }
+    /// Open the shared database (fail-closed on any layout/schema error),
+    /// recover, and start the writer + maintenance timers.
+    pub async fn new(config: Arc<SystemStreamConfig>) -> Result<Self, BrokerError> {
+        let root = PathBuf::from(&config.persistence_path);
+        let (store, continuations) = tokio::task::spawn_blocking(move || Store::open(&root))
+            .await
+            .map_err(|e| BrokerError::storage(format!("Stream storage startup failed: {e}")))??;
 
-    fn config_json(config: &StreamConfig) -> serde_json::Value {
-        serde_json::json!({
-            "retention": {
-                "maxAgeMs": config.retention.max_age_ms,
-                "maxBytes": config.retention.max_bytes,
-            },
-            "maxSegmentSize": config.max_segment_size,
-            "maxAckPending": config.max_ack_pending,
-            "ackWaitMs": config.ack_wait_ms,
-            "maxDeliveries": config.max_deliveries,
-        })
-    }
-
-    pub async fn new(config: Arc<SystemStreamConfig>) -> Self {
-        let streams = Arc::new(DashMap::new());
-        let deleted_streams = Arc::new(DashMap::new());
-        let (storage_tx, storage_rx) = mpsc::channel(config.storage_queue_capacity.max(1));
-
-        let storage_manager = StorageManager::new(
-            config.persistence_path.clone(),
-            storage_rx,
-            config.max_open_files,
+        let (cmd_tx, rx) = mpsc::channel(config.storage_queue_capacity.max(1));
+        let admission = Arc::new(Admission::new(config.storage_queue_max_bytes));
+        let watches = Arc::new(WatchMap::new());
+        let handle = worker::spawn(
+            store,
+            rx,
+            continuations,
+            Arc::clone(&watches),
+            Arc::clone(&admission),
+            config.fetch_response_bytes as u64,
         );
-        tokio::spawn(storage_manager.run());
 
         let manager = Self {
-            streams,
-            deleted_streams,
-            lifecycle_gate: AsyncMutex::new(()),
-            storage_tx,
+            cmd_tx,
+            admission,
+            watches,
             config,
             cancel: CancellationToken::new(),
+            closed: AtomicBool::new(false),
+            worker: Mutex::new(Some(handle)),
         };
-
-        manager.bootstrap_from_disk().await;
-        manager.spawn_background_tasks();
-        manager
+        manager.spawn_timers();
+        Ok(manager)
     }
 
-    pub async fn shutdown(&self) {
-        self.cancel.cancel();
+    pub fn config(&self) -> &SystemStreamConfig {
+        &self.config
+    }
 
-        // Final group state flush
-        for (stream_name, stream_ref) in Self::collect_streams(&self.streams) {
-            let groups_data = stream_ref.state.lock().groups_snapshot();
-            let _ = self
-                .storage_tx
-                .send(StorageCommand::SaveState {
-                    stream_name,
-                    groups: groups_data,
-                })
-                .await;
+    fn spawn_timers(&self) {
+        let tx = self.cmd_tx.clone();
+        let cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(LEASE_SWEEP_MS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let _ = tx.try_send(Command {
+                            op: StreamRequest::ExpireLeases { now_ms: now_millis() },
+                            bytes: 0,
+                            reply: None,
+                        });
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+        let tx = self.cmd_tx.clone();
+        let cancel = self.cancel.clone();
+        let interval_ms = self.config.retention_check_interval_ms.max(100);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let _ = tx.try_send(Command {
+                            op: StreamRequest::RetentionTick,
+                            bytes: 0,
+                            reply: None,
+                        });
+                    }
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Submission path
+    // ------------------------------------------------------------------
+
+    /// Validate + admit + enqueue. Returns once the command is queued;
+    /// the reply arrives on `PendingReply` after the commit.
+    pub async fn submit(&self, request: StreamRequest) -> Result<PendingReply, BrokerError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(BrokerError::storage("Stream storage is shut down"));
         }
-
-        // Shutdown storage manager (drains remaining commands then exits)
+        self.validate(&request)?;
+        let bytes = Self::admission_bytes(&request);
+        self.admission.acquire(bytes).await;
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .storage_tx
-            .send(StorageCommand::Shutdown { reply: tx })
-            .await;
-        let _ = rx.await;
+        match self
+            .cmd_tx
+            .send(Command {
+                op: request,
+                bytes,
+                reply: Some(tx),
+            })
+            .await
+        {
+            Ok(()) => Ok(PendingReply { rx }),
+            Err(_) => {
+                self.admission.release(bytes);
+                Err(BrokerError::storage("Stream storage unavailable"))
+            }
+        }
     }
+
+    /// Pre-queue validation: cheap checks that must fail before the command
+    /// consumes queue space (names, publish item limits, fetch encodability).
+    fn validate(&self, request: &StreamRequest) -> Result<(), BrokerError> {
+        match request {
+            StreamRequest::CreateStream { name, .. }
+            | StreamRequest::DeleteStream { name }
+            | StreamRequest::StreamExists { name }
+            | StreamRequest::DescribeStream { name }
+            | StreamRequest::Read { name, .. } => validate_resource_name("stream", name),
+            StreamRequest::Publish { name, items } => {
+                validate_resource_name("stream", name)?;
+                if items.len() > STREAM_MAX_PUBLISH_BATCH {
+                    return Err(BrokerError::invalid_argument(format!(
+                        "Publish batch too large: {} items (max: {})",
+                        items.len(),
+                        STREAM_MAX_PUBLISH_BATCH
+                    )));
+                }
+                for item in items {
+                    if item.key.len() > STREAM_MAX_KEY_BYTES {
+                        return Err(BrokerError::invalid_argument(format!(
+                            "Stream key exceeds {} bytes",
+                            STREAM_MAX_KEY_BYTES
+                        )));
+                    }
+                    let record = event_logical_bytes(item.key.len(), item.payload.len());
+                    if record > MAX_STREAM_RECORD_BYTES {
+                        return Err(BrokerError::invalid_argument(format!(
+                            "Stream record too large: {} bytes (max: {})",
+                            record, MAX_STREAM_RECORD_BYTES
+                        )));
+                    }
+                    let encoded = 4 + fetch_item_encoded_bytes(item.key.len(), item.payload.len());
+                    if encoded > self.config.fetch_response_bytes as u64 {
+                        return Err(BrokerError::invalid_argument(format!(
+                            "Stream record can never be fetched: {} bytes exceeds the fetch \
+                             response budget of {} bytes",
+                            encoded, self.config.fetch_response_bytes
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            StreamRequest::Join { name, .. }
+            | StreamRequest::Fetch { name, .. }
+            | StreamRequest::Ack { name, .. }
+            | StreamRequest::Leave { name, .. }
+            | StreamRequest::Seek { name, .. }
+            | StreamRequest::PeekDls { name, .. }
+            | StreamRequest::ReplayDls { name, .. }
+            | StreamRequest::DeleteDls { name, .. }
+            | StreamRequest::PurgeDls { name, .. } => validate_resource_name("stream", name),
+            _ => Ok(()),
+        }
+    }
+
+    fn admission_bytes(request: &StreamRequest) -> usize {
+        match request {
+            StreamRequest::Publish { items, .. } => items
+                .iter()
+                .map(|i| 38usize + i.key.len() + i.payload.len())
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    fn unexpected(reply: StreamReply) -> BrokerError {
+        BrokerError::new(
+            BrokerErrorKind::Internal,
+            format!("Unexpected stream reply variant: {reply:?}"),
+        )
+    }
+
+    fn group_watcher(&self, stream: &str, group: &str) -> watch::Receiver<u64> {
+        self.watches
+            .entry(stream.to_string())
+            .or_default()
+            .entry(group.to_string())
+            .or_insert_with(|| watch::channel(0u64).0)
+            .subscribe()
+    }
+
+    // ------------------------------------------------------------------
+    // Public API — thin wrappers over submit()
+    // ------------------------------------------------------------------
 
     pub async fn create_stream(
         &self,
         name: String,
         options: StreamCreateOptions,
     ) -> Result<ProvisionResult<StreamDefinition>, BrokerError> {
-        Self::validate_stream_name(&name)?;
-        let _lifecycle_guard = self.lifecycle_gate.lock().await;
-        self.deleted_streams.remove(&name);
         let requested = StreamConfig::from_options(options, &self.config);
-
-        if let Some(stream_ref) = self.get_stream(&name) {
-            let actual = stream_ref.state.lock().full_config.clone();
-            if actual != requested {
-                return Err(config_conflict_error(
-                    "stream",
-                    &name,
-                    Self::config_json(&requested),
-                    Self::config_json(&actual),
-                ));
-            }
-            return Ok(ProvisionResult {
-                outcome: ProvisionOutcome::Unchanged,
-                definition: StreamDefinition {
-                    name,
-                    config: actual,
-                },
-            });
+        let reply = self
+            .submit(StreamRequest::CreateStream { name, requested })
+            .await?
+            .wait()
+            .await?;
+        match reply {
+            StreamReply::Provision(result) => Ok(*result),
+            other => Err(Self::unexpected(other)),
         }
-
-        let base_path = PathBuf::from(&self.config.persistence_path).join(&name);
-        let existed_on_disk = match tokio::fs::symlink_metadata(&base_path).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(BrokerError::invalid_argument(
-                    "Invalid stream path: symbolic links are not allowed",
-                ));
-            }
-            Ok(metadata) if metadata.is_dir() => true,
-            Ok(_) => {
-                return Err(BrokerError::invalid_argument(
-                    "Invalid stream path: expected a directory",
-                ))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(BrokerError::storage(format!(
-                    "Failed to inspect stream path: {}",
-                    error
-                )))
-            }
-        };
-
-        info!("[StreamManager] Creating stream '{}'", name);
-
-        if !existed_on_disk {
-            tokio::fs::create_dir_all(&base_path)
-                .await
-                .map_err(|error| {
-                    BrokerError::storage(format!("Failed to create stream directory: {}", error))
-                })?;
-        }
-
-        let config_path = base_path.join("config.json");
-        let actual = if config_path.exists() {
-            let data = tokio::fs::read_to_string(&config_path)
-                .await
-                .map_err(|error| {
-                    BrokerError::storage(format!("Failed to read stream configuration: {}", error))
-                })?;
-            serde_json::from_str::<StreamConfig>(&data).map_err(|error| {
-                BrokerError::storage(format!("Failed to parse stream configuration: {}", error))
-            })?
-        } else {
-            let data = serde_json::to_string_pretty(&requested).map_err(|error| {
-                BrokerError::storage(format!(
-                    "Failed to serialize stream configuration: {}",
-                    error
-                ))
-            })?;
-            tokio::fs::write(&config_path, data)
-                .await
-                .map_err(|error| {
-                    BrokerError::storage(format!("Failed to write stream configuration: {}", error))
-                })?;
-            requested.clone()
-        };
-
-        if actual != requested {
-            return Err(config_conflict_error(
-                "stream",
-                &name,
-                Self::config_json(&requested),
-                Self::config_json(&actual),
-            ));
-        }
-
-        let shared =
-            Self::build_stream_shared(name.clone(), actual.clone(), &self.config.persistence_path)
-                .await;
-        self.streams.insert(name.clone(), shared);
-        Ok(ProvisionResult {
-            outcome: ProvisionOutcome::Created,
-            definition: StreamDefinition {
-                name,
-                config: actual,
-            },
-        })
     }
 
+    /// Idempotent: deleting a missing stream succeeds.
     pub async fn delete_stream(&self, name: String) -> Result<(), BrokerError> {
-        Self::validate_stream_name(&name)?;
-        let _lifecycle_guard = self.lifecycle_gate.lock().await;
-        self.deleted_streams.insert(name.clone(), ());
-
-        let stream_path = PathBuf::from(&self.config.persistence_path).join(&name);
-        let stream_ref = self.get_stream(&name);
-        let _append_guard = match &stream_ref {
-            Some(stream_ref) => Some(stream_ref.append_gate.clone().lock_owned().await),
-            None => None,
-        };
-        let _retention_guard = match &stream_ref {
-            Some(stream_ref) => Some(stream_ref.retention_gate.write().await),
-            None => None,
-        };
-
-        if let Some(stream_ref) = &stream_ref {
-            if self
-                .streams
-                .get(&name)
-                .is_some_and(|current| Arc::ptr_eq(current.value(), stream_ref))
-            {
-                self.streams.remove(&name);
-            }
+        match self
+            .submit(StreamRequest::DeleteStream { name })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
         }
-
-        let exists_on_disk = match tokio::fs::symlink_metadata(&stream_path).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(BrokerError::invalid_argument(
-                    "Invalid stream path: symbolic links are not allowed",
-                ));
-            }
-            Ok(metadata) => metadata.is_dir(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(BrokerError::storage(format!(
-                    "Failed to inspect stream path: {}",
-                    error
-                )))
-            }
-        };
-
-        if stream_ref.is_some() || exists_on_disk {
-            let (del_tx, del_rx) = oneshot::channel();
-            self.storage_tx
-                .send(StorageCommand::DropStream {
-                    stream_name: name,
-                    reply: del_tx,
-                })
-                .await
-                .map_err(|_| BrokerError::storage("Storage unavailable"))?;
-            del_rx
-                .await
-                .map_err(|_| BrokerError::storage("Storage delete failed"))?
-                .map_err(|error| {
-                    BrokerError::storage(format!("Storage delete failed: {}", error))
-                })?;
-        }
-        Ok(())
     }
 
+    /// Invalid names report `false` (the resource cannot exist); storage
+    /// failures propagate.
+    pub async fn exists(&self, name: &str) -> Result<bool, BrokerError> {
+        if validate_resource_name("stream", name).is_err() {
+            return Ok(false);
+        }
+        match self
+            .submit(StreamRequest::StreamExists {
+                name: name.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Bool(found) => Ok(found),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn describe(&self, name: &str) -> Result<StreamDefinition, BrokerError> {
+        match self
+            .submit(StreamRequest::DescribeStream {
+                name: name.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Definition(def) => Ok(*def),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Publish one record. `key` empty means keyless.
+    pub async fn publish(
+        &self,
+        name: &str,
+        key: Bytes,
+        payload: Bytes,
+    ) -> Result<u64, BrokerError> {
+        let seqs = self
+            .publish_batch(name, vec![PubItem { key, payload }])
+            .await?;
+        seqs.first()
+            .copied()
+            .ok_or_else(|| BrokerError::storage("Publish returned no sequence"))
+    }
+
+    /// Atomic batch publish: sequences are contiguous and the batch commits
+    /// or fails as a unit.
     pub async fn publish_batch(
         &self,
         name: &str,
-        items: Vec<(Option<Bytes>, Bytes)>,
+        items: Vec<PubItem>,
     ) -> Result<Vec<u64>, BrokerError> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        for (key, payload) in &items {
-            if key.as_ref().is_some_and(Bytes::is_empty) {
-                return Err(BrokerError::invalid_argument(
-                    "Stream key must not be empty",
-                ));
-            }
-            if key
-                .as_ref()
-                .is_some_and(|key| key.len() > STREAM_MAX_KEY_BYTES)
-            {
-                return Err(BrokerError::invalid_argument(format!(
-                    "Stream key exceeds {} bytes",
-                    STREAM_MAX_KEY_BYTES
-                )));
-            }
-            let size = record_len(key.as_deref(), payload);
-            if size > MAX_STREAM_RECORD_BYTES as u64 {
-                return Err(BrokerError::invalid_argument(format!(
-                    "Stream record too large: {} bytes (max: {})",
-                    size, MAX_STREAM_RECORD_BYTES
-                )));
-            }
-        }
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let append_guard = stream_ref.append_gate.clone().lock_owned().await;
-        if !self
-            .get_stream(name)
-            .is_some_and(|current| Arc::ptr_eq(&current, &stream_ref))
+        match self
+            .submit(StreamRequest::Publish {
+                name: name.to_string(),
+                items,
+            })
+            .await?
+            .wait()
+            .await?
         {
-            return Err(BrokerError::not_found(format!(
-                "Stream '{}' not found",
-                name
-            )));
+            StreamReply::Published(seqs) => Ok(seqs),
+            other => Err(Self::unexpected(other)),
         }
-        let permit = self
-            .storage_tx
-            .reserve()
-            .await
-            .map_err(|_| BrokerError::storage("Storage unavailable"))?;
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        let n = items.len() as u64;
-
-        let (first_seq, seqs, messages, file_path, offsets, file_offset_after, starts_new_segment) = {
-            let state = stream_ref.state.lock();
-            let first_seq = state.next_seq;
-            let mut seqs = Vec::with_capacity(items.len());
-            let mut messages = Vec::with_capacity(items.len());
-            for (i, (key, payload)) in items.into_iter().enumerate() {
-                let seq = first_seq + i as u64;
-                seqs.push(seq);
-                messages.push(Message {
-                    seq,
-                    timestamp,
-                    key,
-                    payload,
-                });
-            }
-
-            let bytes_len: u64 = messages
-                .iter()
-                .map(|m| record_len(m.key.as_deref(), &m.payload))
-                .sum();
-
-            let write_offset = if state.file_offset > 0
-                && state.file_offset + bytes_len > state.full_config.max_segment_size
-            {
-                0
-            } else {
-                state.file_offset
-            };
-            let starts_new_segment = write_offset == 0;
-            let file_path = if starts_new_segment {
-                let base_path = PathBuf::from(&self.config.persistence_path).join(name);
-                base_path.join(format!("{}.log", first_seq))
-            } else {
-                state.active_path.clone()
-            };
-
-            let mut current_offset = write_offset;
-            let mut offsets = Vec::with_capacity(messages.len());
-            for msg in &messages {
-                offsets.push((msg.seq, current_offset));
-                current_offset += record_len(msg.key.as_deref(), &msg.payload);
-            }
-            let file_offset_after = if current_offset >= state.full_config.max_segment_size {
-                0
-            } else {
-                current_offset
-            };
-            (
-                first_seq,
-                seqs,
-                messages,
-                file_path,
-                offsets,
-                file_offset_after,
-                starts_new_segment,
-            )
-        };
-
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let commit_stream = stream_ref.clone();
-        let commit_path = file_path.clone();
-        permit.send(StorageCommand::Append {
-            file_path,
-            messages,
-            complete: Box::new(move |result| {
-                let response = match result {
-                    Ok(()) => {
-                        {
-                            let mut state = commit_stream.state.lock();
-                            state.next_seq = first_seq + n;
-                            state.file_offset = file_offset_after;
-                            state.active_path = commit_path.clone();
-                            if starts_new_segment {
-                                let segments = Arc::make_mut(&mut state.segments);
-                                if segments.last().map(|segment| &segment.path)
-                                    != Some(&commit_path)
-                                {
-                                    segments.push(Segment {
-                                        path: commit_path,
-                                        start_seq: first_seq,
-                                    });
-                                }
-                            }
-                            for (seq, offset) in offsets {
-                                state.index.insert(seq, offset);
-                            }
-                        }
-                        commit_stream.wake_tx.send_modify(|version| *version += 1);
-                        Ok(())
-                    }
-                    Err(error) => Err(format!("Storage append failed: {}", error)),
-                };
-                let _ = reply_tx.send(response);
-                drop(append_guard);
-            }),
-        });
-        reply_rx
-            .await
-            .map_err(|_| BrokerError::storage("Storage append failed"))?
-            .map_err(BrokerError::storage)?;
-        Ok(seqs)
     }
 
-    pub async fn publish(
+    /// Read stored messages without delivery semantics (no leases, no
+    /// receipts). `from_seq` is inclusive.
+    pub async fn read(
         &self,
         name: &str,
-        key: Option<Bytes>,
-        payload: Bytes,
-    ) -> Result<u64, BrokerError> {
-        let seqs = self.publish_batch(name, vec![(key, payload)]).await?;
-        Ok(seqs.into_iter().next().unwrap_or(0))
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<Message>, BrokerError> {
+        match self
+            .submit(StreamRequest::Read {
+                name: name.to_string(),
+                from_seq,
+                limit,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Read(messages) => Ok(messages),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn join_group(
+        &self,
+        name: &str,
+        group: &str,
+        connection_id: &str,
+    ) -> Result<JoinGroupResult, BrokerError> {
+        match self
+            .submit(StreamRequest::Join {
+                name: name.to_string(),
+                group: group.to_string(),
+                connection_id: connection_id.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Join {
+                ack_floor,
+                consumer_id,
+                generation,
+            } => Ok(JoinGroupResult {
+                ack_floor,
+                consumer_id,
+                generation,
+            }),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Fetch with long-poll: an empty page parks on the group's watch until a
+    /// post-commit wakeup or `wait_ms` elapses. Membership/fencing errors
+    /// propagate (the SDK rejoins).
+    pub async fn fetch(
+        &self,
+        name: &str,
+        group: &str,
+        identity: &ConsumerIdentity,
+        limit: usize,
+        wait_ms: u64,
+    ) -> Result<Vec<Delivery>, BrokerError> {
+        let deadline = (wait_ms > 0).then(|| Instant::now() + Duration::from_millis(wait_ms));
+        loop {
+            // Subscribe BEFORE submitting so a commit landing between the two
+            // is observed as a version bump instead of a missed wakeup.
+            let mut watcher = self.group_watcher(name, group);
+            let version = *watcher.borrow();
+            let reply = self
+                .submit(StreamRequest::Fetch {
+                    name: name.to_string(),
+                    group: group.to_string(),
+                    identity: identity.clone(),
+                    limit,
+                })
+                .await?
+                .wait()
+                .await?;
+            match reply {
+                StreamReply::Fetch(deliveries) if !deliveries.is_empty() => {
+                    return Ok(deliveries)
+                }
+                StreamReply::Fetch(_) => {}
+                other => return Err(Self::unexpected(other)),
+            }
+            let Some(deadline) = deadline else {
+                return Ok(Vec::new());
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(Vec::new());
+            }
+            if *watcher.borrow() != version {
+                continue; // work arrived between subscribe and submit
+            }
+            tokio::select! {
+                // Sender dropped (stream deleted) also resolves the wait:
+                // the resubmission then fails NOT_FOUND.
+                _ = watcher.changed() => continue,
+                _ = tokio::time::sleep(remaining) => return Ok(Vec::new()),
+            }
+        }
+    }
+
+    /// Consume the lease identified by `receipt`. Stale receipts/epochs and
+    /// unknown sequences are FENCED; unknown members are NOT_MEMBER.
+    pub async fn ack(
+        &self,
+        name: &str,
+        group: &str,
+        identity: &ConsumerIdentity,
+        seq: u64,
+        receipt: [u8; 16],
+    ) -> Result<(), BrokerError> {
+        match self
+            .submit(StreamRequest::Ack {
+                name: name.to_string(),
+                group: group.to_string(),
+                identity: identity.clone(),
+                seq,
+                receipt,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn leave_group(
+        &self,
+        name: &str,
+        group: &str,
+        identity: &ConsumerIdentity,
+    ) -> Result<(), BrokerError> {
+        match self
+            .submit(StreamRequest::Leave {
+                name: name.to_string(),
+                group: group.to_string(),
+                identity: identity.clone(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn seek(
+        &self,
+        name: &str,
+        group: &str,
+        target: SeekTarget,
+    ) -> Result<(), BrokerError> {
+        match self
+            .submit(StreamRequest::Seek {
+                name: name.to_string(),
+                group: group.to_string(),
+                target,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
     }
 
     pub async fn peek_dls(
@@ -502,918 +560,125 @@ impl StreamManager {
         group: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<(u64, String, u32, Option<Bytes>)>, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let state = stream_ref.state.lock();
-        let group_ref = state.groups.get(group).ok_or_else(|| {
-            BrokerError::not_found(format!("Consumer group '{}' not found", group))
-        })?;
-        let entries = group_ref.peek_dls(limit, offset);
-        Ok(entries
-            .into_iter()
-            .map(|(seq, e)| (seq, e.reason, e.attempts, e.key))
-            .collect())
+    ) -> Result<Vec<DlsEntry>, BrokerError> {
+        match self
+            .submit(StreamRequest::PeekDls {
+                name: name.to_string(),
+                group: group.to_string(),
+                limit,
+                offset,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::DlsEntries(entries) => Ok(entries),
+            other => Err(Self::unexpected(other)),
+        }
     }
 
+    /// Move a parked entry back to the live stream of deliveries for `group`.
     pub async fn move_to_stream(
         &self,
         name: &str,
         group: &str,
         seq: u64,
-    ) -> Result<bool, BrokerError> {
-        self.with_state_mut(name, |state| {
-            state
-                .groups
-                .get_mut(group)
-                .ok_or_else(|| {
-                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
-                })?
-                .move_to_stream(seq)
-                .map_err(BrokerError::from)
-        })
-    }
-
-    pub async fn delete_dls(&self, name: &str, group: &str, seq: u64) -> Result<bool, BrokerError> {
-        self.with_state_mut(name, |state| {
-            state
-                .groups
-                .get_mut(group)
-                .ok_or_else(|| {
-                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
-                })?
-                .delete_dls(seq)
-                .map_err(BrokerError::from)
-        })
-    }
-
-    pub async fn purge_dls(&self, name: &str, group: &str) -> Result<usize, BrokerError> {
-        self.with_state_mut(name, |state| {
-            Ok(state
-                .groups
-                .get_mut(group)
-                .ok_or_else(|| {
-                    BrokerError::not_found(format!("Consumer group '{}' not found", group))
-                })?
-                .purge_dls())
-        })
-    }
-
-    pub async fn read(
-        &self,
-        name: &str,
-        from_seq: u64,
-        limit: usize,
-    ) -> Result<Vec<Message>, BrokerError> {
-        let Some(stream_ref) = self.get_stream(name) else {
-            return Ok(Vec::new());
-        };
-        let retention_guard = stream_ref.retention_gate.clone().read_owned().await;
-
-        let (offsets, segments) = {
-            let state = stream_ref.state.lock();
-            let offsets = state
-                .index
-                .range(from_seq..)
-                .take(limit)
-                .map(|(seq, offset)| (*seq, *offset))
-                .collect::<Vec<_>>();
-            (offsets, state.segments.clone())
-        };
-
-        if offsets.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let (tx, rx) = oneshot::channel();
-        self.storage_tx
-            .send(StorageCommand::ReadRange {
-                segments,
-                retention_guard,
-                offsets,
-                reply: tx,
+    ) -> Result<(), BrokerError> {
+        match self
+            .submit(StreamRequest::ReplayDls {
+                name: name.to_string(),
+                group: group.to_string(),
+                seq,
             })
-            .await
-            .map_err(|_| BrokerError::storage("Storage unavailable"))?;
-        rx.await
-            .map_err(|_| BrokerError::storage("Storage read failed"))?
-            .map_err(|error| BrokerError::storage(format!("Storage read failed: {}", error)))
-    }
-
-    pub async fn fetch(
-        &self,
-        group: &str,
-        consumer_id: &str,
-        generation: u64,
-        limit: usize,
-        name: &str,
-        wait_ms: u64,
-    ) -> Result<Vec<Message>, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-
-        let group_cancel = {
-            let state = stream_ref.state.lock();
-            match state.groups.get(group) {
-                Some(g) => g.cancel_token(),
-                None => {
-                    return Err(BrokerError::not_found(format!(
-                        "Consumer group '{}' not found",
-                        group
-                    )))
-                }
-            }
-        };
-
-        if wait_ms == 0 {
-            return self
-                .try_fetch_once(
-                    &stream_ref,
-                    group,
-                    consumer_id,
-                    generation,
-                    limit,
-                    &group_cancel,
-                )
-                .await;
-        }
-
-        let deadline = Instant::now() + Duration::from_millis(wait_ms);
-        let mut wake_rx = stream_ref.wake_tx.subscribe();
-
-        loop {
-            let wake_ver = *wake_rx.borrow();
-
-            match self
-                .try_fetch_once(
-                    &stream_ref,
-                    group,
-                    consumer_id,
-                    generation,
-                    limit,
-                    &group_cancel,
-                )
-                .await
-            {
-                Ok(messages) if !messages.is_empty() => return Ok(messages),
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind,
-                        BrokerErrorKind::NotMember | BrokerErrorKind::Fenced
-                    ) && !self.is_active_member(&stream_ref, group, consumer_id) =>
-                {
-                    return Ok(Vec::new());
-                }
-                Err(error) => return Err(error),
-            }
-
-            if *wake_rx.borrow() != wake_ver {
-                continue;
-            }
-
-            if Instant::now() >= deadline {
-                return Ok(Vec::new());
-            }
-
-            tokio::select! {
-                _ = wake_rx.changed() => {}
-                _ = sleep_until(deadline) => return Ok(Vec::new()),
-                _ = group_cancel.cancelled() => return Ok(Vec::new()),
-            }
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    fn is_active_member(
+    pub async fn delete_dls(
         &self,
-        stream_ref: &Arc<StreamShared>,
-        group: &str,
-        consumer_id: &str,
-    ) -> bool {
-        let state = stream_ref.state.lock();
-        state
-            .groups
-            .get(group)
-            .map_or(false, |g| g.is_member(consumer_id))
-    }
-
-    pub async fn ack(
-        &self,
-        group: &str,
         name: &str,
-        consumer_id: &str,
-        generation: u64,
+        group: &str,
         seq: u64,
     ) -> Result<(), BrokerError> {
-        self.with_state_mut(name, |state| {
-            let head_seq = state.head_seq;
-            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
-                BrokerError::not_found(format!("Consumer group '{}' not found", group))
-            })?;
-            group_ref.clamp_head(head_seq);
-            group_ref.ack(consumer_id, generation, seq)?;
-            Ok(())
-        })
-    }
-
-    pub async fn seek(
-        &self,
-        group: &str,
-        name: &str,
-        target: SeekTarget,
-    ) -> Result<(), BrokerError> {
-        self.with_state_mut(name, |state| {
-            let last_seq = state.next_seq.saturating_sub(1);
-            let head_seq = state.head_seq;
-            let max_ack_pending = state.full_config.max_ack_pending;
-            let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
-            let max_deliveries = state.full_config.max_deliveries;
-            let group_ref = state.groups.entry(group.to_string()).or_insert_with(|| {
-                ConsumerGroup::new(
-                    group.to_string(),
-                    head_seq,
-                    max_ack_pending,
-                    ack_wait,
-                    max_deliveries,
-                )
-            });
-            match target {
-                SeekTarget::Beginning => group_ref.seek_beginning(head_seq),
-                SeekTarget::End => group_ref.seek_end(last_seq),
-            }
-            Ok(())
-        })
-    }
-
-    pub async fn leave_group(
-        &self,
-        group: &str,
-        name: &str,
-        consumer_id: &str,
-        generation: u64,
-    ) -> Result<(), BrokerError> {
-        self.with_state_mut(name, |state| {
-            let group_ref = state.groups.get_mut(group).ok_or_else(|| {
-                BrokerError::not_found(format!("Consumer group '{}' not found", group))
-            })?;
-
-            if group_ref.generation() != generation {
-                return Err(BrokerError::fenced());
-            }
-
-            let Some(connection_client_id) = group_ref.remove_member(consumer_id) else {
-                return Err(BrokerError::not_member());
-            };
-
-            let mut remove_client_key = false;
-            if let Some(bindings) = state.client_map.get_mut(&connection_client_id) {
-                bindings.retain(|binding| {
-                    !(binding.group_id == group && binding.consumer_id == consumer_id)
-                });
-                remove_client_key = bindings.is_empty();
-            }
-            if remove_client_key {
-                state.client_map.remove(&connection_client_id);
-            }
-            Ok(())
-        })
-    }
-
-    pub async fn join_group(
-        &self,
-        group: &str,
-        name: &str,
-        connection_client_id: &str,
-    ) -> Result<JoinGroupResult, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let mut state = stream_ref.state.lock();
-        let head_seq = state.head_seq;
-        let max_ack_pending = state.full_config.max_ack_pending;
-        let ack_wait = Duration::from_millis(state.full_config.ack_wait_ms);
-        let max_deliveries = state.full_config.max_deliveries;
-        let client_id = connection_client_id.to_string();
-        let group_id = group.to_string();
-        let group_exists = state.groups.contains_key(&group_id);
-
-        let (ack_floor, consumer_id, generation, was_clamped) = {
-            let group_ref = state.groups.entry(group_id.clone()).or_insert_with(|| {
-                ConsumerGroup::new(
-                    group_id.clone(),
-                    head_seq,
-                    max_ack_pending,
-                    ack_wait,
-                    max_deliveries,
-                )
-            });
-            let was_clamped = group_ref.clamp_head(head_seq);
-            let consumer_id = group_ref.add_member(client_id.clone());
-            (
-                group_ref.ack_floor,
-                consumer_id,
-                group_ref.generation(),
-                was_clamped,
-            )
-        };
-
-        state
-            .client_map
-            .entry(client_id)
-            .or_default()
-            .push(ConsumerBinding {
-                group_id: group_id.clone(),
-                consumer_id: consumer_id.clone(),
-            });
-
-        if !group_exists || was_clamped {
-            state.groups_dirty = true;
-        }
-
-        Ok(JoinGroupResult {
-            ack_floor,
-            consumer_id,
-            generation,
-        })
-    }
-
-    pub async fn disconnect(&self, client_id: &str) {
-        info!("[StreamManager] Disconnecting client: {}", client_id);
-        for (_, stream_ref) in Self::collect_streams(&self.streams) {
-            let mut should_notify = false;
-            {
-                let mut state = stream_ref.state.lock();
-                if let Some(bindings) = state.client_map.remove(client_id) {
-                    for binding in bindings {
-                        if let Some(group_ref) = state.groups.get_mut(&binding.group_id) {
-                            if group_ref.remove_member(&binding.consumer_id).is_some() {
-                                should_notify = true;
-                                state.groups_dirty = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if should_notify {
-                stream_ref.wake_tx.send_modify(|v| *v += 1);
-            }
+        match self
+            .submit(StreamRequest::DeleteDls {
+                name: name.to_string(),
+                group: group.to_string(),
+                seq,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    pub async fn exists(&self, name: &str) -> bool {
-        if Self::validate_stream_name(name).is_err() {
-            return false;
-        }
-        if self.streams.contains_key(name) {
-            return true;
-        }
-
-        let path = PathBuf::from(&self.config.persistence_path).join(name);
-        tokio::fs::symlink_metadata(path)
-            .await
-            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-            .unwrap_or(false)
-    }
-
-    pub async fn describe(&self, name: &str) -> Result<StreamDefinition, BrokerError> {
-        Self::validate_stream_name(name)?;
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let config = stream_ref.state.lock().full_config.clone();
-        Ok(StreamDefinition {
-            name: name.to_string(),
-            config,
-        })
-    }
-
-    fn get_stream(&self, name: &str) -> Option<Arc<StreamShared>> {
-        self.streams.get(name).map(|entry| entry.value().clone())
-    }
-
-    // Single mutation path for group state: lock → mutate → mark dirty → wake
-    // fetchers, so no call site can forget persistence or the wakeup.
-    fn with_state_mut<R>(
-        &self,
-        name: &str,
-        f: impl FnOnce(&mut StreamState) -> Result<R, BrokerError>,
-    ) -> Result<R, BrokerError> {
-        let stream_ref = self
-            .get_stream(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Stream '{}' not found", name)))?;
-        let result = {
-            let mut state = stream_ref.state.lock();
-            let result = f(&mut state)?;
-            state.groups_dirty = true;
-            result
-        };
-        stream_ref.wake_tx.send_modify(|v| *v += 1);
-        Ok(result)
-    }
-
-    fn collect_streams(
-        streams: &Arc<DashMap<String, Arc<StreamShared>>>,
-    ) -> Vec<(String, Arc<StreamShared>)> {
-        streams
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect()
-    }
-
-    async fn load_stream_config(
-        base_path: &PathBuf,
-        options: StreamCreateOptions,
-        config: &SystemStreamConfig,
-    ) -> StreamConfig {
-        let config_path = base_path.join("config.json");
-        if let Ok(data) = tokio::fs::read_to_string(&config_path).await {
-            serde_json::from_str(&data)
-                .unwrap_or_else(|_| StreamConfig::from_options(options, config))
-        } else {
-            StreamConfig::from_options(options, config)
+    /// Remove every parked membership for the group. Returns the number of
+    /// retained parked entries that were resolved.
+    pub async fn purge_dls(&self, name: &str, group: &str) -> Result<usize, BrokerError> {
+        match self
+            .submit(StreamRequest::PurgeDls {
+                name: name.to_string(),
+                group: group.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::Count(n) => Ok(n),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    async fn bootstrap_from_disk(&self) {
-        let persistence_path = PathBuf::from(&self.config.persistence_path);
-        if !persistence_path.exists() {
+    /// Release all leases/memberships owned by a connection (teardown path).
+    pub async fn disconnect(&self, connection_id: &str) {
+        if self.closed.load(Ordering::Acquire) {
             return;
         }
-
-        let mut entries = match tokio::fs::read_dir(&persistence_path).await {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type().await else {
-                continue;
-            };
-            if !file_type.is_dir() || file_type.is_symlink() {
-                continue;
-            }
-
-            let Some(stream_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-
-            let name = stream_name.to_string();
-            if Self::validate_stream_name(&name).is_err()
-                || self.deleted_streams.contains_key(&name)
-            {
-                continue;
-            }
-
-            let stream_config =
-                Self::load_stream_config(&path, StreamCreateOptions::default(), &self.config).await;
-
-            let config_path = path.join("config.json");
-            if !config_path.exists() {
-                if let Ok(data) = serde_json::to_string_pretty(&stream_config) {
-                    let _ = tokio::fs::write(&config_path, data).await;
-                }
-            }
-
-            let stream_ref = Self::build_stream_shared(
-                name.clone(),
-                stream_config,
-                &self.config.persistence_path,
-            )
-            .await;
-
-            use dashmap::mapref::entry::Entry;
-            match self.streams.entry(name.clone()) {
-                Entry::Occupied(_) => {}
-                Entry::Vacant(v) => {
-                    v.insert(stream_ref);
-                    info!("[StreamManager] Restored stream '{}'", name);
-                }
-            }
-        }
-    }
-
-    async fn build_stream_shared(
-        name: String,
-        config: StreamConfig,
-        persistence_path: &str,
-    ) -> Arc<StreamShared> {
-        let base_path = PathBuf::from(persistence_path).join(&name);
-        if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-            tracing::error!(
-                "Failed to create stream directory at {:?}: {}",
-                base_path,
-                e
-            );
-        }
-
-        let recovered = recover_stream(&name, PathBuf::from(persistence_path)).await;
-        let head_seq = recovered.head_seq.max(1);
-        let next_seq = recovered.next_seq.max(head_seq);
-
-        let ack_wait = Duration::from_millis(config.ack_wait_ms);
-        let mut groups = HashMap::new();
-        for (group_id, group_state) in recovered.groups_data {
-            groups.insert(
-                group_id.clone(),
-                ConsumerGroup::restore(
-                    group_id,
-                    group_state.ack_floor,
-                    head_seq,
-                    config.max_ack_pending,
-                    ack_wait,
-                    config.max_deliveries,
-                    group_state.dls_entries,
-                    group_state.parked_keys,
-                    group_state.redeliver_entries,
-                ),
-            );
-        }
-
-        let active_path = recovered
-            .segments
-            .last()
-            .map(|segment| segment.path.clone())
-            .unwrap_or_else(|| PathBuf::from(persistence_path).join(&name).join("1.log"));
-        let segments = Arc::new(recovered.segments);
-
-        Arc::new(StreamShared {
-            state: Mutex::new(StreamState {
-                head_seq,
-                next_seq,
-                index: recovered.index,
-                groups,
-                client_map: HashMap::new(),
-                groups_dirty: false,
-                full_config: config,
-                file_offset: recovered.last_segment_size,
-                active_path,
-                segments,
-            }),
-            append_gate: Arc::new(AsyncMutex::new(())),
-            retention_gate: Arc::new(RwLock::new(())),
-            wake_tx: watch::channel(0u64).0,
-        })
-    }
-
-    fn spawn_background_tasks(&self) {
-        let cancel = self.cancel.clone();
-        let streams = self.streams.clone();
-
-        // Task 1: Periodic group state save
-        let storage_tx = self.storage_tx.clone();
-        let groups_interval_ms = self.config.default_flush_ms * 10;
-        tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                let mut timer = tokio::time::interval(Duration::from_millis(groups_interval_ms));
-                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = timer.tick() => {}
-                    }
-                    for (stream_name, stream_ref) in StreamManager::collect_streams(&streams) {
-                        let groups_data = {
-                            let mut state = stream_ref.state.lock();
-                            if !state.groups_dirty {
-                                None
-                            } else {
-                                state.groups_dirty = false;
-                                Some(state.groups_snapshot())
-                            }
-                        };
-
-                        if let Some(groups_data) = groups_data {
-                            let _ = storage_tx
-                                .send(StorageCommand::SaveState {
-                                    stream_name,
-                                    groups: groups_data,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            }
-        });
-
-        // Task 2: Retention enforcement
-        let streams = self.streams.clone();
-        let storage_tx = self.storage_tx.clone();
-        let retention_check_ms = self.config.retention_check_interval_ms;
-        tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                let mut timer = tokio::time::interval(Duration::from_millis(retention_check_ms));
-                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = timer.tick() => {}
-                    }
-                    for (stream_name, stream_ref) in StreamManager::collect_streams(&streams) {
-                        let _retention_guard = stream_ref.retention_gate.write().await;
-                        let retention = {
-                            let state = stream_ref.state.lock();
-                            state.full_config.retention.clone()
-                        };
-
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        if storage_tx
-                            .send(StorageCommand::ApplyRetention {
-                                stream_name,
-                                retention,
-                                reply: reply_tx,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            continue;
-                        }
-
-                        let Ok(new_head_seq) = reply_rx.await else {
-                            continue;
-                        };
-
-                        let mut should_notify = false;
-                        {
-                            let mut state = stream_ref.state.lock();
-                            if new_head_seq != state.head_seq {
-                                state.head_seq = new_head_seq;
-                                // Trim index entries below new head_seq
-                                let to_remove: Vec<u64> =
-                                    state.index.range(..new_head_seq).map(|(k, _)| *k).collect();
-                                for k in to_remove {
-                                    state.index.remove(&k);
-                                }
-                                Arc::make_mut(&mut state.segments)
-                                    .retain(|segment| segment.start_seq >= new_head_seq);
-                                let mut groups_changed = false;
-                                for group in state.groups.values_mut() {
-                                    if group.clamp_head(new_head_seq) {
-                                        groups_changed = true;
-                                    }
-                                }
-                                if groups_changed {
-                                    state.groups_dirty = true;
-                                }
-                                should_notify = true;
-                            }
-                        }
-                        if should_notify {
-                            stream_ref.wake_tx.send_modify(|v| *v += 1);
-                        }
-                    }
-                }
-            }
-        });
-
-        // Task 3: Redelivery check (ack timeouts)
-        let streams = self.streams.clone();
-        tokio::spawn({
-            let cancel = cancel.clone();
-            async move {
-                let mut timer = tokio::time::interval(Duration::from_millis(100));
-                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = timer.tick() => {}
-                    }
-                    for (_, stream_ref) in StreamManager::collect_streams(&streams) {
-                        let mut should_notify = false;
-                        {
-                            let mut state = stream_ref.state.lock();
-                            let mut groups_changed = false;
-                            for group in state.groups.values_mut() {
-                                if group.check_redelivery() {
-                                    groups_changed = true;
-                                    should_notify = true;
-                                }
-                            }
-                            if groups_changed {
-                                state.groups_dirty = true;
-                            }
-                        }
-                        if should_notify {
-                            stream_ref.wake_tx.send_modify(|v| *v += 1);
-                        }
-                    }
-                }
-            }
-        });
-    }
-    /// Try to fetch messages for a consumer. Reads from storage via index if needed.
-    async fn try_fetch_once(
-        &self,
-        stream_ref: &Arc<StreamShared>,
-        group: &str,
-        consumer_id: &str,
-        generation: u64,
-        limit: usize,
-        group_cancel: &CancellationToken,
-    ) -> Result<Vec<Message>, BrokerError> {
-        let retention_guard = stream_ref.retention_gate.clone().read_owned().await;
-
-        // 1. Compute fetch plan under lock (which seqs to read)
-        let (plan, was_clamped) = {
-            let mut state = stream_ref.state.lock();
-            let head_seq = state.head_seq;
-            let Some(group_ref) = state.groups.get_mut(group) else {
-                return Err(BrokerError::not_found(format!(
-                    "Consumer group '{}' not found",
-                    group
-                )));
-            };
-
-            group_ref.ensure_active_consumer(consumer_id, generation)?;
-
-            let was_clamped = group_ref.clamp_head(head_seq);
-            let backpressured = group_ref.is_backpressured();
-            let plan = if backpressured {
-                Vec::new()
-            } else {
-                group_ref.fetch_plan(head_seq, limit)
-            };
-            (plan, was_clamped)
-        };
-
-        if was_clamped {
-            stream_ref.state.lock().groups_dirty = true;
-        }
-
-        if plan.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 2. Look up offsets in index (under lock, then released)
-        let (offsets, segments) = {
-            let state = stream_ref.state.lock();
-            let offsets = plan
-                .iter()
-                .filter_map(|seq| state.index.get(seq).map(|off| (*seq, *off)))
-                .collect::<Vec<_>>();
-            (offsets, state.segments.clone())
-        };
-
-        if offsets.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 3. Read messages from storage (outside any lock)
-        if group_cancel.is_cancelled() {
-            return Ok(Vec::new());
-        }
-
-        let (tx, rx) = oneshot::channel();
-        if self
-            .storage_tx
-            .send(StorageCommand::ReadRange {
-                segments,
-                retention_guard,
-                offsets,
-                reply: tx,
+        if let Ok(pending) = self
+            .submit(StreamRequest::Disconnect {
+                connection_id: connection_id.to_string(),
             })
             .await
-            .is_err()
         {
-            return Err(BrokerError::storage("Storage read failed"));
+            if let Err(e) = pending.wait().await {
+                warn!("Stream disconnect cleanup failed for {connection_id}: {e}");
+            }
         }
+    }
 
-        let messages = rx
+    /// Stop timers, drain admitted work, checkpoint the WAL and join the
+    /// writer thread. `closed` is set first so no new work is admitted while
+    /// the barrier command is in flight; the shutdown itself bypasses
+    /// `submit` (which rejects once closed).
+    pub async fn shutdown(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.cancel.cancel();
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(Command {
+                op: StreamRequest::Shutdown,
+                bytes: 0,
+                reply: Some(tx),
+            })
             .await
-            .map_err(|_| BrokerError::storage("Storage read failed"))?
-            .map_err(|error| BrokerError::storage(format!("Storage read failed: {}", error)))?;
-        if messages.is_empty() {
-            return Ok(Vec::new());
+            .is_ok()
+        {
+            let _ = rx.await;
         }
-
-        // 4. Deliver messages to the group (under lock)
-        let mut state = stream_ref.state.lock();
-        let head_seq = state.head_seq;
-        let Some(group_ref) = state.groups.get_mut(group) else {
-            return Err(BrokerError::not_found(format!(
-                "Consumer group '{}' not found",
-                group
-            )));
-        };
-
-        if group_cancel.is_cancelled() {
-            return Ok(Vec::new());
+        let handle = self.worker.lock().ok().and_then(|mut h| h.take());
+        if let Some(handle) = handle {
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
         }
-
-        group_ref.clamp_head(head_seq);
-        let result = group_ref.fetch(consumer_id, generation, limit, &messages, head_seq)?;
-        state.groups_dirty = true;
-        Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn accepted_append_commits_after_publisher_is_cancelled() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut stream_config = SystemStreamConfig::default();
-        stream_config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-        let config = Arc::new(stream_config);
-        let (storage_tx, mut storage_rx) = mpsc::channel(1);
-        let streams = Arc::new(DashMap::new());
-        let stream_name = "cancelled-publisher";
-        let stream_config = StreamConfig::from_options(StreamCreateOptions::default(), &config);
-        let stream_ref = StreamManager::build_stream_shared(
-            stream_name.to_string(),
-            stream_config,
-            &config.persistence_path,
-        )
-        .await;
-        streams.insert(stream_name.to_string(), stream_ref.clone());
-
-        let manager = Arc::new(StreamManager {
-            streams,
-            deleted_streams: Arc::new(DashMap::new()),
-            lifecycle_gate: AsyncMutex::new(()),
-            storage_tx,
-            config,
-            cancel: CancellationToken::new(),
-        });
-
-        let first_manager = manager.clone();
-        let first_publish = tokio::spawn(async move {
-            first_manager
-                .publish(stream_name, None, Bytes::from_static(b"first"))
-                .await
-        });
-
-        let first_command = storage_rx.recv().await.unwrap();
-        first_publish.abort();
-        assert!(first_publish.await.unwrap_err().is_cancelled());
-        match first_command {
-            StorageCommand::Append { complete, .. } => complete(Ok(())),
-            _ => panic!("expected append command"),
-        }
-
-        let second_manager = manager.clone();
-        let second_publish = tokio::spawn(async move {
-            second_manager
-                .publish(stream_name, None, Bytes::from_static(b"second"))
-                .await
-        });
-        let second_command = storage_rx.recv().await.unwrap();
-        match second_command {
-            StorageCommand::Append { complete, .. } => complete(Ok(())),
-            _ => panic!("expected append command"),
-        }
-
-        assert_eq!(second_publish.await.unwrap().unwrap(), 2);
-        let state = stream_ref.state.lock();
-        assert_eq!(state.next_seq, 3);
-        assert_eq!(state.index.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
-    }
-
-    #[test]
-    fn stream_names_cannot_escape_the_persistence_directory() {
-        for invalid in [
-            "",
-            ".",
-            "..",
-            "../outside",
-            "nested/stream",
-            "nested\\stream",
-            "/tmp/stream",
-            "stream name",
-        ] {
-            assert!(
-                StreamManager::validate_stream_name(invalid).is_err(),
-                "{invalid:?} must be rejected"
-            );
-        }
-        assert!(StreamManager::validate_stream_name("stream_42-chat.events").is_ok());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stream_directory_symlinks_are_rejected() {
-        use std::os::unix::fs::symlink;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), temp_dir.path().join("linked-stream")).unwrap();
-
-        let mut config = SystemStreamConfig::default();
-        config.persistence_path = temp_dir.path().to_str().unwrap().to_string();
-        let manager = StreamManager::new(Arc::new(config)).await;
-
-        let error = manager
-            .create_stream("linked-stream".to_string(), StreamCreateOptions::default())
-            .await
-            .unwrap_err();
-
-        assert!(error.message.contains("symbolic links"));
-        manager.shutdown().await;
     }
 }

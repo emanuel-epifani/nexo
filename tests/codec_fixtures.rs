@@ -329,14 +329,15 @@ fn stream_fixtures() {
                 let exp_items = inp["items"].as_array().unwrap();
                 assert_eq!(items.len(), exp_items.len(), "{id}: item count");
                 for (i, (actual, exp)) in items.iter().zip(exp_items).enumerate() {
-                    match &actual.key {
-                        Some(k) => {
-                            let exp_key = exp["key"].as_str().unwrap();
-                            assert_eq!(k.as_ref(), exp_key.as_bytes(), "{id}: item {i} key");
-                        }
-                        None => {
-                            assert!(exp["key"].is_null(), "{id}: item {i} expected null key");
-                        }
+                    if actual.key.is_empty() {
+                        assert!(exp["key"].is_null(), "{id}: item {i} expected null key");
+                    } else {
+                        let exp_key = exp["key"].as_str().unwrap();
+                        assert_eq!(
+                            actual.key.as_ref(),
+                            exp_key.as_bytes(),
+                            "{id}: item {i} key"
+                        );
                     }
                     let ap = expected_payload(
                         exp["data_type"].as_str().unwrap(),
@@ -386,6 +387,7 @@ fn stream_fixtures() {
                 consumer_id,
                 generation,
                 seq,
+                receipt,
             } => {
                 assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
@@ -400,6 +402,11 @@ fn stream_fixtures() {
                     "{id}: generation"
                 );
                 assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
+                assert_eq!(
+                    receipt,
+                    *parse_uuid(inp["receipt"].as_str().unwrap()).as_bytes(),
+                    "{id}: receipt"
+                );
             }
             StreamCommand::Seek {
                 name: t,

@@ -672,14 +672,14 @@ DLS state, redelivery entries, and parked keys are persisted in `state.log` alon
 
 ## Persistence
 
-Nexo uses a single ordered storage writer backed by the operating system page cache.
+Nexo stores every stream — messages, keys, consumer groups, leases, and the dead-letter store — in a **single embedded SQLite database** (`streams.sqlite3` under the persistence directory, WAL mode). A dedicated writer thread owns the database; all commands execute inside SQLite transactions, so message data and consumer-group state are committed atomically.
 
-- **Publish acknowledgment**: `publish` and `publishBatch` return only after `write_all` succeeds. At that point the message is accepted by the OS page cache and visible to consumers. Nexo does not run `fsync` per message, so recently acknowledged data may still be lost after an OS crash or power loss.
-- **Automatic backpressure**: Storage commands use a bounded queue. When it fills, publish requests wait for capacity; no message is dropped and no overload retry policy is exposed to the SDK.
-- **Batching**: `publishBatch` writes multiple messages as one storage operation and is the preferred API for high-throughput ingestion.
-- **Limits**: A publish batch may contain at most 65,536 messages and each encoded record may be at most 64 MiB. Limits are checked before allocation.
-- **Recovery**: Nexo recovers only a contiguous sequence prefix. Partial or invalid tails are truncated; segment files after a sequence gap are renamed with `.corrupt` so they remain available for diagnosis but cannot be appended again.
-- **Group State Persistence**: `STREAM_DEFAULT_FLUSH_MS` (default: 50ms) controls how often consumer group state (ack_floor, DLS entries, parked keys) is saved to disk. Message data itself relies on OS-level page cache flushing.
+- **Publish acknowledgment**: `publish` and `publishBatch` return only after their transaction commits. With `synchronous = NORMAL` the WAL is checkpointed periodically; a process crash never loses acknowledged writes, while an OS crash or power loss may lose the last unsynced commit.
+- **Automatic backpressure**: Storage commands use a bounded queue (count and bytes). When it fills, publish requests wait for capacity; no message is dropped and no overload retry policy is exposed to the SDK.
+- **Batching**: `publishBatch` commits multiple messages as one transaction and is the preferred API for high-throughput ingestion.
+- **Limits**: A publish batch may contain at most 65,536 messages and each encoded record may be at most 64 MiB. A record that can never fit inside a FETCH response is rejected at publish time. Limits are checked before allocation.
+- **Recovery**: On startup Nexo opens the database, wipes stale membership rows, and reconciles every outstanding lease — messages leased-but-unacked at shutdown are re-offered or parked by `maxDeliveries`. Consumer group progress, DLS entries, and parked keys are all durable.
+- **Fail-closed startup**: The persistence directory must contain only the SQLite layout (`streams.sqlite3`, its WAL files, and the lock file). Foreign files — including data written by previous versions — abort startup instead of being silently imported or ignored.
 
 ### High-Cardinality: Treat Streams like Keys
 
@@ -687,25 +687,8 @@ In Nexo, creating a stream is as cheap and safe as writing a key in a database. 
 
 Stream names are 1–255 ASCII bytes and may contain letters, digits, `.`, `_`, and `-`. Path separators, whitespace, `.` and `..` are rejected.
 
-- **FD Management via LRU**: An open file handle is faster — writes are plain appends with no overhead. Opening a file, on the other hand, costs. With thousands of streams, keeping them all open simultaneously hits OS limits and memory pressure. Nexo uses a **Global FD Cache** that keeps only the `N` most recently used writer handles open, evicting and closing the least-recently-used ones when the cap is reached.
-- **Controlled by `STREAM_MAX_OPEN_FILES`** (Default: 256): only the most active streams hold an open handle at any given moment.
-- **Reads**: Readers use independent temporary handles so concurrent seeks cannot interfere with the append cursor. Segment locations come from the in-memory stream catalog; read handles close when the request completes.
-
-::: tip BEST PERFORMANCE
-Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active* streams to limit unnecessary rotation overhead.
-:::
-
-```text
-    [ Stream 1 ] [ Stream 2 ] [ Stream 3 ] ... [ Stream 999 ]
-          \          |           /                /
-           \         |          /                /
-         ┌──────────────────────────────────────────┐
-         │        Global FD Manager (LRU)           │
-         │  (Only keeps N files open at a time)     │
-         └──────────────────┬───────────────────────┘
-                            ▼
-                    [ FILE SYSTEM ]
-```
+- **One row per stream**: All streams share a single SQLite database, so creating a stream is a small transaction — no files to open, no per-stream handles to cache. A process-level lock file prevents two Nexo instances from opening the same database.
+- **Reads**: `fetch` runs as a bounded read transaction inside the writer thread's working set; SQLite's own page cache keeps hot ranges warm.
 
 ---
 
@@ -714,9 +697,9 @@ Set `STREAM_MAX_OPEN_FILES` to match your average number of *concurrently active
 ### How it works
 
 1. Server starts → reads env vars (global defaults)
-2. Stream created → server snapshots defaults into `config.json` (per-stream)
+2. Stream created → server snapshots defaults into the stream's row (per-stream)
 3. SDK can override `retention` at creation — everything else uses system defaults
-4. On restart → each stream reads its own `config.json` (ignores current env vars)
+4. On restart → each stream reads its persisted config (ignores current env vars)
 
 > **Existing streams are not affected by env var changes.** Only new streams pick up new defaults.
 
@@ -726,15 +709,14 @@ Global, set at server startup.
 
 | Variable | Default | Description |
 |:---|:---|:---|
-| `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Base directory for all stream data |
-| `STREAM_DEFAULT_FLUSH_MS` | `50` | Group state save interval multiplier (×10 = actual ms) |
+| `STREAM_ROOT_PERSISTENCE_PATH` | `./data/streams` | Directory containing `streams.sqlite3` and its lock file |
 | `STREAM_STORAGE_QUEUE_CAPACITY` | `16384` | Pending storage commands before publishers wait for capacity |
-| `STREAM_MAX_SEGMENT_SIZE` | `104857600` (100MB) | Max segment file size before rollover |
+| `STREAM_STORAGE_QUEUE_MAX_BYTES` | `268435456` (256MB) | Byte bound on queued command payloads |
+| `STREAM_FETCH_RESPONSE_BYTES` | `10485760` (10MB) | Max encoded size of one FETCH response |
 | `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
 | `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |
 | `STREAM_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) | Default `maxAgeMs` if SDK omits it |
 | `STREAM_MAX_ACK_PENDING` | `10000` | Max unacked messages per consumer group |
-| `STREAM_MAX_OPEN_FILES` | `256` | Max open file handles (LRU cache) |
 | `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |
 | `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLS |
 

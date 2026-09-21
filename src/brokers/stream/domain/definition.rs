@@ -4,9 +4,10 @@ use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::options::{RetentionOptions, StreamCreateOptions};
 use serde::{Deserialize, Serialize};
 
+/// Authoritative per-stream configuration, persisted as JSON inside the
+/// shared stream database at provision time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamConfig {
-    pub max_segment_size: u64,
     pub retention: RetentionOptions,
     pub max_ack_pending: usize,
     pub ack_wait_ms: u64,
@@ -47,7 +48,6 @@ impl StreamConfig {
         };
 
         Self {
-            max_segment_size: sys.max_segment_size,
             retention,
             max_ack_pending: sys.max_ack_pending,
             ack_wait_ms: sys.ack_wait_ms,

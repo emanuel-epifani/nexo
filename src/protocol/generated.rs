@@ -1,4 +1,4 @@
-pub const PROTOCOL_VERSION: u8 = 0x07;
+pub const PROTOCOL_VERSION: u8 = 0x08;
 pub const HEADER_SIZE: usize = 11;
 pub const HEADER_OFFSET_VERSION: usize = 0;
 pub const HEADER_OFFSET_TYPE: usize = 1;

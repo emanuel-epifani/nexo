@@ -48,7 +48,6 @@ export interface StreamRetentionConfiguration {
 
 export interface StreamConfiguration {
   retention: StreamRetentionConfiguration;
-  maxSegmentSize: number;
   maxAckPending: number;
   ackWaitMs: number;
   maxDeliveries: number;
@@ -109,7 +108,6 @@ function readStreamDefinition(cursor: Cursor): StreamDefinition {
     name,
     config: {
       retention,
-      maxSegmentSize: Number(cursor.readU64()),
       maxAckPending: Number(cursor.readU64()),
       ackWaitMs: Number(cursor.readU64()),
       maxDeliveries: cursor.readU32(),
@@ -322,20 +320,21 @@ class StreamSubscription<T> {
     const count = res.cursor.readU32();
     if (count === 0) return;
 
-    const batch: { seq: bigint; key?: Uint8Array; data: T }[] = [];
+    const batch: { seq: bigint; receipt: string; key?: Uint8Array; data: T }[] = [];
     for (let i = 0; i < count; i++) {
       const seq = res.cursor.readU64();
+      const receipt = res.cursor.readUUID();
       res.cursor.readU64(); // skip timestamp
       const keyLen = res.cursor.readU16();
       const key = keyLen > 0 ? res.cursor.readBuffer(keyLen) : undefined;
       const payloadLen = res.cursor.readU32();
-      batch.push({ seq, key, data: res.cursor.decodeAnyFromBuffer(payloadLen) as T });
+      batch.push({ seq, receipt, key, data: res.cursor.decodeAnyFromBuffer(payloadLen) as T });
     }
 
     this.phase = 'processing';
     const ackErrors: unknown[] = [];
     try {
-      await runConcurrent(batch, this.concurrency, async ({ seq, key, data }) => {
+      await runConcurrent(batch, this.concurrency, async ({ seq, receipt, key, data }) => {
         if (!this.active || ackErrors.length > 0) return;
         try {
           await this.callback(data, { seq, key });
@@ -351,6 +350,7 @@ class StreamSubscription<T> {
             .string(consumerId)
             .u64(generation)
             .u64(seq)
+            .uuid(receipt)
           );
         } catch (err) {
           ackErrors.push(err);

@@ -218,6 +218,7 @@ def _encode_fixture(fixture: dict) -> bytes:
             .string(inp["consumer_id"])
             .u64(inp["generation"])
             .u64(inp["seq"])
+            .uuid(inp["receipt"])
         )
 
 
@@ -363,6 +364,7 @@ def _decode_fixture(fixture: dict) -> object:
             "consumer_id": c.read_string(),
             "generation": c.read_u64(),
             "seq": c.read_u64(),
+            "receipt": c.read_uuid(),
         }
 
 

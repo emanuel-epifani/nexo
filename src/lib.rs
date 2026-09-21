@@ -32,7 +32,13 @@ impl NexoEngine {
             store: Arc::new(StoreManager::new(Arc::new(config.store.clone()))),
             queue: Arc::new(QueueManager::new(Arc::new(config.queue.clone()))),
             pubsub,
-            stream: Arc::new(StreamManager::new(Arc::new(config.stream.clone())).await),
+            // Stream startup is fail-closed: a corrupt/locked/legacy store
+            // must stop the engine instead of silently opening empty state.
+            stream: Arc::new(
+                StreamManager::new(Arc::new(config.stream.clone()))
+                    .await
+                    .expect("FATAL: stream engine failed to start"),
+            ),
         }
     }
 

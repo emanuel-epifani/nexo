@@ -245,7 +245,8 @@ function encodeFixture(fixture: Fixture): Buffer {
         .string(inp.group)
         .string(inp.consumer_id)
         .u64(BigInt(inp.generation))
-        .u64(BigInt(inp.seq));
+        .u64(BigInt(inp.seq))
+        .uuid(inp.receipt);
       break;
     case 'STREAM_SEEK_END':
       w.string(inp.stream).string(inp.group).u8(inp.target === 'beginning' ? 0 : 1);
@@ -410,6 +411,7 @@ function decodeFixture(fixture: Fixture): any {
         consumer_id: c.readString(),
         generation: Number(c.readU64()),
         seq: Number(c.readU64()),
+        receipt: c.readUUID(),
       };
     case 'STREAM_SEEK_END': {
       const stream = c.readString();
