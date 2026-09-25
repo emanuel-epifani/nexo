@@ -1,0 +1,17 @@
+{
+  "id": "store",
+  "title": "nexo.store vs redis — key/value map",
+  "reference": "redis",
+  "hot_path": "GET under read-heavy mix: the dominant usage is cache-style reads; p99 read latency is the KPI.",
+  "durability": {
+    "nexo": "in-memory map",
+    "reference": "redis defaults (RDB snapshots, AOF off) — effectively in-memory"
+  },
+  "payload_bytes": 64,
+  "workloads": [
+    { "id": "get-throughput", "op": "get", "ops": 100000, "mode": "concurrent", "workers": 50, "prefill": 100000, "hot": true },
+    { "id": "set-throughput", "op": "set", "ops": 100000, "mode": "concurrent", "workers": 50 },
+    { "id": "mix-80-20", "op": "mix", "read_ratio": 0.8, "ops": 100000, "mode": "concurrent", "workers": 50, "prefill": 20000 },
+    { "id": "get-latency", "op": "get", "ops": 10000, "mode": "sequential", "prefill": 10000 }
+  ]
+}

@@ -12,13 +12,12 @@
 //! changes are not held uncommitted behind a bulk mutation batch.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::{error, warn};
 
 use crate::brokers::stream::domain::ops::{Command, Continuation, Effects, StreamReply};
@@ -38,53 +37,45 @@ const MAX_BATCH_COMMANDS: usize = 256;
 pub type WatchMap = DashMap<String, DashMap<String, watch::Sender<u64>>>;
 
 /// Byte-budget admission shared between submitters (async) and the worker
-/// (releases on dequeue). The channel count bound lives in `mpsc` itself.
+/// (releases on dequeue). Permits are bytes: `acquire` takes `bytes` permits
+/// (FIFO wait when the budget is full) and `release` returns them after
+/// dequeue. A semaphore keeps waiter registration atomic with the
+/// availability check, which a hand-rolled Notify loop cannot guarantee.
+/// The channel count bound lives in `mpsc` itself.
 pub struct Admission {
     max_bytes: usize,
-    in_flight: AtomicUsize,
-    notify: Notify,
+    sem: Semaphore,
 }
 
 impl Admission {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             max_bytes: max_bytes.max(1),
-            in_flight: AtomicUsize::new(0),
-            notify: Notify::new(),
+            sem: Semaphore::new(max_bytes.max(1)),
         }
     }
 
     /// Wait until `bytes` fit the in-flight budget. A single command larger
     /// than the whole budget is admitted anyway (record-size limits are
-    /// enforced separately); it simply over-charges the queue.
+    /// enforced separately); acquire and release skip the semaphore
+    /// symmetrically so the over-charge stays balanced.
     pub async fn acquire(&self, bytes: usize) {
-        if bytes == 0 {
+        if bytes == 0 || bytes >= self.max_bytes {
             return;
         }
-        if bytes >= self.max_bytes {
-            self.in_flight.fetch_add(bytes, Ordering::AcqRel);
-            return;
-        }
-        loop {
-            let cur = self.in_flight.load(Ordering::Acquire);
-            if cur.saturating_add(bytes) <= self.max_bytes
-                && self
-                    .in_flight
-                    .compare_exchange(cur, cur + bytes, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                return;
-            }
-            self.notify.notified().await;
-        }
+        let permits = u32::try_from(bytes).unwrap_or(u32::MAX);
+        self.sem
+            .acquire_many(permits)
+            .await
+            .expect("admission semaphore is never closed")
+            .forget();
     }
 
     pub fn release(&self, bytes: usize) {
-        if bytes == 0 {
+        if bytes == 0 || bytes >= self.max_bytes {
             return;
         }
-        self.in_flight.fetch_sub(bytes, Ordering::AcqRel);
-        self.notify.notify_waiters();
+        self.sem.add_permits(bytes);
     }
 }
 
@@ -421,4 +412,44 @@ fn merge(into: &mut Effects, from: Effects) {
         }
     }
     into.followups.extend(from.followups);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a submitter parked on a saturated budget must wake when
+    /// the worker releases bytes. The former AtomicUsize+Notify loop could
+    /// drop a wakeup landing between the failed check and waiter
+    /// registration, stalling the connection read loop; the semaphore makes
+    /// registration atomic with the check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_waiter_wakes_on_release() {
+        let admission = Arc::new(Admission::new(8));
+        admission.acquire(4).await;
+        admission.acquire(4).await;
+        assert_eq!(admission.sem.available_permits(), 0);
+
+        let waiter = {
+            let admission = Arc::clone(&admission);
+            tokio::spawn(async move { admission.acquire(4).await })
+        };
+        tokio::task::yield_now().await;
+        admission.release(4);
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("acquire lost a wakeup and stalled")
+            .unwrap();
+        assert_eq!(admission.sem.available_permits(), 0);
+    }
+
+    /// Commands at or over the whole budget bypass the gate; acquire and
+    /// release must skip the semaphore symmetrically or permits leak.
+    #[tokio::test]
+    async fn admission_oversized_bypasses_budget() {
+        let admission = Admission::new(8);
+        admission.acquire(16).await;
+        admission.release(16);
+        assert_eq!(admission.sem.available_permits(), 8);
+    }
 }

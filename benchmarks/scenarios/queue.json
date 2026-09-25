@@ -1,0 +1,16 @@
+{
+  "id": "queue",
+  "title": "nexo.queue vs rabbitmq — work queue",
+  "reference": "rabbitmq",
+  "hot_path": "End-to-end pipeline (push → consume → ack): job-queue users measure sustained msgs/sec of the full cycle, not raw enqueue.",
+  "durability": {
+    "nexo": "push confirmed on enqueue to async persistence writer (synchronous=OFF): between rabbit-v and rabbit-d",
+    "reference": "reported in two tiers — rabbit-d: durable queue + persistent msgs + confirms + manual ack; rabbit-v: non-durable + non-persistent + no confirm + auto-ack"
+  },
+  "payload_bytes": 128,
+  "workloads": [
+    { "id": "push", "op": "push", "ops": 50000, "mode": "concurrent", "workers": 20 },
+    { "id": "pipeline", "op": "pipeline", "msgs": 50000, "producers": 10, "consumers": 4, "batch_size": 50, "wait_ms": 200, "prefetch": 50, "hot": true },
+    { "id": "consume-ack", "op": "consume", "msgs": 50000, "consumers": 4, "batch_size": 50, "wait_ms": 200, "prefetch": 50, "prefill": 50000 }
+  ]
+}

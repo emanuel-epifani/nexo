@@ -1,0 +1,43 @@
+# Benchmark stack: nexo (built from this repo) + one industry reference per broker.
+#   nexo.store   vs redis
+#   nexo.queue   vs rabbitmq
+#   nexo.stream  vs nats jetstream
+#   nexo.pubsub  vs mosquitto (mqtt)
+#
+# Usage: docker compose -f benchmarks/docker-compose.yml up -d
+services:
+  nexo:
+    build:
+      context: ..
+    ports:
+      - "7654:7654"
+    environment:
+      NEXO_LOG: warn
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    ports:
+      - "5672:5672"
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.11-alpine
+    command: ["-js", "-sd", "/data"]
+    ports:
+      - "4222:4222"
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      - "1883:1883"
+    restart: unless-stopped

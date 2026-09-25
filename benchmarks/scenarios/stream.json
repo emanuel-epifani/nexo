@@ -1,0 +1,17 @@
+{
+  "id": "stream",
+  "title": "nexo.stream vs nats jetstream — durable event stream",
+  "reference": "jetstream",
+  "hot_path": "Confirmed publish (append): streams are producer-dominated; ingest rate is the headline metric. Fetch is the secondary path (consumer group read).",
+  "durability": {
+    "nexo": "SQLite persisted, write confirmed",
+    "reference": "JetStream file storage, publish ack"
+  },
+  "payload_bytes": 128,
+  "workloads": [
+    { "id": "publish", "op": "publish", "ops": 20000, "mode": "concurrent", "workers": 10, "hot": true },
+    { "id": "publish-batch", "op": "publish_batch", "ops": 50000, "batch": 100, "mode": "concurrent", "workers": 10 },
+    { "id": "fetch-drain", "op": "consume", "msgs": 50000, "consumers": 1, "batch_size": 500, "wait_ms": 100, "prefill": 50000 },
+    { "id": "pipeline", "op": "pipeline", "msgs": 20000, "producers": 5, "consumers": 1, "batch_size": 500, "wait_ms": 100 }
+  ]
+}

@@ -1,0 +1,5 @@
+# Install nexo-client first:  uv pip install -e sdk/py   (or pip install -e sdk/py)
+redis>=5.2,<7
+aio-pika>=9.5,<10
+nats-py>=2.9,<3
+aiomqtt>=2.0,<3

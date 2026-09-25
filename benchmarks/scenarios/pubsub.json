@@ -1,0 +1,17 @@
+{
+  "id": "pubsub",
+  "title": "nexo.pubsub vs mosquitto (mqtt) — topic pub/sub",
+  "reference": "mqtt",
+  "hot_path": "Publish with live subscribers: routing + delivery is the cost; subscribe is one-shot. Fan-out scale and pub→sub latency are the KPIs.",
+  "durability": {
+    "nexo": "server-confirmed publish, live delivery",
+    "reference": "MQTT QoS 1 publish (PUBACK ≈ nexo server confirm), QoS 0 delivery"
+  },
+  "payload_bytes": 128,
+  "workloads": [
+    { "id": "publish-1sub", "op": "publish", "ops": 50000, "mode": "concurrent", "workers": 20, "subscribers": 1, "hot": true },
+    { "id": "publish-wildcard", "op": "publish", "ops": 50000, "mode": "concurrent", "workers": 20, "subscribers": 10, "pattern": "bench/+/metric", "topic": "bench/sensor1/metric" },
+    { "id": "fanout-100", "op": "fanout", "ops": 5000, "subscribers": 100 },
+    { "id": "delivery-latency", "op": "latency", "ops": 10000, "subscribers": 1 }
+  ]
+}

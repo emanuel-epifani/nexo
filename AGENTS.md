@@ -38,6 +38,9 @@ sdk/py/src/nexo/               # Python SDK package (typed, py.typed)
     codec.py                   # frame serialization/deserialization
   transport/tcp/connection.py  # TCP adapter
 sdk/integration-test-matrix.md # source of truth: test scenario IDs + TS/Python test names
+benchmarks/                    # e2e cross-system benchmarks (nexo vs redis/rabbitmq/jetstream/mqtt)
+  scenarios/*.json             # shared workload specs — single source of truth for both harnesses
+  ts/, py/                     # per-SDK harnesses, interpret the same spec for both systems
 docs/guide/                    # functional docs
 ```
 
