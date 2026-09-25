@@ -20,7 +20,10 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::{error, warn};
 
-use crate::brokers::stream::domain::ops::{Command, Continuation, Effects, StreamReply};
+use crate::brokers::stream::domain::message::ConsumerIdentity;
+use crate::brokers::stream::domain::ops::{
+    Command, Continuation, Effects, StreamReply, StreamRequest,
+};
 use crate::brokers::stream::domain::recipes::{self, CmdError, ExecCtx};
 use crate::brokers::stream::domain::storage::Store;
 use crate::brokers::BrokerError;
@@ -88,6 +91,10 @@ pub fn now_millis() -> u64 {
 
 enum Item {
     Cmd(Command),
+    /// Consecutive acks for the same (stream, group, consumer), folded by
+    /// `merge_ack_runs`: the worker executes them as one op so the batch
+    /// pays member resolution and the epoch write once per run.
+    AckRun(Vec<Command>),
     Cont(Continuation),
 }
 
@@ -234,7 +241,7 @@ impl Worker {
         let mut effects = Effects::default();
         let mut fatal: Option<BrokerError> = None;
 
-        for item in batch {
+        for item in merge_ack_runs(batch) {
             match item {
                 Item::Cont(cont) => {
                     if fatal.is_some() {
@@ -264,9 +271,8 @@ impl Worker {
                             }
                         },
                         Err(e) => {
-                            fatal = Some(BrokerError::storage(format!(
-                                "Cannot open savepoint: {e}"
-                            )));
+                            fatal =
+                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
                         }
                     }
                 }
@@ -326,9 +332,137 @@ impl Worker {
                                     "Cannot open savepoint: {e}"
                                 ))),
                             });
-                            fatal = Some(BrokerError::storage(format!(
-                                "Cannot open savepoint: {e}"
-                            )));
+                            fatal =
+                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
+                        }
+                    }
+                }
+                Item::AckRun(cmds) => {
+                    if let Some(e) = &fatal {
+                        for cmd in cmds {
+                            outcomes.push(Outcome {
+                                reply: cmd.reply,
+                                result: Err(BrokerError::storage(format!(
+                                    "Batch aborted by storage error: {e}"
+                                ))),
+                            });
+                        }
+                        continue;
+                    }
+                    let (name, group, identity) = match &cmds[0].op {
+                        StreamRequest::Ack {
+                            name,
+                            group,
+                            identity,
+                            ..
+                        }
+                        | StreamRequest::AckMany {
+                            name,
+                            group,
+                            identity,
+                            ..
+                        } => (name, group, identity),
+                        _ => unreachable!("AckRun carries only ack commands"),
+                    };
+                    // Flatten every command's (seq, receipt) pairs into one
+                    // ack_many call; `counts` remembers how many pairs each
+                    // command owns so replies can be sliced back per command.
+                    let mut acks: Vec<(u64, [u8; 16])> = Vec::new();
+                    let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
+                    for cmd in &cmds {
+                        match &cmd.op {
+                            StreamRequest::Ack { seq, receipt, .. } => {
+                                acks.push((*seq, *receipt));
+                                counts.push(1);
+                            }
+                            StreamRequest::AckMany { acks: more, .. } => {
+                                acks.extend_from_slice(more);
+                                counts.push(more.len());
+                            }
+                            _ => unreachable!("AckRun carries only ack commands"),
+                        }
+                    }
+                    match tx.savepoint() {
+                        Ok(mut sp) => match recipes::ack_many(&sp, name, group, identity, &acks) {
+                            Ok((results, fx)) => {
+                                if let Err(e) = sp.commit() {
+                                    for cmd in cmds {
+                                        outcomes.push(Outcome {
+                                            reply: cmd.reply,
+                                            result: Err(BrokerError::storage(format!(
+                                                "Savepoint release failed: {e}"
+                                            ))),
+                                        });
+                                    }
+                                    fatal = Some(BrokerError::storage(format!(
+                                        "Savepoint release failed: {e}"
+                                    )));
+                                } else {
+                                    merge(&mut effects, fx);
+                                    let mut results = results.into_iter();
+                                    for (cmd, n) in cmds.into_iter().zip(counts) {
+                                        let slice: Vec<Result<StreamReply, BrokerError>> =
+                                            results.by_ref().take(n).collect();
+                                        let result = match &cmd.op {
+                                            StreamRequest::Ack { .. } => {
+                                                slice.into_iter().next().unwrap_or_else(|| {
+                                                    Err(BrokerError::new(
+                                                        crate::brokers::BrokerErrorKind::Internal,
+                                                        "Ack run result missing",
+                                                    ))
+                                                })
+                                            }
+                                            StreamRequest::AckMany { acks: mine, .. } => {
+                                                let failed = mine
+                                                    .iter()
+                                                    .zip(&slice)
+                                                    .filter(|(_, r)| r.is_err())
+                                                    .map(|((seq, _), _)| *seq)
+                                                    .collect();
+                                                Ok(StreamReply::AckOutcome(failed))
+                                            }
+                                            _ => unreachable!(),
+                                        };
+                                        outcomes.push(Outcome {
+                                            reply: cmd.reply,
+                                            result,
+                                        });
+                                    }
+                                }
+                            }
+                            Err(CmdError::Expected(e)) => {
+                                let _ = sp.rollback();
+                                for cmd in cmds {
+                                    outcomes.push(Outcome {
+                                        reply: cmd.reply,
+                                        result: Err(BrokerError::new(e.kind, e.message.clone())),
+                                    });
+                                }
+                            }
+                            Err(CmdError::Fatal(e)) => {
+                                let _ = sp.rollback();
+                                for cmd in cmds {
+                                    outcomes.push(Outcome {
+                                        reply: cmd.reply,
+                                        result: Err(BrokerError::storage(format!(
+                                            "Command aborted: {e}"
+                                        ))),
+                                    });
+                                }
+                                fatal = Some(e);
+                            }
+                        },
+                        Err(e) => {
+                            for cmd in cmds {
+                                outcomes.push(Outcome {
+                                    reply: cmd.reply,
+                                    result: Err(BrokerError::storage(format!(
+                                        "Cannot open savepoint: {e}"
+                                    ))),
+                                });
+                            }
+                            fatal =
+                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
                         }
                     }
                 }
@@ -398,6 +532,46 @@ fn fail_command(cmd: Command, err: &BrokerError) {
     if let Some(reply) = cmd.reply {
         let _ = reply.send(Err(BrokerError::storage(err.to_string())));
     }
+}
+
+/// Fold runs of consecutive `Ack`/`AckMany` commands for the same (stream,
+/// group, consumer) into `Item::AckRun`. Order is preserved: any non-ack item
+/// ends the run, so a mixed batch degrades to per-command execution. Each
+/// merged command keeps its own reply slot.
+fn merge_ack_runs(batch: Vec<Item>) -> Vec<Item> {
+    fn ack_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
+        match &cmd.op {
+            StreamRequest::Ack {
+                name,
+                group,
+                identity,
+                ..
+            }
+            | StreamRequest::AckMany {
+                name,
+                group,
+                identity,
+                ..
+            } => Some((name, group, identity)),
+            _ => None,
+        }
+    }
+    let mut out: Vec<Item> = Vec::with_capacity(batch.len());
+    for item in batch {
+        if matches!(&item, Item::Cmd(cmd) if ack_key(cmd).is_some()) {
+            let Item::Cmd(cmd) = item else { unreachable!() };
+            if let Some(Item::AckRun(run)) = out.last_mut() {
+                if ack_key(&run[0]) == ack_key(&cmd) {
+                    run.push(cmd);
+                    continue;
+                }
+            }
+            out.push(Item::AckRun(vec![cmd]));
+            continue;
+        }
+        out.push(item);
+    }
+    out
 }
 
 fn merge(into: &mut Effects, from: Effects) {

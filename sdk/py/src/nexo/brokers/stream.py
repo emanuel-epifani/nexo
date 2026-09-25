@@ -8,7 +8,13 @@ from typing import Any, Callable, Generic, Literal, TypeVar, TypedDict
 
 from . import ProvisionOutcome, ProvisionResult
 from ..config import DEFAULT_CONFIG
-from ..errors import ConnectionClosedError, NexoError, NotConnectedError, ProtocolError
+from ..errors import (
+    ConnectionClosedError,
+    FencedError,
+    NexoError,
+    NotConnectedError,
+    ProtocolError,
+)
 from ..protocol.generated import (
     ErrorCode,
     FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
@@ -511,6 +517,49 @@ class StreamSubscription(Generic[T]):
             batch.append({"seq": seq, "receipt": receipt, "key": key, "data": data})
 
         ack_errors: list[Exception] = []
+        pending_acks: list[tuple[int, bytes]] = []
+        flush_task: asyncio.Task[None] | None = None
+
+        async def flush_acks() -> None:
+            # Drains the acks of completed callbacks without stalling the
+            # loop: one in-flight S_ACK_MANY at a time, and whatever finished
+            # processing while it flew gets folded into the next frame.
+            while pending_acks:
+                batch_acks = pending_acks[:]
+                pending_acks.clear()
+
+                def write_acks(writer: Any, batch_acks: list = batch_acks) -> None:
+                    writer.string(self._stream_name).string(self._group_name).string(
+                        consumer_id
+                    ).u64(generation).u32(len(batch_acks))
+                    for seq, receipt in batch_acks:
+                        writer.u64(seq).uuid(receipt)
+
+                try:
+                    _, cursor = await self._conn.send(
+                        StreamOpcode.S_ACK_MANY, write_acks
+                    )
+                    for _ in range(cursor.read_u32()):
+                        failed_seq = cursor.read_u64()
+                        error = FencedError(f"ACK rejected for seq={failed_seq}")
+                        ack_errors.append(error)
+                        self._logger.error(
+                            f"[{self._stream_name}:{self._group_name}] "
+                            f"ACK failed at seq={failed_seq}. {error}"
+                        )
+                except Exception as error:
+                    ack_errors.append(error)
+                    self._logger.error(
+                        f"[{self._stream_name}:{self._group_name}] "
+                        f"ACK batch failed. {error}"
+                    )
+
+        def kick_flush() -> None:
+            nonlocal flush_task
+            if not pending_acks:
+                return
+            if flush_task is None or flush_task.done():
+                flush_task = asyncio.create_task(flush_acks())
 
         async def process(message: dict[str, Any]) -> None:
             if not self._active or ack_errors:
@@ -532,27 +581,15 @@ class StreamSubscription(Generic[T]):
                     f"Waiting for timeout-based retry. {error}"
                 )
                 return
-
-            try:
-                await self._conn.send(
-                    StreamOpcode.S_ACK,
-                    lambda writer: writer.string(self._stream_name)
-                    .string(self._group_name)
-                    .string(consumer_id)
-                    .u64(generation)
-                    .u64(message["seq"])
-                    .uuid(message["receipt"]),
-                )
-            except Exception as error:
-                ack_errors.append(error)
-                self._logger.error(
-                    f"[{self._stream_name}:{self._group_name}] "
-                    f"ACK failed at seq={message['seq']}. {error}"
-                )
+            pending_acks.append((message["seq"], message["receipt"]))
+            kick_flush()
 
         self._phase = "processing"
         try:
             await run_concurrent(batch, self._concurrency, process)
+            kick_flush()
+            if flush_task is not None:
+                await flush_task
             if ack_errors:
                 raise StreamAckError(ack_errors) from ack_errors[0]
         finally:

@@ -75,7 +75,7 @@ async def run(spec: dict[str, Any]) -> list[dict[str, Any]]:
             cb,
             batch_size=w.get("batch_size", 500),
             wait_ms=w.get("wait_ms", 100),
-            concurrency=1,
+            concurrency=w.get("concurrency", 1),
         )
         t0 = now_ms()
         while got < msgs:
@@ -110,7 +110,7 @@ async def run(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 cb,
                 batch_size=w.get("batch_size", 500),
                 wait_ms=w.get("wait_ms", 100),
-                concurrency=1,
+                concurrency=w.get("concurrency", 1),
             )
             for c in range(w.get("consumers", 1))
         ]

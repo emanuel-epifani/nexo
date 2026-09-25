@@ -16,6 +16,7 @@ export interface Workload {
   workers?: number;
   producers?: number;
   consumers?: number;
+  concurrency?: number;
   batch?: number;
   batch_size?: number;
   wait_ms?: number;

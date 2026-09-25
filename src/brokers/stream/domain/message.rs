@@ -31,7 +31,7 @@ pub struct Delivery {
 /// Durable membership identity used by fetch/ack/leave.
 /// `connection_id` binds the lease to its TCP session, `consumer_id` is the
 /// member inside the group epoch, `generation` fences pre-seek identities.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerIdentity {
     pub connection_id: String,
     pub consumer_id: String,

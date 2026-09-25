@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 0x08;
+export const PROTOCOL_VERSION = 0x09;
 
 export enum FrameType {
   REQUEST = 0x01,
@@ -93,6 +93,7 @@ export enum StreamOpcode {
   S_MOVE_TO_STREAM = 0x3B,
   S_DELETE_DLS = 0x3C,
   S_PURGE_DLS = 0x3D,
+  S_ACK_MANY = 0x3E,
 }
 
 export const QUEUE_MAX_PUSH_ITEMS = 10_000;

@@ -11,7 +11,8 @@
   "workloads": [
     { "id": "publish", "op": "publish", "ops": 20000, "mode": "concurrent", "workers": 10, "hot": true },
     { "id": "publish-batch", "op": "publish_batch", "ops": 50000, "batch": 100, "mode": "concurrent", "workers": 10 },
-    { "id": "fetch-drain", "op": "consume", "msgs": 50000, "consumers": 1, "batch_size": 500, "wait_ms": 100, "prefill": 50000 },
+    { "id": "fetch-drain", "op": "consume", "msgs": 50000, "consumers": 1, "batch_size": 500, "wait_ms": 100, "prefill": 50000, "concurrency": 1 },
+    { "id": "fetch-drain-par", "op": "consume", "msgs": 50000, "consumers": 1, "batch_size": 500, "wait_ms": 100, "prefill": 50000, "concurrency": 32 },
     { "id": "pipeline", "op": "pipeline", "msgs": 20000, "producers": 5, "consumers": 1, "batch_size": 500, "wait_ms": 100 }
   ]
 }

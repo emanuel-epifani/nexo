@@ -26,14 +26,14 @@ use crate::NexoEngine;
 // OPCODES
 // ==========================================
 
+use crate::protocol::STREAM_MAX_FETCH_BATCH_SIZE;
 use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 pub use crate::protocol::{
-    OP_S_ACK, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLS, OP_S_DESCRIBE, OP_S_EXISTS, OP_S_FETCH,
-    OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLS, OP_S_PUB, OP_S_PURGE_DLS, OP_S_SEEK,
-    STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
+    OP_S_ACK, OP_S_ACK_MANY, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLS, OP_S_DESCRIBE, OP_S_EXISTS,
+    OP_S_FETCH, OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLS, OP_S_PUB,
+    OP_S_PURGE_DLS, OP_S_SEEK, STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
 };
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
-
 
 // ==========================================
 // COMMANDS
@@ -68,6 +68,15 @@ pub enum StreamCommand {
         generation: u64,
         seq: u64,
         receipt: [u8; 16],
+    },
+    /// Batched ack: one frame carries N (seq, receipt) pairs so a fetch
+    /// batch is released in a single round trip instead of N awaits.
+    AckMany {
+        name: String,
+        group: String,
+        consumer_id: String,
+        generation: u64,
+        acks: Vec<(u64, [u8; 16])>,
     },
     Seek {
         name: String,
@@ -206,6 +215,33 @@ impl StreamCommand {
                     receipt,
                 })
             }
+            OP_S_ACK_MANY => {
+                let name = cursor.read_string()?;
+                let group = cursor.read_string()?;
+                let consumer_id = cursor.read_string()?;
+                let generation = cursor.read_u64()?;
+                let count = cursor.read_u32()? as usize;
+                // 24 bytes per item (seq u64 + receipt 16B); the cap mirrors
+                // the fetch batch ceiling since a batch can't ack more than
+                // a fetch could have delivered.
+                if count > STREAM_MAX_FETCH_BATCH_SIZE || count > cursor.len() / 24 {
+                    return Err(ParseError::Invalid(format!(
+                        "Ack batch count {} exceeds remaining payload",
+                        count
+                    )));
+                }
+                let mut acks = Vec::with_capacity(count);
+                for _ in 0..count {
+                    acks.push((cursor.read_u64()?, cursor.read_uuid_bytes()?));
+                }
+                Ok(Self::AckMany {
+                    name,
+                    group,
+                    consumer_id,
+                    generation,
+                    acks,
+                })
+            }
             OP_S_SEEK => {
                 let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
@@ -336,9 +372,49 @@ mod tests {
     #[test]
     fn ack_parser_rejects_truncated_receipt() {
         let mut writer = PayloadWriter::new();
-        writer.put_str("s").put_str("g").put_str("c").put_u64(3).put_u64(9);
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_u64(3)
+            .put_u64(9);
         let mut cursor = PayloadCursor::new(writer.into_bytes());
         assert!(StreamCommand::parse(OP_S_ACK, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn ack_many_parser_reads_pairs() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_u64(3)
+            .put_u32(2)
+            .put_u64(9)
+            .put_uuid(&[0xAB; 16])
+            .put_u64(10)
+            .put_uuid(&[0xCD; 16]);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        match StreamCommand::parse(OP_S_ACK_MANY, &mut cursor).unwrap() {
+            StreamCommand::AckMany { acks, .. } => {
+                assert_eq!(acks, vec![(9, [0xAB; 16]), (10, [0xCD; 16])]);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn ack_many_parser_rejects_oversized_count() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_u64(3)
+            .put_u32(1000);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        assert!(StreamCommand::parse(OP_S_ACK_MANY, &mut cursor).is_err());
     }
 }
 
@@ -376,6 +452,18 @@ fn encode_join_group(ack_floor: u64, generation: u64, consumer_id: &str) -> Byte
     w.put_u64(ack_floor);
     w.put_u64(generation);
     w.put_str(consumer_id);
+    w.into_bytes()
+}
+
+/// S_ACK_MANY reply: `[u32 failed_count][seq u64]*` — empty means all acks
+/// consumed. Kept as DATA (not ERR) so whole-op failures stay distinct from
+/// per-seq fencing, and valid acks still commit.
+fn encode_ack_outcome(failed: &[u64]) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(4 + failed.len() * 8);
+    w.put_u32(failed.len() as u32);
+    for &seq in failed {
+        w.put_u64(seq);
+    }
     w.into_bytes()
 }
 
@@ -461,6 +549,8 @@ enum CallKind {
     DlsPeek,
     Count,
     Unit,
+    /// S_ACK_MANY: DATA reply listing the seqs that failed fencing.
+    AckOutcome,
 }
 
 pub struct StreamCall {
@@ -505,6 +595,9 @@ fn encode_reply(kind: CallKind, reply: StreamReply) -> Response {
             Response::Data(encode_peek_dls(&entries))
         }
         (CallKind::Count, StreamReply::Count(n)) => Response::Data(encode_purge_dls(n)),
+        (CallKind::AckOutcome, StreamReply::AckOutcome(failed)) => {
+            Response::Data(encode_ack_outcome(&failed))
+        }
         (CallKind::Unit, StreamReply::Unit) => Response::Ok,
         _ => Response::error(ErrorCode::Internal, "Unexpected stream reply"),
     }
@@ -522,9 +615,7 @@ pub async fn submit(
     let mut cursor = PayloadCursor::new(payload);
     let cmd = match StreamCommand::parse(opcode, &mut cursor) {
         Ok(c) => c,
-        Err(error) => {
-            return Err(Response::error(ErrorCode::ProtocolError, error.to_string()))
-        }
+        Err(error) => return Err(Response::error(ErrorCode::ProtocolError, error.to_string())),
     };
     let stream = &engine.stream;
     let connection = session_id.to_string();
@@ -535,7 +626,10 @@ pub async fn submit(
                 options,
                 &stream.config(),
             );
-            (StreamRequest::CreateStream { name, requested }, CallKind::Provision)
+            (
+                StreamRequest::CreateStream { name, requested },
+                CallKind::Provision,
+            )
         }
         StreamCommand::Publish { name, items } => {
             (StreamRequest::Publish { name, items }, CallKind::Publish)
@@ -590,11 +684,37 @@ pub async fn submit(
             },
             CallKind::Unit,
         ),
+        StreamCommand::AckMany {
+            name,
+            group,
+            consumer_id,
+            generation,
+            acks,
+        } => (
+            StreamRequest::AckMany {
+                name,
+                group,
+                identity: crate::brokers::stream::domain::message::ConsumerIdentity {
+                    connection_id: connection,
+                    consumer_id,
+                    generation,
+                },
+                acks,
+            },
+            CallKind::AckOutcome,
+        ),
         StreamCommand::Seek {
             name,
             group,
             target,
-        } => (StreamRequest::Seek { name, group, target }, CallKind::Unit),
+        } => (
+            StreamRequest::Seek {
+                name,
+                group,
+                target,
+            },
+            CallKind::Unit,
+        ),
         StreamCommand::Exists { name } => (StreamRequest::StreamExists { name }, CallKind::Bool),
         StreamCommand::Describe { name } => {
             (StreamRequest::DescribeStream { name }, CallKind::Definition)
@@ -671,7 +791,9 @@ fn submit_fetch(
     let wait = wait_ms as u64;
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = stream.fetch(&name, &group, &identity, limit as usize, wait).await;
+        let result = stream
+            .fetch(&name, &group, &identity, limit as usize, wait)
+            .await;
         let _ = tx.send(result.map(StreamReply::Fetch));
     });
     StreamCall {

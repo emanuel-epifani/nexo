@@ -1,7 +1,7 @@
 import { NexoConnection } from '../transport/tcp/connection';
 import { Logger } from '../utils/logger';
 import { DEFAULT_CONFIG } from '../config';
-import { ConnectionClosedError, NexoError, NotConnectedError, ProtocolError } from '../errors';
+import { ConnectionClosedError, FencedError, NexoError, NotConnectedError, ProtocolError } from '../errors';
 import { runConcurrent } from '../utils/concurrent';
 import { Subscription } from '../subscription';
 import { ProvisionOutcome, ProvisionResult } from '../provisioning';
@@ -333,6 +333,50 @@ class StreamSubscription<T> {
 
     this.phase = 'processing';
     const ackErrors: unknown[] = [];
+    const pendingAcks: { seq: bigint; receipt: string }[] = [];
+    let flushing = false;
+    let flushDone: Promise<void> | null = null;
+
+    // Drains acks of completed callbacks without stalling the loop: one
+    // in-flight S_ACK_MANY at a time, and whatever finished processing while
+    // it flew gets folded into the next frame.
+    const kickFlush = () => {
+      if (flushing || pendingAcks.length === 0) return;
+      flushing = true;
+      flushDone = (async () => {
+        try {
+          while (pendingAcks.length > 0) {
+            const batchAcks = pendingAcks.splice(0, pendingAcks.length);
+            try {
+              const res = await this.conn.send(StreamOpcode.S_ACK_MANY, w => {
+                w.string(this.streamName)
+                  .string(this.group)
+                  .string(consumerId)
+                  .u64(generation)
+                  .u32(batchAcks.length);
+                for (const { seq, receipt } of batchAcks) w.u64(seq).uuid(receipt);
+              });
+              const failed = res.cursor.readU32();
+              for (let i = 0; i < failed; i++) {
+                const seq = res.cursor.readU64();
+                const err = new FencedError(`ACK rejected for seq=${seq}`);
+                ackErrors.push(err);
+                this.logger.error(`[${this.streamName}:${this.group}] ACK failed at seq=${seq}.`, err);
+              }
+            } catch (err) {
+              ackErrors.push(err);
+              this.logger.error(`[${this.streamName}:${this.group}] ACK batch failed.`, err);
+            }
+          }
+        } finally {
+          flushing = false;
+          // An ack pushed between the last drain check and `flushing = false`
+          // would otherwise be stranded — re-arm the flush.
+          if (pendingAcks.length > 0) kickFlush();
+        }
+      })();
+    };
+
     try {
       await runConcurrent(batch, this.concurrency, async ({ seq, receipt, key, data }) => {
         if (!this.active || ackErrors.length > 0) return;
@@ -342,22 +386,12 @@ class StreamSubscription<T> {
           this.logger.error(`[${this.streamName}:${this.group}] Processing error at seq=${seq}. Waiting for timeout-based retry.`, err);
           return;
         }
-
-        try {
-          await this.conn.send(StreamOpcode.S_ACK, w => w
-            .string(this.streamName)
-            .string(this.group)
-            .string(consumerId)
-            .u64(generation)
-            .u64(seq)
-            .uuid(receipt)
-          );
-        } catch (err) {
-          ackErrors.push(err);
-          this.logger.error(`[${this.streamName}:${this.group}] ACK failed at seq=${seq}.`, err);
-        }
+        pendingAcks.push({ seq, receipt });
+        kickFlush();
       });
 
+      kickFlush();
+      if (flushDone) await flushDone;
       if (ackErrors.length > 0) throw new StreamAckError(ackErrors);
     } finally {
       this.phase = 'idle';

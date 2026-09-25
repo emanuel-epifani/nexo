@@ -21,9 +21,7 @@ use crate::brokers::stream::domain::types::{
     Origin,
 };
 use crate::brokers::stream::options::SeekTarget;
-use crate::brokers::{
-    config_conflict_error, BrokerError, ProvisionOutcome, ProvisionResult,
-};
+use crate::brokers::{config_conflict_error, BrokerError, ProvisionOutcome, ProvisionResult};
 use bytes::Bytes;
 use uuid::Uuid;
 
@@ -74,11 +72,7 @@ fn sql<T>(result: rusqlite::Result<T>, context: &str) -> R<T> {
 /// All statement access goes through `prepare_cached`: every recipe runs on
 /// the writer's single connection, so cached plans amortize parse/plan cost
 /// across commands and transactions.
-fn exec<P: rusqlite::Params>(
-    conn: &Connection,
-    text: &str,
-    params: P,
-) -> rusqlite::Result<usize> {
+fn exec<P: rusqlite::Params>(conn: &Connection, text: &str, params: P) -> rusqlite::Result<usize> {
     conn.prepare_cached(text)?.execute(params)
 }
 
@@ -250,9 +244,8 @@ fn load_stream(conn: &Connection, name: &str) -> R<Option<StreamRow>> {
 }
 
 fn require_stream(conn: &Connection, name: &str) -> R<StreamRow> {
-    load_stream(conn, name)?.ok_or_else(|| {
-        expected(BrokerError::not_found(format!("Stream '{name}' not found")))
-    })
+    load_stream(conn, name)?
+        .ok_or_else(|| expected(BrokerError::not_found(format!("Stream '{name}' not found"))))
 }
 
 struct GroupRow {
@@ -262,7 +255,8 @@ struct GroupRow {
 }
 
 fn load_group(conn: &Connection, stream_id: &[u8; 16], name: &str) -> R<Option<GroupRow>> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT id, generation, active_epoch FROM groups WHERE stream_id = ?1 AND name = ?2",
         params![stream_id.as_slice(), name],
         |r| {
@@ -279,22 +273,20 @@ fn load_group(conn: &Connection, stream_id: &[u8; 16], name: &str) -> R<Option<G
         Ok(GroupRow {
             id: blob16(&id, "group id")?,
             generation,
-            active_epoch: epoch
-                .map(|e| blob16(&e, "active epoch"))
-                .transpose()?,
+            active_epoch: epoch.map(|e| blob16(&e, "active epoch")).transpose()?,
         })
     })
     .transpose()
 }
 
 fn require_group(conn: &Connection, stream_id: &[u8; 16], name: &str) -> R<GroupRow> {
-    load_group(conn, stream_id, name)?.ok_or_else(|| {
-        expected(BrokerError::not_found(format!("Group '{name}' not found")))
-    })
+    load_group(conn, stream_id, name)?
+        .ok_or_else(|| expected(BrokerError::not_found(format!("Group '{name}' not found"))))
 }
 
 fn load_epoch(conn: &Connection, epoch_id: &[u8; 16]) -> R<Option<EpochRow>> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT id, group_id, stream_id, start_after_seq, initialized, init_key_cursor,
                 init_key_target, keyless_cursor_pos, keyless_ticket, next_ready_ticket,
                 pending_count, max_pending
@@ -368,7 +360,8 @@ fn require_epoch(conn: &Connection, group: &GroupRow) -> R<EpochRow> {
 
 fn save_epoch(conn: &Connection, epoch: &EpochRow) -> R<()> {
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE group_epochs SET initialized=?2, init_key_cursor=?3, init_key_target=?4,
                 keyless_cursor_pos=?5, keyless_ticket=?6, next_ready_ticket=?7, pending_count=?8
              WHERE id=?1",
@@ -406,10 +399,15 @@ fn key_boundary_pos(
     key_id: i64,
     seq_boundary: u64,
 ) -> R<u64> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT key_pos FROM events WHERE stream_id=?1 AND key_id=?2 AND seq<=?3
          ORDER BY seq DESC LIMIT 1",
-        params![stream_id.as_slice(), key_id, encode_u64(seq_boundary).as_slice()],
+        params![
+            stream_id.as_slice(),
+            key_id,
+            encode_u64(seq_boundary).as_slice()
+        ],
         |r| blob8(r, 0, "key_pos"),
     )
     .optional()
@@ -424,7 +422,8 @@ fn next_event_pos(
     key_id: i64,
     pos: u64,
 ) -> R<Option<(u64, u64)>> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT key_pos, seq FROM events WHERE stream_id=?1 AND key_id=?2 AND key_pos>?3
          ORDER BY key_pos LIMIT 1",
         params![stream_id.as_slice(), key_id, encode_u64(pos).as_slice()],
@@ -442,7 +441,8 @@ fn first_retained_seq_in_range(
     first_pos: u64,
     last_pos: Option<u64>,
 ) -> R<Option<u64>> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT seq FROM events WHERE stream_id=?1 AND key_id=?2 AND key_pos>=?3
            AND (?4 IS NULL OR key_pos<=?4) ORDER BY key_pos LIMIT 1",
         params![
@@ -458,7 +458,8 @@ fn first_retained_seq_in_range(
 }
 
 fn key_tail_pos(conn: &Connection, stream_id: &[u8; 16], key_id: i64) -> R<u64> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT last_pos FROM stream_keys WHERE stream_id=?1 AND key_id=?2",
         params![stream_id.as_slice(), key_id],
         |r| blob8(r, 0, "last_pos"),
@@ -477,15 +478,11 @@ fn insert_range(
     reason: DlsReason,
     attempts: i64,
 ) -> R<()> {
-    let first_seq = first_retained_seq_in_range(
-        conn,
-        &epoch.stream_id,
-        key_id,
-        first_pos,
-        last_pos,
-    )?;
+    let first_seq =
+        first_retained_seq_in_range(conn, &epoch.stream_id, key_id, first_pos, last_pos)?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO dls_ranges(epoch_id, stream_id, key_id, first_pos, last_pos, first_seq,
                                     reason, attempts)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -513,11 +510,7 @@ fn insert_range(
 /// (min of next original and oldest replay intent, by position), then persist
 /// the EMPTY/READY state. PARKED and LEASED lanes must not call this.
 /// Returns true when the lane transitioned into READY.
-fn recompute_lane(
-    conn: &Connection,
-    epoch: &mut EpochRow,
-    lane: &LaneRow,
-) -> R<bool> {
+fn recompute_lane(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow) -> R<bool> {
     let next_original = next_event_pos(conn, &epoch.stream_id, lane.key_id, lane.cursor_pos)?;
     let normal_seq = next_original.map(|(_, seq)| seq);
 
@@ -545,13 +538,19 @@ fn recompute_lane(
     };
 
     let (state, ticket, hseq, hpos, horigin, attempts) = match head {
-        Some((seq, pos, origin)) => {
-            (LaneState::Ready as i64, take_ticket(epoch)?, Some(seq), Some(pos), Some(origin as i64), 0i64)
-        }
+        Some((seq, pos, origin)) => (
+            LaneState::Ready as i64,
+            take_ticket(epoch)?,
+            Some(seq),
+            Some(pos),
+            Some(origin as i64),
+            0i64,
+        ),
         None => (LaneState::Empty as i64, 0, None, None, None, 0),
     };
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE key_lanes SET normal_seq=?3, head_seq=?4, head_pos=?5, head_origin=?6,
                 state=?7, attempts=?8, ready_ticket=?9, receipt=NULL, owner=NULL,
                 connection_id=NULL, deadline_ms=NULL
@@ -591,7 +590,8 @@ fn ensure_lane(
     }
     let cursor = boundary;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO key_lanes(epoch_id, stream_id, key_id, cursor_pos, state, attempts,
                                    ready_ticket)
              VALUES (?1,?2,?3,?4,0,0,0)",
@@ -618,7 +618,8 @@ fn ensure_lane(
 }
 
 fn load_lane(conn: &Connection, epoch_id: &[u8; 16], key_id: i64) -> R<Option<LaneRow>> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state, attempts,
                 receipt
          FROM key_lanes WHERE epoch_id=?1 AND key_id=?2",
@@ -641,15 +642,11 @@ fn load_lane(conn: &Connection, epoch_id: &[u8; 16], key_id: i64) -> R<Option<La
     .map_err(|e| fatal("Cannot load lane", e))
 }
 
-fn set_lane_ready(
-    conn: &Connection,
-    epoch: &mut EpochRow,
-    lane: &LaneRow,
-    attempts: i64,
-) -> R<()> {
+fn set_lane_ready(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow, attempts: i64) -> R<()> {
     let ticket = take_ticket(epoch)?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE key_lanes SET state=1, attempts=?3, ready_ticket=?4, receipt=NULL, owner=NULL,
                 connection_id=NULL, deadline_ms=NULL
              WHERE epoch_id=?1 AND key_id=?2",
@@ -663,21 +660,25 @@ fn set_lane_ready(
 /// Park a lane: the failed head becomes the first member of (or extends) the
 /// DLS range set, the lane loses its head/frontier, and `attempts` of the
 /// failed head are preserved on the range.
-fn park_lane(
-    conn: &Connection,
-    epoch: &mut EpochRow,
-    lane: &LaneRow,
-    reason: DlsReason,
-) -> R<()> {
-    let head_pos = lane.head_pos.ok_or_else(|| {
-        CmdError::Fatal(BrokerError::storage("Cannot park lane without a head"))
-    })?;
+fn park_lane(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow, reason: DlsReason) -> R<()> {
+    let head_pos = lane
+        .head_pos
+        .ok_or_else(|| CmdError::Fatal(BrokerError::storage("Cannot park lane without a head")))?;
     match lane.head_origin {
         Some(o) if o == Origin::Replay as i64 => {
             // A re-failed replay parks as a singleton interval.
-            insert_range(conn, epoch, lane.key_id, head_pos, Some(head_pos), reason, lane.attempts)?;
+            insert_range(
+                conn,
+                epoch,
+                lane.key_id,
+                head_pos,
+                Some(head_pos),
+                reason,
+                lane.attempts,
+            )?;
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "DELETE FROM replay_intents WHERE epoch_id=?1 AND key_id=?2 AND key_pos=?3",
                     params![
                         epoch.id.as_slice(),
@@ -691,11 +692,20 @@ fn park_lane(
         _ => {
             // Original head exhausted: the open interval covers this position
             // and every later original until the park is resolved.
-            insert_range(conn, epoch, lane.key_id, head_pos, None, reason, lane.attempts)?;
+            insert_range(
+                conn,
+                epoch,
+                lane.key_id,
+                head_pos,
+                None,
+                reason,
+                lane.attempts,
+            )?;
         }
     }
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE key_lanes SET state=3, normal_seq=NULL, head_seq=NULL, head_pos=NULL,
                 head_origin=NULL, attempts=0, ready_ticket=0, receipt=NULL, owner=NULL,
                 connection_id=NULL, deadline_ms=NULL
@@ -742,7 +752,8 @@ fn release_keyless_lease(
     }
     if attempts >= max_deliveries as i64 {
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
                 params![epoch.id.as_slice(), encode_u64(seq).as_slice()],
             ),
@@ -760,7 +771,8 @@ fn release_keyless_lease(
     } else {
         let ticket = take_ticket(epoch)?;
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "UPDATE keyless_deliveries SET state=1, ready_ticket=?3, receipt=NULL, owner=NULL,
                     connection_id=NULL, deadline_ms=NULL
                  WHERE epoch_id=?1 AND seq=?2",
@@ -825,12 +837,23 @@ pub fn recover_keyless_lease(
         .map_err(|e| BrokerError::storage(format!("Corrupt keyless delivery: {e}")))?
         .ok_or_else(|| BrokerError::storage("Corrupt storage: leased delivery missing"))?;
     let config = load_config_for_stream(conn, &epoch.stream_id)?;
-    release_keyless_lease(conn, &mut epoch, seq, key_pos, attempts, config.max_deliveries, false)
-        .map_err(|e| e.into_error())?;
+    release_keyless_lease(
+        conn,
+        &mut epoch,
+        seq,
+        key_pos,
+        attempts,
+        config.max_deliveries,
+        false,
+    )
+    .map_err(|e| e.into_error())?;
     save_epoch(conn, &epoch).map_err(|e| e.into_error())
 }
 
-fn load_config_for_stream(conn: &Connection, stream_id: &[u8; 16]) -> Result<StreamConfig, BrokerError> {
+fn load_config_for_stream(
+    conn: &Connection,
+    stream_id: &[u8; 16],
+) -> Result<StreamConfig, BrokerError> {
     let json: Option<String> = conn
         .query_row(
             "SELECT config_json FROM streams WHERE id=?1",
@@ -936,6 +959,21 @@ pub fn execute(
             seq,
             receipt,
         } => ack(conn, name, group, identity, *seq, receipt),
+        StreamRequest::AckMany {
+            name,
+            group,
+            identity,
+            acks,
+        } => {
+            let (results, effects) = ack_many(conn, name, group, identity, acks)?;
+            let failed = acks
+                .iter()
+                .zip(&results)
+                .filter(|(_, r)| r.is_err())
+                .map(|((seq, _), _)| *seq)
+                .collect();
+            Ok((StreamReply::AckOutcome(failed), effects))
+        }
         StreamRequest::Leave {
             name,
             group,
@@ -953,8 +991,12 @@ pub fn execute(
             limit,
             offset,
         } => peek_dls(conn, name, group, *limit, *offset),
-        StreamRequest::ReplayDls { name, group, seq } => dls_point_op(conn, name, group, *seq, true),
-        StreamRequest::DeleteDls { name, group, seq } => dls_point_op(conn, name, group, *seq, false),
+        StreamRequest::ReplayDls { name, group, seq } => {
+            dls_point_op(conn, name, group, *seq, true)
+        }
+        StreamRequest::DeleteDls { name, group, seq } => {
+            dls_point_op(conn, name, group, *seq, false)
+        }
         StreamRequest::PurgeDls { name, group } => purge_dls(conn, name, group),
         StreamRequest::ExpireLeases { now_ms } => expire_leases(conn, *now_ms),
         StreamRequest::RetentionTick => retention_tick(conn, ctx),
@@ -994,10 +1036,11 @@ pub fn create_stream_with_config(
         ));
     }
     let stream_id = Uuid::new_v4().into_bytes();
-    let config_json = serde_json::to_string(requested)
-        .map_err(|e| fatal("Cannot serialize stream config", e))?;
+    let config_json =
+        serde_json::to_string(requested).map_err(|e| fatal("Cannot serialize stream config", e))?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO streams(id, name, deleted, config_json, last_seq, retained_after_seq,
                                  last_key_id, logical_bytes)
              VALUES (?1,?2,0,?3,?4,?5,0,0)",
@@ -1013,7 +1056,8 @@ pub fn create_stream_with_config(
     )?;
     // Keyless events live under the reserved key_id 0.
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO stream_keys(stream_id, key_id, key, last_pos, retained_after_pos)
              VALUES (?1,0,?2,?3,?4)",
             params![
@@ -1042,7 +1086,8 @@ fn delete_stream(conn: &Connection, name: &str) -> Result<(StreamReply, Effects)
         return Ok((StreamReply::Unit, Effects::default()));
     };
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE streams SET deleted=1 WHERE id=?1",
             [stream.id.as_slice()],
         ),
@@ -1128,9 +1173,10 @@ fn publish(
         std::collections::HashMap::new();
 
     for item in items {
-        let seq = stream.last_seq.checked_add(1).ok_or_else(|| {
-            CmdError::Fatal(BrokerError::storage("Stream sequence exhausted"))
-        })?;
+        let seq = stream
+            .last_seq
+            .checked_add(1)
+            .ok_or_else(|| CmdError::Fatal(BrokerError::storage("Stream sequence exhausted")))?;
         stream.last_seq = seq;
         seqs.push(seq);
 
@@ -1142,7 +1188,8 @@ fn publish(
         let key_pos = bump_key_pos(conn, &stream.id, key_id)?;
         logical_added += event_logical_bytes(item.key.len(), item.payload.len());
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "INSERT INTO events(stream_id, seq, key_id, key_pos, timestamp_ms, payload,
                                     payload_bytes, logical_bytes)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -1178,7 +1225,8 @@ fn publish(
                     // The open interval already covers the new position;
                     // populate first_seq lazily where it was still empty.
                     sql(
-                        exec(conn, 
+                        exec(
+                            conn,
                             "UPDATE dls_ranges SET first_seq=?4
                              WHERE epoch_id=?1 AND key_id=?2 AND first_seq IS NULL
                                AND first_pos<=?3 AND (last_pos IS NULL OR ?3<=last_pos)",
@@ -1202,14 +1250,11 @@ fn publish(
                 Some(LaneState::Ready) | Some(LaneState::Leased) => {
                     if lane.normal_seq.is_none() {
                         sql(
-                            exec(conn, 
+                            exec(
+                                conn,
                                 "UPDATE key_lanes SET normal_seq=?3
                                  WHERE epoch_id=?1 AND key_id=?2",
-                                params![
-                                    epoch.id.as_slice(),
-                                    key_id,
-                                    encode_u64(seq).as_slice()
-                                ],
+                                params![epoch.id.as_slice(), key_id, encode_u64(seq).as_slice()],
                             ),
                             "Cannot fill lane frontier",
                         )?;
@@ -1234,7 +1279,8 @@ fn publish(
     }
 
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE streams SET last_seq=?2, last_key_id=?3, logical_bytes=logical_bytes+?4
              WHERE id=?1",
             params![
@@ -1271,7 +1317,8 @@ fn intern_key(conn: &Connection, stream: &mut StreamRow, key: &Bytes) -> R<i64> 
         .ok_or_else(|| fatal("Key id space exhausted", ""))?;
     stream.last_key_id = id;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO stream_keys(stream_id, key_id, key, last_pos, retained_after_pos)
              VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -1306,27 +1353,33 @@ fn bump_key_pos(conn: &Connection, stream_id: &[u8; 16], key_id: i64) -> R<u64> 
         .checked_add(1)
         .ok_or_else(|| fatal("Key position space exhausted", ""))?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE stream_keys SET last_pos=?3 WHERE stream_id=?1 AND key_id=?2",
-            params![
-                stream_id.as_slice(),
-                key_id,
-                encode_u64(new_pos).as_slice()
-            ],
+            params![stream_id.as_slice(), key_id, encode_u64(new_pos).as_slice()],
         ),
         "Cannot advance key position",
     )?;
     Ok(new_pos)
 }
 
-fn read(conn: &Connection, name: &str, from_seq: u64, limit: usize) -> Result<(StreamReply, Effects), CmdError> {
+fn read(
+    conn: &Connection,
+    name: &str,
+    from_seq: u64,
+    limit: usize,
+) -> Result<(StreamReply, Effects), CmdError> {
     let stream = require_stream(conn, name)?;
     let rows = query_vec(
         conn,
         "SELECT e.seq, e.timestamp_ms, k.key, e.payload
          FROM events e JOIN stream_keys k ON k.stream_id=e.stream_id AND k.key_id=e.key_id
          WHERE e.stream_id=?1 AND e.seq>=?2 ORDER BY e.seq LIMIT ?3",
-        params![stream.id.as_slice(), encode_u64(from_seq).as_slice(), limit as i64],
+        params![
+            stream.id.as_slice(),
+            encode_u64(from_seq).as_slice(),
+            limit as i64
+        ],
         |r| {
             Ok(Message {
                 seq: blob8(r, 0, "seq")?,
@@ -1344,11 +1397,7 @@ fn read(conn: &Connection, name: &str, from_seq: u64, limit: usize) -> Result<(S
 // Group lifecycle: join / fetch / ack / leave / seek / disconnect
 // ---------------------------------------------------------------------------
 
-fn epoch_keyless_boundary(
-    conn: &Connection,
-    stream_id: &[u8; 16],
-    start_after: u64,
-) -> R<u64> {
+fn epoch_keyless_boundary(conn: &Connection, stream_id: &[u8; 16], start_after: u64) -> R<u64> {
     key_boundary_pos(conn, stream_id, 0, start_after)
 }
 
@@ -1362,7 +1411,8 @@ fn create_group_and_epoch(
     let epoch_id = Uuid::new_v4().into_bytes();
     let keyless_cursor = epoch_keyless_boundary(conn, &stream.id, start_after)?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO groups(id, stream_id, name, generation, active_epoch)
              VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -1376,7 +1426,8 @@ fn create_group_and_epoch(
         "Cannot create group",
     )?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO group_epochs(id, group_id, stream_id, start_after_seq, initialized,
                 init_key_cursor, init_key_target, keyless_cursor_pos, keyless_ticket,
                 next_ready_ticket, pending_count, max_pending)
@@ -1479,7 +1530,8 @@ fn join(
     };
     let consumer_id = Uuid::new_v4().to_string();
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "INSERT INTO members(epoch_id, stream_id, group_id, consumer_id, connection_id)
              VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -1568,11 +1620,42 @@ fn fetch(
     let mut deliveries: Vec<Delivery> = Vec::with_capacity(credit);
     let mut used_bytes: u64 = 4; // FETCH response count prefix
     let mut claimed = 0usize;
+    // Fresh keyless events are scanned in pages and admitted in bulk instead
+    // of one SELECT + one INSERT per message — the dominant fetch path.
+    let mut sources: std::collections::VecDeque<FreshSource> = std::collections::VecDeque::new();
+    let mut fresh_claims: Vec<(u64, u64, [u8; 16])> = Vec::new();
 
     while claimed < credit && used_bytes < ctx.fetch_response_bytes {
-        // Source candidate: next keyless event after the epoch watermark.
-        let source = next_event_pos(conn, &epoch.stream_id, 0, epoch.keyless_cursor)?;
-        let source_ticket = source.map(|_| epoch.keyless_ticket).unwrap_or(i64::MAX);
+        // Source candidate: front of the prefetched keyless page after the
+        // epoch watermark.
+        if sources.is_empty() {
+            let page = ((credit - claimed).min(256)) as i64;
+            sources = query_vec(
+                conn,
+                "SELECT key_pos, seq, timestamp_ms, payload FROM events
+                 WHERE stream_id=?1 AND key_id=0 AND key_pos>?2
+                 ORDER BY key_pos LIMIT ?3",
+                params![
+                    epoch.stream_id.as_slice(),
+                    encode_u64(epoch.keyless_cursor).as_slice(),
+                    page
+                ],
+                |r| {
+                    Ok(FreshSource {
+                        key_pos: blob8(r, 0, "key_pos")?,
+                        seq: blob8(r, 1, "seq")?,
+                        timestamp_ms: r.get(2)?,
+                        payload: r.get(3)?,
+                    })
+                },
+                "Cannot scan fresh keyless events",
+            )?
+            .into();
+        }
+        let source_ticket = sources
+            .front()
+            .map(|_| epoch.keyless_ticket)
+            .unwrap_or(i64::MAX);
         let lane_ticket = lanes.front().map(|c| c.ticket).unwrap_or(i64::MAX);
         // Retries sit below the keyless cursor, so their seq always precedes
         // the next fresh event: the earlier of the two keyless tickets claims
@@ -1584,29 +1667,56 @@ fn fetch(
         enum Choice {
             Lane { key_id: i64 },
             Retry { seq: u64 },
-            Source { seq: u64, key_pos: u64 },
+            Source { ev: FreshSource },
         }
         let (event_seq, choice) = if lane_ticket != i64::MAX && lane_ticket <= keyless_ticket {
             let c = lanes.pop_front().unwrap();
-            (
-                c.head_seq,
-                Choice::Lane {
-                    key_id: c.key_id,
-                },
-            )
-        } else if let Some(c) = retries.front() {
-            let seq = c.seq;
-            retries.pop_front();
-            (seq, Choice::Retry { seq })
+            (c.head_seq, Choice::Lane { key_id: c.key_id })
+        } else if retries.front().is_some() {
+            let c = retries.pop_front().unwrap();
+            (c.seq, Choice::Retry { seq: c.seq })
         } else if source_ticket != i64::MAX {
-            let (pos, seq) = source.unwrap();
-            (seq, Choice::Source { seq, key_pos: pos })
+            let ev = sources.pop_front().unwrap();
+            (ev.seq, Choice::Source { ev })
         } else {
             break;
         };
 
-        // Load the immutable event + key before claiming so the byte budget
-        // is checked against what would actually be encoded.
+        // Fresh sources carry the event inline: byte budget, admission and
+        // the epoch watermark need no event lookup. Admission rows are
+        // deferred into one multi-VALUES insert after the loop.
+        if let Choice::Source { ev } = choice {
+            let item_bytes = fetch_item_encoded_bytes(0, ev.payload.len());
+            if used_bytes + item_bytes > ctx.fetch_response_bytes {
+                if deliveries.is_empty() {
+                    return Err(expected(BrokerError::invalid_argument(format!(
+                        "Single stream event ({} bytes) exceeds the fetch response budget ({} bytes)",
+                        item_bytes, ctx.fetch_response_bytes
+                    ))));
+                }
+                break;
+            }
+            let receipt = Uuid::new_v4().into_bytes();
+            fresh_claims.push((ev.seq, ev.key_pos, receipt));
+            epoch.keyless_cursor = ev.key_pos;
+            epoch.keyless_ticket = take_ticket(&mut epoch)?;
+            used_bytes += item_bytes;
+            claimed += 1;
+            deliveries.push(Delivery {
+                message: Message {
+                    seq: ev.seq,
+                    timestamp: ev.timestamp_ms as u64,
+                    key: Bytes::new(),
+                    payload: Bytes::from(ev.payload),
+                },
+                receipt,
+            });
+            continue;
+        }
+
+        // Lane heads and retries: load the immutable event + key before
+        // claiming so the byte budget is checked against what would actually
+        // be encoded.
         let event = conn
             .query_row(
                 "SELECT e.timestamp_ms, e.payload, k.key FROM events e
@@ -1640,75 +1750,45 @@ fn fetch(
         }
 
         let receipt = Uuid::new_v4().into_bytes();
-        match choice {
-            Choice::Lane { key_id } => {
-                let changed = sql(
-                    exec(conn, 
-                        "UPDATE key_lanes SET state=2, receipt=?3, owner=?4, connection_id=?5,
-                            deadline_ms=?6, attempts=attempts+1
-                         WHERE epoch_id=?1 AND key_id=?2 AND state=1",
-                        params![
-                            epoch.id.as_slice(),
-                            key_id,
-                            receipt.as_slice(),
-                            identity.consumer_id,
-                            identity.connection_id,
-                            deadline,
-                        ],
-                    ),
-                    "Cannot lease lane",
-                )?;
-                if changed == 0 {
-                    continue;
-                }
-            }
-            Choice::Retry { seq } => {
-                let changed = sql(
-                    exec(conn, 
-                        "UPDATE keyless_deliveries SET state=2, receipt=?3, owner=?4,
-                            connection_id=?5, deadline_ms=?6, attempts=attempts+1
-                         WHERE epoch_id=?1 AND seq=?2 AND state=1",
-                        params![
-                            epoch.id.as_slice(),
-                            encode_u64(seq).as_slice(),
-                            receipt.as_slice(),
-                            identity.consumer_id,
-                            identity.connection_id,
-                            deadline,
-                        ],
-                    ),
-                    "Cannot lease keyless delivery",
-                )?;
-                if changed == 0 {
-                    continue;
-                }
-            }
-            Choice::Source { seq, key_pos } => {
-                // Admission creates the delivery row already leased to this
-                // consumer; the epoch watermark moves past the position and
-                // the source re-queues at the back of the ticket order.
-                sql(
-                    exec(conn, 
-                        "INSERT INTO keyless_deliveries(epoch_id, stream_id, seq, key_pos, origin,
-                            state, attempts, ready_ticket, receipt, owner, connection_id,
-                            deadline_ms)
-                         VALUES (?1,?2,?3,?4,0,2,1,0,?5,?6,?7,?8)",
-                        params![
-                            epoch.id.as_slice(),
-                            epoch.stream_id.as_slice(),
-                            encode_u64(seq).as_slice(),
-                            encode_u64(key_pos).as_slice(),
-                            receipt.as_slice(),
-                            identity.consumer_id,
-                            identity.connection_id,
-                            deadline,
-                        ],
-                    ),
-                    "Cannot admit keyless delivery",
-                )?;
-                epoch.keyless_cursor = key_pos;
-                epoch.keyless_ticket = take_ticket(&mut epoch)?;
-            }
+        let changed = match choice {
+            Choice::Lane { key_id } => sql(
+                exec(
+                    conn,
+                    "UPDATE key_lanes SET state=2, receipt=?3, owner=?4, connection_id=?5,
+                        deadline_ms=?6, attempts=attempts+1
+                     WHERE epoch_id=?1 AND key_id=?2 AND state=1",
+                    params![
+                        epoch.id.as_slice(),
+                        key_id,
+                        receipt.as_slice(),
+                        identity.consumer_id,
+                        identity.connection_id,
+                        deadline,
+                    ],
+                ),
+                "Cannot lease lane",
+            )?,
+            Choice::Retry { seq } => sql(
+                exec(
+                    conn,
+                    "UPDATE keyless_deliveries SET state=2, receipt=?3, owner=?4,
+                        connection_id=?5, deadline_ms=?6, attempts=attempts+1
+                     WHERE epoch_id=?1 AND seq=?2 AND state=1",
+                    params![
+                        epoch.id.as_slice(),
+                        encode_u64(seq).as_slice(),
+                        receipt.as_slice(),
+                        identity.consumer_id,
+                        identity.connection_id,
+                        deadline,
+                    ],
+                ),
+                "Cannot lease keyless delivery",
+            )?,
+            Choice::Source { .. } => unreachable!(),
+        };
+        if changed == 0 {
+            continue;
         }
 
         used_bytes += item_bytes;
@@ -1724,9 +1804,61 @@ fn fetch(
         });
     }
 
+    admit_fresh_keyless(conn, &epoch, &fresh_claims, identity, deadline)?;
     epoch.pending += claimed as i64;
     save_epoch(conn, &epoch)?;
     Ok((StreamReply::Fetch(deliveries), Effects::default()))
+}
+
+/// Fresh keyless event prefetched for the claim loop: the whole payload is
+/// read up front so the byte budget needs no second query.
+struct FreshSource {
+    key_pos: u64,
+    seq: u64,
+    timestamp_ms: i64,
+    payload: Vec<u8>,
+}
+
+/// Admission rows for fresh keyless claims, written as chunked multi-row
+/// VALUES inserts — identical rows to the per-message INSERT, at ~1/Nth the
+/// statement count.
+fn admit_fresh_keyless(
+    conn: &Connection,
+    epoch: &EpochRow,
+    claims: &[(u64, u64, [u8; 16])],
+    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
+    deadline: i64,
+) -> R<()> {
+    // 8 bound params per row; chunks stay under the 999-variable limit.
+    for chunk in claims.chunks(120) {
+        let mut text = String::from(
+            "INSERT INTO keyless_deliveries(epoch_id, stream_id, seq, key_pos, origin,
+                state, attempts, ready_ticket, receipt, owner, connection_id, deadline_ms)
+             VALUES ",
+        );
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 8);
+        for (row, (seq, key_pos, receipt)) in chunk.iter().enumerate() {
+            if row > 0 {
+                text.push(',');
+            }
+            text.push_str("(?,?,?,?,0,2,1,0,?,?,?,?)");
+            values.extend([
+                rusqlite::types::Value::Blob(epoch.id.to_vec()),
+                rusqlite::types::Value::Blob(epoch.stream_id.to_vec()),
+                rusqlite::types::Value::Blob(encode_u64(*seq).to_vec()),
+                rusqlite::types::Value::Blob(encode_u64(*key_pos).to_vec()),
+                rusqlite::types::Value::Blob(receipt.to_vec()),
+                rusqlite::types::Value::Text(identity.consumer_id.clone()),
+                rusqlite::types::Value::Text(identity.connection_id.clone()),
+                rusqlite::types::Value::Integer(deadline),
+            ]);
+        }
+        sql(
+            exec(conn, &text, rusqlite::params_from_iter(values)),
+            "Cannot admit keyless deliveries",
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,34 +1902,7 @@ fn ack(
         if stored != receipt.as_slice() {
             return Err(expected(BrokerError::fenced()));
         }
-        epoch.pending -= 1;
-        let origin = lane.head_origin.unwrap_or(Origin::Original as i64);
-        let head_pos = lane.head_pos.ok_or_else(|| {
-            CmdError::Fatal(BrokerError::storage("Corrupt storage: leased lane without head"))
-        })?;
-        if origin == Origin::Replay as i64 {
-            // The delivery obligation is consumed only when it is acked.
-            sql(
-                exec(conn, 
-                    "DELETE FROM replay_intents WHERE epoch_id=?1 AND key_id=?2 AND key_pos=?3",
-                    params![
-                        epoch.id.as_slice(),
-                        lane.key_id,
-                        encode_u64(head_pos).as_slice()
-                    ],
-                ),
-                "Cannot consume replay intent",
-            )?;
-        } else {
-            // Original progress: the resolved position becomes the new cursor.
-            lane_refresh_cursor(conn, &epoch.id, lane.key_id, head_pos)?;
-        }
-        let refreshed = load_lane(conn, &epoch.id, lane.key_id)?.ok_or_else(|| {
-            CmdError::Fatal(BrokerError::storage("Corrupt storage: lane vanished on ack"))
-        })?;
-        if recompute_lane(conn, &mut epoch, &refreshed)? {
-            effects.wake(name, group_name);
-        }
+        consume_lane_lease(conn, &mut epoch, &lane, name, group_name, &mut effects)?;
         save_epoch(conn, &epoch)?;
         // Credit freed: pending fetches retry even when the lane went EMPTY.
         effects.wake(name, group_name);
@@ -1816,7 +1921,8 @@ fn ack(
     match keyless {
         Some((Some(stored), 2)) if stored.as_slice() == receipt.as_slice() => {
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
                     params![epoch.id.as_slice(), encode_u64(seq).as_slice()],
                 ),
@@ -1831,10 +1937,198 @@ fn ack(
     }
 }
 
+/// Consume one leased lane head after the receipt check: drop the replay
+/// obligation or advance the durable cursor, then recompute the next head.
+/// Shared by `ack` and `ack_many`; decrements the epoch pending counter.
+fn consume_lane_lease(
+    conn: &Connection,
+    epoch: &mut EpochRow,
+    lane: &LaneRow,
+    name: &str,
+    group_name: &str,
+    effects: &mut Effects,
+) -> R<()> {
+    epoch.pending -= 1;
+    let origin = lane.head_origin.unwrap_or(Origin::Original as i64);
+    let head_pos = lane.head_pos.ok_or_else(|| {
+        CmdError::Fatal(BrokerError::storage(
+            "Corrupt storage: leased lane without head",
+        ))
+    })?;
+    if origin == Origin::Replay as i64 {
+        // The delivery obligation is consumed only when it is acked.
+        sql(
+            exec(
+                conn,
+                "DELETE FROM replay_intents WHERE epoch_id=?1 AND key_id=?2 AND key_pos=?3",
+                params![
+                    epoch.id.as_slice(),
+                    lane.key_id,
+                    encode_u64(head_pos).as_slice()
+                ],
+            ),
+            "Cannot consume replay intent",
+        )?;
+    } else {
+        // Original progress: the resolved position becomes the new cursor.
+        lane_refresh_cursor(conn, &epoch.id, lane.key_id, head_pos)?;
+    }
+    let refreshed = load_lane(conn, &epoch.id, lane.key_id)?.ok_or_else(|| {
+        CmdError::Fatal(BrokerError::storage(
+            "Corrupt storage: lane vanished on ack",
+        ))
+    })?;
+    if recompute_lane(conn, epoch, &refreshed)? {
+        effects.wake(name, group_name);
+    }
+    Ok(())
+}
+
+/// `(text, params)` for `... WHERE epoch_id=?1 AND <col> IN (?2..)`: seqs
+/// bind as numbered placeholders past the epoch. Bounded by the worker's
+/// batch cap (256), well under the SQLite variable limit.
+fn seq_in_list(
+    base: &str,
+    epoch_id: &[u8; 16],
+    seqs: &[u64],
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut text = String::from(base);
+    let mut values = Vec::with_capacity(seqs.len() + 1);
+    values.push(rusqlite::types::Value::Blob(epoch_id.to_vec()));
+    for (i, seq) in seqs.iter().enumerate() {
+        if i > 0 {
+            text.push(',');
+        }
+        text.push_str(&format!("?{}", i + 2));
+        values.push(rusqlite::types::Value::Blob(encode_u64(*seq).to_vec()));
+    }
+    text.push(')');
+    (text, values)
+}
+
+/// Consecutive acks for one (stream, group, consumer), merged by the worker:
+/// member resolution and the epoch write happen once per run, and keyless
+/// releases collapse into a single IN-list delete — instead of ~5 statements
+/// per message. Per-ack results are preserved: a fenced seq fails alone.
+pub fn ack_many(
+    conn: &Connection,
+    name: &str,
+    group_name: &str,
+    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
+    acks: &[(u64, [u8; 16])],
+) -> Result<(Vec<Result<StreamReply, BrokerError>>, Effects), CmdError> {
+    let (_stream, mut epoch) = resolve_member(conn, name, group_name, identity)?;
+    let mut effects = Effects::default();
+    let mut ok = vec![false; acks.len()];
+    // A seq already released inside this run: a repeated ack behaves like
+    // the second sequential call would — the row is gone → FENCED.
+    let mut consumed = std::collections::HashSet::with_capacity(acks.len());
+
+    let mut seqs: Vec<u64> = acks.iter().map(|(seq, _)| *seq).collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    if seqs.is_empty() {
+        return Ok((Vec::new(), Effects::default()));
+    }
+
+    // Lanes whose leased head is one of the acked seqs, and leased keyless
+    // rows — two IN-list scans instead of two point lookups per ack.
+    let lane_of: std::collections::HashMap<u64, i64> = {
+        let (text, values) = seq_in_list(
+            "SELECT head_seq, key_id FROM key_lanes
+             WHERE epoch_id=?1 AND state=2 AND head_seq IN (",
+            &epoch.id,
+            &seqs,
+        );
+        query_vec(
+            conn,
+            &text,
+            rusqlite::params_from_iter(values),
+            |r| Ok((blob8(r, 0, "head_seq")?, r.get::<_, i64>(1)?)),
+            "Cannot locate lane leases",
+        )?
+        .into_iter()
+        .collect()
+    };
+    let keyless_of: std::collections::HashMap<u64, Vec<u8>> = {
+        let (text, values) = seq_in_list(
+            "SELECT seq, receipt FROM keyless_deliveries
+             WHERE epoch_id=?1 AND state=2 AND seq IN (",
+            &epoch.id,
+            &seqs,
+        );
+        query_vec(
+            conn,
+            &text,
+            rusqlite::params_from_iter(values),
+            |r| Ok((blob8(r, 0, "seq")?, r.get::<_, Vec<u8>>(1)?)),
+            "Cannot locate keyless leases",
+        )?
+        .into_iter()
+        .collect()
+    };
+
+    let mut keyless_done: Vec<u64> = Vec::new();
+    for (i, (seq, receipt)) in acks.iter().enumerate() {
+        if consumed.contains(seq) {
+            continue;
+        }
+        if let Some(&key_id) = lane_of.get(seq) {
+            let Some(lane) = load_lane(conn, &epoch.id, key_id)? else {
+                continue;
+            };
+            if lane.receipt.as_deref() == Some(receipt.as_slice()) {
+                consume_lane_lease(conn, &mut epoch, &lane, name, group_name, &mut effects)?;
+                consumed.insert(*seq);
+                ok[i] = true;
+            }
+            continue;
+        }
+        if let Some(stored) = keyless_of.get(seq) {
+            if stored.as_slice() == receipt.as_slice() {
+                keyless_done.push(*seq);
+                consumed.insert(*seq);
+                ok[i] = true;
+            }
+        }
+    }
+
+    if !keyless_done.is_empty() {
+        let (text, values) = seq_in_list(
+            "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq IN (",
+            &epoch.id,
+            &keyless_done,
+        );
+        sql(
+            exec(conn, &text, rusqlite::params_from_iter(values)),
+            "Cannot consume keyless deliveries",
+        )?;
+        epoch.pending -= keyless_done.len() as i64;
+    }
+    if ok.iter().any(|done| *done) {
+        save_epoch(conn, &epoch)?;
+        // Credit freed once per run; wakes are deduplicated anyway.
+        effects.wake(name, group_name);
+    }
+    Ok((
+        ok.into_iter()
+            .map(|done| {
+                if done {
+                    Ok(StreamReply::Unit)
+                } else {
+                    Err(BrokerError::fenced())
+                }
+            })
+            .collect(),
+        effects,
+    ))
+}
+
 /// Rewrite the cursor column in place (helper split out for readability).
 fn lane_refresh_cursor(conn: &Connection, epoch_id: &[u8; 16], key_id: i64, cursor: u64) -> R<()> {
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE key_lanes SET cursor_pos=?3 WHERE epoch_id=?1 AND key_id=?2",
             params![epoch_id.as_slice(), key_id, encode_u64(cursor).as_slice()],
         ),
@@ -1864,7 +2158,8 @@ fn leave(
         group_name,
     )?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM members WHERE epoch_id=?1 AND consumer_id=?2",
             params![epoch.id.as_slice(), identity.consumer_id],
         ),
@@ -1965,7 +2260,8 @@ fn disconnect(conn: &Connection, connection_id: &str) -> Result<(StreamReply, Ef
             &names.1,
         )?;
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "DELETE FROM members WHERE epoch_id=?1 AND consumer_id=?2",
                 params![epoch.id.as_slice(), consumer_id],
             ),
@@ -2019,7 +2315,8 @@ fn load_stream_by_id(conn: &Connection, id: &[u8; 16]) -> R<Option<StreamRow>> {
 /// `(stream_name, group_name)` for wakeups; group may outlive its stream
 /// row during GC only by FK ordering, so a missing row is corruption.
 fn group_stream_names(conn: &Connection, epoch: &EpochRow) -> R<(String, String)> {
-    query_one(conn, 
+    query_one(
+        conn,
         "SELECT s.name, g.name FROM groups g JOIN streams s ON s.id=g.stream_id
          WHERE g.id=?1",
         [epoch.group_id.as_slice()],
@@ -2053,7 +2350,7 @@ fn seek(
                 CmdError::Fatal(BrokerError::storage("Group generation exhausted"))
             })?;
             sql(
-                exec(conn, 
+                exec(conn,
                     "INSERT INTO group_epochs(id, group_id, stream_id, start_after_seq, initialized,
                         init_key_cursor, init_key_target, keyless_cursor_pos, keyless_ticket,
                         next_ready_ticket, pending_count, max_pending)
@@ -2071,7 +2368,8 @@ fn seek(
                 "Cannot create epoch",
             )?;
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "UPDATE groups SET generation=?2, active_epoch=?3 WHERE id=?1",
                     params![
                         group.id.as_slice(),
@@ -2086,8 +2384,7 @@ fn seek(
             effects.wake(name, group_name);
         }
         None => {
-            let (_group, epoch) =
-                create_group_and_epoch(conn, &stream, group_name, start_after)?;
+            let (_group, epoch) = create_group_and_epoch(conn, &stream, group_name, start_after)?;
             effects
                 .followups
                 .push(Continuation::InitEpoch { epoch_id: epoch.id });
@@ -2124,7 +2421,12 @@ fn peek_dls(
         params![epoch.id.as_slice(), limit as i64, offset as i64],
         |r| {
             let reason_kind = r.get::<_, i64>(1)?;
-            Ok((blob8(r, 0, "seq")?, reason_kind, r.get::<_, i64>(2)?, r.get::<_, Vec<u8>>(3)?))
+            Ok((
+                blob8(r, 0, "seq")?,
+                reason_kind,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+            ))
         },
         "Cannot peek DLS",
     )?;
@@ -2156,7 +2458,8 @@ fn find_range(
     key_id: i64,
     pos: u64,
 ) -> R<Option<RangeRow>> {
-    let result = query_one(conn, 
+    let result = query_one(
+        conn,
         "SELECT first_pos, last_pos, reason, attempts FROM dls_ranges
          WHERE epoch_id=?1 AND key_id=?2 AND first_pos<=?3
            AND (last_pos IS NULL OR ?3<=last_pos)
@@ -2184,18 +2487,14 @@ fn find_range(
 
 /// Remove `pos` from its containing range, splitting into left/right pieces.
 /// Returns false when the position is not a member.
-fn remove_dls_point(
-    conn: &Connection,
-    epoch: &EpochRow,
-    key_id: i64,
-    pos: u64,
-) -> R<bool> {
+fn remove_dls_point(conn: &Connection, epoch: &EpochRow, key_id: i64, pos: u64) -> R<bool> {
     let Some(range) = find_range(conn, &epoch.id, key_id, pos)? else {
         return Ok(false);
     };
     let reason = DlsReason::from_i64(range.reason).unwrap_or(DlsReason::MaxDeliveries);
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM dls_ranges WHERE epoch_id=?1 AND key_id=?2 AND first_pos=?3",
             params![
                 epoch.id.as_slice(),
@@ -2221,7 +2520,15 @@ fn remove_dls_point(
         Some(last) => pos < last,
     };
     if right_exists {
-        insert_range(conn, epoch, key_id, pos + 1, range.last_pos, reason, range.attempts)?;
+        insert_range(
+            conn,
+            epoch,
+            key_id,
+            pos + 1,
+            range.last_pos,
+            reason,
+            range.attempts,
+        )?;
     }
     Ok(true)
 }
@@ -2229,11 +2536,7 @@ fn remove_dls_point(
 /// A parked lane resumes when no retained DLS member remains for the key:
 /// the original cursor jumps to the key tail covered by parking and the head
 /// is rebuilt from remaining replay intents. Returns true if it became READY.
-fn try_unpark_lane(
-    conn: &Connection,
-    epoch: &mut EpochRow,
-    key_id: i64,
-) -> R<bool> {
+fn try_unpark_lane(conn: &Connection, epoch: &mut EpochRow, key_id: i64) -> R<bool> {
     let Some(lane) = load_lane(conn, &epoch.id, key_id)? else {
         return Ok(false);
     };
@@ -2254,7 +2557,8 @@ fn try_unpark_lane(
     }
     // All ranges of this key are memberless: drop them and resume originals.
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM dls_ranges WHERE epoch_id=?1 AND key_id=?2",
             params![epoch.id.as_slice(), key_id],
         ),
@@ -2262,14 +2566,17 @@ fn try_unpark_lane(
     )?;
     let tail = key_tail_pos(conn, &epoch.stream_id, key_id)?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE key_lanes SET cursor_pos=?3 WHERE epoch_id=?1 AND key_id=?2",
             params![epoch.id.as_slice(), key_id, encode_u64(tail).as_slice()],
         ),
         "Cannot advance parked cursor",
     )?;
     let lane = load_lane(conn, &epoch.id, key_id)?.ok_or_else(|| {
-        CmdError::Fatal(BrokerError::storage("Corrupt storage: lane vanished on unpark"))
+        CmdError::Fatal(BrokerError::storage(
+            "Corrupt storage: lane vanished on unpark",
+        ))
     })?;
     recompute_lane(conn, epoch, &lane)
 }
@@ -2312,7 +2619,8 @@ fn dls_point_op(
             // Keyless replays materialize as READY delivery rows.
             let ticket = take_ticket(&mut epoch)?;
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "INSERT INTO keyless_deliveries(epoch_id, stream_id, seq, key_pos, origin,
                         state, attempts, ready_ticket)
                      VALUES (?1,?2,?3,?4,1,1,0,?5)",
@@ -2328,7 +2636,8 @@ fn dls_point_op(
             )?;
         } else {
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "INSERT INTO replay_intents(epoch_id, stream_id, key_id, key_pos, seq)
                      VALUES (?1,?2,?3,?4,?5)",
                     params![
@@ -2390,7 +2699,8 @@ fn purge_dls(
         .map_err(|e| fatal("Cannot count DLS members", e))?;
 
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM dls_ranges WHERE epoch_id=?1",
             [epoch.id.as_slice()],
         ),
@@ -2408,14 +2718,17 @@ fn purge_dls(
     for key_id in parked {
         let tail = key_tail_pos(conn, &epoch.stream_id, key_id)?;
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "UPDATE key_lanes SET cursor_pos=?3 WHERE epoch_id=?1 AND key_id=?2",
                 params![epoch.id.as_slice(), key_id, encode_u64(tail).as_slice()],
             ),
             "Cannot advance parked cursor",
         )?;
         let lane = load_lane(conn, &epoch.id, key_id)?.ok_or_else(|| {
-            CmdError::Fatal(BrokerError::storage("Corrupt storage: lane vanished on purge"))
+            CmdError::Fatal(BrokerError::storage(
+                "Corrupt storage: lane vanished on purge",
+            ))
         })?;
         if recompute_lane(conn, &mut epoch, &lane)? {
             resumed = true;
@@ -2675,22 +2988,19 @@ fn retain_stream(
     // itself continued, so budget-exhaustion is the only "more" signal needed.
     let more = !scanned_all && deleted.len() == BATCH_LIMIT;
     let boundary_seq = deleted.last().unwrap().0;
-    let mut key_deleted_pos: std::collections::HashMap<i64, u64> =
-        std::collections::HashMap::new();
+    let mut key_deleted_pos: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
     let mut deleted_bytes: u64 = 0;
     for (_, key_id, key_pos, logical) in &deleted {
-        *key_deleted_pos.entry(*key_id).or_insert(0) = (*key_deleted_pos
-            .get(key_id)
-            .unwrap_or(&0))
-        .max(*key_pos);
+        *key_deleted_pos.entry(*key_id).or_insert(0) =
+            (*key_deleted_pos.get(key_id).unwrap_or(&0)).max(*key_pos);
         deleted_bytes += logical;
     }
 
     let mut dirty_epochs: std::collections::HashMap<[u8; 16], EpochRow> =
         std::collections::HashMap::new();
     let epoch_of = |conn: &Connection,
-                        dirty: &mut std::collections::HashMap<[u8; 16], EpochRow>,
-                        epoch_id: [u8; 16]| {
+                    dirty: &mut std::collections::HashMap<[u8; 16], EpochRow>,
+                    epoch_id: [u8; 16]| {
         if !dirty.contains_key(&epoch_id) {
             if let Some(e) = load_epoch(conn, &epoch_id)? {
                 dirty.insert(epoch_id, e);
@@ -2716,13 +3026,12 @@ fn retain_stream(
     )?;
     for (epoch_blob, seq_blob, state) in expired_keyless {
         let epoch_id = blob16(&epoch_blob, "epoch id")?;
-        if epoch_of(conn, &mut dirty_epochs, epoch_id)?
-            && state == LaneState::Leased as i64
-        {
+        if epoch_of(conn, &mut dirty_epochs, epoch_id)? && state == LaneState::Leased as i64 {
             dirty_epochs.get_mut(&epoch_id).unwrap().pending -= 1;
         }
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
                 params![epoch_id.as_slice(), seq_blob.as_slice()],
             ),
@@ -2730,7 +3039,8 @@ fn retain_stream(
         )?;
     }
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM replay_intents WHERE stream_id=?1 AND seq<=?2",
             params![stream.id.as_slice(), encode_u64(boundary_seq).as_slice()],
         ),
@@ -2739,14 +3049,16 @@ fn retain_stream(
 
     // Phase C: delete the event prefix and charge the stream.
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "DELETE FROM events WHERE stream_id=?1 AND seq<=?2",
             params![stream.id.as_slice(), encode_u64(boundary_seq).as_slice()],
         ),
         "Cannot delete expired events",
     )?;
     sql(
-        exec(conn, 
+        exec(
+            conn,
             "UPDATE streams SET retained_after_seq=?2, logical_bytes=logical_bytes-?3 WHERE id=?1",
             params![
                 stream.id.as_slice(),
@@ -2758,14 +3070,11 @@ fn retain_stream(
     )?;
     for (key_id, dpos) in &key_deleted_pos {
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "UPDATE stream_keys SET retained_after_pos=?3
                  WHERE stream_id=?1 AND key_id=?2 AND retained_after_pos<?3",
-                params![
-                    stream.id.as_slice(),
-                    key_id,
-                    encode_u64(*dpos).as_slice()
-                ],
+                params![stream.id.as_slice(), key_id, encode_u64(*dpos).as_slice()],
             ),
             "Cannot advance retained position",
         )?;
@@ -2775,7 +3084,8 @@ fn retain_stream(
     // Keyless source watermark moves past deleted positions.
     if let Some(dpos0) = key_deleted_pos.get(&0).copied() {
         sql(
-            exec(conn, 
+            exec(
+                conn,
                 "UPDATE group_epochs SET keyless_cursor_pos=?2
                  WHERE stream_id=?1 AND keyless_cursor_pos<?2",
                 params![stream.id.as_slice(), encode_u64(dpos0).as_slice()],
@@ -2828,7 +3138,8 @@ fn retain_stream_ranges(
             let clipped_front = *dpos >= first_pos;
             if fully {
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "DELETE FROM dls_ranges WHERE epoch_id=?1 AND key_id=?2 AND first_pos=?3",
                         params![
                             epoch_id.as_slice(),
@@ -2843,7 +3154,8 @@ fn retain_stream_ranges(
             if clipped_front {
                 // Reinsert shifted; first_seq is recomputed below.
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "UPDATE dls_ranges SET first_pos=?4, first_seq=NULL
                          WHERE epoch_id=?1 AND key_id=?2 AND first_pos=?3",
                         params![
@@ -2881,14 +3193,14 @@ fn retain_stream_ranges(
                     last_pos,
                 )?;
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "UPDATE dls_ranges SET first_seq=?4
                          WHERE epoch_id=?1 AND key_id=?2 AND first_pos=?3",
                         params![
                             epoch_id.as_slice(),
                             key_id,
-                            encode_u64(if clipped_front { dpos + 1 } else { first_pos })
-                                .as_slice(),
+                            encode_u64(if clipped_front { dpos + 1 } else { first_pos }).as_slice(),
                             new_first.map(encode_u64).map(|b| b.to_vec()),
                         ],
                     ),
@@ -2933,13 +3245,10 @@ fn retain_stream_lanes(
             };
             if lane.cursor_pos < *dpos {
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "UPDATE key_lanes SET cursor_pos=?3 WHERE epoch_id=?1 AND key_id=?2",
-                        params![
-                            epoch_id.as_slice(),
-                            key_id,
-                            encode_u64(*dpos).as_slice()
-                        ],
+                        params![epoch_id.as_slice(), key_id, encode_u64(*dpos).as_slice()],
                     ),
                     "Cannot advance lane cursor",
                 )?;
@@ -2958,7 +3267,8 @@ fn retain_stream_lanes(
                         // the credit, and rebuild the lane.
                         epoch.pending -= 1;
                         sql(
-                            exec(conn, 
+                            exec(
+                                conn,
                                 "UPDATE key_lanes SET state=0, head_seq=NULL, head_pos=NULL,
                                     head_origin=NULL, receipt=NULL, owner=NULL,
                                     connection_id=NULL, deadline_ms=NULL
@@ -3039,10 +3349,12 @@ pub fn init_epoch(
         let boundary = key_boundary_pos(conn, &epoch.stream_id, *key_id, epoch.start_after)?;
         // Materialize only lanes with pending originals; a key with nothing to
         // deliver lazily gets its lane on the next publish.
-        if boundary < *last_pos && next_event_pos(conn, &epoch.stream_id, *key_id, boundary)?.is_some()
+        if boundary < *last_pos
+            && next_event_pos(conn, &epoch.stream_id, *key_id, boundary)?.is_some()
         {
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "INSERT INTO key_lanes(epoch_id, stream_id, key_id, cursor_pos, state,
                                            attempts, ready_ticket)
                      VALUES (?1,?2,?3,?4,0,0,0)
@@ -3057,8 +3369,7 @@ pub fn init_epoch(
                 "Cannot create lane",
             )?;
             if let Some(lane) = load_lane(conn, &epoch.id, *key_id)? {
-                if lane.state == LaneState::Empty as i64
-                    && recompute_lane(conn, &mut epoch, &lane)?
+                if lane.state == LaneState::Empty as i64 && recompute_lane(conn, &mut epoch, &lane)?
                 {
                     let names = group_stream_names(conn, &epoch)?;
                     effects.wake(&names.0, &names.1);
@@ -3074,9 +3385,9 @@ pub fn init_epoch(
         epoch.initialized = true;
     }
     if !epoch.initialized {
-        effects.followups.push(Continuation::InitEpoch {
-            epoch_id: epoch.id,
-        });
+        effects
+            .followups
+            .push(Continuation::InitEpoch { epoch_id: epoch.id });
     }
     save_epoch(conn, &epoch)?;
     // Wake the group once per page so long-polling fetches observe progress.
@@ -3097,11 +3408,9 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
     // deleted per-group in one step so the deferred active_epoch check is
     // never violated at commit.
     let deleted_stream: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT id FROM streams WHERE deleted=1 LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT id FROM streams WHERE deleted=1 LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .optional()
         .map_err(|e| fatal("Cannot scan deleted streams", e))?;
     if let Some(id_blob) = deleted_stream {
@@ -3119,7 +3428,8 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
         ] {
             while budget > 0 {
                 let n = sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         &format!(
                             "DELETE FROM {table} WHERE rowid IN
                              (SELECT rowid FROM {table} WHERE stream_id=?1 LIMIT ?2)"
@@ -3153,14 +3463,16 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
             let remaining_groups = group_ids.len() == GROUP_GC_BATCH;
             for gid in &group_ids {
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "DELETE FROM group_epochs WHERE stream_id=?1 AND group_id=?2",
                         params![stream_id.as_slice(), gid.as_slice()],
                     ),
                     "Cannot GC group epochs",
                 )?;
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "DELETE FROM groups WHERE stream_id=?1 AND id=?2",
                         params![stream_id.as_slice(), gid.as_slice()],
                     ),
@@ -3169,7 +3481,8 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
             }
             if !remaining_groups {
                 sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         "DELETE FROM streams WHERE id=?1",
                         params![stream_id.as_slice()],
                     ),
@@ -3210,7 +3523,8 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
         ] {
             while budget > 0 {
                 let n = sql(
-                    exec(conn, 
+                    exec(
+                        conn,
                         &format!(
                             "DELETE FROM {table} WHERE rowid IN
                              (SELECT rowid FROM {table} WHERE epoch_id=?1 LIMIT ?2)"
@@ -3231,7 +3545,8 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
         }
         if drained {
             sql(
-                exec(conn, 
+                exec(
+                    conn,
                     "DELETE FROM group_epochs WHERE id=?1",
                     params![epoch_id.as_slice()],
                 ),
@@ -3242,7 +3557,9 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
     }
 
     let pending_deleted: i64 = conn
-        .query_row("SELECT COUNT(*) FROM streams WHERE deleted=1", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM streams WHERE deleted=1", [], |r| {
+            r.get(0)
+        })
         .map_err(|e| fatal("Cannot count deleted streams", e))?;
     let pending_orphans: i64 = conn
         .query_row(
@@ -3297,16 +3614,15 @@ mod tests {
         let group_id = [8u8; 16];
         let epoch_id = [9u8; 16];
 
-        exec(&conn, 
+        exec(
+            &conn,
             "INSERT INTO streams VALUES (?1,'s',1,'{}',?2,?2,0,0)",
-            params![
-                stream_id.as_slice(),
-                encode_u64(0).as_slice()
-            ],
+            params![stream_id.as_slice(), encode_u64(0).as_slice()],
         )
         .unwrap();
         // The keyless key row (key_id=0, empty key) required by the schema.
-        exec(&conn, 
+        exec(
+            &conn,
             "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
              VALUES (?1,0,'',?2,?2)",
             params![stream_id.as_slice(), encode_u64(0).as_slice()],
@@ -3316,7 +3632,8 @@ mod tests {
             // groups.active_epoch → group_epochs is DEFERRED: the pair must
             // be inserted inside one transaction.
             let tx = conn.transaction().unwrap();
-            exec(&tx, 
+            exec(
+                &tx,
                 "INSERT INTO groups(id,stream_id,name,generation,active_epoch)
                  VALUES (?1,?2,'g',?3,?4)",
                 params![
@@ -3327,7 +3644,8 @@ mod tests {
                 ],
             )
             .unwrap();
-            exec(&tx, 
+            exec(
+                &tx,
                 "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,initialized,
                     init_key_cursor,init_key_target,keyless_cursor_pos,keyless_ticket,
                     next_ready_ticket,pending_count,max_pending)
@@ -3346,7 +3664,8 @@ mod tests {
         // More keyed lanes than one slice can hold.
         let total_keys = BATCH_LIMIT + 37;
         for key_id in 1..=total_keys as i64 {
-            exec(&conn, 
+            exec(
+                &conn,
                 "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
                  VALUES (?1,?2,?3,?4,?4)",
                 params![
@@ -3357,7 +3676,8 @@ mod tests {
                 ],
             )
             .unwrap();
-            exec(&conn, 
+            exec(
+                &conn,
                 "INSERT INTO events(stream_id,seq,key_id,key_pos,timestamp_ms,payload,
                     payload_bytes,logical_bytes)
                  VALUES (?1,?2,?3,?4,0,'x',1,1)",
@@ -3369,7 +3689,8 @@ mod tests {
                 ],
             )
             .unwrap();
-            exec(&conn, 
+            exec(
+                &conn,
                 "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,state,
                     attempts,ready_ticket)
                  VALUES (?1,?2,?3,?4,3,0,0)",
@@ -3421,5 +3742,156 @@ mod tests {
                 .unwrap();
             assert_eq!(left, 0, "{table} must be fully reclaimed");
         }
+    }
+
+    /// A merged ack run consumes keyless leases in bulk while keeping
+    /// per-ack outcomes: duplicate seqs, stale receipts and unknown seqs are
+    /// FENCED alone; valid releases drop `pending` and delete the rows.
+    #[test]
+    fn ack_many_consumes_keyless_run_with_per_ack_outcomes() {
+        let conn = test_conn();
+        let stream_id = [7u8; 16];
+        let group_id = [8u8; 16];
+        let epoch_id = [9u8; 16];
+        let identity = crate::brokers::stream::domain::message::ConsumerIdentity {
+            connection_id: "conn1".to_string(),
+            consumer_id: "c1".to_string(),
+            generation: 1,
+        };
+
+        exec(
+            &conn,
+            "INSERT INTO streams VALUES (?1,'s',0,?3,?2,?2,0,0)",
+            params![
+                stream_id.as_slice(),
+                encode_u64(0).as_slice(),
+                r#"{"retention":{"max_age_ms":null,"max_bytes":null},"max_ack_pending":1000,"ack_wait_ms":30000,"max_deliveries":3}"#
+            ],
+        )
+        .unwrap();
+        exec(
+            &conn,
+            "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
+             VALUES (?1,0,'',?2,?2)",
+            params![stream_id.as_slice(), encode_u64(0).as_slice()],
+        )
+        .unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        exec(
+            &conn,
+            "INSERT INTO groups(id,stream_id,name,generation,active_epoch)
+             VALUES (?1,?2,'g',?3,?4)",
+            params![
+                group_id.as_slice(),
+                stream_id.as_slice(),
+                encode_u64(1).as_slice(),
+                epoch_id.as_slice()
+            ],
+        )
+        .unwrap();
+        exec(
+            &conn,
+            "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,initialized,
+                init_key_cursor,init_key_target,keyless_cursor_pos,keyless_ticket,
+                next_ready_ticket,pending_count,max_pending)
+             VALUES (?1,?2,?3,?4,1,0,0,?4,0,1,0,100)",
+            params![
+                epoch_id.as_slice(),
+                group_id.as_slice(),
+                stream_id.as_slice(),
+                encode_u64(0).as_slice()
+            ],
+        )
+        .unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        exec(
+            &conn,
+            "INSERT INTO members(epoch_id,stream_id,group_id,consumer_id,connection_id)
+             VALUES (?1,?2,?3,'c1','conn1')",
+            params![
+                epoch_id.as_slice(),
+                stream_id.as_slice(),
+                group_id.as_slice()
+            ],
+        )
+        .unwrap();
+        for seq in 1..=5u64 {
+            exec(
+                &conn,
+                "INSERT INTO events(stream_id,seq,key_id,key_pos,timestamp_ms,payload,
+                    payload_bytes,logical_bytes)
+                 VALUES (?1,?2,0,?3,1,X'78',1,1)",
+                params![
+                    stream_id.as_slice(),
+                    encode_u64(seq).as_slice(),
+                    encode_u64(seq).as_slice()
+                ],
+            )
+            .unwrap();
+        }
+
+        let ctx = ExecCtx {
+            now_ms: 1_000,
+            fetch_response_bytes: 1 << 20,
+        };
+        let (reply, _) = match fetch(&conn, "s", "g", &identity, 10, &ctx) {
+            Ok(out) => out,
+            Err(e) => panic!("fetch failed: {}", e.into_error()),
+        };
+        let StreamReply::Fetch(deliveries) = reply else {
+            panic!("expected a fetch reply")
+        };
+        assert_eq!(deliveries.len(), 5);
+        // The deferred bulk admit actually wrote the lease rows.
+        let leased: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM keyless_deliveries WHERE epoch_id=?1 AND state=2",
+                [epoch_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leased, 5);
+
+        // Run: [ok 1, dup 1, stale receipt on 2, unknown 99, ok 3, ok 4, ok 5]
+        let mut run: Vec<(u64, [u8; 16])> = vec![];
+        run.push((deliveries[0].message.seq, deliveries[0].receipt));
+        run.push((deliveries[0].message.seq, deliveries[0].receipt));
+        run.push((deliveries[1].message.seq, [0xAA; 16]));
+        run.push((99, [0xBB; 16]));
+        for d in &deliveries[2..] {
+            run.push((d.message.seq, d.receipt));
+        }
+
+        let (results, _) = match ack_many(&conn, "s", "g", &identity, &run) {
+            Ok(out) => out,
+            Err(e) => panic!("ack_many failed: {}", e.into_error()),
+        };
+        assert!(results[0].is_ok());
+        assert!(
+            results[1].is_err(),
+            "second ack of a consumed seq is fenced"
+        );
+        assert!(results[2].is_err(), "stale receipt is fenced");
+        assert!(results[3].is_err(), "unknown seq is fenced");
+        for r in &results[4..] {
+            assert!(r.is_ok());
+        }
+
+        let leased: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM keyless_deliveries WHERE epoch_id=?1 AND state=2",
+                [epoch_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leased, 1, "only the stale-receipt lease survives");
+        let pending: i64 = conn
+            .query_row(
+                "SELECT pending_count FROM group_epochs WHERE id=?1",
+                [epoch_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 1);
     }
 }

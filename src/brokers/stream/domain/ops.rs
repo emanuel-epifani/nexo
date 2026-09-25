@@ -2,7 +2,9 @@
 //! dedicated SQLite writer (`worker.rs`). Everything here is transport-agnostic.
 
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
-use crate::brokers::stream::domain::message::{ConsumerIdentity, Delivery, DlsEntry, Message, PubItem};
+use crate::brokers::stream::domain::message::{
+    ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
+};
 use crate::brokers::stream::options::SeekTarget;
 use crate::brokers::{BrokerError, ProvisionResult};
 
@@ -51,6 +53,14 @@ pub enum StreamRequest {
         identity: ConsumerIdentity,
         seq: u64,
         receipt: [u8; 16],
+    },
+    /// Wire-level ack batch (S_ACK_MANY): N (seq, receipt) pairs from one
+    /// consumer. Per-ack outcomes come back in `StreamReply::AckOutcome`.
+    AckMany {
+        name: String,
+        group: String,
+        identity: ConsumerIdentity,
+        acks: Vec<(u64, [u8; 16])>,
     },
     Leave {
         name: String,
@@ -115,6 +125,9 @@ pub enum StreamReply {
     },
     DlsEntries(Vec<DlsEntry>),
     Count(usize),
+    /// Seq list of the acks that failed (fenced/stale) inside an AckMany
+    /// run — empty means every ack was consumed.
+    AckOutcome(Vec<u64>),
 }
 
 /// Side effects staged inside a transaction and applied only after commit:

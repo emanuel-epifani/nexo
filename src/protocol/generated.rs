@@ -1,4 +1,4 @@
-pub const PROTOCOL_VERSION: u8 = 0x08;
+pub const PROTOCOL_VERSION: u8 = 0x09;
 pub const HEADER_SIZE: usize = 11;
 pub const HEADER_OFFSET_VERSION: usize = 0;
 pub const HEADER_OFFSET_TYPE: usize = 1;
@@ -91,6 +91,7 @@ pub const OP_S_PEEK_DLS: u8 = 0x3A;
 pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
 pub const OP_S_DELETE_DLS: u8 = 0x3C;
 pub const OP_S_PURGE_DLS: u8 = 0x3D;
+pub const OP_S_ACK_MANY: u8 = 0x3E;
 
 pub const QUEUE_MAX_PUSH_ITEMS: usize = 10_000;
 pub const STREAM_MAX_PUBLISH_BATCH: usize = 65_536;

@@ -69,7 +69,7 @@ export async function run(spec: Spec): Promise<Row[]> {
       const group = await s.group(`drain-${w.id}`).subscribe(async () => { got++; }, {
         batchSize: w.batch_size ?? 500,
         waitMs: w.wait_ms ?? 100,
-        concurrency: 1,
+        concurrency: w.concurrency ?? 1,
       });
       const t0 = performance.now();
       while (got < msgs) {
@@ -96,7 +96,7 @@ export async function run(spec: Spec): Promise<Row[]> {
           s.group(`pipe-${w.id}-${c}`).subscribe(async (data: string) => {
             meter.recordRaw(performance.now() - embeddedTime(data));
             if (++got === msgs) resolveDone();
-          }, { batchSize: w.batch_size ?? 500, waitMs: w.wait_ms ?? 100, concurrency: 1 }),
+          }, { batchSize: w.batch_size ?? 500, waitMs: w.wait_ms ?? 100, concurrency: w.concurrency ?? 1 }),
         ),
       );
 
