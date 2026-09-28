@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use rusqlite::{params, types::Type, Connection, ErrorCode, Result};
@@ -10,6 +11,22 @@ use uuid::Uuid;
 
 use crate::brokers::queue::domain::dlq::DlqMessage;
 use crate::brokers::queue::domain::queue::Message;
+
+// ==========================================
+// DIAGNOSTICS
+// ==========================================
+
+/// Statements executed by the writer, flushes, and exec-vs-commit time.
+/// Always-on relaxed counters; the unit of work is a flush, not a command.
+pub static SQL_STATEMENTS: AtomicU64 = AtomicU64::new(0);
+pub static FLUSHES: AtomicU64 = AtomicU64::new(0);
+pub static EXEC_NS: AtomicU64 = AtomicU64::new(0);
+pub static COMMIT_NS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn count_stmt() {
+    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+}
 
 // ==========================================
 // STORAGE OPERATIONS
@@ -235,27 +252,56 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StorageOp>) {
         }
     };
 
-    for op in batch.iter() {
-        if let Err(e) = exec_op(&tx, op) {
+    let exec_started = Instant::now();
+    let mut flush_ok = true;
+    let mut i = 0;
+    while i < batch.len() {
+        let result = match &batch[i] {
+            StorageOp::Insert(_) => {
+                // Merge runs of consecutive Insert ops into one multi-row
+                // statement per chunk — same semantics, ~200x fewer
+                // statements for queued single pushes.
+                let mut msgs: Vec<&Message> = Vec::new();
+                while let Some(StorageOp::Insert(v)) = batch.get(i) {
+                    msgs.extend(v.iter());
+                    i += 1;
+                }
+                exec_insert(&tx, &msgs)
+            }
+            op => {
+                i += 1;
+                exec_op(&tx, op)
+            }
+        };
+        if let Err(e) = result {
             if is_constraint_error(&e) {
                 error!(
-                    "Fatal constraint error in batch ({} ops), discarding batch to avoid infinite retry: {} — op: {:?}",
-                    batch.len(), e, op
+                    "Fatal constraint error in batch ({} ops), discarding batch to avoid infinite retry: {}",
+                    batch.len(), e
                 );
-                drop(tx); // explicit rollback
                 batch.clear();
-                return;
+            } else {
+                error!(
+                    "Failed to exec op {:?}: {} — rolling back entire batch",
+                    batch[i.saturating_sub(1)], e
+                );
             }
-            error!(
-                "Failed to exec op {:?}: {} — rolling back entire batch",
-                op, e
-            );
-            drop(tx); // explicit rollback
-            return;
+            flush_ok = false;
+            break;
         }
     }
+    EXEC_NS.fetch_add(exec_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    FLUSHES.fetch_add(1, Ordering::Relaxed);
+    if !flush_ok {
+        // tx drops here → rollback; constraint errors cleared the batch,
+        // transient ones keep it for the next flush attempt.
+        return;
+    }
 
-    if let Err(e) = tx.commit() {
+    let commit_started = Instant::now();
+    let commit_result = tx.commit();
+    COMMIT_NS.fetch_add(commit_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    if let Err(e) = commit_result {
         if is_constraint_error(&e) {
             error!(
                 "Fatal constraint error on commit ({} ops), discarding batch: {}",
@@ -403,95 +449,147 @@ fn load_dlq_messages(conn: &Connection) -> Result<Vec<DlqMessage>> {
     Ok(messages)
 }
 
+/// Single chokepoint for every statement the writer runs: cached prepare +
+/// statement counting. Params stay borrowed into `params_from_iter`/`params!`
+/// so nothing is copied.
+fn exec_stmt(tx: &rusqlite::Transaction, sql: &str, p: impl rusqlite::Params) -> Result<usize> {
+    count_stmt();
+    tx.prepare_cached(sql)?.execute(p)
+}
+
+/// Rows per multi-row INSERT chunk: 9 columns × 200 stays far under the
+/// 32 766 bind-parameter limit.
+const INSERT_CHUNK: usize = 200;
+
+/// Multi-row INSERT over a merged run of messages.
+fn exec_insert(tx: &rusqlite::Transaction, msgs: &[&Message]) -> Result<()> {
+    for chunk in msgs.chunks(INSERT_CHUNK) {
+        let mut text = String::with_capacity(150 + chunk.len() * 11);
+        text.push_str(
+            "INSERT INTO queue (id, payload, priority, visible_at, attempts,
+                               created_at, ready_seq, delivery_token, error)
+             VALUES ",
+        );
+        for i in 0..chunk.len() {
+            if i > 0 {
+                text.push(',');
+            }
+            text.push_str("(?,?,?,?,?,?,?,?,?)");
+        }
+        let mut ids: Vec<&[u8]> = Vec::with_capacity(chunk.len());
+        let mut payloads: Vec<&[u8]> = Vec::with_capacity(chunk.len());
+        let mut errors: Vec<Option<&str>> = Vec::with_capacity(chunk.len());
+        let mut ints: Vec<i64> = Vec::with_capacity(chunk.len() * 6);
+        for msg in chunk {
+            ids.push(msg.id.as_bytes().as_slice());
+            payloads.push(msg.payload.as_ref());
+            errors.push(msg.failure_reason.as_deref());
+            ints.push(msg.priority as i64);
+            ints.push(msg.visible_at as i64);
+            ints.push(msg.attempts as i64);
+            ints.push(msg.created_at as i64);
+            ints.push(msg.ready_seq as i64);
+            ints.push(msg.delivery_token as i64);
+        }
+        let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 9);
+        for i in 0..chunk.len() {
+            params.push(&ids[i]);
+            params.push(&payloads[i]);
+            params.push(&ints[i * 6]);
+            params.push(&ints[i * 6 + 1]);
+            params.push(&ints[i * 6 + 2]);
+            params.push(&ints[i * 6 + 3]);
+            params.push(&ints[i * 6 + 4]);
+            params.push(&ints[i * 6 + 5]);
+            params.push(&errors[i]);
+        }
+        exec_stmt(tx, &text, rusqlite::params_from_iter(params))?;
+    }
+    Ok(())
+}
+
 fn exec_op(tx: &rusqlite::Transaction, op: &StorageOp) -> Result<()> {
     match op {
         StorageOp::Insert(msgs) => {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
-            )?;
-            for msg in msgs {
-                stmt.execute(params![
-                    msg.id.as_bytes(),
-                    msg.payload.as_ref(),
-                    msg.priority,
-                    msg.visible_at as i64,
-                    msg.attempts,
-                    msg.created_at as i64,
-                    msg.ready_seq as i64,
-                    msg.delivery_token as i64,
-                    msg.failure_reason.as_deref()
-                ])?;
-            }
+            let refs: Vec<&Message> = msgs.iter().collect();
+            exec_insert(tx, &refs)?;
         }
         StorageOp::Delete(id) => {
-            let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            stmt.execute(params![id.as_bytes()])?;
+            exec_stmt(tx, "DELETE FROM queue WHERE id = ?1", params![id.as_bytes()])?;
         }
         StorageOp::UpdateState(msgs) => {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE queue SET visible_at = ?1, attempts = ?2, ready_seq = ?3, delivery_token = ?4, error = ?5 WHERE id = ?6"
-            )?;
             for msg in msgs {
-                stmt.execute(params![
-                    msg.visible_at as i64,
-                    msg.attempts,
-                    msg.ready_seq as i64,
-                    msg.delivery_token as i64,
-                    msg.failure_reason.as_deref(),
-                    msg.id.as_bytes()
-                ])?;
+                exec_stmt(
+                    tx,
+                    "UPDATE queue SET visible_at = ?1, attempts = ?2, ready_seq = ?3,
+                            delivery_token = ?4, error = ?5 WHERE id = ?6",
+                    params![
+                        msg.visible_at as i64,
+                        msg.attempts,
+                        msg.ready_seq as i64,
+                        msg.delivery_token as i64,
+                        msg.failure_reason.as_deref(),
+                        msg.id.as_bytes()
+                    ],
+                )?;
             }
         }
 
         // DLQ Operations
         StorageOp::DeleteDLQ(id) => {
-            let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
-            stmt.execute(params![id.as_bytes()])?;
+            exec_stmt(
+                tx,
+                "DELETE FROM dlq_messages WHERE id = ?1",
+                params![id.as_bytes()],
+            )?;
         }
         StorageOp::MoveToDLQ(msg) => {
             // Atomic: delete from queue, insert into DLQ
-            let mut stmt = tx.prepare_cached("DELETE FROM queue WHERE id = ?1")?;
-            stmt.execute(params![msg.id.as_bytes()])?;
-
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO dlq_messages (id, payload, priority, attempts, created_at, failed_at, dlq_seq, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            exec_stmt(tx, "DELETE FROM queue WHERE id = ?1", params![msg.id.as_bytes()])?;
+            exec_stmt(
+                tx,
+                "INSERT OR REPLACE INTO dlq_messages (id, payload, priority, attempts,
+                        created_at, failed_at, dlq_seq, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    msg.id.as_bytes(),
+                    msg.payload.as_ref(),
+                    msg.priority,
+                    msg.attempts,
+                    msg.created_at as i64,
+                    msg.failed_at as i64,
+                    msg.dlq_seq as i64,
+                    msg.failure_reason
+                ],
             )?;
-            stmt.execute(params![
-                msg.id.as_bytes(),
-                msg.payload.as_ref(),
-                msg.priority,
-                msg.attempts,
-                msg.created_at as i64,
-                msg.failed_at as i64,
-                msg.dlq_seq as i64,
-                msg.failure_reason
-            ])?;
         }
         StorageOp::MoveToMain(msg) => {
             // Atomic: delete from DLQ, insert into queue
-            let mut stmt = tx.prepare_cached("DELETE FROM dlq_messages WHERE id = ?1")?;
-            stmt.execute(params![msg.id.as_bytes()])?;
-
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO queue (id, payload, priority, visible_at, attempts, created_at, ready_seq, delivery_token, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            exec_stmt(
+                tx,
+                "DELETE FROM dlq_messages WHERE id = ?1",
+                params![msg.id.as_bytes()],
             )?;
-            stmt.execute(params![
-                msg.id.as_bytes(),
-                msg.payload.as_ref(),
-                msg.priority,
-                0i64, // visible_at = 0 (ready immediately)
-                0u32, // reset attempts
-                msg.created_at as i64,
-                msg.ready_seq as i64,
-                msg.delivery_token as i64,
-                msg.failure_reason.as_deref()
-            ])?;
+            exec_stmt(
+                tx,
+                "INSERT OR REPLACE INTO queue (id, payload, priority, visible_at, attempts,
+                        created_at, ready_seq, delivery_token, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    msg.id.as_bytes(),
+                    msg.payload.as_ref(),
+                    msg.priority,
+                    0i64, // visible_at = 0 (ready immediately)
+                    0u32, // reset attempts
+                    msg.created_at as i64,
+                    msg.ready_seq as i64,
+                    msg.delivery_token as i64,
+                    msg.failure_reason.as_deref()
+                ],
+            )?;
         }
         StorageOp::PurgeDLQ => {
-            tx.execute("DELETE FROM dlq_messages", [])?;
+            exec_stmt(tx, "DELETE FROM dlq_messages", [])?;
         }
     }
     Ok(())

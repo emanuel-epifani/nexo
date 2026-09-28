@@ -230,6 +230,7 @@ mod stress_tests {
             };
             manager.create_queue(q.clone(), config).await.unwrap();
 
+            let stats = manager.sql_stats();
             let mut bench = Benchmark::start("PUSH - Queue Throughput (Sequential)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
@@ -241,6 +242,15 @@ mod stress_tests {
             }
             // Wait for flush to happen in background (optional, just to be fair to disk)
             tokio::time::sleep(Duration::from_millis(200)).await;
+            let (s, f, e, c) = manager.sql_stats();
+            println!(
+                "   SQL stmts:   {} ({:.2}/op) | flushes {} | exec {:.1}ms | commit {:.1}ms",
+                s - stats.0,
+                (s - stats.0) as f64 / COUNT as f64,
+                f - stats.1,
+                (e - stats.2) as f64 / 1e6,
+                (c - stats.3) as f64 / 1e6,
+            );
             bench.stop();
         }
     }

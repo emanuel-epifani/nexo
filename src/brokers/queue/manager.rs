@@ -600,6 +600,20 @@ impl QueueManager {
         }
     }
 
+    /// Writer diagnostics: (sql statements, flushes, exec ns, commit ns).
+    /// Benchmarks read the delta across a workload — counters are process-wide
+    /// and shared by every queue.
+    #[doc(hidden)]
+    pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            crate::brokers::queue::domain::persistence::SQL_STATEMENTS.load(Relaxed),
+            crate::brokers::queue::domain::persistence::FLUSHES.load(Relaxed),
+            crate::brokers::queue::domain::persistence::EXEC_NS.load(Relaxed),
+            crate::brokers::queue::domain::persistence::COMMIT_NS.load(Relaxed),
+        )
+    }
+
     pub async fn exists(&self, name: &str) -> bool {
         if Self::validate_queue_name(name).is_err() {
             return false;
