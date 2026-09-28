@@ -69,7 +69,6 @@ CREATE TABLE events (
 );
 CREATE UNIQUE INDEX events_key_pos ON events(stream_id, key_id, key_pos);
 CREATE INDEX events_by_key_seq ON events(stream_id, key_id, seq);
-CREATE INDEX events_ts ON events(stream_id, timestamp_ms);
 
 CREATE TABLE groups (
     id           BLOB(16) PRIMARY KEY,
@@ -140,7 +139,6 @@ CREATE INDEX lane_owners ON key_lanes(connection_id, owner, epoch_id) WHERE stat
 CREATE INDEX lane_normal_frontier ON key_lanes(epoch_id, normal_seq)
     WHERE normal_seq IS NOT NULL AND state <> 3;
 CREATE INDEX lane_head_expiry ON key_lanes(stream_id, head_seq) WHERE head_seq IS NOT NULL;
-CREATE INDEX lane_normal_expiry ON key_lanes(stream_id, normal_seq) WHERE normal_seq IS NOT NULL;
 -- Per-key sweep used by retention (any state) and by lane fan-out checks.
 CREATE INDEX lanes_by_key ON key_lanes(stream_id, key_id, epoch_id);
 
@@ -263,9 +261,13 @@ impl Store {
              PRAGMA busy_timeout = 5000;
              PRAGMA cache_size = -64000;
              PRAGMA temp_store = MEMORY;
-             PRAGMA mmap_size = 268435456;",
+             PRAGMA mmap_size = 268435456;
+             PRAGMA wal_autocheckpoint = 4000;",
         )
         .map_err(|e| BrokerError::storage(format!("Cannot configure stream database: {e}")))?;
+        // Recipes use ~60 distinct statements through `prepare_cached`; the
+        // default cache of 16 would thrash on any mixed workload.
+        conn.set_prepared_statement_cache_capacity(256);
 
         let fresh = !table_exists(&conn, "schema_meta")?;
         if fresh {
@@ -317,7 +319,7 @@ impl Store {
         // Reclaim leased keyed lanes in slices until none remain.
         loop {
             let leased: Vec<(Vec<u8>, i64, i64)> = tx
-                .prepare(
+                .prepare_cached(
                     "SELECT epoch_id, key_id, attempts FROM key_lanes
                      WHERE state = 2 LIMIT ?1",
                 )
@@ -339,7 +341,7 @@ impl Store {
         // Reclaim leased keyless deliveries.
         loop {
             let leased: Vec<(Vec<u8>, Vec<u8>, i64)> = tx
-                .prepare(
+                .prepare_cached(
                     "SELECT epoch_id, seq, attempts FROM keyless_deliveries
                      WHERE state = 2 LIMIT ?1",
                 )
@@ -373,7 +375,7 @@ impl Store {
         {
             let mut stmt = self
                 .conn
-                .prepare("SELECT id FROM group_epochs WHERE initialized = 0")
+                .prepare_cached("SELECT id FROM group_epochs WHERE initialized = 0")
                 .map_err(|e| {
                     BrokerError::storage(format!("Recovery resume scan failed: {e}"))
                 })?;
@@ -495,7 +497,6 @@ fn validate_schema(conn: &Connection) -> Result<(), BrokerError> {
         "lane_owners",
         "lane_normal_frontier",
         "lane_head_expiry",
-        "lane_normal_expiry",
         "lanes_by_key",
         "keyless_ready",
         "keyless_deadlines",

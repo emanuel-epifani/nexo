@@ -12,15 +12,16 @@
 //! changes are not held uncommitted behind a bulk mutation batch.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::{error, warn};
 
-use crate::brokers::stream::domain::message::ConsumerIdentity;
+use crate::brokers::stream::domain::message::{ConsumerIdentity, PubItem};
 use crate::brokers::stream::domain::ops::{
     Command, Continuation, Effects, StreamReply, StreamRequest,
 };
@@ -31,6 +32,16 @@ use crate::brokers::BrokerError;
 /// Max commands coalesced into one commit. Bounded so a barrier command's
 /// leases never wait behind an arbitrarily large write batch.
 const MAX_BATCH_COMMANDS: usize = 256;
+
+/// Max items a merged publish run may carry: bounds the rows one commit
+/// writes so a queued barrier never waits behind an unbounded insert.
+const MAX_PUB_RUN_ITEMS: usize = 4096;
+
+/// Writer diagnostics for benchmarks: how much of a batch is spent executing
+/// statements vs committing. Always-on relaxed counters; one add per batch.
+pub static BATCHES: AtomicU64 = AtomicU64::new(0);
+pub static EXEC_NS: AtomicU64 = AtomicU64::new(0);
+pub static COMMIT_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Group-level watch signals: `watches[stream][group]` is bumped on every
 /// commit that may have made new work visible (publishes, acks, lease
@@ -92,9 +103,13 @@ pub fn now_millis() -> u64 {
 enum Item {
     Cmd(Command),
     /// Consecutive acks for the same (stream, group, consumer), folded by
-    /// `merge_ack_runs`: the worker executes them as one op so the batch
+    /// `merge_runs`: the worker executes them as one op so the batch
     /// pays member resolution and the epoch write once per run.
     AckRun(Vec<Command>),
+    /// Consecutive publishes for the same stream: one `publish` call assigns
+    /// seqs across the concatenated items, then seq slices map back to each
+    /// command's reply. Items move out of the commands — no payload copies.
+    PubRun(Vec<Command>),
     Cont(Continuation),
 }
 
@@ -159,30 +174,37 @@ impl Worker {
             if let Some(cont) = self.conts.pop_front() {
                 batch.push(Item::Cont(cont));
             }
-            loop {
-                match self.rx.try_recv() {
-                    Ok(cmd) => {
-                        self.admission.release(cmd.bytes);
-                        let barrier = cmd.is_barrier();
-                        batch.push(Item::Cmd(cmd));
-                        if barrier || batch.len() >= MAX_BATCH_COMMANDS {
-                            break;
-                        }
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        self.channel_closed = true;
-                        break;
-                    }
-                }
-            }
+            // When the queue was empty, sleep on the first command — then
+            // still drain whatever queued up meanwhile: otherwise every
+            // low-rate command commits alone.
+            let mut drain = true;
             if batch.is_empty() && !self.channel_closed {
                 match self.rx.blocking_recv() {
                     Some(cmd) => {
                         self.admission.release(cmd.bytes);
+                        drain = !cmd.is_barrier();
                         batch.push(Item::Cmd(cmd));
                     }
                     None => self.channel_closed = true,
+                }
+            }
+            if drain {
+                loop {
+                    match self.rx.try_recv() {
+                        Ok(cmd) => {
+                            self.admission.release(cmd.bytes);
+                            let barrier = cmd.is_barrier();
+                            batch.push(Item::Cmd(cmd));
+                            if barrier || batch.len() >= MAX_BATCH_COMMANDS {
+                                break;
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            self.channel_closed = true;
+                            break;
+                        }
+                    }
                 }
             }
             if batch.is_empty() {
@@ -240,8 +262,9 @@ impl Worker {
         let mut outcomes: Vec<Outcome> = Vec::with_capacity(batch.len());
         let mut effects = Effects::default();
         let mut fatal: Option<BrokerError> = None;
+        let exec_started = Instant::now();
 
-        for item in merge_ack_runs(batch) {
+        for item in merge_runs(batch) {
             match item {
                 Item::Cont(cont) => {
                     if fatal.is_some() {
@@ -332,6 +355,101 @@ impl Worker {
                                     "Cannot open savepoint: {e}"
                                 ))),
                             });
+                            fatal =
+                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
+                        }
+                    }
+                }
+                Item::PubRun(mut cmds) => {
+                    if let Some(e) = &fatal {
+                        for cmd in cmds {
+                            outcomes.push(Outcome {
+                                reply: cmd.reply,
+                                result: Err(BrokerError::storage(format!(
+                                    "Batch aborted by storage error: {e}"
+                                ))),
+                            });
+                        }
+                        continue;
+                    }
+                    // Items move out of the commands (no payload copies);
+                    // `counts` maps each seq range back to its own reply.
+                    let mut name = String::new();
+                    let mut items: Vec<PubItem> = Vec::new();
+                    let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
+                    for cmd in &mut cmds {
+                        if let StreamRequest::Publish { name: n, items: it } = &mut cmd.op {
+                            name = std::mem::take(n);
+                            counts.push(it.len());
+                            items.append(it);
+                        } else {
+                            unreachable!("PubRun carries only publish commands")
+                        }
+                    }
+                    match tx.savepoint() {
+                        Ok(mut sp) => match recipes::publish(&sp, &name, &items, &ctx) {
+                            Ok((reply, fx)) => {
+                                if let Err(e) = sp.commit() {
+                                    for cmd in cmds {
+                                        outcomes.push(Outcome {
+                                            reply: cmd.reply,
+                                            result: Err(BrokerError::storage(format!(
+                                                "Savepoint release failed: {e}"
+                                            ))),
+                                        });
+                                    }
+                                    fatal = Some(BrokerError::storage(format!(
+                                        "Savepoint release failed: {e}"
+                                    )));
+                                } else {
+                                    merge(&mut effects, fx);
+                                    let mut seqs = match reply {
+                                        StreamReply::Published(seqs) => seqs.into_iter(),
+                                        _ => unreachable!("publish returns Published"),
+                                    };
+                                    for (cmd, n) in cmds.into_iter().zip(counts) {
+                                        let slice: Vec<u64> = seqs.by_ref().take(n).collect();
+                                        outcomes.push(Outcome {
+                                            reply: cmd.reply,
+                                            result: Ok(StreamReply::Published(slice)),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(CmdError::Expected(e)) => {
+                                let _ = sp.rollback();
+                                for cmd in cmds {
+                                    outcomes.push(Outcome {
+                                        reply: cmd.reply,
+                                        result: Err(BrokerError::new(
+                                            e.kind,
+                                            e.message.clone(),
+                                        )),
+                                    });
+                                }
+                            }
+                            Err(CmdError::Fatal(e)) => {
+                                let _ = sp.rollback();
+                                for cmd in cmds {
+                                    outcomes.push(Outcome {
+                                        reply: cmd.reply,
+                                        result: Err(BrokerError::storage(format!(
+                                            "Command aborted: {e}"
+                                        ))),
+                                    });
+                                }
+                                fatal = Some(e);
+                            }
+                        },
+                        Err(e) => {
+                            for cmd in cmds {
+                                outcomes.push(Outcome {
+                                    reply: cmd.reply,
+                                    result: Err(BrokerError::storage(format!(
+                                        "Cannot open savepoint: {e}"
+                                    ))),
+                                });
+                            }
                             fatal =
                                 Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
                         }
@@ -469,26 +587,36 @@ impl Worker {
             }
         }
 
+        EXEC_NS.fetch_add(exec_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        BATCHES.fetch_add(1, Ordering::Relaxed);
         match fatal {
-            None => match tx.commit() {
-                Ok(()) => {
-                    for outcome in outcomes {
-                        if let Some(reply) = outcome.reply {
-                            let _ = reply.send(outcome.result);
+            None => {
+                let commit_started = Instant::now();
+                match tx.commit() {
+                    Ok(()) => {
+                        COMMIT_NS.fetch_add(
+                            commit_started.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        for outcome in outcomes {
+                            if let Some(reply) = outcome.reply {
+                                let _ = reply.send(outcome.result);
+                            }
+                        }
+                        self.apply(effects);
+                    }
+                    Err(e) => {
+                        let err =
+                            BrokerError::storage(format!("Transaction commit failed: {e}"));
+                        error!("Stream writer commit failed: {}", err);
+                        for outcome in outcomes {
+                            if let Some(reply) = outcome.reply {
+                                let _ = reply.send(Err(BrokerError::storage(err.to_string())));
+                            }
                         }
                     }
-                    self.apply(effects);
                 }
-                Err(e) => {
-                    let err = BrokerError::storage(format!("Transaction commit failed: {e}"));
-                    error!("Stream writer commit failed: {}", err);
-                    for outcome in outcomes {
-                        if let Some(reply) = outcome.reply {
-                            let _ = reply.send(Err(BrokerError::storage(err.to_string())));
-                        }
-                    }
-                }
-            },
+            }
             Some(e) => {
                 // Whole transaction rolls back; every command gets the error.
                 drop(tx);
@@ -534,11 +662,12 @@ fn fail_command(cmd: Command, err: &BrokerError) {
     }
 }
 
-/// Fold runs of consecutive `Ack`/`AckMany` commands for the same (stream,
-/// group, consumer) into `Item::AckRun`. Order is preserved: any non-ack item
-/// ends the run, so a mixed batch degrades to per-command execution. Each
-/// merged command keeps its own reply slot.
-fn merge_ack_runs(batch: Vec<Item>) -> Vec<Item> {
+/// Fold runs of consecutive mergeable commands into `Item::AckRun` (acks for
+/// the same stream/group/consumer) or `Item::PubRun` (publishes for the same
+/// stream, capped by item count). Order is preserved: any other item ends
+/// the run, so a mixed batch degrades to per-command execution. Each merged
+/// command keeps its own reply slot.
+fn merge_runs(batch: Vec<Item>) -> Vec<Item> {
     fn ack_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
         match &cmd.op {
             StreamRequest::Ack {
@@ -557,6 +686,7 @@ fn merge_ack_runs(batch: Vec<Item>) -> Vec<Item> {
         }
     }
     let mut out: Vec<Item> = Vec::with_capacity(batch.len());
+    let mut pub_run_items = 0usize;
     for item in batch {
         if matches!(&item, Item::Cmd(cmd) if ack_key(cmd).is_some()) {
             let Item::Cmd(cmd) = item else { unreachable!() };
@@ -567,6 +697,29 @@ fn merge_ack_runs(batch: Vec<Item>) -> Vec<Item> {
                 }
             }
             out.push(Item::AckRun(vec![cmd]));
+            continue;
+        }
+        if matches!(&item, Item::Cmd(cmd) if matches!(cmd.op, StreamRequest::Publish { .. }))
+        {
+            let Item::Cmd(cmd) = item else { unreachable!() };
+            let StreamRequest::Publish { name, items } = &cmd.op else {
+                unreachable!()
+            };
+            if let Some(Item::PubRun(run)) = out.last_mut() {
+                let StreamRequest::Publish {
+                    name: run_name, ..
+                } = &run[0].op
+                else {
+                    unreachable!()
+                };
+                if *run_name == *name && pub_run_items + items.len() <= MAX_PUB_RUN_ITEMS {
+                    pub_run_items += items.len();
+                    run.push(cmd);
+                    continue;
+                }
+            }
+            pub_run_items = items.len();
+            out.push(Item::PubRun(vec![cmd]));
             continue;
         }
         out.push(item);

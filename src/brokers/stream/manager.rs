@@ -28,6 +28,7 @@ use crate::brokers::stream::domain::message::{
     ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
 };
 use crate::brokers::stream::domain::ops::{Command, StreamReply, StreamRequest};
+use crate::brokers::stream::domain::recipes;
 use crate::brokers::stream::domain::storage::Store;
 use crate::brokers::stream::domain::types::{event_logical_bytes, fetch_item_encoded_bytes};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
@@ -119,6 +120,18 @@ impl StreamManager {
 
     pub fn config(&self) -> &SystemStreamConfig {
         &self.config
+    }
+
+    /// Diagnostics for benchmarks: `(sql statements, writer batches, exec ns,
+    /// commit ns)` since process start. Snapshot and diff around a workload.
+    #[doc(hidden)]
+    pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
+        (
+            recipes::SQL_STATEMENTS.load(Ordering::Relaxed),
+            worker::BATCHES.load(Ordering::Relaxed),
+            worker::EXEC_NS.load(Ordering::Relaxed),
+            worker::COMMIT_NS.load(Ordering::Relaxed),
+        )
     }
 
     fn spawn_timers(&self) {

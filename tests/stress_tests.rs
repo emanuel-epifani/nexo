@@ -341,7 +341,25 @@ mod stress_tests {
 
     mod stream {
         use super::*;
+        use nexo::brokers::stream::PubItem;
         const COUNT: usize = 500_000;
+
+        fn sql_stats_diff(
+            manager: &StreamManager,
+            before: (u64, u64, u64, u64),
+            ops: usize,
+        ) {
+            let (s, b, e, c) = manager.sql_stats();
+            let ds = s - before.0;
+            println!(
+                "   SQL stmts:   {} ({:.1}/op) | batches {} | exec {:.1}ms | commit {:.1}ms",
+                ds,
+                ds as f64 / ops.max(1) as f64,
+                b - before.1,
+                (e - before.2) as f64 / 1e6,
+                (c - before.3) as f64 / 1e6,
+            );
+        }
 
         #[tokio::test]
         async fn bench_stream_publish() {
@@ -356,6 +374,7 @@ mod stress_tests {
                 .await
                 .unwrap();
 
+            let stats = manager.sql_stats();
             let mut bench = Benchmark::start("STREAM PUBLISH (Write Confirmed)", COUNT);
             for _ in 0..COUNT {
                 let start = Instant::now();
@@ -366,6 +385,176 @@ mod stress_tests {
                 bench.record(start.elapsed());
             }
             bench.stop();
+            sql_stats_diff(&manager, stats, COUNT);
+        }
+
+        /// 100-item keyless batches: the amortized publish path.
+        #[tokio::test]
+        async fn bench_stream_publish_batch_keyless() {
+            const BATCHES: usize = 3_000;
+            const ITEMS: usize = 100;
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_stream_manager(config).await;
+            let name = "bench-batch-keyless";
+            manager
+                .create_stream(name.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+
+            let items: Vec<PubItem> = (0..ITEMS)
+                .map(|_| PubItem {
+                    key: Bytes::new(),
+                    payload: Bytes::from("data"),
+                })
+                .collect();
+            let stats = manager.sql_stats();
+            let mut bench = Benchmark::start("STREAM PUBLISH BATCH 100 keyless", BATCHES);
+            for _ in 0..BATCHES {
+                let start = Instant::now();
+                manager
+                    .publish_batch(name, items.clone())
+                    .await
+                    .unwrap();
+                bench.record(start.elapsed());
+            }
+            bench.stop();
+            sql_stats_diff(&manager, stats, BATCHES * ITEMS);
+        }
+
+        /// 100-item keyed batches over 64 keys while two groups are joined:
+        /// exercises the per-key lane fan-out.
+        #[tokio::test]
+        async fn bench_stream_publish_batch_keyed_groups() {
+            const BATCHES: usize = 2_000;
+            const ITEMS: usize = 100;
+            const KEYS: usize = 64;
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_stream_manager(config).await;
+            let name = "bench-batch-keyed";
+            manager
+                .create_stream(name.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            for g in ["g1", "g2"] {
+                manager.join_group(name, g, "producer-conn").await.unwrap();
+            }
+
+            let items: Vec<PubItem> = (0..ITEMS)
+                .map(|i| PubItem {
+                    key: Bytes::from(format!("key-{}", i % KEYS)),
+                    payload: Bytes::from("data"),
+                })
+                .collect();
+            let stats = manager.sql_stats();
+            let mut bench = Benchmark::start("STREAM PUBLISH BATCH 100 keyed x2 groups", BATCHES);
+            for _ in 0..BATCHES {
+                let start = Instant::now();
+                manager
+                    .publish_batch(name, items.clone())
+                    .await
+                    .unwrap();
+                bench.record(start.elapsed());
+            }
+            bench.stop();
+            sql_stats_diff(&manager, stats, BATCHES * ITEMS);
+        }
+
+        /// Concurrent single publishes: the drain merges what concurrent
+        /// submitters leave in the queue — organic commit batching.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn bench_stream_publish_concurrent() {
+            const TASKS: usize = 16;
+            const PER_TASK: usize = 5_000;
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_stream_manager(config).await;
+            let name = "bench-concurrent";
+            manager
+                .create_stream(name.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+
+            let stats = manager.sql_stats();
+            let mut bench =
+                Benchmark::start("STREAM PUBLISH concurrent x16", TASKS * PER_TASK);
+            let mut handles = Vec::with_capacity(TASKS);
+            for _ in 0..TASKS {
+                let m = Arc::clone(&manager);
+                handles.push(tokio::spawn(async move {
+                    let mut latencies = Vec::with_capacity(PER_TASK);
+                    for _ in 0..PER_TASK {
+                        let t0 = Instant::now();
+                        m.publish(name, Bytes::new(), Bytes::from("data"))
+                            .await
+                            .unwrap();
+                        latencies.push(t0.elapsed());
+                    }
+                    latencies
+                }));
+            }
+            for h in handles {
+                for d in h.await.unwrap() {
+                    bench.record(d);
+                }
+            }
+            bench.stop();
+            sql_stats_diff(&manager, stats, TASKS * PER_TASK);
+        }
+
+        /// Consume loop: fetch a page of keyless events then ack each one.
+        #[tokio::test]
+        async fn bench_stream_fetch_ack_keyless() {
+            const MESSAGES: usize = 50_000;
+            const PAGE: usize = 100;
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = get_stream_test_config(Some(temp_dir.path().to_str().unwrap()));
+            let manager = build_stream_manager(config).await;
+            let name = "bench-fetch-ack";
+            manager
+                .create_stream(name.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            let seed: Vec<PubItem> = (0..1_000)
+                .map(|_| PubItem {
+                    key: Bytes::new(),
+                    payload: Bytes::from("data"),
+                })
+                .collect();
+            for _ in 0..MESSAGES / 1_000 {
+                manager.publish_batch(name, seed.clone()).await.unwrap();
+            }
+            let joined = manager.join_group(name, "g", "consumer-conn").await.unwrap();
+            let identity = nexo::brokers::stream::ConsumerIdentity {
+                connection_id: "consumer-conn".to_string(),
+                consumer_id: joined.consumer_id.clone(),
+                generation: joined.generation,
+            };
+
+            let stats = manager.sql_stats();
+            let mut bench = Benchmark::start(
+                "STREAM FETCH+ACK keyless (pages of 100)",
+                MESSAGES / PAGE,
+            );
+            let mut consumed = 0usize;
+            while consumed < MESSAGES {
+                let start = Instant::now();
+                let deliveries = manager
+                    .fetch(name, "g", &identity, PAGE, 0)
+                    .await
+                    .unwrap();
+                for d in &deliveries {
+                    manager
+                        .ack(name, "g", &identity, d.message.seq, d.receipt)
+                        .await
+                        .unwrap();
+                }
+                consumed += deliveries.len();
+                bench.record(start.elapsed());
+            }
+            bench.stop();
+            sql_stats_diff(&manager, stats, consumed);
         }
     }
 }
