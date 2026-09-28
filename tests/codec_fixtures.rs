@@ -408,6 +408,37 @@ fn stream_fixtures() {
                     "{id}: receipt"
                 );
             }
+            StreamCommand::AckMany {
+                name: t,
+                group,
+                consumer_id,
+                generation,
+                acks,
+            } => {
+                assert_eq!(t, name, "{id}: name");
+                assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
+                assert_eq!(
+                    consumer_id,
+                    inp["consumer_id"].as_str().unwrap(),
+                    "{id}: consumer_id"
+                );
+                assert_eq!(
+                    generation,
+                    inp["generation"].as_u64().unwrap(),
+                    "{id}: generation"
+                );
+                if let Some(exp_acks) = inp["acks"].as_array() {
+                    assert_eq!(acks.len(), exp_acks.len(), "{id}: ack count");
+                    for (i, ((seq, receipt), exp)) in acks.iter().zip(exp_acks).enumerate() {
+                        assert_eq!(*seq, exp["seq"].as_u64().unwrap(), "{id}: ack {i} seq");
+                        assert_eq!(
+                            receipt,
+                            parse_uuid(exp["receipt"].as_str().unwrap()).as_bytes(),
+                            "{id}: ack {i} receipt"
+                        );
+                    }
+                }
+            }
             StreamCommand::Seek {
                 name: t,
                 group,
