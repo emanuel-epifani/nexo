@@ -57,28 +57,29 @@ struct RawFrame {
 async fn read_frame(stream: &mut TcpStream) -> std::io::Result<RawFrame> {
     let mut header = [0_u8; HEADER_SIZE];
     stream.read_exact(&mut header).await?;
-    let payload_len = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+    let payload_len =
+        u32::from_be_bytes(header[7..11].try_into().expect("4-byte len")) as usize;
     let mut payload = vec![0_u8; payload_len];
     stream.read_exact(&mut payload).await?;
     Ok(RawFrame {
         frame_type: header[1],
-        id: u32::from_be_bytes(header[3..7].try_into().unwrap()),
+        id: u32::from_be_bytes(header[3..7].try_into().expect("4-byte id")),
     })
 }
 
 async fn spawn_server() -> (SocketAddr, NexoEngine, TempDir) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().expect("create tempdir");
     let mut config = Config::global().clone();
     config.queue.persistence_path = temp.path().join("queue").to_string_lossy().into_owned();
     config.pubsub.persistence_path = temp.path().join("pubsub").to_string_lossy().into_owned();
     config.stream.persistence_path = temp.path().join("stream").to_string_lossy().into_owned();
-    std::fs::create_dir_all(&config.queue.persistence_path).unwrap();
-    std::fs::create_dir_all(&config.pubsub.persistence_path).unwrap();
-    std::fs::create_dir_all(&config.stream.persistence_path).unwrap();
+    std::fs::create_dir_all(&config.queue.persistence_path).expect("create persistence dir");
+    std::fs::create_dir_all(&config.pubsub.persistence_path).expect("create persistence dir");
+    std::fs::create_dir_all(&config.stream.persistence_path).expect("create persistence dir");
 
     let engine = NexoEngine::new(&config).await;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("local addr");
     let accept_engine = engine.clone();
     let server_config = config.server.clone();
     tokio::spawn(async move {

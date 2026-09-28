@@ -190,7 +190,7 @@ pub async fn handle_connection(
     bridge_handle.abort();
     writer_task.abort();
     engine.pubsub.disconnect(&session_id);
-    engine.stream.disconnect(&*session_id).await;
+    engine.stream.disconnect(&session_id).await;
 
     result
 }

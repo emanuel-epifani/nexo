@@ -66,13 +66,13 @@ struct RawFrame {
 async fn read_frame(s: &mut TcpStream) -> std::io::Result<RawFrame> {
     let mut header = [0u8; HEADER_SIZE];
     s.read_exact(&mut header).await?;
-    let len = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+    let len = u32::from_be_bytes(header[7..11].try_into().expect("4-byte len")) as usize;
     let mut payload = vec![0u8; len];
     s.read_exact(&mut payload).await?;
     Ok(RawFrame {
         frame_type: header[1],
         meta: header[2],
-        id: u32::from_be_bytes(header[3..7].try_into().unwrap()),
+        id: u32::from_be_bytes(header[3..7].try_into().expect("4-byte id")),
         payload: Bytes::from(payload),
     })
 }
@@ -82,10 +82,10 @@ async fn read_frame(s: &mut TcpStream) -> std::io::Result<RawFrame> {
 // ==========================================
 
 async fn spawn_server() -> (SocketAddr, NexoEngine, TempDir) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().expect("create tempdir");
     let mut config = Config::global().clone();
     for dir in ["queue", "pubsub", "stream"] {
-        std::fs::create_dir_all(temp.path().join(dir)).unwrap();
+        std::fs::create_dir_all(temp.path().join(dir)).expect("create persistence dir");
     }
     config.queue.persistence_path = temp.path().join("queue").to_string_lossy().into_owned();
     config.pubsub.persistence_path = temp.path().join("pubsub").to_string_lossy().into_owned();
@@ -93,8 +93,8 @@ async fn spawn_server() -> (SocketAddr, NexoEngine, TempDir) {
     config.server.max_payload_size = TEST_MAX_PAYLOAD;
 
     let engine = NexoEngine::new(&config).await;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
 
     let server_config = config.server.clone();
     let accept_engine = engine.clone();

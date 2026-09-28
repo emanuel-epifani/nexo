@@ -1,4 +1,3 @@
-#![allow(clippy::too_many_arguments)]
 //! DLQ State: LinkedHashMap for O(1) lookup + insertion-ordered iteration + pagination.
 
 use crate::brokers::queue::domain::queue::{current_time_ms, Message};
@@ -33,7 +32,7 @@ impl DlqMessage {
         }
     }
 
-    pub fn to_message(self) -> Message {
+    pub fn into_message(self) -> Message {
         Message {
             id: self.id,
             payload: self.payload,

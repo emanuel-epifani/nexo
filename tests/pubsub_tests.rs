@@ -622,11 +622,9 @@ mod pubsub_tests {
             manager.subscribe(&client_id, "sensors/+").unwrap();
 
             // Should receive ALL 3 retained messages
-            let mut received = vec![
-                rx.recv().await.expect("Should receive retained 1"),
+            let mut received = [rx.recv().await.expect("Should receive retained 1"),
                 rx.recv().await.expect("Should receive retained 2"),
-                rx.recv().await.expect("Should receive retained 3"),
-            ];
+                rx.recv().await.expect("Should receive retained 3")];
 
             // Sort by topic for deterministic comparison
             received.sort_by(|a, b| a.topic.cmp(&b.topic));

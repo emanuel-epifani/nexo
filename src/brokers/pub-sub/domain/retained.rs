@@ -32,7 +32,7 @@ impl RetainedMessage {
         if let Some(exp) = self.expires_at {
             Instant::now() >= exp
         } else {
-            self.expires_at_unix.map_or(false, |unix| {
+            self.expires_at_unix.is_some_and(|unix| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

@@ -1,4 +1,3 @@
-#![allow(clippy::too_many_arguments)]
 //! Queue State: Internal state management for queue broker
 //!
 //! This module contains the pure state logic without any concurrency primitives.
@@ -256,7 +255,9 @@ impl QueueState {
                 break;
             }
 
-            let (id, _) = self.in_flight.pop().expect("non-empty in-flight heap");
+            let Some((id, _)) = self.in_flight.pop() else {
+                break;
+            };
 
             let should_dlq = self
                 .registry
@@ -323,8 +324,8 @@ impl QueueState {
 pub fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

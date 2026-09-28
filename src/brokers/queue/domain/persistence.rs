@@ -735,7 +735,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Now MoveToMain twice — second should not fail (INSERT OR REPLACE)
-        let mut new_msg = dlq_msg.to_message();
+        let mut new_msg = dlq_msg.into_message();
         new_msg.ready_seq = 1;
         store
             .execute(StorageOp::MoveToMain(new_msg.clone()))

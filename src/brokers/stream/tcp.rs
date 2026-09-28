@@ -624,7 +624,7 @@ pub async fn submit(
         StreamCommand::Create { name, options } => {
             let requested = crate::brokers::stream::domain::definition::StreamConfig::from_options(
                 options,
-                &stream.config(),
+                stream.config(),
             );
             (
                 StreamRequest::CreateStream { name, requested },

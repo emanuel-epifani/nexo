@@ -1927,7 +1927,9 @@ fn fetch(
 
         let (encoded_bytes, claim) =
             if lane_ticket != i64::MAX && lane_ticket <= keyless_ticket {
-                let c = lanes.pop_front().unwrap();
+                let Some(c) = lanes.pop_front() else {
+                    break;
+                };
                 (
                     c.encoded_bytes,
                     Claim::Lane {
@@ -1937,7 +1939,9 @@ fn fetch(
                     },
                 )
             } else if retries.front().is_some() {
-                let c = retries.pop_front().unwrap();
+                let Some(c) = retries.pop_front() else {
+                    break;
+                };
                 (
                     c.encoded_bytes,
                     Claim::Retry {
@@ -1946,7 +1950,9 @@ fn fetch(
                     },
                 )
             } else if source_ticket != i64::MAX {
-                let ev = sources.pop_front().unwrap();
+                let Some(ev) = sources.pop_front() else {
+                    break;
+                };
                 next_source_ticket += 1;
                 scan_cursor = ev.key_pos;
                 (fetch_item_encoded_bytes(0, ev.payload.len()), Claim::Source { ev })
@@ -3116,30 +3122,35 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
         let Ok(epoch_id) = <[u8; 16]>::try_from(epoch_id.as_slice()) else {
             continue;
         };
-        if !epoch_cache.contains_key(&epoch_id) {
-            if let Some(e) = load_epoch(conn, &epoch_id)? {
-                epoch_cache.insert(epoch_id, e);
+        let stream_id = match epoch_cache.entry(epoch_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().stream_id,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let Some(loaded) = load_epoch(conn, &epoch_id)? else {
+                    continue;
+                };
+                let stream_id = loaded.stream_id;
+                v.insert(loaded);
+                stream_id
             }
-        }
-        if !epoch_cache.contains_key(&epoch_id) {
-            continue;
-        }
-        let stream_id = epoch_cache[&epoch_id].stream_id;
-        if !config_cache.contains_key(&stream_id) {
-            if let Ok(cfg) = load_config_for_stream(conn, &stream_id) {
-                config_cache.insert(stream_id, cfg);
-            }
-        }
-        let Some(config) = config_cache.get(&stream_id) else {
-            continue;
         };
-        if !name_cache.contains_key(&epoch_id) {
+        let max_deliveries = match config_cache.entry(stream_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().max_deliveries,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let Ok(cfg) = load_config_for_stream(conn, &stream_id) else {
+                    continue;
+                };
+                let max_deliveries = cfg.max_deliveries;
+                v.insert(cfg);
+                max_deliveries
+            }
+        };
+        if let std::collections::hash_map::Entry::Vacant(e) = name_cache.entry(epoch_id) {
             if let Ok(n) = group_stream_names(conn, &epoch_cache[&epoch_id]) {
-                name_cache.insert(epoch_id, n);
+                e.insert(n);
             }
         }
         let epoch = epoch_for!(&epoch_id);
-        release_lane_lease(conn, epoch, &lane, config.max_deliveries, true)?;
+        release_lane_lease(conn, epoch, &lane, max_deliveries, true)?;
         if let Some((sname, gname)) = name_cache.get(&epoch_id) {
             effects.wake(&sname.clone(), &gname.clone());
         }
@@ -3165,26 +3176,31 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
         let Ok(epoch_id) = <[u8; 16]>::try_from(epoch_id.as_slice()) else {
             continue;
         };
-        if !epoch_cache.contains_key(&epoch_id) {
-            if let Some(e) = load_epoch(conn, &epoch_id)? {
-                epoch_cache.insert(epoch_id, e);
+        let stream_id = match epoch_cache.entry(epoch_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().stream_id,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let Some(loaded) = load_epoch(conn, &epoch_id)? else {
+                    continue;
+                };
+                let stream_id = loaded.stream_id;
+                v.insert(loaded);
+                stream_id
             }
-        }
-        if !epoch_cache.contains_key(&epoch_id) {
-            continue;
-        }
-        let stream_id = epoch_cache[&epoch_id].stream_id;
-        if !config_cache.contains_key(&stream_id) {
-            if let Ok(cfg) = load_config_for_stream(conn, &stream_id) {
-                config_cache.insert(stream_id, cfg);
-            }
-        }
-        let Some(config) = config_cache.get(&stream_id) else {
-            continue;
         };
-        if !name_cache.contains_key(&epoch_id) {
+        let max_deliveries = match config_cache.entry(stream_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().max_deliveries,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let Ok(cfg) = load_config_for_stream(conn, &stream_id) else {
+                    continue;
+                };
+                let max_deliveries = cfg.max_deliveries;
+                v.insert(cfg);
+                max_deliveries
+            }
+        };
+        if let std::collections::hash_map::Entry::Vacant(e) = name_cache.entry(epoch_id) {
             if let Ok(n) = group_stream_names(conn, &epoch_cache[&epoch_id]) {
-                name_cache.insert(epoch_id, n);
+                e.insert(n);
             }
         }
         // The scan ran inside this same transaction and this loop is the
@@ -3196,7 +3212,7 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
             seq,
             key_pos,
             attempts,
-            config.max_deliveries,
+            max_deliveries,
             true,
         )?;
         if let Some((sname, gname)) = name_cache.get(&epoch_id) {
@@ -3312,7 +3328,9 @@ fn retain_stream(
     // byte-overflow tail could remain — but excess>0 implies the prefix walk
     // itself continued, so budget-exhaustion is the only "more" signal needed.
     let more = !scanned_all && deleted.len() == BATCH_LIMIT;
-    let boundary_seq = deleted.last().unwrap().0;
+    let Some((boundary_seq, ..)) = deleted.last().copied() else {
+        return Ok(false);
+    };
     let mut key_deleted_pos: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
     let mut deleted_bytes: u64 = 0;
     for (_, key_id, key_pos, logical) in &deleted {
@@ -3326,9 +3344,9 @@ fn retain_stream(
     let epoch_of = |conn: &Connection,
                     dirty: &mut std::collections::HashMap<[u8; 16], EpochRow>,
                     epoch_id: [u8; 16]| {
-        if !dirty.contains_key(&epoch_id) {
-            if let Some(e) = load_epoch(conn, &epoch_id)? {
-                dirty.insert(epoch_id, e);
+        if let std::collections::hash_map::Entry::Vacant(e) = dirty.entry(epoch_id) {
+            if let Some(v) = load_epoch(conn, &epoch_id)? {
+                e.insert(v);
             }
         }
         Ok::<bool, CmdError>(dirty.contains_key(&epoch_id))
@@ -3352,7 +3370,9 @@ fn retain_stream(
     for (epoch_blob, seq_blob, state) in expired_keyless {
         let epoch_id = blob16(&epoch_blob, "epoch id")?;
         if epoch_of(conn, &mut dirty_epochs, epoch_id)? && state == LaneState::Leased as i64 {
-            dirty_epochs.get_mut(&epoch_id).unwrap().pending -= 1;
+            if let Some(e) = dirty_epochs.get_mut(&epoch_id) {
+                e.pending -= 1;
+            }
         }
         sql(
             exec(
@@ -3557,14 +3577,15 @@ fn retain_stream_lanes(
         )?;
         for epoch_blob in lane_epochs {
             let epoch_id = blob16(&epoch_blob, "epoch id")?;
-            if !dirty_epochs.contains_key(&epoch_id) {
-                if let Some(e) = load_epoch(conn, &epoch_id)? {
-                    dirty_epochs.insert(epoch_id, e);
-                } else {
-                    continue;
+            let epoch = match dirty_epochs.entry(epoch_id) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let Some(loaded) = load_epoch(conn, &epoch_id)? else {
+                        continue;
+                    };
+                    v.insert(loaded)
                 }
-            }
-            let epoch = dirty_epochs.get_mut(&epoch_id).unwrap();
+            };
             let Some(mut lane) = load_lane(conn, &epoch_id, *key_id)? else {
                 continue;
             };
@@ -3602,7 +3623,9 @@ fn retain_stream_lanes(
                             ),
                             "Cannot retire expired lease",
                         )?;
-                        let lane = load_lane(conn, &epoch_id, *key_id)?.unwrap();
+                        let Some(lane) = load_lane(conn, &epoch_id, *key_id)? else {
+                            continue;
+                        };
                         if recompute_lane(conn, epoch, &lane)? {
                             let names = group_stream_names(conn, epoch)?;
                             effects.wake(&names.0, &names.1);
@@ -3663,13 +3686,11 @@ pub fn init_epoch(
         |r| Ok((r.get::<_, i64>(0)?, blob8(r, 1, "last_pos")?)),
         "Cannot scan keys for epoch init",
     )?;
-    let mut processed = 0i64;
     let mut last_key = epoch.init_cursor;
-    for (key_id, last_pos) in &keys {
-        if processed == INIT_PAGE {
+    for (processed, (key_id, last_pos)) in keys.iter().enumerate() {
+        if processed == INIT_PAGE as usize {
             break;
         }
-        processed += 1;
         last_key = *key_id;
         let boundary = key_boundary_pos(conn, &epoch.stream_id, *key_id, epoch.start_after)?;
         // Materialize only lanes with pending originals; a key with nothing to
@@ -4182,11 +4203,12 @@ mod tests {
         assert_eq!(leased, 5);
 
         // Run: [ok 1, dup 1, stale receipt on 2, unknown 99, ok 3, ok 4, ok 5]
-        let mut run: Vec<(u64, [u8; 16])> = vec![];
-        run.push((deliveries[0].message.seq, deliveries[0].receipt));
-        run.push((deliveries[0].message.seq, deliveries[0].receipt));
-        run.push((deliveries[1].message.seq, [0xAA; 16]));
-        run.push((99, [0xBB; 16]));
+        let mut run: Vec<(u64, [u8; 16])> = vec![
+            (deliveries[0].message.seq, deliveries[0].receipt),
+            (deliveries[0].message.seq, deliveries[0].receipt),
+            (deliveries[1].message.seq, [0xAA; 16]),
+            (99, [0xBB; 16]),
+        ];
         for d in &deliveries[2..] {
             run.push((d.message.seq, d.receipt));
         }

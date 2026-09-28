@@ -23,6 +23,19 @@ crc32fast = "1.4"
 bytemuck = { version = "1.14", features = ["derive"] }
 parking_lot = "0.12"
 
+[lints.rust]
+unsafe_code = "deny"
+unused = "deny"
+deprecated = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes = "deny"
+too_many_arguments = "allow"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

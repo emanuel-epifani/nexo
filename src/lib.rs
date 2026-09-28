@@ -1,5 +1,3 @@
-#![deny(warnings)]
-
 pub mod brokers;
 pub mod config;
 pub mod protocol;

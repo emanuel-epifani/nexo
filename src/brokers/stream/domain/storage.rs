@@ -242,6 +242,7 @@ impl Store {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&lock_path)
             .map_err(|e| BrokerError::storage(format!("Cannot open stream lock file: {e}")))?;
         lock_file.try_lock().map_err(|_| {

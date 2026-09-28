@@ -12,8 +12,8 @@ use tempfile::TempDir;
 // ==========================================
 
 pub(crate) async fn setup_queue_manager() -> (Arc<QueueManager>, TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let path = temp_dir.path().to_str().unwrap().to_string();
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let path = temp_dir.path().to_str().expect("tempdir path is utf8").to_string();
 
     let mut config = Config::global().queue.clone();
     config.persistence_path = path;
@@ -23,8 +23,8 @@ pub(crate) async fn setup_queue_manager() -> (Arc<QueueManager>, TempDir) {
 }
 
 pub(crate) async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let path = temp_dir.path().to_str().unwrap().to_string();
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let path = temp_dir.path().to_str().expect("tempdir path is utf8").to_string();
 
     let mut config = Config::global().pubsub.clone();
     config.persistence_path = path;
@@ -34,7 +34,7 @@ pub(crate) async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
 }
 
 pub(crate) async fn setup_store_manager() -> (StoreManager, TempDir) {
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
     let config = Config::global().store.clone();
     let manager = StoreManager::new(Arc::new(config));
     (manager, temp_dir)

@@ -1665,7 +1665,7 @@ mod stream_tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
 
             let dls = manager.peek_dls(name, group, 10, 0).await.unwrap();
-            assert!(dls.len() >= 1, "Should have entries in DLS");
+            assert!(!dls.is_empty(), "Should have entries in DLS");
 
             let count = manager.purge_dls(name, group).await.unwrap();
             assert!(count >= 1, "Purge should return count of removed entries");
@@ -1787,7 +1787,7 @@ mod stream_tests {
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
                 let dls = manager.peek_dls(name, group, 10, 0).await.unwrap();
-                assert!(dls.len() >= 1, "Should have DLS entries before restart");
+                assert!(!dls.is_empty(), "Should have DLS entries before restart");
                 manager.shutdown().await;
             }
 
@@ -1795,7 +1795,7 @@ mod stream_tests {
                 let manager2 = build_manager(config.clone()).await;
 
                 let dls = manager2.peek_dls(name, group, 10, 0).await.unwrap();
-                assert!(dls.len() >= 1, "DLS entries should persist across restart");
+                assert!(!dls.is_empty(), "DLS entries should persist across restart");
 
                 manager2
                     .publish(name, key.clone(), Bytes::from("msg-3"))
@@ -2082,7 +2082,7 @@ mod stream_tests {
                 assert_eq!(all_seqs[i], (i + 1) as u64, "Seq gap at index {}", i);
             }
 
-            let msgs = manager.read(name, 1, TOTAL as usize * 2).await.unwrap();
+            let msgs = manager.read(name, 1, TOTAL * 2).await.unwrap();
             assert_eq!(
                 msgs.len(),
                 TOTAL,
@@ -3241,7 +3241,7 @@ mod stream_tests {
 
                 let a1 = batch1
                     .iter()
-                    .find(|d| d.message.payload == Bytes::from("A1"))
+                    .find(|d| d.message.payload == "A1")
                     .unwrap();
                 ack_delivery(&manager, group, name, &consumer, a1).await;
 
@@ -3265,7 +3265,7 @@ mod stream_tests {
 
                 let b1 = batch1
                     .iter()
-                    .find(|d| d.message.payload == Bytes::from("B1"))
+                    .find(|d| d.message.payload == "B1")
                     .unwrap();
                 ack_delivery(&manager, group, name, &consumer, b1).await;
 

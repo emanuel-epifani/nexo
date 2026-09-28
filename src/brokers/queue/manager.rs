@@ -663,7 +663,7 @@ impl QueueManager {
         let new_msg = {
             let mut inner = Self::lock(&shared.inner);
             if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
-                let mut new_msg = dlq_msg.to_message();
+                let mut new_msg = dlq_msg.into_message();
                 inner.state.push(&mut new_msg);
                 Some(new_msg)
             } else {

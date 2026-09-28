@@ -23,14 +23,14 @@ const tabs = [
 await client.store.map.set("user:1", { name: "Max", role: "admin" });
 // Get key
 const user = await client.store.map.get<User>("user:1");
-// Del key
-await client.store.map.del("user:1");`,
+// Delete key
+await client.store.map.delete("user:1");`,
   },
   {
     key: 'pubsub',
     label: 'Pub/Sub',
     code: `// Define topic
-const alerts = client.pubsub<AlertMsg>("system-alerts");
+const alerts = client.pubsub.topic<AlertMsg>("system-alerts");
 // Subscribe
 await alerts.subscribe((msg) => console.log(msg));
 // Publish
@@ -40,25 +40,31 @@ await alerts.publish({ level: "high" });`,
     key: 'queue',
     label: 'Queue',
     code: `// Create queue
-const mailQ = await client.queue<MailJob>("emails").create();
+await client.queue.create("emails");
+// Get typed handle
+const mailQ = await client.queue.get<MailJob>("emails");
 // Push message
 await mailQ.push({ to: "test@test.com" });
-// Subscribe
+// Consume
 await mailQ.subscribe((msg) => console.log(msg));
 // Delete queue
-await mailQ.delete();`,
+await client.queue.delete("emails");`,
   },
   {
     key: 'stream',
     label: 'Stream',
     code: `// Create stream
-const stream = await client.stream<UserEvent>('user-events').create();
+await client.stream.create('user-events');
+// Get typed handle
+const stream = await client.stream.get<UserEvent>('user-events');
 // Publish
 await stream.publish({ type: 'login', userId: 'u1' });
-// Consume
-await stream.subscribe('analytics', (msg) => { console.log(\`User \${msg.userId} performed \${msg.type}\`); });
+// Consume (consumer group)
+await stream.group('analytics').subscribe((msg) => {
+  console.log(\`User \${msg.userId} performed \${msg.type}\`);
+});
 // Delete stream
-await stream.delete();`,
+await client.stream.delete('user-events');`,
   },
 ]
 
@@ -74,21 +80,21 @@ const engines = [
     icon: 'radio',
     title: 'Pub/Sub',
     desc: 'Real-time messaging with native wildcard routing for complex event topologies.',
-    perf: '3.8M msg/sec',
+    perf: '3.5M msg/sec',
     link: '/guide/pubsub',
   },
   {
     icon: 'list-ordered',
     title: 'Queue',
     desc: 'Reliable job processing with Priority, Retry and Dead Letter Queues.',
-    perf: '400k ops/sec',
+    perf: '350k ops/sec',
     link: '/guide/queue',
   },
   {
     icon: 'activity',
     title: 'Stream',
     desc: 'Persistent event log with Consumer Groups, server-side Key Ordering and Offset Tracking.',
-    perf: '1.9M ops/sec',
+    perf: '500k msg/sec',
     link: '/guide/stream',
   },
 ]
@@ -101,9 +107,9 @@ const environments = [
 
 const benchmarks = [
   { engine: 'Store', throughput: '4.5M ops/sec', latency: '< 1 µs' },
-  { engine: 'PubSub', throughput: '3.8M msg/sec', latency: '< 1 µs' },
-  { engine: 'Stream', throughput: '1.9M ops/sec', latency: '< 1 µs' },
-  { engine: 'Queue', throughput: '400k ops/sec', latency: '2 µs' },
+  { engine: 'PubSub', throughput: '3.5M msg/sec', latency: '< 1 µs' },
+  { engine: 'Stream', throughput: '500k msg/sec', latency: '~1 ms' },
+  { engine: 'Queue', throughput: '350k ops/sec', latency: '~3 µs' },
 ]
 
 const highlightedCode = computed(() => {
@@ -145,7 +151,7 @@ function handleCopy() {
         </p>
         <p class="hero-desc">
           No external dependencies, no emulators, no cloud lock-in. The same container runs on your laptop and in production <br>
-            <br></br>just <code>docker run</code> and start coding.
+            <br>just <code>docker run</code> and start coding.
         </p>
         <a href="/guide/quickstart" class="hero-cta">
           Get Started →
