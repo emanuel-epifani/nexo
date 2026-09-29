@@ -8,18 +8,16 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures-util = { version = "0.3", features = ["sink"] }
 bytes = { version = "1", features = ["serde"] }
-dashmap = "6.1.0"
+dashmap = "6.2.1"
 dotenv = "0.15"
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-hashlink = "0.11.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+hashlink = "0.12.2"
 priority-queue = "2"
-lru = "0.12.3"
-rusqlite = { version = "0.38.0", features = ["bundled", "uuid", "time"] }
-crc32fast = "1.4"
+rusqlite = { version = "0.40.2", features = ["bundled", "uuid", "time"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 parking_lot = "0.12"
 
@@ -44,4 +42,4 @@ incremental = false
 
 [dev-dependencies]
 tempfile = "3.24.0"
-base64 = "0.21"
+base64 = "0.23"

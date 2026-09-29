@@ -259,10 +259,10 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mypy", specifier = ">=1.8" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
-    { name = "pytest-timeout", specifier = ">=2.2" },
+    { name = "mypy", specifier = ">=2.3" },
+    { name = "pytest", specifier = ">=9.0" },
+    { name = "pytest-asyncio", specifier = ">=1.4" },
+    { name = "pytest-timeout", specifier = ">=2.4" },
 ]
 
 [[package]]

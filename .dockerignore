@@ -32,3 +32,4 @@ smoke-test/*
 # Other components not necessary
 sdk/*
 data/*
+benchmarks/*

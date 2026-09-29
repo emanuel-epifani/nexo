@@ -8,65 +8,74 @@
 //! ```text
 //! Running tests/stress_tests.rs (target/release/deps/stress_tests-b8b3d0ca528459fd)
 //!
-//! running 7 tests
-//! test stress_tests::pubsub::bench_pubsub_fanout ...
+//! running 11 tests
 //! 📊 PUBSUB - Fanout 1->100
-//!    Throughput:  180203 ops/sec
-//!    Total Time:  55.49ms
-//!    Latency:     Avg: 5µs | p50: 5µs | p95: 7µs | p99: 13µs | Max: 113µs
+//!    Throughput:  188720 ops/sec
+//!    Total Time:  52.99ms
+//!    Latency:     Avg: 5µs | p50: 5µs | p95: 8µs | p99: 14µs | Max: 66µs
 //!    Count:       10000
 //!
-//! ok
-//! test stress_tests::pubsub::bench_pubsub_throughput_exact_match ...
 //! 📊 PUBSUB - Exact Match Throughput
-//!    Throughput:  5033819 ops/sec
-//!    Total Time:  99.33ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 184µs
+//!    Throughput:  9918855 ops/sec
+//!    Total Time:  50.41ms
+//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 74µs
 //!    Count:       500000
 //!
-//! ok
-//! test stress_tests::pubsub::bench_pubsub_throughput_wildcard_match ...
 //! 📊 PUBSUB - Wildcard Match Throughput
-//!    Throughput:  4411367 ops/sec
-//!    Total Time:  113.34ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 130µs
+//!    Throughput:  7443735 ops/sec
+//!    Total Time:  67.17ms
+//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 52µs
 //!    Count:       500000
 //!
-//! ok
-//! test stress_tests::queue::bench_queue_throughput ...
 //! 📊 PUSH - Queue Throughput (Sequential)
-//!    Throughput:  451531 ops/sec
-//!    Total Time:  1.11s
-//!    Latency:     Avg: 1µs | p50: 0µs | p95: 1µs | p99: 2µs | Max: 13507µs
+//!    Throughput:  315649 ops/sec
+//!    Total Time:  1.58s
+//!    Latency:     Avg: 2µs | p50: 1µs | p95: 1µs | p99: 4µs | Max: 69505µs
 //!    Count:       500000
 //!
-//! ok
-//! test stress_tests::store::bench_read_throughput ...
 //! 📊 STORE - Read (GET)
-//!    Throughput:  8122130 ops/sec
-//!    Total Time:  24.62ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 130µs
+//!    Throughput:  11417861 ops/sec
+//!    Total Time:  17.52ms
+//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 8µs
 //!    Count:       200000
 //!
-//! ok
-//! test stress_tests::store::bench_write_throughput ...
 //! 📊 STORE - Write (PUT)
-//!    Throughput:  8772010 ops/sec
-//!    Total Time:  22.80ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 43µs
+//!    Throughput:  11215582 ops/sec
+//!    Total Time:  17.83ms
+//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 33µs
 //!    Count:       200000
 //!
-//! ok
-//! test stress_tests::stream::bench_stream_publish ...
+//! 📊 STREAM FETCH+ACK keyless (pages of 100)
+//!    Throughput:  180 ops/sec
+//!    Total Time:  2.78s
+//!    Latency:     Avg: 5564µs | p50: 5349µs | p95: 7213µs | p99: 7919µs | Max: 12845µs
+//!    Count:       500
+//!
 //! 📊 STREAM PUBLISH (Write Confirmed)
-//!    Throughput:  78091 ops/sec
-//!    Total Time:  6.40s
-//!    Latency:     Avg: 12µs | p50: 13µs | p95: 15µs | p99: 21µs | Max: 5807µs
+//!    Throughput:  20480 ops/sec
+//!    Total Time:  24.41s
+//!    Latency:     Avg: 48µs | p50: 40µs | p95: 71µs | p99: 114µs | Max: 12572µs
 //!    Count:       500000
 //!
-//! ok
+//! 📊 STREAM PUBLISH BATCH 100 keyed x2 groups
+//!    Throughput:  749 ops/sec
+//!    Total Time:  2.67s
+//!    Latency:     Avg: 1334µs | p50: 1119µs | p95: 1755µs | p99: 6039µs | Max: 8036µs
+//!    Count:       2000
 //!
-//! test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+//! 📊 STREAM PUBLISH BATCH 100 keyless
+//!    Throughput:  4516 ops/sec
+//!    Total Time:  664.27ms
+//!    Latency:     Avg: 221µs | p50: 182µs | p95: 244µs | p99: 556µs | Max: 6192µs
+//!    Count:       3000
+//!
+//! 📊 STREAM PUBLISH concurrent x16
+//!    Throughput:  122185 ops/sec
+//!    Total Time:  654.74ms
+//!    Latency:     Avg: 130µs | p50: 114µs | p95: 175µs | p99: 333µs | Max: 3516µs
+//!    Count:       80000
+//!
+//! test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.12s
 //! ```
 
 mod common;

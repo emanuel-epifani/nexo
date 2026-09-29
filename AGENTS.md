@@ -97,7 +97,8 @@ node scripts/generate-protocol.js --check   # exits non-zero if any generated fi
   - **Rust unit test** if the logic is algorithmically complex or CPU-intensive
   - **Integration tests** (Rust + all SDKs) covering happy path, edge cases, and error paths
   - **Fuzz test** when the feature involves parsing/serialization of untrusted input (wire protocol, client payloads)
-- **Regression**: any bug fix must include a regression test in the affected broker/SDK.
+- **Regression**: any bug fix must include a regression test in the affected broker/SDK, as a mod/describe block inside that broker's own test file — never as a standalone ad-hoc test file.
+- **No leftover dev artifacts**: temporary files used during development (repro scripts, ad-hoc test files, debug harnesses, scratch configs) must be removed before committing, or folded into the proper permanent location. This applies to generated/committed files too — e.g. `sdk/codec-fixtures.json` must be regenerated in the same commit that bumps `protocol.json`'s `protocolVersion`, never left stale.
 - **Performance**: compare always before/after of test-stress.test.ts, test_stress.py, tests/stress_tests.rs (keep alignes benchmark on docstring)
 - **Algorithm**: only O(1) / O(log n) is acceptable. Never implement O(n)+ solutions — go back to redesign and pick better data structures.
 - **Refactors**: prefer clean and robust refactors over backward compatibility while the project is pre-production. Hard breaking changes are acceptable; removed features must leave no residual references or compatibility layers.
