@@ -6,8 +6,6 @@ import { ErrorCode, FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HE
 import { Cursor, FrameWriter } from '../../protocol/codec';
 import { ConnectionClosedError, decodeErrorPayload, NotConnectedError, RequestTimeoutError, RequestCancelledError } from '../../errors';
 
-const EMPTY_BUFFER = Buffer.alloc(0);
-
 /** @internal */
 export class NexoConnection extends EventEmitter {
   public socket: net.Socket;
@@ -23,8 +21,12 @@ export class NexoConnection extends EventEmitter {
 
   public onPush?: (topic: string, data: any) => void;
 
-  private buffer: Buffer = EMPTY_BUFFER;
+  // Unconsumed inbound bytes: chunks[0][chunkOffset..] plus the rest of chunks.
+  // chunkOffset avoids subarray-ing the head chunk on every partial consume.
   private chunks: Buffer[] = [];
+  private chunkOffset = 0;
+  private chunksLen = 0;
+  private readonly headerScratch = Buffer.allocUnsafe(HEADER_SIZE);
 
   private readonly host: string;
   private readonly port: number;
@@ -80,6 +82,7 @@ export class NexoConnection extends EventEmitter {
   private setupListeners() {
     this.socket.on('data', (chunk) => {
       this.chunks.push(chunk);
+      this.chunksLen += chunk.length;
       this.processBuffer();
     });
 
@@ -97,7 +100,8 @@ export class NexoConnection extends EventEmitter {
       });
       this.pending.clear();
       this.chunks = [];
-      this.buffer = EMPTY_BUFFER;
+      this.chunkOffset = 0;
+      this.chunksLen = 0;
 
       if (this.shouldReconnect && !this.isReconnecting) {
         this.startReconnectLoop();
@@ -127,30 +131,66 @@ export class NexoConnection extends EventEmitter {
   }
 
   private processBuffer() {
-    if (this.chunks.length > 0) {
-      if (this.buffer.length > 0) {
-        this.buffer = Buffer.concat([this.buffer, ...this.chunks]);
+    while (this.chunksLen >= HEADER_SIZE) {
+      const totalFrameLen = HEADER_SIZE + this.readPayloadLen();
+      if (this.chunksLen < totalFrameLen) break;
+      this.handleFrame(this.takeFrame(totalFrameLen));
+    }
+  }
+
+  // Header (11 bytes): [Version:1][Type:1][Meta:1][ID:4][Len:4]. Only copy it
+  // into scratch when it straddles a chunk boundary.
+  private readPayloadLen(): number {
+    const first = this.chunks[0];
+    if (first.length - this.chunkOffset >= HEADER_SIZE) {
+      return first.readUInt32BE(this.chunkOffset + HEADER_OFFSET.PAYLOAD_LEN);
+    }
+    this.copyBuffered(this.headerScratch, HEADER_SIZE);
+    return this.headerScratch.readUInt32BE(HEADER_OFFSET.PAYLOAD_LEN);
+  }
+
+  private takeFrame(len: number): Buffer {
+    const first = this.chunks[0];
+    let frame: Buffer;
+    if (first.length - this.chunkOffset >= len) {
+      frame = first.subarray(this.chunkOffset, this.chunkOffset + len);
+    } else {
+      frame = Buffer.allocUnsafe(len);
+      this.copyBuffered(frame, len);
+    }
+    this.consumeBytes(len);
+    return frame;
+  }
+
+  private copyBuffered(dest: Buffer, len: number) {
+    let written = 0;
+    let off = this.chunkOffset;
+    for (let i = 0; written < len; i++) {
+      const chunk = this.chunks[i];
+      const take = Math.min(chunk.length - off, len - written);
+      chunk.copy(dest, written, off, off + take);
+      written += take;
+      off = 0;
+    }
+  }
+
+  private consumeBytes(n: number) {
+    this.chunksLen -= n;
+    let consumed = 0;
+    let off = this.chunkOffset;
+    while (n > 0) {
+      const avail = this.chunks[consumed].length - off;
+      if (n < avail) {
+        off += n;
+        n = 0;
       } else {
-        this.buffer = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks);
+        n -= avail;
+        off = 0;
+        consumed++;
       }
-      this.chunks = [];
     }
-
-    while (true) {
-      // Need at least header (11 bytes): [Version:1][Type:1][Meta:1][ID:4][Len:4]
-      if (this.buffer.length < HEADER_SIZE) break;
-
-      const payloadLen = this.buffer.readUInt32BE(HEADER_OFFSET.PAYLOAD_LEN);
-      const totalFrameLen = HEADER_SIZE + payloadLen;
-
-      if (this.buffer.length < totalFrameLen) break;
-
-      // 2. Slice Frame
-      const frame = this.buffer.subarray(0, totalFrameLen);
-      this.buffer = totalFrameLen === this.buffer.length ? EMPTY_BUFFER : this.buffer.subarray(totalFrameLen); // Advance buffer
-
-      this.handleFrame(frame);
-    }
+    if (consumed > 0) this.chunks.splice(0, consumed);
+    this.chunkOffset = off;
   }
 
   private handleFrame(frame: Buffer) {

@@ -68,12 +68,18 @@ describe('receive buffer ownership', () => {
 
     const feed = (conn: NexoConnection, chunk: Buffer) => {
         (conn as any).chunks.push(chunk);
+        (conn as any).chunksLen += chunk.length;
         (conn as any).processBuffer();
     };
 
+    const buffered = (conn: NexoConnection) => {
+        const c = conn as any;
+        return Buffer.concat(c.chunks.map((chunk: Buffer, i: number) => i === 0 ? chunk.subarray(c.chunkOffset) : chunk));
+    };
+
     const expectReleased = (conn: NexoConnection) => {
-        expect((conn as any).buffer.length).toBe(0);
-        expect((conn as any).buffer.buffer.byteLength).toBe(0);
+        expect((conn as any).chunksLen).toBe(0);
+        expect((conn as any).chunks).toHaveLength(0);
     };
 
     it('releases backing storage after a complete frame from a large pool buffer', async () => {
@@ -128,14 +134,59 @@ describe('receive buffer ownership', () => {
 
             expect(received).toHaveLength(1);
             expect(received[0].equals(p1)).toBe(true);
-            expect((conn as any).buffer.length).toBe(splitAt);
-            expect((conn as any).buffer.equals(f2.subarray(0, splitAt))).toBe(true);
+            expect((conn as any).chunksLen).toBe(splitAt);
+            expect(buffered(conn).equals(f2.subarray(0, splitAt))).toBe(true);
 
             feed(conn, f2.subarray(splitAt));
 
             expect(received).toHaveLength(2);
             expect(received[1].equals(p2)).toBe(true);
             expect(received[0].equals(p1)).toBe(true);
+            expectReleased(conn);
+        } finally {
+            conn.disconnect();
+        }
+    });
+
+    // Every header split position exercises the scratch-assembly path: the
+    // payload length must be read correctly no matter where the 11-byte
+    // header straddles two chunks.
+    it.each(Array.from({ length: HEADER_SIZE - 1 }, (_, i) => i + 1))('delivers a frame whose header is split at byte %s', async (splitAt) => {
+        const conn = makeConnection();
+        try {
+            const rawPayload = Buffer.from('header-split-payload');
+            const frame = pushFrame(rawPayload);
+            const received: Buffer[] = [];
+            conn.onPush = (_topic, data) => received.push(data);
+
+            feed(conn, frame.subarray(0, splitAt));
+            expect(received).toHaveLength(0);
+
+            feed(conn, frame.subarray(splitAt));
+            expect(received).toHaveLength(1);
+            expect(received[0].equals(rawPayload)).toBe(true);
+            expectReleased(conn);
+        } finally {
+            conn.disconnect();
+        }
+    });
+
+    it('delivers a frame spread across more than two chunks', async () => {
+        const conn = makeConnection();
+        try {
+            const rawPayload = Buffer.alloc(257, 0xcd);
+            const frame = pushFrame(rawPayload);
+            const received: Buffer[] = [];
+            conn.onPush = (_topic, data) => received.push(data);
+
+            const third = Math.ceil(frame.length / 3);
+            feed(conn, frame.subarray(0, third));
+            feed(conn, frame.subarray(third, 2 * third));
+            expect(received).toHaveLength(0);
+
+            feed(conn, frame.subarray(2 * third));
+            expect(received).toHaveLength(1);
+            expect(received[0].equals(rawPayload)).toBe(true);
             expectReleased(conn);
         } finally {
             conn.disconnect();
