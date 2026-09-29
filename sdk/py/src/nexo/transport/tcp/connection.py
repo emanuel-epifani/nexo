@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import struct
 from typing import Any, Callable, Optional
 
@@ -90,10 +91,34 @@ class NexoConnection:
         except OSError as e:
             raise ConnectionError(str(e)) from e
 
+        self._tune_socket()
         self.is_connected = True
 
         # Start read loop
         self._read_task = asyncio.create_task(self._read_loop())
+
+    def _tune_socket(self) -> None:
+        # TCP tuning (parity with the TS SDK):
+        # - TCP_NODELAY disables Nagle's algorithm, avoiding Nagle/delayed-ACK
+        #   interactions that add up to ~40ms to sporadic small writes.
+        # - SO_KEEPALIVE lets the kernel probe idle connections so dead sockets
+        #   (NAT/LB idle timeouts) are detected in seconds instead of minutes.
+        assert self._writer is not None
+        sock = self._writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Idle delay before the first probe, mirroring the TS 30s setting:
+            # TCP_KEEPIDLE on Linux, TCP_KEEPALIVE on macOS/BSD.
+            for opt in ("TCP_KEEPIDLE", "TCP_KEEPALIVE"):
+                constant = getattr(socket, opt, None)
+                if constant is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, constant, 30)
+                    break
+        except OSError:
+            pass
 
     async def _read_loop(self) -> None:
         assert self._reader is not None
