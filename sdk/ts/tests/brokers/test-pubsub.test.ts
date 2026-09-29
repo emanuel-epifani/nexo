@@ -614,4 +614,55 @@ describe('PUBSUB', () => {
             expect(silentlyInactive).toBe(false);
         });
     });
+
+    describe('MATCHER LIFECYCLE', () => {
+        it.each(['#', '+/value', 'routing/+', 'routing/#'])('removes and re-adds wildcard %s', async (wildcard) => {
+            class FakeConnection extends EventEmitter {
+                onPush?: (topic: string, data: unknown) => void;
+                isConnected = true;
+
+                async send(_opcode: number): Promise<void> { }
+            }
+            const connection = new FakeConnection();
+            const broker = new NexoPubSub(connection as any, { info() { }, error() { }, warn() { } } as any);
+
+            const exactReceived: number[] = [];
+            const wildReceived: number[] = [];
+            const wildTopics: string[] = [];
+
+            const subExact = await broker.topic('routing/value').subscribe((data: number) => exactReceived.push(data));
+            let subWild: Subscription | undefined;
+            let subWild2: Subscription | undefined;
+            try {
+                connection.onPush!('routing/value', 1);
+                await waitFor(() => expect(exactReceived).toEqual([1]));
+                expect(wildReceived).toEqual([]);
+
+                const wildHandler = (data: number, meta: { topic: string }) => {
+                    wildReceived.push(data);
+                    wildTopics.push(meta.topic);
+                };
+                subWild = await broker.pattern(wildcard).subscribe(wildHandler);
+                connection.onPush!('routing/value', 2);
+                await waitFor(() => expect(wildReceived).toEqual([2]));
+
+                await subWild.stop();
+                connection.onPush!('routing/value', 3);
+                await waitFor(() => expect(exactReceived).toEqual([1, 2, 3]));
+                expect(wildReceived).toEqual([2]);
+
+                subWild2 = await broker.pattern(wildcard).subscribe(wildHandler);
+                connection.onPush!('routing/value', 4);
+                await waitFor(() => expect(wildReceived).toEqual([2, 4]));
+
+                expect(exactReceived).toEqual([1, 2, 3, 4]);
+                expect(wildReceived).toEqual([2, 4]);
+                expect(wildTopics).toEqual(['routing/value', 'routing/value']);
+            } finally {
+                await subExact.stop();
+                await subWild?.stop();
+                await subWild2?.stop();
+            }
+        });
+    });
 });

@@ -141,6 +141,13 @@ class _PatternMatcher:
         remove_from(self._root, 0)
 
     def match(self, topic: str) -> list[_PatternState]:
+        if (
+            not self._root.children
+            and self._root.single is None
+            and self._root.terminal is None
+            and self._root.multi is None
+        ):
+            return []
         frontier = [self._root]
         matches: list[_PatternState] = []
         for segment in topic.split("/"):
@@ -385,6 +392,7 @@ class NexoPubSub:
 
     async def _close_listener(self, listener: _Listener) -> None:
         listener.active = False
+        listener.queue = asyncio.Queue(maxsize=listener.queue.maxsize)
         if listener.task is None:
             return
         if not listener.processing:

@@ -297,7 +297,8 @@ class FrameWriter:
         self._buf[HEADER_OFFSET_META] = opcode
         struct.pack_into(">I", self._buf, HEADER_OFFSET_ID, corr_id)
         struct.pack_into(">I", self._buf, HEADER_OFFSET_PAYLOAD_LEN, total - HEADER_SIZE)
-        return bytes(self._buf[:total])
+        del self._buf[total:]
+        return bytes(self._buf)
 
 
 # Type alias for build functions passed to connection.send

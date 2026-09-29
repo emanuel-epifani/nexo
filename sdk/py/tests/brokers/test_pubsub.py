@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import uuid
+import weakref
 
 import pytest
 
-from nexo import NexoClient, SlowConsumerError
+from nexo import NexoClient, NexoPubSub, SlowConsumerError
+from nexo.protocol.generated import PubSubOpcode
+from nexo.utils.logger import Logger
 from tests.utils.wait_for import wait_for
+
+
+class _FakePubSubConnection:
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.on_push = None
+        self.on_reconnect = None
+        self.unsub_sent = asyncio.Event()
+
+    async def send(self, opcode, build=None, **kwargs):
+        if opcode == PubSubOpcode.UNSUB:
+            self.unsub_sent.set()
+        return 0, b""
+
+
+class _HeldPayload:
+    pass
 
 
 @pytest.mark.asyncio
@@ -485,3 +506,102 @@ class TestPubSub:
         await subscription.stop()
         assert active is False
         assert closed is True
+
+    @pytest.mark.parametrize("mode", ["stop", "overflow"])
+    async def test_close_listener_drops_backlog(self, mode: str):
+        conn = _FakePubSubConnection()
+        broker = NexoPubSub(conn, Logger(level="OFF"))
+        topic = f"cleanup-{mode}-{uuid.uuid4()}"
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def blocked_handler(_):
+            started.set()
+            await release.wait()
+            finished.set()
+
+        sub = await broker.topic(topic).subscribe(blocked_handler, queue_capacity=1)
+        broker._enqueue(topic, "first")
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        payload = _HeldPayload()
+        payload_ref = weakref.ref(payload)
+        broker._enqueue(topic, payload)
+        del payload
+
+        listener = next(iter(broker._states[topic].listeners.values()))
+
+        stop_task = None
+        try:
+            if mode == "stop":
+                stop_task = asyncio.create_task(sub.stop())
+            else:
+                broker._enqueue(topic, "extra")
+            await asyncio.wait_for(conn.unsub_sent.wait(), timeout=2)
+
+            assert listener.queue.empty()
+            gc.collect()
+            assert payload_ref() is None
+            assert not finished.is_set()
+            if stop_task is not None:
+                assert not stop_task.done()
+            assert not sub.active
+        finally:
+            release.set()
+            if stop_task is not None:
+                await stop_task
+            await sub.wait_closed()
+            await sub.stop()
+
+        assert finished.is_set()
+        if mode == "overflow":
+            assert isinstance(sub.error, SlowConsumerError)
+        else:
+            assert sub.error is None
+
+    @pytest.mark.parametrize("wildcard", ["#", "+/value", "routing/+", "routing/#"])
+    async def test_wildcard_remove_and_readd(self, wildcard: str):
+        conn = _FakePubSubConnection()
+        broker = NexoPubSub(conn, Logger(level="OFF"))
+
+        exact_received: list = []
+        wild_received: list = []
+        wild_topics: list = []
+
+        sub_exact = await broker.topic("routing/value").subscribe(exact_received.append)
+        sub_wild = None
+        sub_wild2 = None
+        try:
+            broker._enqueue("routing/value", 1)
+            await wait_for(lambda: exact_received == [1])
+            assert wild_received == []
+
+            def wild_handler(data, meta):
+                wild_received.append(data)
+                wild_topics.append(meta["topic"])
+
+            sub_wild = await broker.pattern(wildcard).subscribe(wild_handler)
+            broker._enqueue("routing/value", 2)
+            await wait_for(lambda: wild_received == [2])
+
+            await sub_wild.stop()
+            broker._enqueue("routing/value", 3)
+            await wait_for(lambda: exact_received == [1, 2, 3])
+            await asyncio.sleep(0.05)
+            assert wild_received == [2]
+
+            sub_wild2 = await broker.pattern(wildcard).subscribe(wild_handler)
+            broker._enqueue("routing/value", 4)
+            await wait_for(lambda: wild_received == [2, 4])
+
+            assert exact_received == [1, 2, 3, 4]
+            assert wild_received == [2, 4]
+            assert wild_topics == ["routing/value", "routing/value"]
+        finally:
+            await sub_exact.stop()
+            if sub_wild is not None:
+                await sub_wild.stop()
+            if sub_wild2 is not None:
+                await sub_wild2.stop()

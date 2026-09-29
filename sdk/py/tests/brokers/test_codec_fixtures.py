@@ -6,7 +6,13 @@ import time
 import pytest
 
 from nexo.protocol.codec import Cursor, FrameWriter
-from nexo.protocol.generated import DataType, FrameType, PROTOCOL_VERSION
+from nexo.protocol.generated import (
+    HEADER_SIZE,
+    DataType,
+    FrameType,
+    PROTOCOL_VERSION,
+    StoreOpcode,
+)
 
 _FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "../..", "..", "codec-fixtures.json")
 FIXTURES = json.load(open(_FIXTURES_PATH))
@@ -496,3 +502,36 @@ def test_bench_queue_push_batch_large():
     ops_sec = N_BENCH / elapsed
     print(f"CODEC BENCH  queue_push_batch (lg) {N_BENCH:>7} iter | {ops_sec:>12.0f} ops/sec | {elapsed*1000:.1f}ms")
     assert ok == N_BENCH
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        bytes(range(64)),
+        b"\x00" * (4 * 1024),
+        b"\xab" * (1024 * 1024),
+        "caffe/東京",
+        {"outer": {"list": [1, "two", {"inner": [True, None]}]}},
+    ],
+    ids=["raw-empty", "raw-64B", "raw-4KiB", "raw-1MiB", "unicode-string", "nested-json"],
+)
+def test_frame_writer_finish_returns_independent_bytes(payload: object) -> None:
+    writer = FrameWriter()
+    writer.begin()
+    writer.string("key").u8(0).any(payload)
+    frame = writer.finish(7, StoreOpcode.MAP_SET)
+
+    assert type(frame) is bytes
+
+    cursor = Cursor(frame, HEADER_SIZE)
+    assert cursor.read_string() == "key"
+    assert cursor.read_u8() == 0
+    assert cursor.decode_any() == payload
+
+    frame_hex = frame.hex()
+    writer._buf[0] = 0x00
+    writer.begin()
+    writer.string("other").u8(0).any(0)
+    writer.finish(8, StoreOpcode.MAP_SET)
+    assert frame.hex() == frame_hex

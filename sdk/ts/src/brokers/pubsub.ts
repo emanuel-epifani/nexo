@@ -106,6 +106,7 @@ class PatternTrie {
   }
 
   match(topic: string, visit: (entry: PatternEntry) => void): void {
+    if (this.root.literals.size === 0 && this.root.plus === null && this.root.terminal === null && this.root.hash === null) return;
     const parts = topic.split('/');
     const stack: { node: TrieNode; depth: number }[] = [{ node: this.root, depth: 0 }];
     while (stack.length > 0) {

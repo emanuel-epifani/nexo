@@ -6,6 +6,8 @@ import { ErrorCode, FrameType, ResponseStatus, PROTOCOL_VERSION, HEADER_SIZE, HE
 import { Cursor, FrameWriter } from '../../protocol/codec';
 import { ConnectionClosedError, decodeErrorPayload, NotConnectedError, RequestTimeoutError, RequestCancelledError } from '../../errors';
 
+const EMPTY_BUFFER = Buffer.alloc(0);
+
 /** @internal */
 export class NexoConnection extends EventEmitter {
   public socket: net.Socket;
@@ -21,7 +23,7 @@ export class NexoConnection extends EventEmitter {
 
   public onPush?: (topic: string, data: any) => void;
 
-  private buffer: Buffer = Buffer.alloc(0);
+  private buffer: Buffer = EMPTY_BUFFER;
   private chunks: Buffer[] = [];
 
   private readonly host: string;
@@ -95,7 +97,7 @@ export class NexoConnection extends EventEmitter {
       });
       this.pending.clear();
       this.chunks = [];
-      this.buffer = Buffer.alloc(0);
+      this.buffer = EMPTY_BUFFER;
 
       if (this.shouldReconnect && !this.isReconnecting) {
         this.startReconnectLoop();
@@ -145,7 +147,7 @@ export class NexoConnection extends EventEmitter {
 
       // 2. Slice Frame
       const frame = this.buffer.subarray(0, totalFrameLen);
-      this.buffer = this.buffer.subarray(totalFrameLen); // Advance buffer
+      this.buffer = totalFrameLen === this.buffer.length ? EMPTY_BUFFER : this.buffer.subarray(totalFrameLen); // Advance buffer
 
       this.handleFrame(frame);
     }
