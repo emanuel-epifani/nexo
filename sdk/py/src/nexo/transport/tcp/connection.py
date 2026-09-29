@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
-import time
 from typing import Any, Callable, Optional
 
 from ...protocol.codec import FrameWriter, Cursor, BuildFn
@@ -65,12 +64,13 @@ class NexoConnection:
         self.is_connected: bool = False
 
         self._next_id: int = 1
-        self._pending: dict[int, asyncio.Future[tuple[int, bytes]]] = {}
+        self._pending: dict[
+            int, tuple[asyncio.Future[tuple[int, bytes]], asyncio.TimerHandle]
+        ] = {}
 
         self._should_reconnect: bool = False
         self._is_reconnecting: bool = False
 
-        self._sweep_task: Optional[asyncio.Task] = None
         self._read_task: Optional[asyncio.Task] = None
 
         self.on_push: Optional[Callable[[str, Any], None]] = None
@@ -80,40 +80,7 @@ class NexoConnection:
 
     async def connect(self) -> None:
         self._should_reconnect = True
-        self._start_sweep()
         await self._create_socket_and_connect()
-
-    def _start_sweep(self) -> None:
-        if self._sweep_task is not None:
-            return
-        self._sweep_task = asyncio.create_task(self._sweep_loop())
-
-    def _stop_sweep(self) -> None:
-        if self._sweep_task is not None:
-            self._sweep_task.cancel()
-            self._sweep_task = None
-
-    async def _sweep_loop(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(self._config.sweep_interval_ms / 1000.0)
-                now = time.monotonic()
-                expired: list[int] = []
-                for cid, fut in self._pending.items():
-                    if fut.done():
-                        expired.append(cid)
-                        continue
-                    # Check deadline via stored attribute
-                    deadline = getattr(fut, "_nexo_deadline", None)
-                    timeout_ms = getattr(fut, "_nexo_timeout_ms", None)
-                    if deadline is not None and now > deadline:
-                        expired.append(cid)
-                        if not fut.done():
-                            fut.set_exception(RequestTimeoutError(timeout_ms or 0))
-                for cid in expired:
-                    self._pending.pop(cid, None)
-        except asyncio.CancelledError:
-            pass
 
     async def _create_socket_and_connect(self) -> None:
         try:
@@ -157,9 +124,12 @@ class NexoConnection:
                 payload = await self._reader.readexactly(payload_len) if payload_len else b""
 
                 if frame_type == FrameType.RESPONSE:
-                    fut = self._pending.pop(corr_id, None)
-                    if fut is not None and not fut.done():
-                        fut.set_result((meta, payload))
+                    entry = self._pending.pop(corr_id, None)
+                    if entry is not None:
+                        fut, timer = entry
+                        timer.cancel()
+                        if not fut.done():
+                            fut.set_result((meta, payload))
                 elif frame_type == FrameType.PUSH_PUBSUB:
                     if self.on_push is not None:
                         cursor = Cursor(payload)
@@ -186,7 +156,8 @@ class NexoConnection:
             self._logger.error("[Connection] SOCKET CLOSED.")
 
         # Reject all pending
-        for fut in self._pending.values():
+        for fut, timer in self._pending.values():
+            timer.cancel()
             if not fut.done():
                 fut.set_exception(ConnectionClosedError())
         self._pending.clear()
@@ -212,6 +183,11 @@ class NexoConnection:
             except Exception:
                 pass  # Retry silently
 
+    def _expire_request(self, corr_id: int, timeout_ms: int) -> None:
+        entry = self._pending.pop(corr_id, None)
+        if entry is not None and not entry[0].done():
+            entry[0].set_exception(RequestTimeoutError(timeout_ms))
+
     async def send(
         self,
         opcode: int,
@@ -230,35 +206,34 @@ class NexoConnection:
             build(self._writer_buf)
         packet = self._writer_buf.finish(corr_id, opcode)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[int, bytes]] = loop.create_future()
         timeout = timeout_ms if timeout_ms is not None else self._config.request_timeout_ms
-        fut._nexo_deadline = time.monotonic() + timeout / 1000.0  # type: ignore[attr-defined]
-        fut._nexo_timeout_ms = timeout  # type: ignore[attr-defined]
-
-        self._pending[corr_id] = fut
+        timer = loop.call_later(timeout / 1000.0, self._expire_request, corr_id, timeout)
+        self._pending[corr_id] = (fut, timer)
 
         assert self._writer is not None
         self._writer.write(packet)
+        drain_task = asyncio.ensure_future(self._writer.drain())
+        waiters: set[asyncio.Future[Any]] = {drain_task, fut}
         try:
-            await self._writer.drain()
-        except Exception:
-            self._pending.pop(corr_id, None)
-            raise ConnectionClosedError()
-
-        try:
-            status, data = await asyncio.wait_for(fut, timeout=timeout / 1000.0)
-        except asyncio.TimeoutError:
-            self._pending.pop(corr_id, None)
-            raise RequestTimeoutError(timeout)
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if fut.done():
+                status, data = fut.result()
+            else:
+                if drain_task.cancelled() or drain_task.exception() is not None:
+                    raise ConnectionClosedError()
+                status, data = await fut
         except asyncio.CancelledError:
             self._pending.pop(corr_id, None)
             raise
-        except ConnectionClosedError:
-            raise
-        except Exception as e:
+        except Exception:
             self._pending.pop(corr_id, None)
             raise
+        finally:
+            timer.cancel()
+            if not drain_task.done():
+                drain_task.cancel()
 
         if status == ResponseStatus.ERR:
             error = _decode_server_error(data)
@@ -291,9 +266,9 @@ class NexoConnection:
     def disconnect(self) -> None:
         self._should_reconnect = False
         self._is_reconnecting = False
-        self._stop_sweep()
 
-        for fut in self._pending.values():
+        for fut, timer in self._pending.values():
+            timer.cancel()
             if not fut.done():
                 fut.set_exception(ConnectionClosedError())
         self._pending.clear()

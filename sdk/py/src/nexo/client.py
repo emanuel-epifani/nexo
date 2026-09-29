@@ -31,7 +31,6 @@ class NexoClient:
                 port=port,
                 request_timeout_ms=DEFAULT_CONFIG.connection.request_timeout_ms,
                 reconnect_delay_ms=DEFAULT_CONFIG.connection.reconnect_delay_ms,
-                sweep_interval_ms=DEFAULT_CONFIG.connection.sweep_interval_ms,
                 backoff_short_ms=DEFAULT_CONFIG.connection.backoff_short_ms,
                 backoff_long_ms=DEFAULT_CONFIG.connection.backoff_long_ms,
             ),

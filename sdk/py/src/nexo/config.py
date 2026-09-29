@@ -12,7 +12,6 @@ class NexoConnectionConfig:
     port: int = DEFAULT_PORT
     request_timeout_ms: int = 15000
     reconnect_delay_ms: int = 1500
-    sweep_interval_ms: int = 1000
     backoff_short_ms: int = 1000
     backoff_long_ms: int = 2000
 
