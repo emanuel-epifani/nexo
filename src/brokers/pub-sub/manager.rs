@@ -1,11 +1,12 @@
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::brokers::pub_sub::config::PubSubConfig;
 use crate::brokers::pub_sub::domain::persistence;
@@ -19,32 +20,31 @@ pub struct PubSubManager {
     clients: ClientRegistry,
     retained_dirty: Arc<AtomicBool>,
     config: Arc<PubSubConfig>,
+    flush_task: Mutex<Option<JoinHandle<()>>>,
+    cleanup_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl PubSubManager {
-    pub fn new(config: Arc<PubSubConfig>) -> Self {
+    /// Startup is fail-closed: a corrupt, locked or legacy retained store must
+    /// stop the engine instead of silently opening empty state — the same
+    /// contract `StreamManager` already enforces on its store.
+    pub fn new(config: Arc<PubSubConfig>) -> Result<Self, BrokerError> {
         let tree = Arc::new(RwLock::new(Node::new()));
         let retained_dirty = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(DashMap::new());
         let persistence_path = format!("{}/retained.db", config.persistence_path);
 
-        let loaded = match persistence::init_db(&persistence_path) {
-            Ok(conn) => match persistence::load_all(&conn) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!("Failed to load retained topics from SQLite DB: {}", e);
-                    Vec::new()
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to initialize SQLite for retained at {}: {}",
-                    persistence_path,
-                    e
-                );
-                Vec::new()
-            }
-        };
+        let conn = persistence::init_db(&persistence_path).map_err(|e| {
+            BrokerError::storage(format!(
+                "Failed to initialize retained store at {persistence_path}: {e}"
+            ))
+        })?;
+        let loaded = persistence::load_all(&conn).map_err(|e| {
+            BrokerError::storage(format!(
+                "Failed to load retained messages from {persistence_path}: {e}"
+            ))
+        })?;
+        drop(conn);
 
         {
             let mut root = tree.write();
@@ -54,32 +54,45 @@ impl PubSubManager {
             }
         }
 
-        // Background Flush Task
+        // Background Flush Task. The connection is opened lazily and the dirty
+        // flag is restored on every failure, so a locked/corrupt store is
+        // retried on the next tick instead of silently dropping the write.
         let flush_tree = tree.clone();
         let flush_dirty = retained_dirty.clone();
-        let flush_path = persistence_path;
         let flush_ms = config.retained_flush_ms;
 
-        tokio::spawn(async move {
-            if let Ok(mut conn) = persistence::init_db(&flush_path) {
-                let mut interval = tokio::time::interval(Duration::from_millis(flush_ms));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    if !flush_dirty.swap(false, Ordering::Relaxed) {
-                        continue;
-                    }
+        let flush_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(flush_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut conn = None;
+            loop {
+                interval.tick().await;
+                if !flush_dirty.swap(false, Ordering::Relaxed) {
+                    continue;
+                }
+                let active = match conn.as_mut() {
+                    Some(c) => c,
+                    None => match persistence::init_db(&persistence_path) {
+                        Ok(c) => conn.insert(c),
+                        Err(e) => {
+                            tracing::error!("Failed to open retained store for flush: {}", e);
+                            flush_dirty.store(true, Ordering::Relaxed);
+                            continue;
+                        }
+                    },
+                };
 
-                    let entries = {
-                        let root = flush_tree.read();
-                        let mut results = Vec::new();
-                        root.collect_all_retained("", &mut results);
-                        results
-                    };
+                let entries = {
+                    let root = flush_tree.read();
+                    let mut results = Vec::new();
+                    root.collect_all_retained("", &mut results);
+                    results
+                };
 
-                    if let Err(e) = persistence::flush(&mut conn, &entries) {
-                        tracing::error!("Failed to flush retained messages to SQLite: {}", e);
-                    }
+                if let Err(e) = persistence::flush(active, &entries) {
+                    tracing::error!("Failed to flush retained messages to SQLite: {}", e);
+                    conn = None;
+                    flush_dirty.store(true, Ordering::Relaxed);
                 }
             }
         });
@@ -89,7 +102,7 @@ impl PubSubManager {
         let cleanup_dirty = retained_dirty.clone();
         let cleanup_secs = config.cleanup_interval_seconds;
 
-        tokio::spawn(async move {
+        let cleanup_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(cleanup_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await; // skip first
@@ -105,15 +118,26 @@ impl PubSubManager {
             }
         });
 
-        Self {
+        Ok(Self {
             tree,
             clients,
             retained_dirty,
             config,
-        }
+            flush_task: Mutex::new(Some(flush_task)),
+            cleanup_task: Mutex::new(Some(cleanup_task)),
+        })
     }
 
     pub fn shutdown(&self) {
+        // Stop the background tasks first: they write to the same SQLite file
+        // and would overwrite the state of any manager started after this one.
+        if let Some(task) = self.flush_task.lock().take() {
+            task.abort();
+        }
+        if let Some(task) = self.cleanup_task.lock().take() {
+            task.abort();
+        }
+
         let persistence_path = format!("{}/retained.db", self.config.persistence_path);
         if let Ok(mut conn) = persistence::init_db(&persistence_path) {
             let entries = {
@@ -214,7 +238,11 @@ impl PubSubManager {
         let Some(mut info) = self.clients.get_mut(client_id) else {
             return Ok(());
         };
-        info.subscriptions.insert(pattern.to_string());
+        // Idempotent: a repeated SUB for the same pattern must not replay the
+        // retained messages a second time.
+        if !info.subscriptions.insert(pattern.to_string()) {
+            return Ok(());
+        }
         let sender = info.sender.clone();
         drop(info);
 
@@ -328,5 +356,11 @@ impl PubSubManager {
         }
 
         Ok(sent_count)
+    }
+}
+
+impl Drop for PubSubManager {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

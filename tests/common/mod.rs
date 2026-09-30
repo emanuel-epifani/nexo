@@ -29,7 +29,7 @@ pub(crate) async fn setup_pubsub_manager() -> (Arc<PubSubManager>, TempDir) {
     let mut config = Config::global().pubsub.clone();
     config.persistence_path = path;
 
-    let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+    let manager = Arc::new(PubSubManager::new(Arc::new(config)).expect("pubsub manager"));
     (manager, temp_dir)
 }
 

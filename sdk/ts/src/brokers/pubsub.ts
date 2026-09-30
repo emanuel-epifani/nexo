@@ -324,7 +324,12 @@ export class NexoPubSub {
       transition = this.enqueueTransition(entry, async () => {
         if (entry.listeners.size > 0) return;
         try {
-          if (entry.wireSubscribed) await PubSubCommands.unsubscribe(this.conn, entry.pattern);
+          // Best-effort: a dead socket must not make stop() fail.
+          if (entry.wireSubscribed && this.conn.isConnected) {
+            await PubSubCommands.unsubscribe(this.conn, entry.pattern);
+          }
+        } catch (error) {
+          this.logger.error(`[PubSub] UNSUB for "${entry.pattern}" failed`, error);
         } finally {
           entry.wireSubscribed = false;
           if (entry.listeners.size === 0) this.removeEntry(entry);

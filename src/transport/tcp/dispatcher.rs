@@ -11,6 +11,11 @@ use bytes::Bytes;
 /// execute without allocating a Tokio task. Stream opcodes are NOT here:
 /// they take the dedicated ordered-submit path in `connection.rs` (submit on
 /// the reader, completion detached).
+///
+/// Every pubsub opcode is inline: PUB/SUB/UNSUB are all in-memory operations
+/// and MUST run in arrival order — a PUB spawned to a task can overtake a
+/// SUB/UNSUB written in the same TCP batch, causing spurious deliveries or
+/// lost messages.
 pub fn is_inline_opcode(opcode: u8) -> bool {
     matches!(
         opcode,
@@ -20,6 +25,7 @@ pub fn is_inline_opcode(opcode: u8) -> bool {
             | store::tcp::OP_MAP_DEL
             | store::tcp::OP_MAP_INCR
             | queue::tcp::OP_Q_EXISTS
+            | pub_sub::tcp::OP_PUB
             | pub_sub::tcp::OP_SUB
             | pub_sub::tcp::OP_UNSUB
     )
@@ -75,7 +81,8 @@ mod tests {
 
         assert!(is_inline_opcode(queue::tcp::OP_Q_EXISTS));
 
-        // PubSub opcodes that must be ordered with publish
+        // All PubSub commands are inline: PUB/SUB/UNSUB must execute in TCP order
+        assert!(is_inline_opcode(pub_sub::tcp::OP_PUB));
         assert!(is_inline_opcode(pub_sub::tcp::OP_SUB));
         assert!(is_inline_opcode(pub_sub::tcp::OP_UNSUB));
     }
@@ -93,7 +100,6 @@ mod tests {
         assert!(!is_inline_opcode(stream::tcp::OP_S_DELETE));
         assert!(!is_inline_opcode(store::tcp::OP_MAP_CLEAR_ALL));
         assert!(!is_inline_opcode(store::tcp::OP_MAP_CLEAR_PREFIX));
-        assert!(!is_inline_opcode(pub_sub::tcp::OP_PUB));
 
         // Queue ack/nack now await on the bounded store writer channel
         assert!(!is_inline_opcode(queue::tcp::OP_Q_ACK));

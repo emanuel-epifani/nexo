@@ -24,7 +24,12 @@ pub struct NexoEngine {
 
 impl NexoEngine {
     pub async fn new(config: &Config) -> Self {
-        let pubsub = Arc::new(PubSubManager::new(Arc::new(config.pubsub.clone())));
+        // PubSub startup is fail-closed: a corrupt/locked/legacy retained
+        // store must stop the engine instead of silently opening empty state.
+        let pubsub = Arc::new(
+            PubSubManager::new(Arc::new(config.pubsub.clone()))
+                .expect("FATAL: pubsub engine failed to start"),
+        );
 
         Self {
             store: Arc::new(StoreManager::new(Arc::new(config.store.clone()))),

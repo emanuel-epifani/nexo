@@ -133,7 +133,7 @@ mod pubsub_tests {
 
             let mut config = nexo::config::Config::global().pubsub.clone();
             config.persistence_path = path;
-            let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+            let manager = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
             let client_id = "leaver".to_string();
             let (tx, _rx) = mpsc::channel(8192);
@@ -242,7 +242,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 manager
                     .publish(topic, payload.clone(), true, false, None)
@@ -262,7 +262,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 // Subscribe - should receive retained from disk
                 let client_id = "after_restart".to_string();
@@ -291,7 +291,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 // Publish retained with 1 second TTL
                 manager
@@ -308,7 +308,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 let client_id = "after_restart".to_string();
                 let (tx, mut rx) = mpsc::channel(8192);
@@ -1069,7 +1069,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 manager
                     .publish(topic, payload.clone(), true, false, None)
@@ -1083,7 +1083,7 @@ mod pubsub_tests {
             {
                 let mut config = nexo::config::Config::global().pubsub.clone();
                 config.persistence_path = path.clone();
-                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)));
+                let manager2 = Arc::new(PubSubManager::new(Arc::new(config)).unwrap());
 
                 let client_id = "after_shutdown".to_string();
                 let (tx, mut rx) = mpsc::channel(8192);
@@ -1203,7 +1203,7 @@ mod pubsub_tests {
         #[tokio::test]
         async fn duplicate_sub_must_not_replay_retained_twice() {
             let temp = tempfile::tempdir().unwrap();
-            let manager = PubSubManager::new(Arc::new(manager_config(&temp)));
+            let manager = PubSubManager::new(Arc::new(manager_config(&temp))).unwrap();
             manager
                 .publish("dup/topic", Bytes::from_static(b"value"), true, false, None)
                 .unwrap();
@@ -1224,7 +1224,7 @@ mod pubsub_tests {
             let temp = tempfile::tempdir().unwrap();
             let mut config = manager_config(&temp);
             config.push_channel_capacity = 2;
-            let manager = PubSubManager::new(Arc::new(config));
+            let manager = PubSubManager::new(Arc::new(config)).unwrap();
             for index in 0..3 {
                 manager
                     .publish(
@@ -1252,7 +1252,7 @@ mod pubsub_tests {
             let mut old_config = manager_config(&temp);
             old_config.retained_flush_ms = 5_000;
             old_config.cleanup_interval_seconds = 1;
-            let old = PubSubManager::new(Arc::new(old_config));
+            let old = PubSubManager::new(Arc::new(old_config)).unwrap();
             old.publish(
                 "old/topic",
                 Bytes::from_static(b"old"),
@@ -1264,7 +1264,7 @@ mod pubsub_tests {
             old.shutdown();
             drop(old);
 
-            let current = PubSubManager::new(Arc::new(manager_config(&temp)));
+            let current = PubSubManager::new(Arc::new(manager_config(&temp))).unwrap();
             current
                 .publish("old/topic", Bytes::new(), false, true, None)
                 .unwrap();
@@ -1280,7 +1280,7 @@ mod pubsub_tests {
             tokio::time::sleep(Duration::from_millis(250)).await;
             tokio::time::sleep(Duration::from_millis(5_100)).await;
 
-            let recovered = PubSubManager::new(Arc::new(manager_config(&temp)));
+            let recovered = PubSubManager::new(Arc::new(manager_config(&temp))).unwrap();
             let (sender, mut receiver) = mpsc::channel(8);
             recovered.connect("reader", sender);
             recovered.subscribe("reader", "current/topic").unwrap();
@@ -1310,7 +1310,7 @@ mod pubsub_tests {
 
             let mut config = manager_config(&temp);
             config.retained_flush_ms = 200;
-            let manager = PubSubManager::new(Arc::new(config));
+            let manager = PubSubManager::new(Arc::new(config)).unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             let lock = Connection::open(&database_path).unwrap();
@@ -1328,7 +1328,7 @@ mod pubsub_tests {
             lock.execute_batch("COMMIT").unwrap();
             tokio::time::sleep(Duration::from_millis(300)).await;
 
-            let recovered = PubSubManager::new(Arc::new(manager_config(&temp)));
+            let recovered = PubSubManager::new(Arc::new(manager_config(&temp))).unwrap();
             let (sender, mut receiver) = mpsc::channel(8);
             recovered.connect("reader", sender);
             recovered.subscribe("reader", "retry/topic").unwrap();
@@ -1337,7 +1337,7 @@ mod pubsub_tests {
         }
 
         #[tokio::test]
-        async fn malformed_retained_schema_must_not_silently_start_empty() {
+        async fn malformed_retained_schema_must_fail_startup_not_start_empty() {
             let temp = tempfile::tempdir().unwrap();
             let database_path = temp.path().join("retained.db");
             let seed = Connection::open(&database_path).unwrap();
@@ -1353,15 +1353,10 @@ mod pubsub_tests {
             .unwrap();
             drop(seed);
 
-            let manager = PubSubManager::new(Arc::new(manager_config(&temp)));
-            let (sender, mut receiver) = mpsc::channel(8);
-            manager.connect("reader", sender);
-            manager.subscribe("reader", "startup/topic").unwrap();
-            let message = timeout(Duration::from_millis(250), receiver.recv())
-                .await
-                .expect("startup must not hide all retained data after a storage/schema error")
-                .expect("channel must stay open");
-            assert_eq!(message.payload, Bytes::from_static(b"persisted"));
+            // Fail-closed: an unreadable retained store must stop the manager
+            // instead of silently starting empty (same contract as stream).
+            let result = PubSubManager::new(Arc::new(manager_config(&temp)));
+            assert!(result.is_err());
         }
 
         #[tokio::test]
@@ -1385,6 +1380,14 @@ mod pubsub_tests {
                     responses += 1;
                 }
             }
+            // A pushed frame travels an extra bridge hop and can trail the
+            // responses on the wire: drain briefly so a spurious delivery
+            // can't hide behind the loop exit.
+            while let Ok(Ok(extra)) =
+                timeout(Duration::from_millis(200), read_frame(&mut stream)).await
+            {
+                assert_ne!(extra.frame_type, TYPE_PUSH_PUBSUB);
+            }
             assert_eq!(pushes, 0);
             engine.shutdown().await;
         }
@@ -1403,9 +1406,12 @@ mod pubsub_tests {
             batch.extend_from_slice(&frame(OP_UNSUB, 3, &str_field("ordered/topic")));
             stream.write_all(&batch).await.unwrap();
 
+            // The expected push travels an extra bridge hop and can trail the
+            // responses on the wire: keep reading until both responses AND the
+            // push have arrived.
             let mut pushes = 0;
             let mut responses = 0;
-            while responses < 2 {
+            while responses < 2 || pushes < 1 {
                 let received = timeout(Duration::from_secs(1), read_frame(&mut stream))
                     .await
                     .unwrap()
