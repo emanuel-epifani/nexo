@@ -1,5 +1,6 @@
 pub mod brokers;
 pub mod config;
+pub mod durable;
 pub mod protocol;
 pub mod transport;
 

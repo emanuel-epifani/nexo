@@ -12,8 +12,6 @@
 //! - Message ids are `BLOB(16)` UUIDs; counters live on the `queues` row and
 //!   are bumped inside the same transaction that consumes them.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
@@ -22,85 +20,15 @@ use crate::brokers::queue::domain::message::{DlqMessage, Message, PushItem};
 use crate::brokers::queue::domain::ops::{Continuation, Effects, QueueReply, QueueRequest};
 use crate::brokers::queue::domain::types::{MSG_INFLIGHT, MSG_READY};
 use crate::brokers::{config_conflict_error, BrokerError, ProvisionOutcome, ProvisionResult};
+use crate::durable::{
+    exec, expected, fatal, query_one, query_vec, sql, CmdError, ExecCtx, R,
+};
 
 /// Rows processed per expiry sweep / GC continuation slice.
 pub const BATCH_LIMIT: usize = 1024;
 /// Rows per multi-row INSERT chunk: 11 columns × 200 stays far under the
 /// 32 766 bind-parameter limit.
 const INSERT_CHUNK: usize = 200;
-
-#[derive(Debug)]
-pub enum CmdError {
-    /// Domain failure: roll back the command savepoint, reply with the error.
-    Expected(BrokerError),
-    /// Storage failure: abort the entire transaction.
-    Fatal(BrokerError),
-}
-
-/// Any unexpected SQLite error aborts the whole batch transaction.
-impl From<rusqlite::Error> for CmdError {
-    fn from(e: rusqlite::Error) -> Self {
-        CmdError::Fatal(BrokerError::storage(format!("SQLite error: {e}")))
-    }
-}
-
-pub type R<T> = Result<T, CmdError>;
-
-/// Statements executed through the shared helpers below — a diagnostics
-/// counter for benchmarks. A relaxed atomic add costs ~ns against the ~µs a
-/// statement costs, so it is always on rather than feature-gated.
-pub static SQL_STATEMENTS: AtomicU64 = AtomicU64::new(0);
-
-fn expected(e: BrokerError) -> CmdError {
-    CmdError::Expected(e)
-}
-
-fn fatal(context: &str, e: impl std::fmt::Display) -> CmdError {
-    CmdError::Fatal(BrokerError::storage(format!("{context}: {e}")))
-}
-
-fn sql<T>(result: rusqlite::Result<T>, context: &str) -> R<T> {
-    result.map_err(|e| fatal(context, e))
-}
-
-/// All statement access goes through `prepare_cached`: every recipe runs on
-/// the writer's single connection, so cached plans amortize parse/plan cost
-/// across commands and transactions.
-fn exec<P: rusqlite::Params>(conn: &Connection, text: &str, params: P) -> rusqlite::Result<usize> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    conn.prepare_cached(text)?.execute(params)
-}
-
-fn query_one<P: rusqlite::Params, T>(
-    conn: &Connection,
-    text: &str,
-    params: P,
-    map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
-) -> rusqlite::Result<T> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    conn.prepare_cached(text)?.query_row(params, map)
-}
-
-/// Prepare + map + collect in one step. The collect result is bound to a
-/// local first so the `MappedRows` temporary dies before the `Statement`
-/// it borrows.
-fn query_vec<P: rusqlite::Params, T>(
-    conn: &Connection,
-    text: &str,
-    params: P,
-    map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ctx: &'static str,
-) -> R<Vec<T>> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    let mut stmt = sql(conn.prepare_cached(text), ctx)?;
-    let rows = stmt.query_map(params, map)?.collect::<Result<Vec<_>, _>>();
-    sql(rows, ctx)
-}
-
-#[derive(Clone, Copy)]
-pub struct ExecCtx {
-    pub now_ms: u64,
-}
 
 // ---------------------------------------------------------------------------
 // Row types / lookups

@@ -11,9 +11,7 @@
 //!   (replays) live strictly below it once the lane is unparked, because the
 //!   unpark jump sets the cursor to the key tail covered by parking.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
 use crate::brokers::stream::domain::message::{Delivery, DlsEntry, Message};
@@ -24,6 +22,7 @@ use crate::brokers::stream::domain::types::{
 };
 use crate::brokers::stream::options::SeekTarget;
 use crate::brokers::{config_conflict_error, BrokerError, ProvisionOutcome, ProvisionResult};
+use crate::durable::{exec, expected, fatal, query_one, query_vec, sql, CmdError, R};
 use bytes::Bytes;
 use uuid::Uuid;
 
@@ -35,81 +34,8 @@ const GROUP_GC_BATCH: usize = 64;
 /// Keys initialized per `InitEpoch` slice.
 pub const INIT_PAGE: i64 = 512;
 
-pub enum CmdError {
-    /// Domain failure: roll back the command savepoint, reply with the error.
-    Expected(BrokerError),
-    /// Storage failure: abort the entire transaction.
-    Fatal(BrokerError),
-}
-
-impl CmdError {
-    fn into_error(self) -> BrokerError {
-        match self {
-            Self::Expected(e) | Self::Fatal(e) => e,
-        }
-    }
-}
-
-/// Any unexpected SQLite error aborts the whole batch transaction.
-impl From<rusqlite::Error> for CmdError {
-    fn from(e: rusqlite::Error) -> Self {
-        CmdError::Fatal(BrokerError::storage(format!("SQLite error: {e}")))
-    }
-}
-
-pub type R<T> = Result<T, CmdError>;
-
-/// Statements executed through the shared helpers below — a diagnostics
-/// counter for benchmarks. A relaxed atomic add costs ~ns against the ~µs a
-/// statement costs, so it is always on rather than feature-gated.
-pub static SQL_STATEMENTS: AtomicU64 = AtomicU64::new(0);
-
-fn expected(e: BrokerError) -> CmdError {
-    CmdError::Expected(e)
-}
-
-fn fatal(context: &str, e: impl std::fmt::Display) -> CmdError {
-    CmdError::Fatal(BrokerError::storage(format!("{context}: {e}")))
-}
-
-fn sql<T>(result: rusqlite::Result<T>, context: &str) -> R<T> {
-    result.map_err(|e| fatal(context, e))
-}
-
-/// All statement access goes through `prepare_cached`: every recipe runs on
-/// the writer's single connection, so cached plans amortize parse/plan cost
-/// across commands and transactions.
-fn exec<P: rusqlite::Params>(conn: &Connection, text: &str, params: P) -> rusqlite::Result<usize> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    conn.prepare_cached(text)?.execute(params)
-}
-
-fn query_one<P: rusqlite::Params, T>(
-    conn: &Connection,
-    text: &str,
-    params: P,
-    map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
-) -> rusqlite::Result<T> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    conn.prepare_cached(text)?.query_row(params, map)
-}
-
-/// Prepare + map + collect in one step. The collect result is bound to a
-/// local first so the `MappedRows` temporary dies before the `Statement`
-/// it borrows (block-tail temporaries would otherwise outlive `stmt`).
-fn query_vec<P: rusqlite::Params, T>(
-    conn: &Connection,
-    text: &str,
-    params: P,
-    map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
-    ctx: &'static str,
-) -> R<Vec<T>> {
-    SQL_STATEMENTS.fetch_add(1, Ordering::Relaxed);
-    let mut stmt = sql(conn.prepare_cached(text), ctx)?;
-    let rows = stmt.query_map(params, map)?.collect::<Result<Vec<_>, _>>();
-    sql(rows, ctx)
-}
-
+/// Batch context carrying the fetch response byte budget — the one knob
+/// recipes need that the shared `durable::ExecCtx` does not model.
 #[derive(Clone, Copy)]
 pub struct ExecCtx {
     pub now_ms: u64,

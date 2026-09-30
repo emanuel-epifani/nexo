@@ -13,7 +13,7 @@
 //! by post-commit effects.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,15 +27,14 @@ use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition}
 use crate::brokers::stream::domain::message::{
     ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
 };
-use crate::brokers::stream::domain::ops::{Command, StreamReply, StreamRequest};
-use crate::brokers::stream::domain::recipes;
-use crate::brokers::stream::domain::storage::Store;
+use crate::brokers::stream::domain::ops::{Command, StreamDomain, StreamReply, StreamRequest};
+use crate::brokers::stream::domain::storage::{self, SPEC};
 use crate::brokers::stream::domain::types::{event_logical_bytes, fetch_item_encoded_bytes};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
-use crate::brokers::stream::worker::{self, now_millis, Admission, WatchMap};
 use crate::brokers::{
     validate_resource_name, BrokerError, BrokerErrorKind, ProvisionResult,
 };
+use crate::durable::{now_millis, EngineHandle, Store};
 use crate::protocol::{STREAM_MAX_KEY_BYTES, STREAM_MAX_PUBLISH_BATCH};
 
 /// Absolute per-record storage bound (defense in depth; the effective fetch
@@ -54,33 +53,12 @@ pub struct JoinGroupResult {
 }
 
 /// Completion handle for a submitted command.
-pub struct PendingReply {
-    rx: oneshot::Receiver<Result<StreamReply, BrokerError>>,
-}
-
-impl PendingReply {
-    /// Wrap a completion produced outside the submit path (the fetch
-    /// long-poll loop resolves through the same reply channel).
-    pub(crate) fn wrap(rx: oneshot::Receiver<Result<StreamReply, BrokerError>>) -> Self {
-        Self { rx }
-    }
-}
-
-impl PendingReply {
-    pub async fn wait(self) -> Result<StreamReply, BrokerError> {
-        self.rx
-            .await
-            .map_err(|_| BrokerError::storage("Stream storage unavailable"))?
-    }
-}
+pub type PendingReply = crate::durable::PendingReply<StreamDomain>;
 
 pub struct StreamManager {
-    cmd_tx: mpsc::Sender<Command>,
-    admission: Arc<Admission>,
-    watches: Arc<WatchMap>,
+    engine: EngineHandle<StreamDomain>,
     config: Arc<SystemStreamConfig>,
     cancel: CancellationToken,
-    closed: AtomicBool,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -89,29 +67,30 @@ impl StreamManager {
     /// recover, and start the writer + maintenance timers.
     pub async fn new(config: Arc<SystemStreamConfig>) -> Result<Self, BrokerError> {
         let root = PathBuf::from(&config.persistence_path);
-        let (store, continuations) = tokio::task::spawn_blocking(move || Store::open(&root))
-            .await
-            .map_err(|e| BrokerError::storage(format!("Stream storage startup failed: {e}")))??;
+        let (store, continuations) = tokio::task::spawn_blocking(move || {
+            let mut store = Store::open(&root, SPEC)?;
+            let conts = storage::recover(&mut store)?;
+            Ok::<_, BrokerError>((store, conts))
+        })
+        .await
+        .map_err(|e| BrokerError::storage(format!("Stream storage startup failed: {e}")))??;
 
         let (cmd_tx, rx) = mpsc::channel(config.storage_queue_capacity.max(1));
-        let admission = Arc::new(Admission::new(config.storage_queue_max_bytes));
-        let watches = Arc::new(WatchMap::new());
-        let handle = worker::spawn(
+        let engine =
+            EngineHandle::<StreamDomain>::new("Stream", cmd_tx, config.storage_queue_max_bytes);
+        let handle = crate::durable::spawn(
+            "stream",
+            StreamDomain(config.fetch_response_bytes as u64),
             store,
             rx,
             continuations,
-            Arc::clone(&watches),
-            Arc::clone(&admission),
-            config.fetch_response_bytes as u64,
+            &engine,
         );
 
         let manager = Self {
-            cmd_tx,
-            admission,
-            watches,
+            engine,
             config,
             cancel: CancellationToken::new(),
-            closed: AtomicBool::new(false),
             worker: Mutex::new(Some(handle)),
         };
         manager.spawn_timers();
@@ -123,19 +102,20 @@ impl StreamManager {
     }
 
     /// Diagnostics for benchmarks: `(sql statements, writer batches, exec ns,
-    /// commit ns)` since process start. Snapshot and diff around a workload.
+    /// commit ns)` for this engine. Snapshot and diff around a workload.
     #[doc(hidden)]
     pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
+        let stats = self.engine.stats();
         (
-            recipes::SQL_STATEMENTS.load(Ordering::Relaxed),
-            worker::BATCHES.load(Ordering::Relaxed),
-            worker::EXEC_NS.load(Ordering::Relaxed),
-            worker::COMMIT_NS.load(Ordering::Relaxed),
+            stats.sql_stmts.load(Ordering::Relaxed),
+            stats.batches.load(Ordering::Relaxed),
+            stats.exec_ns.load(Ordering::Relaxed),
+            stats.commit_ns.load(Ordering::Relaxed),
         )
     }
 
     fn spawn_timers(&self) {
-        let tx = self.cmd_tx.clone();
+        let tx = self.engine.sender();
         let cancel = self.cancel.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(LEASE_SWEEP_MS));
@@ -153,7 +133,7 @@ impl StreamManager {
                 }
             }
         });
-        let tx = self.cmd_tx.clone();
+        let tx = self.engine.sender();
         let cancel = self.cancel.clone();
         let interval_ms = self.config.retention_check_interval_ms.max(100);
         tokio::spawn(async move {
@@ -181,28 +161,12 @@ impl StreamManager {
     /// Validate + admit + enqueue. Returns once the command is queued;
     /// the reply arrives on `PendingReply` after the commit.
     pub async fn submit(&self, request: StreamRequest) -> Result<PendingReply, BrokerError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.engine.is_closed() {
             return Err(BrokerError::storage("Stream storage is shut down"));
         }
         self.validate(&request)?;
         let bytes = Self::admission_bytes(&request);
-        self.admission.acquire(bytes).await;
-        let (tx, rx) = oneshot::channel();
-        match self
-            .cmd_tx
-            .send(Command {
-                op: request,
-                bytes,
-                reply: Some(tx),
-            })
-            .await
-        {
-            Ok(()) => Ok(PendingReply { rx }),
-            Err(_) => {
-                self.admission.release(bytes);
-                Err(BrokerError::storage("Stream storage unavailable"))
-            }
-        }
+        self.engine.submit(request, bytes).await
     }
 
     /// Pre-queue validation: cheap checks that must fail before the command
@@ -279,7 +243,8 @@ impl StreamManager {
     }
 
     fn group_watcher(&self, stream: &str, group: &str) -> watch::Receiver<u64> {
-        self.watches
+        self.engine
+            .watches()
             .entry(stream.to_string())
             .or_default()
             .entry(group.to_string())
@@ -652,7 +617,7 @@ impl StreamManager {
 
     /// Release all leases/memberships owned by a connection (teardown path).
     pub async fn disconnect(&self, connection_id: &str) {
-        if self.closed.load(Ordering::Acquire) {
+        if self.engine.is_closed() {
             return;
         }
         if let Ok(pending) = self
@@ -672,13 +637,14 @@ impl StreamManager {
     /// the barrier command is in flight; the shutdown itself bypasses
     /// `submit` (which rejects once closed).
     pub async fn shutdown(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.engine.mark_closed() {
             return;
         }
         self.cancel.cancel();
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .engine
+            .sender()
             .send(Command {
                 op: StreamRequest::Shutdown,
                 bytes: 0,

@@ -797,7 +797,7 @@ fn submit_fetch(
         let _ = tx.send(result.map(StreamReply::Fetch));
     });
     StreamCall {
-        pending: PendingReply::wrap(rx),
+        pending: PendingReply::wrap(rx, "Stream"),
         kind: CallKind::Fetch,
     }
 }

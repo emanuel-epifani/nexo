@@ -1,47 +1,31 @@
-//! Dedicated SQLite writer thread: the single owner of `Store`.
+//! Stream `Domain` impl: everything broker-specific the durable engine
+//! needs. The machinery (drain, transaction, savepoints, commit, effects,
+//! shutdown) lives in `crate::durable::engine`.
 //!
-//! Commands arrive on a bounded channel, are drained into one transaction
-//! (bounded in count), each guarded by a savepoint so a domain error rolls
-//! back only its own work. Replies, wakeups and follow-up continuations are
-//! staged and applied only after the commit lands — a crash or commit failure
-//! never leaks a staged notification.
-//!
-//! Ordering: submission order is preserved through the channel, so commands
-//! execute in TCP read order per connection. Barrier commands (fetch/seek/
-//! leave/disconnect/shutdown) stop the drain so their leases and epoch
-//! changes are not held uncommitted behind a bulk mutation batch.
+//! `Fetch`/`Seek`/`Leave`/`Disconnect` are barrier requests: they stop the
+//! drain so leases and epoch changes are not held uncommitted behind a bulk
+//! publish batch. Consecutive publishes for the same stream fold into a
+//! `PubRun` (one recipe call, seqs sliced back per command); consecutive
+//! acks for the same (stream, group, consumer) fold into an `AckRun` (one
+//! `ack_many` call, outcomes mapped back per command).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, watch, Semaphore};
-use tracing::{error, warn};
+use rusqlite::Connection;
+use tokio::sync::watch;
 
 use crate::brokers::stream::domain::message::{ConsumerIdentity, PubItem};
 use crate::brokers::stream::domain::ops::{
-    Command, Continuation, Effects, StreamReply, StreamRequest,
+    Command, Continuation, Effects, StreamDomain, StreamReply, StreamRequest,
 };
-use crate::brokers::stream::domain::recipes::{self, CmdError, ExecCtx};
-use crate::brokers::stream::domain::storage::Store;
+use crate::brokers::stream::domain::recipes::{self, ExecCtx};
 use crate::brokers::BrokerError;
-
-/// Max commands coalesced into one commit. Bounded so a barrier command's
-/// leases never wait behind an arbitrarily large write batch.
-const MAX_BATCH_COMMANDS: usize = 256;
+use crate::durable::{CmdError, Domain, Item, ReplyTx};
 
 /// Max items a merged publish run may carry: bounds the rows one commit
 /// writes so a queued barrier never waits behind an unbounded insert.
 const MAX_PUB_RUN_ITEMS: usize = 4096;
-
-/// Writer diagnostics for benchmarks: how much of a batch is spent executing
-/// statements vs committing. Always-on relaxed counters; one add per batch.
-pub static BATCHES: AtomicU64 = AtomicU64::new(0);
-pub static EXEC_NS: AtomicU64 = AtomicU64::new(0);
-pub static COMMIT_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Group-level watch signals: `watches[stream][group]` is bumped on every
 /// commit that may have made new work visible (publishes, acks, lease
@@ -50,733 +34,278 @@ pub static COMMIT_NS: AtomicU64 = AtomicU64::new(0);
 /// NOT_FOUND.
 pub type WatchMap = DashMap<String, DashMap<String, watch::Sender<u64>>>;
 
-/// Byte-budget admission shared between submitters (async) and the worker
-/// (releases on dequeue). Permits are bytes: `acquire` takes `bytes` permits
-/// (FIFO wait when the budget is full) and `release` returns them after
-/// dequeue. A semaphore keeps waiter registration atomic with the
-/// availability check, which a hand-rolled Notify loop cannot guarantee.
-/// The channel count bound lives in `mpsc` itself.
-pub struct Admission {
-    max_bytes: usize,
-    sem: Semaphore,
+/// A merged run of same-key commands. Each carries its folded `Command`s:
+/// ops keep their payloads (no copies), reply slots are peeled by
+/// `take_replies`.
+pub enum Run {
+    Publish(Vec<Command>),
+    Ack(Vec<Command>),
 }
 
-impl Admission {
-    pub fn new(max_bytes: usize) -> Self {
-        Self {
-            max_bytes: max_bytes.max(1),
-            sem: Semaphore::new(max_bytes.max(1)),
+impl Domain for StreamDomain {
+    type Request = StreamRequest;
+    type Reply = StreamReply;
+    type Continuation = Continuation;
+    type Run = Run;
+    type Effects = Effects;
+    type Ctx = ExecCtx;
+    type Watches = WatchMap;
+
+    fn make_ctx(&self, now_ms: u64) -> ExecCtx {
+        ExecCtx {
+            now_ms,
+            fetch_response_bytes: self.0,
         }
     }
 
-    /// Wait until `bytes` fit the in-flight budget. A single command larger
-    /// than the whole budget is admitted anyway (record-size limits are
-    /// enforced separately); acquire and release skip the semaphore
-    /// symmetrically so the over-charge stays balanced.
-    pub async fn acquire(&self, bytes: usize) {
-        if bytes == 0 || bytes >= self.max_bytes {
-            return;
+    fn merge_effects(into: &mut Effects, from: Effects) {
+        for pair in from.wakes {
+            if !into.wakes.contains(&pair) {
+                into.wakes.push(pair);
+            }
         }
-        let permits = u32::try_from(bytes).unwrap_or(u32::MAX);
-        self.sem
-            .acquire_many(permits)
-            .await
-            .expect("admission semaphore is never closed")
-            .forget();
+        for s in from.deleted_streams {
+            if !into.deleted_streams.contains(&s) {
+                into.deleted_streams.push(s);
+            }
+        }
+        into.followups.extend(from.followups);
     }
 
-    pub fn release(&self, bytes: usize) {
-        if bytes == 0 || bytes >= self.max_bytes {
-            return;
-        }
-        self.sem.add_permits(bytes);
+    /// Commands whose replies order leases/epoch changes against later work
+    /// stop the drain so their commits are not delayed behind bulk writes.
+    fn is_barrier(req: &StreamRequest) -> bool {
+        matches!(
+            req,
+            StreamRequest::Fetch { .. }
+                | StreamRequest::Seek { .. }
+                | StreamRequest::Leave { .. }
+                | StreamRequest::Disconnect { .. }
+                | StreamRequest::Shutdown
+        )
     }
-}
 
-pub fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+    fn is_shutdown(req: &StreamRequest) -> bool {
+        matches!(req, StreamRequest::Shutdown)
+    }
 
-enum Item {
-    Cmd(Command),
-    /// Consecutive acks for the same (stream, group, consumer), folded by
-    /// `merge_runs`: the worker executes them as one op so the batch
-    /// pays member resolution and the epoch write once per run.
-    AckRun(Vec<Command>),
-    /// Consecutive publishes for the same stream: one `publish` call assigns
-    /// seqs across the concatenated items, then seq slices map back to each
-    /// command's reply. Items move out of the commands — no payload copies.
-    PubRun(Vec<Command>),
-    Cont(Continuation),
-}
+    fn execute(
+        &self,
+        conn: &Connection,
+        req: &StreamRequest,
+        ctx: &ExecCtx,
+    ) -> Result<(StreamReply, Effects), CmdError> {
+        recipes::execute(conn, req, ctx)
+    }
 
-pub struct Worker {
-    store: Store,
-    rx: mpsc::Receiver<Command>,
-    conts: VecDeque<Continuation>,
-    watches: Arc<WatchMap>,
-    admission: Arc<Admission>,
-    fetch_response_bytes: u64,
-    shutdown_requested: bool,
-    channel_closed: bool,
-}
+    fn run_continuation(
+        &self,
+        conn: &Connection,
+        cont: &Continuation,
+        ctx: &ExecCtx,
+    ) -> Result<Effects, CmdError> {
+        recipes::run_continuation(conn, cont, ctx).map(|(_, fx)| fx)
+    }
 
-/// Spawn the writer thread. `initial` continuations resume unfinished work
-/// discovered during recovery (paged epoch init, deleted-stream GC).
-pub fn spawn(
-    store: Store,
-    rx: mpsc::Receiver<Command>,
-    initial: Vec<Continuation>,
-    watches: Arc<WatchMap>,
-    admission: Arc<Admission>,
-    fetch_response_bytes: u64,
-) -> JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("stream-writer".to_string())
-        .spawn(move || {
-            Worker {
-                store,
-                rx,
-                conts: initial.into(),
-                watches,
-                admission,
-                fetch_response_bytes,
-                shutdown_requested: false,
-                channel_closed: false,
-            }
-            .run()
-        })
-        .expect("failed to spawn stream writer thread")
-}
-
-impl Worker {
-    fn run(&mut self) {
-        loop {
-            if self.shutdown_requested {
-                // Drain whatever was already admitted, then checkpoint + exit.
-                while let Ok(cmd) = self.rx.try_recv() {
-                    self.admission.release(cmd.bytes);
-                    self.exec_batch(vec![Item::Cmd(cmd)]);
+    /// Fold runs of consecutive mergeable commands into `Run::Ack` (acks for
+    /// the same stream/group/consumer) or `Run::Publish` (publishes for the
+    /// same stream, capped by item count).
+    fn merge_runs(&self, batch: Vec<Item<StreamDomain>>) -> Vec<Item<StreamDomain>> {
+        fn ack_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
+            match &cmd.op {
+                StreamRequest::Ack {
+                    name,
+                    group,
+                    identity,
+                    ..
                 }
-                while let Some(cont) = self.conts.pop_front() {
-                    self.exec_batch(vec![Item::Cont(cont)]);
-                }
-                if let Err(e) = self.store.checkpoint(true) {
-                    error!("Stream WAL checkpoint on shutdown failed: {}", e);
-                }
-                return;
+                | StreamRequest::AckMany {
+                    name,
+                    group,
+                    identity,
+                    ..
+                } => Some((name, group, identity)),
+                _ => None,
             }
-
-            let mut batch: Vec<Item> = Vec::with_capacity(MAX_BATCH_COMMANDS);
-            if let Some(cont) = self.conts.pop_front() {
-                batch.push(Item::Cont(cont));
-            }
-            // When the queue was empty, sleep on the first command — then
-            // still drain whatever queued up meanwhile: otherwise every
-            // low-rate command commits alone.
-            let mut drain = true;
-            if batch.is_empty() && !self.channel_closed {
-                match self.rx.blocking_recv() {
-                    Some(cmd) => {
-                        self.admission.release(cmd.bytes);
-                        drain = !cmd.is_barrier();
-                        batch.push(Item::Cmd(cmd));
-                    }
-                    None => self.channel_closed = true,
-                }
-            }
-            if drain {
-                loop {
-                    match self.rx.try_recv() {
-                        Ok(cmd) => {
-                            self.admission.release(cmd.bytes);
-                            let barrier = cmd.is_barrier();
-                            batch.push(Item::Cmd(cmd));
-                            if barrier || batch.len() >= MAX_BATCH_COMMANDS {
-                                break;
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            self.channel_closed = true;
-                            break;
-                        }
+        }
+        let mut out: Vec<Item<StreamDomain>> = Vec::with_capacity(batch.len());
+        let mut pub_run_items = 0usize;
+        for item in batch {
+            if matches!(&item, Item::Cmd(cmd) if ack_key(cmd).is_some()) {
+                let Item::Cmd(cmd) = item else { unreachable!() };
+                if let Some(Item::Run(Run::Ack(run))) = out.last_mut() {
+                    if ack_key(&run[0]) == ack_key(&cmd) {
+                        run.push(cmd);
+                        continue;
                     }
                 }
-            }
-            if batch.is_empty() {
-                if self.conts.is_empty() && self.channel_closed {
-                    // No work and no senders: idle forever would only hold the
-                    // lock file; shutdown ordering is owned by the manager.
-                    if let Err(e) = self.store.checkpoint(true) {
-                        error!("Stream WAL checkpoint failed: {}", e);
-                    }
-                    return;
-                }
+                out.push(Item::Run(Run::Ack(vec![cmd])));
                 continue;
             }
-            let saw_shutdown = batch.iter().any(|item| {
-                matches!(
-                    item,
-                    Item::Cmd(Command {
-                        op: crate::brokers::stream::domain::ops::StreamRequest::Shutdown,
-                        ..
-                    })
-                )
-            });
-            self.exec_batch(batch);
-            if saw_shutdown {
-                self.shutdown_requested = true;
+            if matches!(&item, Item::Cmd(cmd) if matches!(cmd.op, StreamRequest::Publish { .. }))
+            {
+                let Item::Cmd(cmd) = item else { unreachable!() };
+                let StreamRequest::Publish { name, items } = &cmd.op else {
+                    unreachable!()
+                };
+                if let Some(Item::Run(Run::Publish(run))) = out.last_mut() {
+                    let StreamRequest::Publish {
+                        name: run_name, ..
+                    } = &run[0].op
+                    else {
+                        unreachable!()
+                    };
+                    if *run_name == *name && pub_run_items + items.len() <= MAX_PUB_RUN_ITEMS {
+                        pub_run_items += items.len();
+                        run.push(cmd);
+                        continue;
+                    }
+                }
+                pub_run_items = items.len();
+                out.push(Item::Run(Run::Publish(vec![cmd])));
+                continue;
+            }
+            out.push(item);
+        }
+        out
+    }
+
+    fn take_replies(run: &mut Run) -> Vec<Option<ReplyTx<StreamReply>>> {
+        match run {
+            Run::Publish(cmds) | Run::Ack(cmds) => {
+                cmds.iter_mut().map(|c| c.reply.take()).collect()
             }
         }
     }
 
-    /// Execute one drained batch inside a single transaction, replying to
-    /// every command only after commit.
-    fn exec_batch(&mut self, batch: Vec<Item>) {
-        let ctx = ExecCtx {
-            now_ms: now_millis(),
-            fetch_response_bytes: self.fetch_response_bytes,
-        };
-        let mut tx = match self.store.conn.transaction() {
-            Ok(tx) => tx,
-            Err(e) => {
-                let err = BrokerError::storage(format!("Cannot start transaction: {e}"));
-                for item in batch {
-                    if let Item::Cmd(cmd) = item {
-                        fail_command(cmd, &err);
+    /// Execute one merged run; the returned vec maps 1:1 to the peeled
+    /// reply slots (publish: seq slices per command; ack: one outcome per
+    /// command shaped by its variant).
+    fn execute_run(
+        &self,
+        conn: &Connection,
+        run: Run,
+        ctx: &ExecCtx,
+    ) -> Result<(Vec<Result<StreamReply, BrokerError>>, Effects), CmdError> {
+        match run {
+            Run::Publish(cmds) => {
+                // Items move out of the commands (no payload copies);
+                // `counts` maps each seq range back to its own reply.
+                let mut name = String::new();
+                let mut items: Vec<PubItem> = Vec::new();
+                let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
+                for mut cmd in cmds {
+                    if let StreamRequest::Publish { name: n, items: it } = &mut cmd.op {
+                        name = std::mem::take(n);
+                        counts.push(it.len());
+                        items.append(it);
+                    } else {
+                        unreachable!("publish run carries only publish commands")
                     }
                 }
-                return;
+                let (reply, fx) = recipes::publish(conn, &name, &items, ctx)?;
+                let mut seqs = match reply {
+                    StreamReply::Published(seqs) => seqs.into_iter(),
+                    _ => unreachable!("publish returns Published"),
+                };
+                let results = counts
+                    .iter()
+                    .map(|n| {
+                        Ok(StreamReply::Published(
+                            seqs.by_ref().take(*n).collect::<Vec<u64>>(),
+                        ))
+                    })
+                    .collect();
+                Ok((results, fx))
             }
-        };
-
-        struct Outcome {
-            reply: Option<tokio::sync::oneshot::Sender<Result<StreamReply, BrokerError>>>,
-            result: Result<StreamReply, BrokerError>,
-        }
-
-        let mut outcomes: Vec<Outcome> = Vec::with_capacity(batch.len());
-        let mut effects = Effects::default();
-        let mut fatal: Option<BrokerError> = None;
-        let exec_started = Instant::now();
-
-        for item in merge_runs(batch) {
-            match item {
-                Item::Cont(cont) => {
-                    if fatal.is_some() {
-                        // Keep background work ordered; it retries next batch.
-                        self.conts.push_back(cont);
-                        continue;
+            Run::Ack(cmds) => {
+                let (name, group, identity) = match &cmds[0].op {
+                    StreamRequest::Ack {
+                        name,
+                        group,
+                        identity,
+                        ..
                     }
-                    match tx.savepoint() {
-                        Ok(mut sp) => match recipes::run_continuation(&sp, &cont, &ctx) {
-                            Ok((_, fx)) => {
-                                if let Err(e) = sp.commit() {
-                                    fatal = Some(BrokerError::storage(format!(
-                                        "Savepoint release failed: {e}"
-                                    )));
-                                } else {
-                                    merge(&mut effects, fx);
-                                }
-                            }
-                            Err(CmdError::Expected(e)) => {
-                                warn!("Stream continuation dropped domain error: {e}");
-                                let _ = sp.rollback();
-                            }
-                            Err(CmdError::Fatal(e)) => {
-                                let _ = sp.rollback();
-                                error!("Stream continuation hit storage error: {e}");
-                                fatal = Some(e);
-                            }
-                        },
-                        Err(e) => {
-                            fatal =
-                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
+                    | StreamRequest::AckMany {
+                        name,
+                        group,
+                        identity,
+                        ..
+                    } => (name, group, identity),
+                    _ => unreachable!("ack run carries only ack commands"),
+                };
+                // Flatten every command's (seq, receipt) pairs into one
+                // ack_many call; `counts` remembers how many pairs each
+                // command owns so replies can be sliced back per command.
+                let mut acks: Vec<(u64, [u8; 16])> = Vec::new();
+                let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
+                for cmd in &cmds {
+                    match &cmd.op {
+                        StreamRequest::Ack { seq, receipt, .. } => {
+                            acks.push((*seq, *receipt));
+                            counts.push(1);
                         }
+                        StreamRequest::AckMany { acks: more, .. } => {
+                            acks.extend_from_slice(more);
+                            counts.push(more.len());
+                        }
+                        _ => unreachable!("ack run carries only ack commands"),
                     }
                 }
-                Item::Cmd(cmd) => {
-                    if let Some(e) = &fatal {
-                        outcomes.push(Outcome {
-                            reply: cmd.reply,
-                            result: Err(BrokerError::storage(format!(
-                                "Batch aborted by storage error: {e}"
-                            ))),
-                        });
-                        continue;
-                    }
-                    match tx.savepoint() {
-                        Ok(mut sp) => match recipes::execute(&sp, &cmd.op, &ctx) {
-                            Ok((reply, fx)) => {
-                                if let Err(e) = sp.commit() {
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Err(BrokerError::storage(format!(
-                                            "Savepoint release failed: {e}"
-                                        ))),
-                                    });
-                                    fatal = Some(BrokerError::storage(format!(
-                                        "Savepoint release failed: {e}"
-                                    )));
-                                } else {
-                                    merge(&mut effects, fx);
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Ok(reply),
-                                    });
-                                }
-                            }
-                            Err(CmdError::Expected(e)) => {
-                                let _ = sp.rollback();
-                                outcomes.push(Outcome {
-                                    reply: cmd.reply,
-                                    result: Err(e),
-                                });
-                            }
-                            Err(CmdError::Fatal(e)) => {
-                                let _ = sp.rollback();
-                                outcomes.push(Outcome {
-                                    reply: cmd.reply,
-                                    result: Err(BrokerError::storage(format!(
-                                        "Command aborted: {e}"
-                                    ))),
-                                });
-                                fatal = Some(e);
-                            }
-                        },
-                        Err(e) => {
-                            outcomes.push(Outcome {
-                                reply: cmd.reply,
-                                result: Err(BrokerError::storage(format!(
-                                    "Cannot open savepoint: {e}"
-                                ))),
-                            });
-                            fatal =
-                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
-                        }
-                    }
-                }
-                Item::PubRun(mut cmds) => {
-                    if let Some(e) = &fatal {
-                        for cmd in cmds {
-                            outcomes.push(Outcome {
-                                reply: cmd.reply,
-                                result: Err(BrokerError::storage(format!(
-                                    "Batch aborted by storage error: {e}"
-                                ))),
-                            });
-                        }
-                        continue;
-                    }
-                    // Items move out of the commands (no payload copies);
-                    // `counts` maps each seq range back to its own reply.
-                    let mut name = String::new();
-                    let mut items: Vec<PubItem> = Vec::new();
-                    let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
-                    for cmd in &mut cmds {
-                        if let StreamRequest::Publish { name: n, items: it } = &mut cmd.op {
-                            name = std::mem::take(n);
-                            counts.push(it.len());
-                            items.append(it);
-                        } else {
-                            unreachable!("PubRun carries only publish commands")
-                        }
-                    }
-                    match tx.savepoint() {
-                        Ok(mut sp) => match recipes::publish(&sp, &name, &items, &ctx) {
-                            Ok((reply, fx)) => {
-                                if let Err(e) = sp.commit() {
-                                    for cmd in cmds {
-                                        outcomes.push(Outcome {
-                                            reply: cmd.reply,
-                                            result: Err(BrokerError::storage(format!(
-                                                "Savepoint release failed: {e}"
-                                            ))),
-                                        });
-                                    }
-                                    fatal = Some(BrokerError::storage(format!(
-                                        "Savepoint release failed: {e}"
-                                    )));
-                                } else {
-                                    merge(&mut effects, fx);
-                                    let mut seqs = match reply {
-                                        StreamReply::Published(seqs) => seqs.into_iter(),
-                                        _ => unreachable!("publish returns Published"),
-                                    };
-                                    for (cmd, n) in cmds.into_iter().zip(counts) {
-                                        let slice: Vec<u64> = seqs.by_ref().take(n).collect();
-                                        outcomes.push(Outcome {
-                                            reply: cmd.reply,
-                                            result: Ok(StreamReply::Published(slice)),
-                                        });
-                                    }
-                                }
-                            }
-                            Err(CmdError::Expected(e)) => {
-                                let _ = sp.rollback();
-                                for cmd in cmds {
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Err(BrokerError::new(
-                                            e.kind,
-                                            e.message.clone(),
-                                        )),
-                                    });
-                                }
-                            }
-                            Err(CmdError::Fatal(e)) => {
-                                let _ = sp.rollback();
-                                for cmd in cmds {
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Err(BrokerError::storage(format!(
-                                            "Command aborted: {e}"
-                                        ))),
-                                    });
-                                }
-                                fatal = Some(e);
-                            }
-                        },
-                        Err(e) => {
-                            for cmd in cmds {
-                                outcomes.push(Outcome {
-                                    reply: cmd.reply,
-                                    result: Err(BrokerError::storage(format!(
-                                        "Cannot open savepoint: {e}"
-                                    ))),
-                                });
-                            }
-                            fatal =
-                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
-                        }
-                    }
-                }
-                Item::AckRun(cmds) => {
-                    if let Some(e) = &fatal {
-                        for cmd in cmds {
-                            outcomes.push(Outcome {
-                                reply: cmd.reply,
-                                result: Err(BrokerError::storage(format!(
-                                    "Batch aborted by storage error: {e}"
-                                ))),
-                            });
-                        }
-                        continue;
-                    }
-                    let (name, group, identity) = match &cmds[0].op {
-                        StreamRequest::Ack {
-                            name,
-                            group,
-                            identity,
-                            ..
-                        }
-                        | StreamRequest::AckMany {
-                            name,
-                            group,
-                            identity,
-                            ..
-                        } => (name, group, identity),
-                        _ => unreachable!("AckRun carries only ack commands"),
-                    };
-                    // Flatten every command's (seq, receipt) pairs into one
-                    // ack_many call; `counts` remembers how many pairs each
-                    // command owns so replies can be sliced back per command.
-                    let mut acks: Vec<(u64, [u8; 16])> = Vec::new();
-                    let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
-                    for cmd in &cmds {
+                let (results, fx) = recipes::ack_many(conn, name, group, identity, &acks)?;
+                let mut results = results.into_iter();
+                let outcomes = cmds
+                    .iter()
+                    .zip(&counts)
+                    .map(|(cmd, n)| {
+                        let slice: Vec<Result<StreamReply, BrokerError>> =
+                            results.by_ref().take(*n).collect();
                         match &cmd.op {
-                            StreamRequest::Ack { seq, receipt, .. } => {
-                                acks.push((*seq, *receipt));
-                                counts.push(1);
+                            StreamRequest::Ack { .. } => slice
+                                .into_iter()
+                                .next()
+                                .unwrap_or_else(|| {
+                                    Err(BrokerError::new(
+                                        crate::brokers::BrokerErrorKind::Internal,
+                                        "Ack run result missing",
+                                    ))
+                                }),
+                            StreamRequest::AckMany { acks: mine, .. } => {
+                                let failed = mine
+                                    .iter()
+                                    .zip(&slice)
+                                    .filter(|(_, r)| r.is_err())
+                                    .map(|((seq, _), _)| *seq)
+                                    .collect();
+                                Ok(StreamReply::AckOutcome(failed))
                             }
-                            StreamRequest::AckMany { acks: more, .. } => {
-                                acks.extend_from_slice(more);
-                                counts.push(more.len());
-                            }
-                            _ => unreachable!("AckRun carries only ack commands"),
+                            _ => unreachable!(),
                         }
-                    }
-                    match tx.savepoint() {
-                        Ok(mut sp) => match recipes::ack_many(&sp, name, group, identity, &acks) {
-                            Ok((results, fx)) => {
-                                if let Err(e) = sp.commit() {
-                                    for cmd in cmds {
-                                        outcomes.push(Outcome {
-                                            reply: cmd.reply,
-                                            result: Err(BrokerError::storage(format!(
-                                                "Savepoint release failed: {e}"
-                                            ))),
-                                        });
-                                    }
-                                    fatal = Some(BrokerError::storage(format!(
-                                        "Savepoint release failed: {e}"
-                                    )));
-                                } else {
-                                    merge(&mut effects, fx);
-                                    let mut results = results.into_iter();
-                                    for (cmd, n) in cmds.into_iter().zip(counts) {
-                                        let slice: Vec<Result<StreamReply, BrokerError>> =
-                                            results.by_ref().take(n).collect();
-                                        let result = match &cmd.op {
-                                            StreamRequest::Ack { .. } => {
-                                                slice.into_iter().next().unwrap_or_else(|| {
-                                                    Err(BrokerError::new(
-                                                        crate::brokers::BrokerErrorKind::Internal,
-                                                        "Ack run result missing",
-                                                    ))
-                                                })
-                                            }
-                                            StreamRequest::AckMany { acks: mine, .. } => {
-                                                let failed = mine
-                                                    .iter()
-                                                    .zip(&slice)
-                                                    .filter(|(_, r)| r.is_err())
-                                                    .map(|((seq, _), _)| *seq)
-                                                    .collect();
-                                                Ok(StreamReply::AckOutcome(failed))
-                                            }
-                                            _ => unreachable!(),
-                                        };
-                                        outcomes.push(Outcome {
-                                            reply: cmd.reply,
-                                            result,
-                                        });
-                                    }
-                                }
-                            }
-                            Err(CmdError::Expected(e)) => {
-                                let _ = sp.rollback();
-                                for cmd in cmds {
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Err(BrokerError::new(e.kind, e.message.clone())),
-                                    });
-                                }
-                            }
-                            Err(CmdError::Fatal(e)) => {
-                                let _ = sp.rollback();
-                                for cmd in cmds {
-                                    outcomes.push(Outcome {
-                                        reply: cmd.reply,
-                                        result: Err(BrokerError::storage(format!(
-                                            "Command aborted: {e}"
-                                        ))),
-                                    });
-                                }
-                                fatal = Some(e);
-                            }
-                        },
-                        Err(e) => {
-                            for cmd in cmds {
-                                outcomes.push(Outcome {
-                                    reply: cmd.reply,
-                                    result: Err(BrokerError::storage(format!(
-                                        "Cannot open savepoint: {e}"
-                                    ))),
-                                });
-                            }
-                            fatal =
-                                Some(BrokerError::storage(format!("Cannot open savepoint: {e}")));
-                        }
-                    }
-                }
-            }
-        }
-
-        EXEC_NS.fetch_add(exec_started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        BATCHES.fetch_add(1, Ordering::Relaxed);
-        match fatal {
-            None => {
-                let commit_started = Instant::now();
-                match tx.commit() {
-                    Ok(()) => {
-                        COMMIT_NS.fetch_add(
-                            commit_started.elapsed().as_nanos() as u64,
-                            Ordering::Relaxed,
-                        );
-                        for outcome in outcomes {
-                            if let Some(reply) = outcome.reply {
-                                let _ = reply.send(outcome.result);
-                            }
-                        }
-                        self.apply(effects);
-                    }
-                    Err(e) => {
-                        let err =
-                            BrokerError::storage(format!("Transaction commit failed: {e}"));
-                        error!("Stream writer commit failed: {}", err);
-                        for outcome in outcomes {
-                            if let Some(reply) = outcome.reply {
-                                let _ = reply.send(Err(BrokerError::storage(err.to_string())));
-                            }
-                        }
-                    }
-                }
-            }
-            Some(e) => {
-                // Whole transaction rolls back; every command gets the error.
-                drop(tx);
-                error!("Stream writer aborted batch: {}", e);
-                for outcome in outcomes {
-                    if let Some(reply) = outcome.reply {
-                        let _ = reply.send(match outcome.result {
-                            Ok(_) => Err(BrokerError::storage(format!(
-                                "Batch aborted by storage error: {e}"
-                            ))),
-                            Err(err) => Err(err),
-                        });
-                    }
-                }
-                // Avoid a hot spin when the database is persistently broken.
-                std::thread::sleep(Duration::from_millis(20));
+                    })
+                    .collect();
+                Ok((outcomes, fx))
             }
         }
     }
 
     /// Post-commit side effects: group wakeups, deleted-stream invalidation,
     /// continuation scheduling.
-    fn apply(&mut self, effects: Effects) {
+    fn apply_effects(
+        &self,
+        watches: &WatchMap,
+        effects: Effects,
+        followups: &mut VecDeque<Continuation>,
+    ) {
         for (stream, group) in effects.wakes {
-            if let Some(groups) = self.watches.get(&stream) {
+            if let Some(groups) = watches.get(&stream) {
                 if let Some(watch) = groups.get(&group) {
                     watch.send_modify(|v| *v = v.wrapping_add(1));
                 }
             }
         }
         for stream in effects.deleted_streams {
-            self.watches.remove(&stream);
+            watches.remove(&stream);
         }
-        for cont in effects.followups {
-            self.conts.push_back(cont);
-        }
-    }
-}
-
-fn fail_command(cmd: Command, err: &BrokerError) {
-    if let Some(reply) = cmd.reply {
-        let _ = reply.send(Err(BrokerError::storage(err.to_string())));
-    }
-}
-
-/// Fold runs of consecutive mergeable commands into `Item::AckRun` (acks for
-/// the same stream/group/consumer) or `Item::PubRun` (publishes for the same
-/// stream, capped by item count). Order is preserved: any other item ends
-/// the run, so a mixed batch degrades to per-command execution. Each merged
-/// command keeps its own reply slot.
-fn merge_runs(batch: Vec<Item>) -> Vec<Item> {
-    fn ack_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
-        match &cmd.op {
-            StreamRequest::Ack {
-                name,
-                group,
-                identity,
-                ..
-            }
-            | StreamRequest::AckMany {
-                name,
-                group,
-                identity,
-                ..
-            } => Some((name, group, identity)),
-            _ => None,
-        }
-    }
-    let mut out: Vec<Item> = Vec::with_capacity(batch.len());
-    let mut pub_run_items = 0usize;
-    for item in batch {
-        if matches!(&item, Item::Cmd(cmd) if ack_key(cmd).is_some()) {
-            let Item::Cmd(cmd) = item else { unreachable!() };
-            if let Some(Item::AckRun(run)) = out.last_mut() {
-                if ack_key(&run[0]) == ack_key(&cmd) {
-                    run.push(cmd);
-                    continue;
-                }
-            }
-            out.push(Item::AckRun(vec![cmd]));
-            continue;
-        }
-        if matches!(&item, Item::Cmd(cmd) if matches!(cmd.op, StreamRequest::Publish { .. }))
-        {
-            let Item::Cmd(cmd) = item else { unreachable!() };
-            let StreamRequest::Publish { name, items } = &cmd.op else {
-                unreachable!()
-            };
-            if let Some(Item::PubRun(run)) = out.last_mut() {
-                let StreamRequest::Publish {
-                    name: run_name, ..
-                } = &run[0].op
-                else {
-                    unreachable!()
-                };
-                if *run_name == *name && pub_run_items + items.len() <= MAX_PUB_RUN_ITEMS {
-                    pub_run_items += items.len();
-                    run.push(cmd);
-                    continue;
-                }
-            }
-            pub_run_items = items.len();
-            out.push(Item::PubRun(vec![cmd]));
-            continue;
-        }
-        out.push(item);
-    }
-    out
-}
-
-fn merge(into: &mut Effects, from: Effects) {
-    for pair in from.wakes {
-        if !into.wakes.contains(&pair) {
-            into.wakes.push(pair);
-        }
-    }
-    for s in from.deleted_streams {
-        if !into.deleted_streams.contains(&s) {
-            into.deleted_streams.push(s);
-        }
-    }
-    into.followups.extend(from.followups);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression: a submitter parked on a saturated budget must wake when
-    /// the worker releases bytes. The former AtomicUsize+Notify loop could
-    /// drop a wakeup landing between the failed check and waiter
-    /// registration, stalling the connection read loop; the semaphore makes
-    /// registration atomic with the check.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn admission_waiter_wakes_on_release() {
-        let admission = Arc::new(Admission::new(8));
-        admission.acquire(4).await;
-        admission.acquire(4).await;
-        assert_eq!(admission.sem.available_permits(), 0);
-
-        let waiter = {
-            let admission = Arc::clone(&admission);
-            tokio::spawn(async move { admission.acquire(4).await })
-        };
-        tokio::task::yield_now().await;
-        admission.release(4);
-        tokio::time::timeout(Duration::from_secs(5), waiter)
-            .await
-            .expect("acquire lost a wakeup and stalled")
-            .unwrap();
-        assert_eq!(admission.sem.available_permits(), 0);
-    }
-
-    /// Commands at or over the whole budget bypass the gate; acquire and
-    /// release must skip the semaphore symmetrically or permits leak.
-    #[tokio::test]
-    async fn admission_oversized_bypasses_budget() {
-        let admission = Admission::new(8);
-        admission.acquire(16).await;
-        admission.release(16);
-        assert_eq!(admission.sem.available_permits(), 8);
+        followups.extend(effects.followups);
     }
 }

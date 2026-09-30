@@ -13,7 +13,7 @@
 //! and is woken by post-commit effects.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,14 +25,13 @@ use uuid::Uuid;
 use crate::brokers::queue::config::SystemQueueConfig;
 use crate::brokers::queue::domain::definition::{QueueConfig, QueueDefinition};
 use crate::brokers::queue::domain::message::{DlqMessage, Message, PushItem};
-use crate::brokers::queue::domain::ops::{Command, QueueReply, QueueRequest};
-use crate::brokers::queue::domain::recipes;
-use crate::brokers::queue::domain::storage::Store;
+use crate::brokers::queue::domain::ops::{Command, QueueDomain, QueueReply, QueueRequest};
+use crate::brokers::queue::domain::storage::{self, SPEC};
 use crate::brokers::queue::options::QueueCreateOptions;
-use crate::brokers::queue::worker::{self, now_millis, Admission, WatchMap};
 use crate::brokers::{
     validate_resource_name, BrokerError, BrokerErrorKind, ProvisionResult,
 };
+use crate::durable::{now_millis, EngineHandle, Store};
 use crate::protocol::QUEUE_MAX_PUSH_ITEMS;
 
 /// Visibility-expiry sweep cadence. Deadlines are evaluated against durable
@@ -45,25 +44,12 @@ const EXPIRY_SWEEP_MS: u64 = 50;
 const PUSH_ITEM_OVERHEAD: usize = 64;
 
 /// Completion handle for a submitted command.
-pub struct PendingReply {
-    rx: oneshot::Receiver<Result<QueueReply, BrokerError>>,
-}
-
-impl PendingReply {
-    pub async fn wait(self) -> Result<QueueReply, BrokerError> {
-        self.rx
-            .await
-            .map_err(|_| BrokerError::storage("Queue storage unavailable"))?
-    }
-}
+pub type PendingReply = crate::durable::PendingReply<QueueDomain>;
 
 pub struct QueueManager {
-    cmd_tx: mpsc::Sender<Command>,
-    admission: Arc<Admission>,
-    watches: Arc<WatchMap>,
+    engine: EngineHandle<QueueDomain>,
     config: Arc<SystemQueueConfig>,
     cancel: CancellationToken,
-    closed: AtomicBool,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -72,28 +58,24 @@ impl QueueManager {
     /// recover, and start the writer + expiry timer.
     pub async fn new(config: Arc<SystemQueueConfig>) -> Result<Self, BrokerError> {
         let root = PathBuf::from(&config.persistence_path);
-        let (store, continuations) = tokio::task::spawn_blocking(move || Store::open(&root))
-            .await
-            .map_err(|e| BrokerError::storage(format!("Queue storage startup failed: {e}")))??;
+        let (store, continuations) = tokio::task::spawn_blocking(move || {
+            let mut store = Store::open(&root, SPEC)?;
+            let conts = storage::recover(&mut store)?;
+            Ok::<_, BrokerError>((store, conts))
+        })
+        .await
+        .map_err(|e| BrokerError::storage(format!("Queue storage startup failed: {e}")))??;
 
         let (cmd_tx, rx) = mpsc::channel(config.storage_queue_capacity.max(1));
-        let admission = Arc::new(Admission::new(config.storage_queue_max_bytes));
-        let watches = Arc::new(WatchMap::new());
-        let handle = worker::spawn(
-            store,
-            rx,
-            continuations,
-            Arc::clone(&watches),
-            Arc::clone(&admission),
-        );
+        let engine =
+            EngineHandle::<QueueDomain>::new("Queue", cmd_tx, config.storage_queue_max_bytes);
+        let handle =
+            crate::durable::spawn("queue", QueueDomain, store, rx, continuations, &engine);
 
         let manager = Self {
-            cmd_tx,
-            admission,
-            watches,
+            engine,
             config,
             cancel: CancellationToken::new(),
-            closed: AtomicBool::new(false),
             worker: Mutex::new(Some(handle)),
         };
         manager.spawn_timer();
@@ -101,19 +83,20 @@ impl QueueManager {
     }
 
     /// Diagnostics for benchmarks: `(sql statements, writer batches, exec ns,
-    /// commit ns)` since process start. Snapshot and diff around a workload.
+    /// commit ns)` for this engine. Snapshot and diff around a workload.
     #[doc(hidden)]
     pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
+        let stats = self.engine.stats();
         (
-            recipes::SQL_STATEMENTS.load(Ordering::Relaxed),
-            worker::BATCHES.load(Ordering::Relaxed),
-            worker::EXEC_NS.load(Ordering::Relaxed),
-            worker::COMMIT_NS.load(Ordering::Relaxed),
+            stats.sql_stmts.load(Ordering::Relaxed),
+            stats.batches.load(Ordering::Relaxed),
+            stats.exec_ns.load(Ordering::Relaxed),
+            stats.commit_ns.load(Ordering::Relaxed),
         )
     }
 
     fn spawn_timer(&self) {
-        let tx = self.cmd_tx.clone();
+        let tx = self.engine.sender();
         let cancel = self.cancel.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(EXPIRY_SWEEP_MS));
@@ -143,28 +126,12 @@ impl QueueManager {
     /// Validate + admit + enqueue. Returns once the command is queued;
     /// the reply arrives on `PendingReply` after the commit.
     pub async fn submit(&self, request: QueueRequest) -> Result<PendingReply, BrokerError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.engine.is_closed() {
             return Err(BrokerError::storage("Queue storage is shut down"));
         }
         Self::validate(&request)?;
         let bytes = Self::admission_bytes(&request);
-        self.admission.acquire(bytes).await;
-        let (tx, rx) = oneshot::channel();
-        match self
-            .cmd_tx
-            .send(Command {
-                op: request,
-                bytes,
-                reply: Some(tx),
-            })
-            .await
-        {
-            Ok(()) => Ok(PendingReply { rx }),
-            Err(_) => {
-                self.admission.release(bytes);
-                Err(BrokerError::storage("Queue storage unavailable"))
-            }
-        }
+        self.engine.submit(request, bytes).await
     }
 
     /// Pre-queue validation: cheap checks that must fail before the command
@@ -216,7 +183,8 @@ impl QueueManager {
     }
 
     fn queue_watcher(&self, name: &str) -> watch::Receiver<u64> {
-        self.watches
+        self.engine
+            .watches()
             .entry(name.to_string())
             .or_insert_with(|| watch::channel(0u64).0)
             .subscribe()
@@ -525,13 +493,14 @@ impl QueueManager {
     /// the barrier command is in flight; the shutdown itself bypasses
     /// `submit` (which rejects once closed).
     pub async fn shutdown(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.engine.mark_closed() {
             return;
         }
         self.cancel.cancel();
         let (tx, rx) = oneshot::channel();
         if self
-            .cmd_tx
+            .engine
+            .sender()
             .send(Command {
                 op: QueueRequest::Shutdown,
                 bytes: 0,

@@ -1,11 +1,20 @@
 //! Command/reply contract between `QueueManager` (async submitters) and the
-//! dedicated SQLite writer (`worker.rs`). Everything here is transport-agnostic.
+//! shared durable engine (`crate::durable`). Everything here is
+//! transport-agnostic.
 
 use uuid::Uuid;
 
 use crate::brokers::queue::domain::definition::{QueueConfig, QueueDefinition};
 use crate::brokers::queue::domain::message::{DlqMessage, Message, PushItem};
-use crate::brokers::{BrokerError, ProvisionResult};
+use crate::brokers::ProvisionResult;
+
+/// Engine marker type: the `Domain` impl lives in `worker.rs`. Declared here
+/// so domain types can parameterize engine generics without importing the
+/// infrastructure layer.
+pub struct QueueDomain;
+
+/// A submitted command plus its completion channel and admission weight.
+pub type Command = crate::durable::Command<QueueDomain>;
 
 /// One durable command executed inside the writer transaction.
 #[derive(Debug)]
@@ -114,24 +123,4 @@ pub enum Continuation {
     Expire,
     /// Continue the GC of deleted queues after a slice exhausted its budget.
     Gc,
-}
-
-/// A submitted command plus its completion channel and admission weight.
-pub struct Command {
-    pub op: QueueRequest,
-    /// Bytes charged against the queue byte budget (0 for lightweight ops).
-    pub bytes: usize,
-    /// `None` for internal/maintenance commands that do not need a reply.
-    pub reply: Option<tokio::sync::oneshot::Sender<Result<QueueReply, BrokerError>>>,
-}
-
-impl Command {
-    /// Commands whose replies order leases against later work stop the drain
-    /// so their commits are not delayed behind bulk write batches.
-    pub fn is_barrier(&self) -> bool {
-        matches!(
-            self.op,
-            QueueRequest::Consume { .. } | QueueRequest::Shutdown
-        )
-    }
 }

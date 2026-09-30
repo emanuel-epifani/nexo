@@ -1,12 +1,21 @@
 //! Command/reply contract between `StreamManager` (async submitters) and the
-//! dedicated SQLite writer (`worker.rs`). Everything here is transport-agnostic.
+//! shared durable engine (`crate::durable`). Everything here is
+//! transport-agnostic.
 
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
 use crate::brokers::stream::domain::message::{
     ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
 };
 use crate::brokers::stream::options::SeekTarget;
-use crate::brokers::{BrokerError, ProvisionResult};
+use crate::brokers::ProvisionResult;
+
+/// Engine marker type carrying the domain's runtime config (the fetch
+/// response byte budget, baked into every batch `ExecCtx`). The `Domain`
+/// impl lives in `worker.rs`.
+pub struct StreamDomain(pub u64);
+
+/// A submitted command plus its completion channel and admission weight.
+pub type Command = crate::durable::Command<StreamDomain>;
 
 /// One durable command executed inside the writer transaction.
 #[derive(Debug)]
@@ -164,28 +173,4 @@ pub enum Continuation {
     Retention,
     /// Bounded deletion of dead rows (deleted streams, superseded epochs).
     Gc,
-}
-
-/// A submitted command plus its completion channel and admission weight.
-pub struct Command {
-    pub op: StreamRequest,
-    /// Bytes charged against the queue byte budget (0 for lightweight ops).
-    pub bytes: usize,
-    /// `None` for internal/maintenance commands that do not need a reply.
-    pub reply: Option<tokio::sync::oneshot::Sender<Result<StreamReply, BrokerError>>>,
-}
-
-impl Command {
-    /// Commands whose replies order leases/epoch changes against later work
-    /// stop the drain so their commits are not delayed behind bulk writes.
-    pub fn is_barrier(&self) -> bool {
-        matches!(
-            self.op,
-            StreamRequest::Fetch { .. }
-                | StreamRequest::Seek { .. }
-                | StreamRequest::Leave { .. }
-                | StreamRequest::Disconnect { .. }
-                | StreamRequest::Shutdown
-        )
-    }
 }
