@@ -48,9 +48,12 @@ Delete the resource from an administrative process with `client.queue.delete("em
 
 ## Persistence
 
-All queues are **persisted to disk** by default using a Write-Ahead Log (WAL) backed by SQLite. To maximize throughput and performance, Nexo uses an **asynchronous flush strategy** for all queues. Writes are buffered in memory and flushed to disk periodically.
+All queues share a **single embedded SQLite database** (`queues.sqlite3` under the persistence directory, WAL mode). A dedicated writer thread owns the database; every command executes inside a SQLite transaction and replies are sent **only after the transaction commits**.
 
-By default, the server flushes data to disk every **100ms**. This interval is globally configurable via the `QUEUE_DEFAULT_FLUSH_MS` environment variable (see [Configuration](#configuration) below).
+- **Durability**: with `synchronous = NORMAL`, a commit promises crash-consistency of the database file — a process crash never loses an acknowledged `push`, while an OS crash or power loss may lose the last unsynced commits. Consecutive commands are merged into bounded batches, amortizing transaction cost across the whole batch.
+- **Backpressure**: storage commands pass through a bounded channel (count and bytes); when it fills, publishers wait for capacity instead of dropping messages.
+- **Recovery**: on startup the engine reconciles durable state — in-flight leases are requeued or moved to the DLQ by `maxDeliveries` — without loading payloads into memory. Restart time is proportional to in-flight messages, not queue depth.
+- **Fail-closed startup**: the persistence directory must contain only the shared database layout (`queues.sqlite3`, its WAL files, and the lock file). Foreign files — including per-queue databases written by previous versions — abort startup instead of being silently imported or ignored.
 
 ## Advanced Creation
 
@@ -266,13 +269,13 @@ Global, set at server startup.
 
 | Variable | Default | Description |
 |:---|:---|:---|
-| `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Base directory for all queue SQLite DBs |
+| `QUEUE_ROOT_PERSISTENCE_PATH` | `./data/queues` | Directory containing `queues.sqlite3` and its lock file |
+| `QUEUE_STORAGE_QUEUE_CAPACITY` | `16384` | Pending storage commands before producers wait for capacity |
+| `QUEUE_STORAGE_QUEUE_MAX_BYTES` | `268435456` (256MB) | Byte bound on queued command payloads |
 | `QUEUE_VISIBILITY_MS` | `30000` (30s) | Default visibility timeout — how long before an unacked message is redelivered |
 | `QUEUE_MAX_DELIVERIES` | `5` | Default max delivery attempts before moving to DLQ |
 | `QUEUE_DEFAULT_BATCH_SIZE` | `10` | Default batch size for server-side consume |
 | `QUEUE_DEFAULT_WAIT_MS` | `0` | Default long-polling wait (ms) when queue is empty |
-| `QUEUE_DEFAULT_FLUSH_MS` | `100` | Max durability window (ms) — how often writes are flushed to disk |
-| `QUEUE_WRITER_BATCH_SIZE` | `50000` | SQLite writer batch size (internal tuning) |
 
 ### SDK Overrides
 

@@ -18,7 +18,11 @@ pub(crate) async fn setup_queue_manager() -> (Arc<QueueManager>, TempDir) {
     let mut config = Config::global().queue.clone();
     config.persistence_path = path;
 
-    let manager = Arc::new(QueueManager::new(Arc::new(config)));
+    let manager = Arc::new(
+        QueueManager::new(Arc::new(config))
+            .await
+            .expect("queue manager"),
+    );
     (manager, temp_dir)
 }
 

@@ -20,8 +20,8 @@ async def run(spec: dict[str, Any]) -> list[dict[str, Any]]:
         port=int(env("NEXO_PORT", "7654")),
     )
     conn = await aio_pika.connect_robust(env("RABBITMQ_URL", "amqp://127.0.0.1:5672"))
-    # Two durability tiers: nexo push confirms on enqueue to the persistence
-    # writer (async commit, synchronous=OFF), so it sits between rabbit-d
+    # Two durability tiers: nexo push confirms after the shared-WAL
+    # transaction commits (synchronous=NORMAL), so it sits between rabbit-d
     # (disk + confirm) and rabbit-v (fire-and-forget). Report both.
     ch_d = await conn.channel(publisher_confirms=True)
     ch_v = await conn.channel()

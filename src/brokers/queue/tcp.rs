@@ -11,8 +11,8 @@ use crate::protocol::{
 };
 use crate::NexoEngine;
 
-use crate::brokers::queue::domain::dlq::DlqMessage;
-use crate::brokers::queue::domain::queue::{Message, QueueDefinition};
+use crate::brokers::queue::domain::definition::QueueDefinition;
+use crate::brokers::queue::domain::message::{DlqMessage, Message};
 use crate::brokers::queue::options::QueueCreateOptions;
 use crate::brokers::{ProvisionOutcome, ProvisionResult};
 use crate::transport::tcp::error_response;
@@ -336,23 +336,23 @@ pub async fn handle(opcode: u8, cursor: &mut PayloadCursor, engine: &NexoEngine)
             id,
             delivery_token,
             q_name,
-        } => {
-            let found = queue.ack(&q_name, id, delivery_token).await;
-            Response::Data(encode_bool(found))
-        }
+        } => match queue.ack(&q_name, id, delivery_token).await {
+            Ok(found) => Response::Data(encode_bool(found)),
+            Err(error) => error_response(error),
+        },
         QueueCommand::Nack {
             id,
             delivery_token,
             q_name,
             reason,
-        } => {
-            let found = queue.nack(&q_name, id, delivery_token, reason).await;
-            Response::Data(encode_bool(found))
-        }
-        QueueCommand::Exists { q_name } => {
-            let found = queue.exists(&q_name).await;
-            Response::Data(encode_bool(found))
-        }
+        } => match queue.nack(&q_name, id, delivery_token, reason).await {
+            Ok(found) => Response::Data(encode_bool(found)),
+            Err(error) => error_response(error),
+        },
+        QueueCommand::Exists { q_name } => match queue.exists(&q_name).await {
+            Ok(found) => Response::Data(encode_bool(found)),
+            Err(error) => error_response(error),
+        },
         QueueCommand::Describe { q_name } => match queue.describe(&q_name).await {
             Ok(definition) => Response::Data(encode_definition(&definition)),
             Err(error) => error_response(error),

@@ -36,17 +36,17 @@ mod queue_tests {
                 .unwrap();
 
             // Pop
-            let msg = manager.pop(&q).await.expect("Should pop message");
+            let msg = manager.pop(&q).await.unwrap().expect("Should pop message");
             assert_eq!(msg.payload, Bytes::from("payload"));
 
             // Ack
             assert!(
-                manager.ack(&q, msg.id, msg.delivery_token).await,
+                manager.ack(&q, msg.id, msg.delivery_token).await.unwrap(),
                 "Ack should succeed"
             );
 
             // Check Empty
-            assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
+            assert!(manager.pop(&q).await.unwrap().is_none(), "Queue should be empty");
         }
 
         #[tokio::test]
@@ -111,13 +111,13 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let m1 = manager.pop(&q).await.unwrap();
+            let m1 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m1.payload, Bytes::from("msg1"));
 
-            let m2 = manager.pop(&q).await.unwrap();
+            let m2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m2.payload, Bytes::from("msg2"));
 
-            let m3 = manager.pop(&q).await.unwrap();
+            let m3 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m3.payload, Bytes::from("msg3"));
         }
 
@@ -143,13 +143,13 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let m1 = manager.pop(&q).await.unwrap();
+            let m1 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m1.payload, Bytes::from("high"));
 
-            let m2 = manager.pop(&q).await.unwrap();
+            let m2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m2.payload, Bytes::from("mid"));
 
-            let m3 = manager.pop(&q).await.unwrap();
+            let m3 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m3.payload, Bytes::from("low"));
         }
 
@@ -189,19 +189,19 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let m1 = manager.pop(&q).await.unwrap();
+            let m1 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m1.payload, Bytes::from("high"));
-            let m2 = manager.pop(&q).await.unwrap();
+            let m2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m2.payload, Bytes::from("mid"));
 
-            let m3 = manager.pop(&q).await.unwrap();
+            let m3 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m3.payload, Bytes::from("msg1"));
-            let m4 = manager.pop(&q).await.unwrap();
+            let m4 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m4.payload, Bytes::from("msg2"));
-            let m5 = manager.pop(&q).await.unwrap();
+            let m5 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m5.payload, Bytes::from("msg3"));
 
-            let m6 = manager.pop(&q).await.unwrap();
+            let m6 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m6.payload, Bytes::from("low"));
         }
 
@@ -228,19 +228,19 @@ mod queue_tests {
                 .unwrap();
 
             // Attempt 1
-            let m1 = manager.pop(&q).await.unwrap();
+            let m1 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m1.attempts, 1);
 
             // Wait for visibility timeout + buffer
             tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
 
             // Attempt 2
-            let m2 = manager.pop(&q).await.unwrap();
+            let m2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m2.attempts, 2);
             tokio::time::sleep(Duration::from_millis(visibility_timeout + 50)).await;
 
             // Attempt 3 (Last)
-            let m3 = manager.pop(&q).await.unwrap();
+            let m3 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(m3.attempts, 3);
             let msg_id = m3.id;
 
@@ -249,7 +249,7 @@ mod queue_tests {
 
             // Attempt 4 -> Should be gone from Main Queue (moved to internal DLQ)
             // The actor loop should have woken up automatically and moved to DLQ
-            assert!(manager.pop(&q).await.is_none(), "Should be moved to DLQ");
+            assert!(manager.pop(&q).await.unwrap().is_none(), "Should be moved to DLQ");
 
             // Verify message is in DLQ using new DLQ methods
             let (total, dlq_msgs) = manager.peek_dlq(&q, 10, 0).await.unwrap();
@@ -265,7 +265,7 @@ mod queue_tests {
             // Verify it's back in main queue
             let replayed = manager
                 .pop(&q)
-                .await
+                .await.unwrap()
                 .expect("Message should be back in main queue");
             assert_eq!(replayed.payload, Bytes::from("fail_me"));
             // After move_to_queue (attempts=0) + pop (attempts++), should be 1
@@ -275,7 +275,7 @@ mod queue_tests {
             );
 
             // Ack it to clean up
-            manager.ack(&q, replayed.id, replayed.delivery_token).await;
+            manager.ack(&q, replayed.id, replayed.delivery_token).await.unwrap();
         }
 
         #[tokio::test]
@@ -291,20 +291,21 @@ mod queue_tests {
                 .push(q.clone(), Bytes::from("msg"), 0)
                 .await
                 .unwrap();
-            assert!(manager.exists(&q).await);
+            assert!(manager.exists(&q).await.unwrap());
 
             manager.delete_queue(q.clone()).await.unwrap();
 
-            assert!(!manager.exists(&q).await, "Queue should not exist in RAM");
+            assert!(!manager.exists(&q).await.unwrap(), "Queue should not exist in RAM");
 
             // Try to pop -> None
-            assert!(manager.pop(&q).await.is_none());
+            assert!(manager.pop(&q).await.unwrap().is_none());
 
             // Restart to check disk cleanup
             let path = _tmp.path().to_str().unwrap().to_string();
             let mut sys_config = nexo::config::Config::global().queue.clone();
             sys_config.persistence_path = path;
-            let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)));
+            manager.shutdown().await;
+            let manager2 = std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)).await.unwrap());
 
             // Since we can't easily check if file exists without knowing path logic,
             // we check if declaring it again results in an empty queue (no recovery)
@@ -313,7 +314,7 @@ mod queue_tests {
                 .await
                 .unwrap();
             assert!(
-                manager2.pop(&q).await.is_none(),
+                manager2.pop(&q).await.unwrap().is_none(),
                 "Queue should be empty after delete and recreation"
             );
         }
@@ -589,12 +590,12 @@ mod queue_tests {
             assert!(
                 manager
                     .ack(&q, batch_a[0].id, batch_a[0].delivery_token)
-                    .await
+                    .await.unwrap()
             );
             assert!(
                 manager
                     .ack(&q, batch_b[0].id, batch_b[0].delivery_token)
-                    .await
+                    .await.unwrap()
             );
         }
     }
@@ -617,7 +618,7 @@ mod queue_tests {
 
             {
                 let manager1 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -628,14 +629,13 @@ mod queue_tests {
                     .await
                     .unwrap();
 
-                // Wait for async flush before dropping manager
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                manager1.shutdown().await;
             }
 
             // Simulating Restart
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 // We must "redeclare" the queue to spawn the actor again,
                 // but the actor should find the DB and recover.
                 let config = QueueCreateOptions {
@@ -645,7 +645,7 @@ mod queue_tests {
 
                 let msg = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("Message should survive crash");
                 assert_eq!(msg.payload, Bytes::from("survivor"));
             }
@@ -662,7 +662,7 @@ mod queue_tests {
 
             {
                 let manager1 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 manager1
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
@@ -676,21 +676,20 @@ mod queue_tests {
                         .unwrap();
                 }
 
-                // Wait for async flush
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                manager1.shutdown().await;
             }
 
             // Restart - messages should come out in the same FIFO order
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 manager2
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
                     .unwrap();
 
                 for i in 0..5 {
-                    let msg = manager2.pop(&q).await.expect("Should have message");
+                    let msg = manager2.pop(&q).await.unwrap().expect("Should have message");
                     assert_eq!(
                         msg.payload,
                         Bytes::from(format!("msg{}", i)),
@@ -698,7 +697,7 @@ mod queue_tests {
                         i,
                         msg.payload
                     );
-                    manager2.ack(&q, msg.id, msg.delivery_token).await;
+                    manager2.ack(&q, msg.id, msg.delivery_token).await.unwrap();
                 }
             }
         }
@@ -713,7 +712,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -724,19 +723,18 @@ mod queue_tests {
                     .await
                     .unwrap();
 
-                let msg = manager.pop(&q).await.unwrap();
+                let msg = manager.pop(&q).await.unwrap().unwrap();
 
                 // Ack it (Should delete from DB)
-                manager.ack(&q, msg.id, msg.delivery_token).await;
+                manager.ack(&q, msg.id, msg.delivery_token).await.unwrap();
 
-                // Wait for the async writer to flush (using double the default max flush time just to be safe)
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                manager.shutdown().await;
             }
 
             // Restart
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     ..Default::default()
                 };
@@ -744,7 +742,7 @@ mod queue_tests {
 
                 // Should be empty (Ack was persisted)
                 assert!(
-                    manager2.pop(&q).await.is_none(),
+                    manager2.pop(&q).await.unwrap().is_none(),
                     "Acked message should not reappear"
                 );
             }
@@ -760,7 +758,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500), // Short timeout
                     ..Default::default()
@@ -773,16 +771,17 @@ mod queue_tests {
                     .unwrap();
 
                 // Take it (make it InFlight)
-                let _ = manager.pop(&q).await.unwrap();
+                let _ = manager.pop(&q).await.unwrap().unwrap();
 
                 // Drop manager while message is InFlight (and not Acked)
+                manager.shutdown().await;
             }
 
             tokio::time::sleep(Duration::from_millis(600)).await; // Wait for timeout to theoretically pass
 
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(500),
                     ..Default::default()
@@ -796,7 +795,7 @@ mod queue_tests {
 
                 let msg = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("InFlight message should expire and reappear");
                 assert_eq!(msg.payload, Bytes::from("job"));
             }
@@ -815,7 +814,7 @@ mod queue_tests {
             // Phase 1: Create queues and add messages
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
 
                 let config = QueueCreateOptions {
                     ..Default::default()
@@ -843,45 +842,42 @@ mod queue_tests {
                     .await
                     .unwrap();
 
-                // Wait for async flush before dropping manager
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                manager.shutdown().await;
             }
 
-            // Small delay to ensure files are flushed
-            tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Phase 2: Restart manager WITHOUT calling create_queue
             // Warm start should automatically discover and restore queues
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
 
                 // Wait a bit for warm start to complete
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 // Verify queues exist (warm start should have restored them)
                 assert!(
-                    manager2.exists(&q1).await,
+                    manager2.exists(&q1).await.unwrap(),
                     "Queue 1 should be auto-restored"
                 );
                 assert!(
-                    manager2.exists(&q2).await,
+                    manager2.exists(&q2).await.unwrap(),
                     "Queue 2 should be auto-restored"
                 );
 
                 // Verify messages are recovered
-                let msg1 = manager2.pop(&q1).await.expect("Should recover msg1_q1");
+                let msg1 = manager2.pop(&q1).await.unwrap().expect("Should recover msg1_q1");
                 assert_eq!(msg1.payload, Bytes::from("msg1_q1"));
 
-                let msg2 = manager2.pop(&q1).await.expect("Should recover msg2_q1");
+                let msg2 = manager2.pop(&q1).await.unwrap().expect("Should recover msg2_q1");
                 assert_eq!(msg2.payload, Bytes::from("msg2_q1"));
 
-                let msg3 = manager2.pop(&q2).await.expect("Should recover msg1_q2");
+                let msg3 = manager2.pop(&q2).await.unwrap().expect("Should recover msg1_q2");
                 assert_eq!(msg3.payload, Bytes::from("msg1_q2"));
 
                 // Verify queues restored after recovery
-                assert!(manager2.exists(&q1).await, "Queue q1 should be restored");
-                assert!(manager2.exists(&q2).await, "Queue q2 should be restored");
+                assert!(manager2.exists(&q1).await.unwrap(), "Queue q1 should be restored");
+                assert!(manager2.exists(&q2).await.unwrap(), "Queue q2 should be restored");
             }
         }
 
@@ -897,7 +893,7 @@ mod queue_tests {
             // Phase 1: Create queue and push a message
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 manager
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
@@ -907,23 +903,21 @@ mod queue_tests {
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(150)).await;
+                manager.shutdown().await;
             }
 
-            // Corrupt the DB file
-            let db_path = std::path::PathBuf::from(&path).join(format!("{}.db", q));
+            // Corrupt the shared DB file
+            let db_path = std::path::PathBuf::from(&path).join("queues.sqlite3");
             std::fs::write(&db_path, b"corrupted garbage data").unwrap();
 
-            // Phase 2: Restart — queue should NOT be registered (fail-fast)
-            {
-                let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
-                tokio::time::sleep(Duration::from_millis(200)).await;
-
-                assert!(
-                    !manager2.exists(&q).await,
-                    "Queue with corrupted DB must NOT be registered — fail-fast prevents silent data loss"
-                );
-            }
+            // Phase 2: Restart must fail closed — the engine refuses to boot
+            // over a damaged store rather than dropping the queue silently.
+            assert!(
+                QueueManager::new(std::sync::Arc::new(sys_config))
+                    .await
+                    .is_err(),
+                "QueueManager::new must fail on corrupted storage"
+            );
         }
 
         #[tokio::test]
@@ -953,9 +947,9 @@ mod queue_tests {
                 .unwrap();
 
             // Pop all 3 and let them timeout
-            let m1 = manager.pop(&q).await.unwrap();
-            let _m2 = manager.pop(&q).await.unwrap();
-            let _m3 = manager.pop(&q).await.unwrap();
+            let m1 = manager.pop(&q).await.unwrap().unwrap();
+            let _m2 = manager.pop(&q).await.unwrap().unwrap();
+            let _m3 = manager.pop(&q).await.unwrap().unwrap();
 
             // Wait for visibility timeout + buffer for actor to wake up and process
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -997,7 +991,7 @@ mod queue_tests {
             // Phase 1: Trigger DLQ move
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 // Create with max_deliveries = 0 (1st timeout -> DLQ immediately)
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(100),
@@ -1013,14 +1007,14 @@ mod queue_tests {
                     .unwrap();
 
                 // Attempt 1 (and only attempt allowed)
-                let _ = manager.pop(&q).await.unwrap();
+                let _ = manager.pop(&q).await.unwrap().unwrap();
 
                 // Wait for visibility timeout + buffer for actor to wake up and process
                 tokio::time::sleep(Duration::from_millis(250)).await;
 
                 // Verify main queue is empty (message moved to internal DLQ by actor)
                 assert!(
-                    manager.pop(&q).await.is_none(),
+                    manager.pop(&q).await.unwrap().is_none(),
                     "Main queue should be empty"
                 );
 
@@ -1029,23 +1023,22 @@ mod queue_tests {
                 assert_eq!(total, 1);
                 assert_eq!(dlq_msgs.len(), 1, "Should have 1 message in DLQ");
                 assert_eq!(dlq_msgs[0].payload, Bytes::from("stay_in_dlq"));
+                manager.shutdown().await;
             }
 
-            // Small delay for flush
-            tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Phase 2: Restart
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 // Queue should be auto-restored with DLQ messages
-                assert!(manager2.exists(&q).await, "Queue should survive restart");
+                assert!(manager2.exists(&q).await.unwrap(), "Queue should survive restart");
 
                 // Main queue should still be empty (DLQ message persisted internally)
                 assert!(
-                    manager2.pop(&q).await.is_none(),
+                    manager2.pop(&q).await.unwrap().is_none(),
                     "Main queue should still be empty after restart"
                 );
 
@@ -1068,7 +1061,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     max_deliveries: Some(5),
                     ..Default::default()
@@ -1081,28 +1074,27 @@ mod queue_tests {
                     .unwrap();
 
                 // Pop → InFlight
-                let msg = manager.pop(&q).await.unwrap();
+                let msg = manager.pop(&q).await.unwrap().unwrap();
 
                 // Nack with a reason (requeue, not DLQ since attempts < max_deliveries)
                 manager
                     .nack(&q, msg.id, msg.delivery_token, "bad_payload".to_string())
-                    .await;
+                    .await.unwrap();
 
-                // Wait for flush
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                manager.shutdown().await;
             }
 
             // Restart
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
-                assert!(manager2.exists(&q).await, "Queue should survive restart");
+                assert!(manager2.exists(&q).await.unwrap(), "Queue should survive restart");
 
                 let msg = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("Requeued message should survive restart");
                 assert_eq!(msg.payload, Bytes::from("failer"));
                 assert_eq!(
@@ -1124,7 +1116,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 manager
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
@@ -1138,12 +1130,13 @@ mod queue_tests {
                 }
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
+                manager.shutdown().await;
             }
 
             // Restart - new pushes must come out in original FIFO order
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 manager2
@@ -1152,14 +1145,14 @@ mod queue_tests {
                     .unwrap();
 
                 for i in 1..=3 {
-                    let msg = manager2.pop(&q).await.expect("Message should be recovered");
+                    let msg = manager2.pop(&q).await.unwrap().expect("Message should be recovered");
                     assert_eq!(
                         msg.payload,
                         Bytes::from(format!("msg{}", i)),
                         "FIFO order must survive restart for new pushes"
                     );
                     assert!(msg.ready_seq > 0, "ready_seq must be persisted");
-                    manager2.ack(&q, msg.id, msg.delivery_token).await;
+                    manager2.ack(&q, msg.id, msg.delivery_token).await.unwrap();
                 }
             }
         }
@@ -1175,7 +1168,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(50),
                     max_deliveries: Some(5),
@@ -1187,7 +1180,7 @@ mod queue_tests {
                     .push(q.clone(), Bytes::from("first"), 0)
                     .await
                     .unwrap();
-                let msg = manager.pop(&q).await.unwrap();
+                let msg = manager.pop(&q).await.unwrap().unwrap();
                 assert_eq!(msg.payload, Bytes::from("first"));
 
                 // Wait for timeout so the message is requeued with a new ready_seq
@@ -1200,12 +1193,13 @@ mod queue_tests {
                     .unwrap();
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
+                manager.shutdown().await;
             }
 
             // Restart - requeued message must still come before the newer push
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 assert_eq!(
@@ -1220,18 +1214,18 @@ mod queue_tests {
 
                 let first = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("First message should be first after restart");
                 assert_eq!(
                     first.payload,
                     Bytes::from("first"),
                     "Requeued message must come before newer push after restart"
                 );
-                manager2.ack(&q, first.id, first.delivery_token).await;
+                manager2.ack(&q, first.id, first.delivery_token).await.unwrap();
 
                 let second = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("Second message should follow");
                 assert_eq!(second.payload, Bytes::from("second"));
             }
@@ -1248,7 +1242,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 let config = QueueCreateOptions {
                     visibility_timeout_ms: Some(50),
                     max_deliveries: Some(1),
@@ -1266,8 +1260,8 @@ mod queue_tests {
                     .unwrap();
 
                 // Pop both: each has attempts=1 >= max_deliveries=1, so timeout moves them to DLQ
-                let _ = manager.pop(&q).await.unwrap();
-                let _ = manager.pop(&q).await.unwrap();
+                let _ = manager.pop(&q).await.unwrap().unwrap();
+                let _ = manager.pop(&q).await.unwrap().unwrap();
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -1278,12 +1272,13 @@ mod queue_tests {
                 assert_eq!(dlq_msgs[1].payload, Bytes::from("first"));
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
+                manager.shutdown().await;
             }
 
             // Restart - DLQ ordering and dlq_seq must survive
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(200)).await;
 
                 assert_eq!(
@@ -1322,7 +1317,7 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let msg = manager.pop(&q).await.expect("Should pop message");
+            let msg = manager.pop(&q).await.unwrap().expect("Should pop message");
             assert_eq!(msg.payload, Bytes::from("hello"));
         }
 
@@ -1341,10 +1336,10 @@ mod queue_tests {
             manager.push_batch(q.clone(), items).await.unwrap();
 
             for i in 0..5 {
-                let msg = manager.pop(&q).await.expect("Should pop message");
+                let msg = manager.pop(&q).await.unwrap().expect("Should pop message");
                 assert_eq!(msg.payload, Bytes::from(format!("msg_{}", i)));
             }
-            assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
+            assert!(manager.pop(&q).await.unwrap().is_none(), "Queue should be empty");
         }
 
         #[tokio::test]
@@ -1363,9 +1358,9 @@ mod queue_tests {
             ];
             manager.push_batch(q.clone(), items).await.unwrap();
 
-            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("high"));
-            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("mid"));
-            assert_eq!(manager.pop(&q).await.unwrap().payload, Bytes::from("low"));
+            assert_eq!(manager.pop(&q).await.unwrap().unwrap().payload, Bytes::from("high"));
+            assert_eq!(manager.pop(&q).await.unwrap().unwrap().payload, Bytes::from("mid"));
+            assert_eq!(manager.pop(&q).await.unwrap().unwrap().payload, Bytes::from("low"));
         }
 
         #[tokio::test]
@@ -1378,7 +1373,7 @@ mod queue_tests {
                 .unwrap();
 
             manager.push_batch(q.clone(), vec![]).await.unwrap();
-            assert!(manager.pop(&q).await.is_none(), "Queue should be empty");
+            assert!(manager.pop(&q).await.unwrap().is_none(), "Queue should be empty");
         }
 
         #[tokio::test]
@@ -1405,7 +1400,7 @@ mod queue_tests {
 
             {
                 let manager =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config.clone())).await.unwrap());
                 manager
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
@@ -1422,14 +1417,14 @@ mod queue_tests {
             // Recover with a new manager
             {
                 let manager2 =
-                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)));
+                    std::sync::Arc::new(QueueManager::new(std::sync::Arc::new(sys_config)).await.unwrap());
                 manager2
                     .create_queue(q.clone(), QueueCreateOptions::default())
                     .await
                     .unwrap();
                 let msg = manager2
                     .pop(&q)
-                    .await
+                    .await.unwrap()
                     .expect("Message should survive shutdown flush");
                 assert_eq!(msg.payload, Bytes::from("survivor"));
             }
@@ -1473,9 +1468,9 @@ mod queue_tests {
         async fn test_exists_returns_false_for_invalid_names() {
             let (manager, _tmp) = setup_queue_manager().await;
 
-            assert!(!manager.exists("../outside").await);
-            assert!(!manager.exists("nested/queue").await);
-            assert!(!manager.exists("").await);
+            assert!(!manager.exists("../outside").await.unwrap());
+            assert!(!manager.exists("nested/queue").await.unwrap());
+            assert!(!manager.exists("").await.unwrap());
         }
 
         #[tokio::test]
@@ -1519,14 +1514,14 @@ mod queue_tests {
                 .push(q.clone(), Bytes::from("msg1"), 0)
                 .await
                 .unwrap();
-            let msg = manager.pop(&q).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap().unwrap();
 
             assert!(
-                manager.ack(&q, msg.id, msg.delivery_token).await,
+                manager.ack(&q, msg.id, msg.delivery_token).await.unwrap(),
                 "Valid token ACK should succeed"
             );
             assert!(
-                manager.pop(&q).await.is_none(),
+                manager.pop(&q).await.unwrap().is_none(),
                 "Queue should be empty after ACK"
             );
         }
@@ -1544,19 +1539,19 @@ mod queue_tests {
                 .push(q.clone(), Bytes::from("msg1"), 0)
                 .await
                 .unwrap();
-            let msg = manager.pop(&q).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap().unwrap();
 
             // ACK with wrong token should fail and NOT delete the message
             let stale_token = msg.delivery_token + 999;
             assert!(
-                !manager.ack(&q, msg.id, stale_token).await,
+                !manager.ack(&q, msg.id, stale_token).await.unwrap(),
                 "Stale token ACK should return false"
             );
 
             // Message should still be in-flight (not deleted)
             // Pop should return None (message is in-flight, not ready)
             assert!(
-                manager.pop(&q).await.is_none(),
+                manager.pop(&q).await.unwrap().is_none(),
                 "Message should still be in-flight"
             );
         }
@@ -1574,18 +1569,18 @@ mod queue_tests {
                 .push(q.clone(), Bytes::from("msg1"), 0)
                 .await
                 .unwrap();
-            let msg = manager.pop(&q).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap().unwrap();
 
             // NACK with wrong token should fail and NOT requeue
             let stale_token = msg.delivery_token + 999;
             let result = manager
                 .nack(&q, msg.id, stale_token, "reason".to_string())
-                .await;
+                .await.unwrap();
             assert!(!result, "Stale token NACK should return false");
 
             // Message should still be in-flight (not requeued to ready)
             assert!(
-                manager.pop(&q).await.is_none(),
+                manager.pop(&q).await.unwrap().is_none(),
                 "Message should still be in-flight after stale NACK"
             );
         }
@@ -1607,7 +1602,7 @@ mod queue_tests {
                 .unwrap();
 
             // First pop: token = 1
-            let msg1 = manager.pop(&q).await.unwrap();
+            let msg1 = manager.pop(&q).await.unwrap().unwrap();
             let token1 = msg1.delivery_token;
             assert_eq!(token1, 1, "First delivery token should be 1");
 
@@ -1615,20 +1610,20 @@ mod queue_tests {
             tokio::time::sleep(Duration::from_millis(150)).await;
 
             // Second pop: token should be different (2)
-            let msg2 = manager.pop(&q).await.unwrap();
+            let msg2 = manager.pop(&q).await.unwrap().unwrap();
             let token2 = msg2.delivery_token;
             assert_eq!(token2, 2, "Second delivery token should be 2");
             assert_ne!(token1, token2, "Tokens must differ across deliveries");
 
             // ACK with old token should fail
             assert!(
-                !manager.ack(&q, msg1.id, token1).await,
+                !manager.ack(&q, msg1.id, token1).await.unwrap(),
                 "ACK with old token should fail"
             );
 
             // ACK with current token should succeed
             assert!(
-                manager.ack(&q, msg2.id, token2).await,
+                manager.ack(&q, msg2.id, token2).await.unwrap(),
                 "ACK with current token should succeed"
             );
         }
@@ -1646,11 +1641,11 @@ mod queue_tests {
                 .push(q.clone(), Bytes::from("msg1"), 0)
                 .await
                 .unwrap();
-            let msg = manager.pop(&q).await.unwrap();
+            let msg = manager.pop(&q).await.unwrap().unwrap();
 
             // Token 0 means "never delivered" — should be stale for an in-flight message
             assert!(
-                !manager.ack(&q, msg.id, 0).await,
+                !manager.ack(&q, msg.id, 0).await.unwrap(),
                 "ACK with token=0 on in-flight message should be stale"
             );
         }
@@ -1671,7 +1666,7 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let msg1 = manager.pop(&q).await.unwrap();
+            let msg1 = manager.pop(&q).await.unwrap().unwrap();
             let token1 = msg1.delivery_token;
 
             // Wait for timeout → process_expired requeues the message
@@ -1679,15 +1674,15 @@ mod queue_tests {
 
             // ACK with the old token must fail before the message is repopped
             assert!(
-                !manager.ack(&q, msg1.id, token1).await,
+                !manager.ack(&q, msg1.id, token1).await.unwrap(),
                 "ACK with old token after requeue should fail"
             );
 
             // A new pop assigns a new token; ACK with that token must succeed
-            let msg2 = manager.pop(&q).await.unwrap();
+            let msg2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(msg2.delivery_token, 2, "Second delivery token should be 2");
             assert!(
-                manager.ack(&q, msg2.id, msg2.delivery_token).await,
+                manager.ack(&q, msg2.id, msg2.delivery_token).await.unwrap(),
                 "ACK with current token should succeed"
             );
         }
@@ -1708,7 +1703,7 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let msg1 = manager.pop(&q).await.unwrap();
+            let msg1 = manager.pop(&q).await.unwrap().unwrap();
             let token1 = msg1.delivery_token;
 
             // Wait for timeout → process_expired requeues the message
@@ -1716,17 +1711,17 @@ mod queue_tests {
 
             // NACK with the old token must fail before the message is repopped
             assert!(
-                !manager.nack(&q, msg1.id, token1, "stale".to_string()).await,
+                !manager.nack(&q, msg1.id, token1, "stale".to_string()).await.unwrap(),
                 "NACK with old token after requeue should fail"
             );
 
             // A new pop assigns a new token; NACK with that token must succeed
-            let msg2 = manager.pop(&q).await.unwrap();
+            let msg2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(msg2.delivery_token, 2, "Second delivery token should be 2");
             assert!(
                 manager
                     .nack(&q, msg2.id, msg2.delivery_token, "valid".to_string())
-                    .await,
+                    .await.unwrap(),
                 "NACK with current token should succeed"
             );
         }
@@ -1736,7 +1731,7 @@ mod queue_tests {
             let (manager, _tmp) = setup_queue_manager().await;
             let q = format!("token_expired_ack_{}", Uuid::new_v4());
             let config = QueueCreateOptions {
-                visibility_timeout_ms: Some(1),
+                visibility_timeout_ms: Some(50),
                 max_deliveries: Some(5),
                 ..Default::default()
             };
@@ -1747,24 +1742,24 @@ mod queue_tests {
                 .await
                 .unwrap();
 
-            let msg1 = manager.pop(&q).await.unwrap();
+            let msg1 = manager.pop(&q).await.unwrap().unwrap();
             let token1 = msg1.delivery_token;
 
             // Wait just enough for the lease to expire but before the timeout task requeues it
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
 
             assert!(
-                !manager.ack(&q, msg1.id, token1).await,
+                !manager.ack(&q, msg1.id, token1).await.unwrap(),
                 "ACK after lease expiration should fail"
             );
 
             // Give the timeout task time to requeue and redeliver
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(120)).await;
 
-            let msg2 = manager.pop(&q).await.unwrap();
+            let msg2 = manager.pop(&q).await.unwrap().unwrap();
             assert_eq!(msg2.delivery_token, 2, "Redelivery should have a new token");
             assert!(
-                manager.ack(&q, msg2.id, msg2.delivery_token).await,
+                manager.ack(&q, msg2.id, msg2.delivery_token).await.unwrap(),
                 "ACK with new token should succeed"
             );
         }

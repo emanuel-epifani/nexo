@@ -26,7 +26,7 @@ pub enum BrokerErrorKind {
     Storage,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BrokerError {
     pub kind: BrokerErrorKind,
     pub message: String,

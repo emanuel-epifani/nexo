@@ -28,10 +28,25 @@
 //!    Count:       500000
 //!
 //! 📊 PUSH - Queue Throughput (Sequential)
-//!    Throughput:  315649 ops/sec
-//!    Total Time:  1.58s
-//!    Latency:     Avg: 2µs | p50: 1µs | p95: 1µs | p99: 4µs | Max: 69505µs
+//!    Throughput:  11983 ops/sec
+//!    Total Time:  41.72s
+//!    Latency:     Avg: 83µs | p50: 64µs | p95: 108µs | p99: 151µs | Max: 18331µs
 //!    Count:       500000
+//!    (durable commit per op — synchronous=NORMAL, one WAL commit per push)
+//!
+//! 📊 QUEUE PUSH concurrent x16
+//!    Throughput:  47332 ops/sec
+//!    Total Time:  1.69s
+//!    Latency:     Avg: 337µs | p50: 299µs | p95: 376µs | p99: 540µs | Max: 11331µs
+//!    Count:       80000
+//!    (drain merges backlogged pushes into shared commits — ~8 ops/commit here)
+//!
+//! 📊 QUEUE PUSH BATCH 100
+//!    Throughput:  56611 ops/sec
+//!    Total Time:  8.83s
+//!    Latency:     Avg: 1764µs | p50: 1193µs | p95: 1513µs | p99: 24038µs | Max: 32481µs
+//!    Count:       500000
+//!    (one request = one tx slice of 100 rows — ~97 messages per commit)
 //!
 //! 📊 STORE - Read (GET)
 //!    Throughput:  11417861 ops/sec
@@ -261,6 +276,94 @@ mod stress_tests {
                 (c - stats.3) as f64 / 1e6,
             );
             bench.stop();
+        }
+
+        /// Concurrent single pushes: the drain merges what concurrent
+        /// submitters leave in the channel — organic commit batching.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn bench_queue_throughput_concurrent() {
+            const TASKS: usize = 16;
+            const PER_TASK: usize = 5_000;
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("bench_concurrent_{}", Uuid::new_v4());
+            manager
+                .create_queue(q.clone(), QueueCreateOptions::default())
+                .await
+                .unwrap();
+
+            let stats = manager.sql_stats();
+            let mut bench =
+                Benchmark::start("QUEUE PUSH concurrent x16", TASKS * PER_TASK);
+            let mut handles = Vec::with_capacity(TASKS);
+            for _ in 0..TASKS {
+                let m = Arc::clone(&manager);
+                let queue = q.clone();
+                handles.push(tokio::spawn(async move {
+                    let mut latencies = Vec::with_capacity(PER_TASK);
+                    for _ in 0..PER_TASK {
+                        let t0 = Instant::now();
+                        m.push(queue.clone(), Bytes::from("data"), 0)
+                            .await
+                            .unwrap();
+                        latencies.push(t0.elapsed());
+                    }
+                    latencies
+                }));
+            }
+            for h in handles {
+                for d in h.await.unwrap() {
+                    bench.record(d);
+                }
+            }
+            bench.stop();
+            let (s, f, e, c) = manager.sql_stats();
+            println!(
+                "   SQL stmts:   {} ({:.2}/op) | flushes {} | exec {:.1}ms | commit {:.1}ms",
+                s - stats.0,
+                (s - stats.0) as f64 / (TASKS * PER_TASK) as f64,
+                f - stats.1,
+                (e - stats.2) as f64 / 1e6,
+                (c - stats.3) as f64 / 1e6,
+            );
+        }
+
+        /// Batched pushes: one request = one transaction slice carrying N rows —
+        /// the fast path the API is shaped around.
+        #[tokio::test]
+        async fn bench_queue_push_batch() {
+            const BATCH: usize = 100;
+            const BATCHES: usize = 5_000;
+            let (manager, _tmp) = setup_queue_manager().await;
+            let q = format!("bench_batch_{}", Uuid::new_v4());
+            manager
+                .create_queue(q.clone(), QueueCreateOptions::default())
+                .await
+                .unwrap();
+
+            let stats = manager.sql_stats();
+            let mut bench = Benchmark::start("QUEUE PUSH BATCH 100", BATCH * BATCHES);
+            let items: Vec<(Bytes, u8)> =
+                (0..BATCH).map(|_| (Bytes::from("data"), 0u8)).collect();
+            for _ in 0..BATCHES {
+                let start = Instant::now();
+                manager
+                    .push_batch(q.clone(), items.clone())
+                    .await
+                    .unwrap();
+                for _ in 0..BATCH {
+                    bench.record(start.elapsed());
+                }
+            }
+            bench.stop();
+            let (s, f, e, c) = manager.sql_stats();
+            println!(
+                "   SQL stmts:   {} ({:.2}/op) | flushes {} | exec {:.1}ms | commit {:.1}ms",
+                s - stats.0,
+                (s - stats.0) as f64 / (BATCH * BATCHES) as f64,
+                f - stats.1,
+                (e - stats.2) as f64 / 1e6,
+                (c - stats.3) as f64 / 1e6,
+            );
         }
     }
 

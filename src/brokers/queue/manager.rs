@@ -1,428 +1,296 @@
-//! Queue Manager: Shared-state router and lifecycle manager for queues.
-//! Each queue is an Arc<QueueShared> with a Mutex<QueueInner> for state
-//! and a Notify for long-polling wakeup.
+//! QueueManager: the public, transport-agnostic API of the queue engine.
+//!
+//! Structure: submitters enqueue `QueueRequest`s on a bounded channel with a
+//! byte-budget admission gate; a dedicated writer thread (`worker.rs`) owns
+//! the shared SQLite database and replies over oneshot channels after commit.
+//! Runtime memory holds only watches (long-poll wakeups), the closed flag and
+//! the expiry timer — all durable state lives in SQLite.
+//!
+//! Key flow: `submit()` validates, charges admission, sends the command, and
+//! returns a `PendingReply`; convenience methods (`push`, `consume_batch`,
+//! ...) build requests on top of the same path. `consume_batch` additionally
+//! implements the long-poll loop: an empty consume parks on the queue's watch
+//! and is woken by post-commit effects.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use dashmap::DashMap;
-use parking_lot::{Mutex, MutexGuard};
-use tokio::sync::{Mutex as TokioMutex, Notify};
-use tokio::time::{sleep_until, Instant};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::brokers::queue::config::SystemQueueConfig;
-use crate::brokers::queue::domain::dlq::{DlqMessage, DlqState};
-use crate::brokers::queue::domain::persistence::{QueueStore, StorageOp};
-use crate::brokers::queue::domain::queue::{
-    current_time_ms, Message, QueueConfig, QueueDefinition, QueueState,
-};
+use crate::brokers::queue::domain::definition::{QueueConfig, QueueDefinition};
+use crate::brokers::queue::domain::message::{DlqMessage, Message, PushItem};
+use crate::brokers::queue::domain::ops::{Command, QueueReply, QueueRequest};
+use crate::brokers::queue::domain::recipes;
+use crate::brokers::queue::domain::storage::Store;
 use crate::brokers::queue::options::QueueCreateOptions;
+use crate::brokers::queue::worker::{self, now_millis, Admission, WatchMap};
 use crate::brokers::{
-    config_conflict_error, validate_resource_name, BrokerError, ProvisionOutcome, ProvisionResult,
+    validate_resource_name, BrokerError, BrokerErrorKind, ProvisionResult,
 };
+use crate::protocol::QUEUE_MAX_PUSH_ITEMS;
 
-// ==========================================
-// SHARED STATE
-// ==========================================
+/// Visibility-expiry sweep cadence. Deadlines are evaluated against durable
+/// `visible_at` values inside the writer transaction, so this only bounds
+/// redelivery latency.
+const EXPIRY_SWEEP_MS: u64 = 50;
 
-struct QueueShared {
-    inner: Mutex<QueueInner>,
-    notify: Notify,
-    store: QueueStore,
+/// Charged admission weight of one pushed item: the payload plus its
+/// storage-row overhead (id, counters, timestamps).
+const PUSH_ITEM_OVERHEAD: usize = 64;
+
+/// Completion handle for a submitted command.
+pub struct PendingReply {
+    rx: oneshot::Receiver<Result<QueueReply, BrokerError>>,
 }
 
-struct QueueInner {
-    state: QueueState,
-    dlq: DlqState,
-    config: QueueConfig,
+impl PendingReply {
+    pub async fn wait(self) -> Result<QueueReply, BrokerError> {
+        self.rx
+            .await
+            .map_err(|_| BrokerError::storage("Queue storage unavailable"))?
+    }
 }
-
-// ==========================================
-// QUEUE MANAGER
-// ==========================================
 
 pub struct QueueManager {
-    queues: Arc<DashMap<String, Arc<QueueShared>>>,
+    cmd_tx: mpsc::Sender<Command>,
+    admission: Arc<Admission>,
+    watches: Arc<WatchMap>,
     config: Arc<SystemQueueConfig>,
     cancel: CancellationToken,
-    /// Serializes create/delete lifecycle operations to prevent interleaving
-    lifecycle_mutex: TokioMutex<()>,
+    closed: AtomicBool,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl QueueManager {
-    fn validate_queue_name(name: &str) -> Result<(), BrokerError> {
-        validate_resource_name("queue", name)
-    }
+    /// Open the shared database (fail-closed on any layout/schema error),
+    /// recover, and start the writer + expiry timer.
+    pub async fn new(config: Arc<SystemQueueConfig>) -> Result<Self, BrokerError> {
+        let root = PathBuf::from(&config.persistence_path);
+        let (store, continuations) = tokio::task::spawn_blocking(move || Store::open(&root))
+            .await
+            .map_err(|e| BrokerError::storage(format!("Queue storage startup failed: {e}")))??;
 
-    fn config_json(config: &QueueConfig) -> serde_json::Value {
-        serde_json::json!({
-            "visibilityTimeoutMs": config.visibility_timeout_ms,
-            "maxDeliveries": config.max_deliveries,
-        })
-    }
-
-    pub fn new(system_config: Arc<SystemQueueConfig>) -> Self {
-        let queues = Arc::new(DashMap::new());
-        let cancel = CancellationToken::new();
-
-        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
-        if let Err(e) = std::fs::create_dir_all(&persistence_path) {
-            error!(
-                "Failed to create queue data directory at {:?}: {}",
-                persistence_path, e
-            );
-        }
+        let (cmd_tx, rx) = mpsc::channel(config.storage_queue_capacity.max(1));
+        let admission = Arc::new(Admission::new(config.storage_queue_max_bytes));
+        let watches = Arc::new(WatchMap::new());
+        let handle = worker::spawn(
+            store,
+            rx,
+            continuations,
+            Arc::clone(&watches),
+            Arc::clone(&admission),
+        );
 
         let manager = Self {
-            queues: queues.clone(),
-            config: system_config.clone(),
-            cancel: cancel.clone(),
-            lifecycle_mutex: TokioMutex::new(()),
+            cmd_tx,
+            admission,
+            watches,
+            config,
+            cancel: CancellationToken::new(),
+            closed: AtomicBool::new(false),
+            worker: Mutex::new(Some(handle)),
         };
-
-        // Warm start: discover and restore queues from filesystem
-        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
-        if persistence_path.exists() {
-            if let Ok(entries) = std::fs::read_dir(&persistence_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                            if filename.ends_with(".db")
-                                && !filename.ends_with(".db-wal")
-                                && !filename.ends_with(".db-shm")
-                            {
-                                let queue_name = filename.trim_end_matches(".db").to_string();
-
-                                if Self::validate_queue_name(&queue_name).is_err() {
-                                    error!("[QueueManager] Skipping queue with invalid name during warm start: '{}'", queue_name);
-                                    continue;
-                                }
-
-                                let config_path =
-                                    persistence_path.join(format!("{}.config.json", queue_name));
-                                let config = if let Ok(data) = std::fs::read_to_string(&config_path)
-                                {
-                                    serde_json::from_str(&data).unwrap_or_else(|_| {
-                                        QueueConfig::from_options(
-                                            QueueCreateOptions::default(),
-                                            &system_config,
-                                        )
-                                    })
-                                } else {
-                                    QueueConfig::from_options(
-                                        QueueCreateOptions::default(),
-                                        &system_config,
-                                    )
-                                };
-
-                                let shared = match Self::build_queue(
-                                    queue_name.clone(),
-                                    config,
-                                    &system_config,
-                                ) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        error!("[QueueManager] Warm start: Failed to build queue '{}': {}", queue_name, e);
-                                        continue;
-                                    }
-                                };
-                                queues.insert(queue_name.clone(), shared);
-                                info!("[QueueManager] Warm start: Restored queue '{}'", queue_name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        manager.spawn_timeout_task();
-        manager
+        manager.spawn_timer();
+        Ok(manager)
     }
 
-    // ==========================================
-    // INTERNAL HELPERS
-    // ==========================================
-
-    fn build_queue(
-        name: String,
-        config: QueueConfig,
-        system_config: &SystemQueueConfig,
-    ) -> Result<Arc<QueueShared>, String> {
-        let persistence_path = std::path::PathBuf::from(&system_config.persistence_path);
-        let db_path = persistence_path.join(format!("{}.db", name));
-        let store = QueueStore::new(
-            db_path,
-            system_config.default_flush_ms,
-            system_config.writer_batch_size,
-            system_config.storage_channel_capacity,
-        )?;
-
-        let mut main_state = QueueState::new();
-        let mut dlq_state = DlqState::new();
-
-        match store.recover() {
-            Ok((main_messages, dlq_messages)) => {
-                let main_count = main_messages.len();
-                let dlq_count = dlq_messages.len();
-
-                for msg in main_messages {
-                    main_state.restore(msg);
-                }
-                for msg in dlq_messages {
-                    dlq_state.restore(msg);
-                }
-
-                if main_count > 0 || dlq_count > 0 {
-                    info!(
-                        "Queue '{}': Recovered {} main + {} DLQ messages from storage",
-                        name, main_count, dlq_count
-                    );
-                }
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Queue '{}': Persistence recovery failed: {}",
-                    name, e
-                ));
-            }
-        }
-
-        Ok(Arc::new(QueueShared {
-            inner: Mutex::new(QueueInner {
-                state: main_state,
-                dlq: dlq_state,
-                config,
-            }),
-            notify: Notify::new(),
-            store,
-        }))
+    /// Diagnostics for benchmarks: `(sql statements, writer batches, exec ns,
+    /// commit ns)` since process start. Snapshot and diff around a workload.
+    #[doc(hidden)]
+    pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
+        (
+            recipes::SQL_STATEMENTS.load(Ordering::Relaxed),
+            worker::BATCHES.load(Ordering::Relaxed),
+            worker::EXEC_NS.load(Ordering::Relaxed),
+            worker::COMMIT_NS.load(Ordering::Relaxed),
+        )
     }
 
-    fn spawn_timeout_task(&self) {
-        let queues = self.queues.clone();
+    fn spawn_timer(&self) {
+        let tx = self.cmd_tx.clone();
         let cancel = self.cancel.clone();
-
         tokio::spawn(async move {
-            let mut timer = tokio::time::interval(Duration::from_millis(50));
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+            let mut tick = tokio::time::interval(Duration::from_millis(EXPIRY_SWEEP_MS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
+                    _ = tick.tick() => {
+                        // A full channel means the writer is saturated: skip
+                        // this tick instead of queueing maintenance behind
+                        // client work — expiry re-runs next tick.
+                        let _ = tx.try_send(Command {
+                            op: QueueRequest::ExpireLeases { now_ms: now_millis() },
+                            bytes: 0,
+                            reply: None,
+                        });
+                    }
                     _ = cancel.cancelled() => break,
-                    _ = timer.tick() => {}
-                }
-
-                for entry in queues.iter() {
-                    let shared = entry.value().clone();
-                    let now = current_time_ms();
-
-                    let (requeued, dlq_msgs) = {
-                        let mut inner = Self::lock(&shared.inner);
-
-                        let should_process = inner
-                            .state
-                            .next_inflight_timeout()
-                            .map(|ts| ts <= now)
-                            .unwrap_or(false);
-                        if !should_process {
-                            continue;
-                        }
-
-                        let max_deliveries = inner.config.max_deliveries;
-                        let (requeued, mut dlq_msgs) = inner.state.process_expired(max_deliveries);
-
-                        for ref mut dlq_msg in &mut dlq_msgs {
-                            inner.dlq.push(dlq_msg);
-                        }
-
-                        (requeued, dlq_msgs)
-                    };
-
-                    if !requeued.is_empty() {
-                        if let Err(e) = shared
-                            .store
-                            .execute(StorageOp::UpdateState(requeued.clone()))
-                            .await
-                        {
-                            error!("Failed to persist timeout requeue: {}", e);
-                        }
-                    }
-                    for dlq_msg in &dlq_msgs {
-                        if let Err(e) = shared
-                            .store
-                            .execute(StorageOp::MoveToDLQ(dlq_msg.clone()))
-                            .await
-                        {
-                            error!("Failed to persist timeout dlq: {}", e);
-                        }
-                    }
-
-                    if requeued.is_empty() && dlq_msgs.is_empty() {
-                        continue;
-                    }
-
-                    if !requeued.is_empty() {
-                        shared.notify.notify_waiters();
-                    }
                 }
             }
         });
     }
 
-    #[inline]
-    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock()
+    // ------------------------------------------------------------------
+    // Submission path
+    // ------------------------------------------------------------------
+
+    /// Validate + admit + enqueue. Returns once the command is queued;
+    /// the reply arrives on `PendingReply` after the commit.
+    pub async fn submit(&self, request: QueueRequest) -> Result<PendingReply, BrokerError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(BrokerError::storage("Queue storage is shut down"));
+        }
+        Self::validate(&request)?;
+        let bytes = Self::admission_bytes(&request);
+        self.admission.acquire(bytes).await;
+        let (tx, rx) = oneshot::channel();
+        match self
+            .cmd_tx
+            .send(Command {
+                op: request,
+                bytes,
+                reply: Some(tx),
+            })
+            .await
+        {
+            Ok(()) => Ok(PendingReply { rx }),
+            Err(_) => {
+                self.admission.release(bytes);
+                Err(BrokerError::storage("Queue storage unavailable"))
+            }
+        }
     }
 
-    #[inline]
-    fn get_queue(&self, name: &str) -> Option<Arc<QueueShared>> {
-        self.queues.get(name).map(|r| r.value().clone())
+    /// Pre-queue validation: cheap checks that must fail before the command
+    /// consumes channel space.
+    fn validate(request: &QueueRequest) -> Result<(), BrokerError> {
+        let name = match request {
+            QueueRequest::CreateQueue { name, .. }
+            | QueueRequest::DeleteQueue { name }
+            | QueueRequest::QueueExists { name }
+            | QueueRequest::DescribeQueue { name }
+            | QueueRequest::Consume { name, .. }
+            | QueueRequest::Ack { name, .. }
+            | QueueRequest::Nack { name, .. }
+            | QueueRequest::PeekDlq { name, .. }
+            | QueueRequest::MoveToQueue { name, .. }
+            | QueueRequest::DeleteDlq { name, .. }
+            | QueueRequest::PurgeDlq { name } => name,
+            QueueRequest::Push { name, items } => {
+                validate_resource_name("queue", name)?;
+                if items.len() > QUEUE_MAX_PUSH_ITEMS {
+                    return Err(BrokerError::invalid_argument(format!(
+                        "Push batch too large: {} items (max: {})",
+                        items.len(),
+                        QUEUE_MAX_PUSH_ITEMS
+                    )));
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        validate_resource_name("queue", name)
     }
 
-    // ==========================================
-    // PUBLIC API
-    // ==========================================
+    fn admission_bytes(request: &QueueRequest) -> usize {
+        match request {
+            QueueRequest::Push { items, .. } => items
+                .iter()
+                .map(|i| PUSH_ITEM_OVERHEAD + i.payload.len())
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    fn unexpected(reply: QueueReply) -> BrokerError {
+        BrokerError::new(
+            BrokerErrorKind::Internal,
+            format!("Unexpected queue reply variant: {reply:?}"),
+        )
+    }
+
+    fn queue_watcher(&self, name: &str) -> watch::Receiver<u64> {
+        self.watches
+            .entry(name.to_string())
+            .or_insert_with(|| watch::channel(0u64).0)
+            .subscribe()
+    }
+
+    // ------------------------------------------------------------------
+    // Public API — thin wrappers over submit()
+    // ------------------------------------------------------------------
 
     pub async fn create_queue(
         &self,
         name: String,
         options: QueueCreateOptions,
     ) -> Result<ProvisionResult<QueueDefinition>, BrokerError> {
-        Self::validate_queue_name(&name)?;
-
-        let _guard = self.lifecycle_mutex.lock().await;
+        validate_resource_name("queue", &name)?;
         let requested = QueueConfig::from_options(options, &self.config);
-
-        // Path traversal protection
-        let persistence_path = std::path::PathBuf::from(&self.config.persistence_path);
-        let db_path = persistence_path.join(format!("{}.db", name));
-        if let Ok(meta) = std::fs::symlink_metadata(&db_path) {
-            if meta.file_type().is_symlink() {
-                return Err(BrokerError::invalid_argument(
-                    "Invalid queue path: symbolic links are not allowed",
-                ));
-            }
-        }
-
-        use dashmap::mapref::entry::Entry;
-
-        match self.queues.entry(name.clone()) {
-            Entry::Occupied(entry) => {
-                let actual = Self::lock(&entry.get().inner).config.clone();
-                if actual != requested {
-                    return Err(config_conflict_error(
-                        "queue",
-                        &name,
-                        Self::config_json(&requested),
-                        Self::config_json(&actual),
-                    ));
-                }
-                Ok(ProvisionResult {
-                    outcome: ProvisionOutcome::Unchanged,
-                    definition: QueueDefinition {
-                        name,
-                        config: actual,
-                    },
-                })
-            }
-            Entry::Vacant(entry) => {
-                let config_path = persistence_path.join(format!("{}.config.json", name));
-                let data = serde_json::to_string_pretty(&requested).map_err(|error| {
-                    BrokerError::storage(format!(
-                        "Failed to serialize queue configuration: {}",
-                        error
-                    ))
-                })?;
-                std::fs::write(&config_path, data).map_err(|error| {
-                    BrokerError::storage(format!("Failed to write queue configuration: {}", error))
-                })?;
-
-                let shared = Self::build_queue(name.clone(), requested.clone(), &self.config)
-                    .map_err(BrokerError::storage)?;
-                entry.insert(shared);
-                Ok(ProvisionResult {
-                    outcome: ProvisionOutcome::Created,
-                    definition: QueueDefinition {
-                        name,
-                        config: requested,
-                    },
-                })
-            }
+        let reply = self
+            .submit(QueueRequest::CreateQueue { name, requested })
+            .await?
+            .wait()
+            .await?;
+        match reply {
+            QueueReply::Provision(result) => Ok(*result),
+            other => Err(Self::unexpected(other)),
         }
     }
 
+    /// Idempotent: deleting a missing queue succeeds.
     pub async fn delete_queue(&self, name: String) -> Result<(), BrokerError> {
-        Self::validate_queue_name(&name)?;
-
-        let _guard = self.lifecycle_mutex.lock().await;
-
-        if let Some((_, shared)) = self.queues.remove(&name) {
-            shared.store.shutdown().await;
-        }
-
-        // Safe: writer has flushed and closed
-        let base_path = std::path::PathBuf::from(&self.config.persistence_path);
-        let db_path = base_path.join(format!("{}.db", name));
-        let wal_path = base_path.join(format!("{}.db-wal", name));
-        let shm_path = base_path.join(format!("{}.db-shm", name));
-        let config_path = base_path.join(format!("{}.config.json", name));
-
-        if db_path.exists() {
-            std::fs::remove_file(&db_path).map_err(|error| {
-                BrokerError::storage(format!("Failed to delete queue DB file: {}", error))
-            })?;
-        }
-        // WAL/SHM may not exist
-        let _ = std::fs::remove_file(wal_path);
-        let _ = std::fs::remove_file(shm_path);
-        // Config may not exist
-        let _ = std::fs::remove_file(config_path);
-
-        Ok(())
-    }
-
-    pub async fn push_batch(
-        &self,
-        queue_name: String,
-        items: Vec<(Bytes, u8)>,
-    ) -> Result<(), BrokerError> {
-        if items.is_empty() {
-            return Ok(());
-        }
-
-        let shared = self
-            .get_queue(&queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
-        let now = current_time_ms();
-
-        let mut msgs = Vec::with_capacity(items.len());
-        for (payload, priority) in items {
-            msgs.push(Message::new(payload, priority, now));
-        }
+        match self
+            .submit(QueueRequest::DeleteQueue { name })
+            .await?
+            .wait()
+            .await?
         {
-            let mut inner = Self::lock(&shared.inner);
-            for msg in &mut msgs {
-                inner.state.push(msg);
-            }
+            QueueReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
         }
-
-        shared
-            .store
-            .execute(StorageOp::Insert(msgs))
-            .await
-            .map_err(BrokerError::storage)?;
-
-        shared.notify.notify_waiters();
-
-        Ok(())
     }
 
+    /// Invalid names report `false` (the resource cannot exist); storage
+    /// failures propagate.
+    pub async fn exists(&self, name: &str) -> Result<bool, BrokerError> {
+        if validate_resource_name("queue", name).is_err() {
+            return Ok(false);
+        }
+        match self
+            .submit(QueueRequest::QueueExists {
+                name: name.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Bool(found) => Ok(found),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn describe(&self, name: &str) -> Result<QueueDefinition, BrokerError> {
+        match self
+            .submit(QueueRequest::DescribeQueue {
+                name: name.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Definition(def) => Ok(*def),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    /// Push one message.
     pub async fn push(
         &self,
         queue_name: String,
@@ -432,343 +300,251 @@ impl QueueManager {
         self.push_batch(queue_name, vec![(payload, priority)]).await
     }
 
-    pub async fn pop(&self, queue_name: &str) -> Option<Message> {
-        let shared = self.get_queue(queue_name)?;
-
-        let now = current_time_ms();
-        let msg_opt = {
-            let mut inner = Self::lock(&shared.inner);
-            let vt = inner.config.visibility_timeout_ms;
-            inner.state.pop(vt, now)
-        };
-
-        if let Some(ref m) = msg_opt {
-            if let Err(e) = shared
-                .store
-                .execute(StorageOp::UpdateState(vec![m.clone()]))
-                .await
-            {
-                error!("Failed to persist pop state: {}", e);
-            }
-        }
-
-        msg_opt
-    }
-
-    pub async fn ack(&self, queue_name: &str, id: Uuid, delivery_token: u64) -> bool {
-        let shared = match self.get_queue(queue_name) {
-            Some(s) => s,
-            None => return false,
-        };
-
-        let ok = {
-            let mut inner = Self::lock(&shared.inner);
-            inner.state.ack(id, delivery_token)
-        };
-
-        if ok {
-            if let Err(e) = shared.store.execute(StorageOp::Delete(id)).await {
-                error!("Failed to persist ack: {}", e);
-            }
-        }
-
-        ok
-    }
-
-    pub async fn nack(
+    /// Atomic batch push: the batch commits or fails as a unit.
+    pub async fn push_batch(
         &self,
-        queue_name: &str,
-        id: Uuid,
-        delivery_token: u64,
-        reason: String,
-    ) -> bool {
-        let shared = match self.get_queue(queue_name) {
-            Some(s) => s,
-            None => return false,
-        };
-
-        let (requeued, dlq_msg) = {
-            let mut inner = Self::lock(&shared.inner);
-            let max_deliveries = inner.config.max_deliveries;
-            let (requeued, mut dlq_msg) =
-                inner.state.nack(id, delivery_token, reason, max_deliveries);
-
-            if let Some(ref mut dlq_message) = dlq_msg {
-                inner.dlq.push(dlq_message);
-            }
-
-            (requeued, dlq_msg)
-        };
-
-        if let Some(ref msg) = requeued {
-            if let Err(e) = shared
-                .store
-                .execute(StorageOp::UpdateState(vec![msg.clone()]))
-                .await
-            {
-                error!("Failed to persist nack requeue: {}", e);
-            }
+        queue_name: String,
+        items: Vec<(Bytes, u8)>,
+    ) -> Result<(), BrokerError> {
+        if items.is_empty() {
+            return Ok(());
         }
-        if let Some(ref dlq_message) = dlq_msg {
-            if let Err(e) = shared
-                .store
-                .execute(StorageOp::MoveToDLQ(dlq_message.clone()))
-                .await
-            {
-                error!("Failed to persist nack dlq: {}", e);
-            }
+        let items = items
+            .into_iter()
+            .map(|(payload, priority)| PushItem { payload, priority })
+            .collect();
+        match self
+            .submit(QueueRequest::Push {
+                name: queue_name,
+                items,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
         }
-
-        if requeued.is_some() {
-            shared.notify.notify_waiters();
-            return true;
-        }
-
-        dlq_msg.is_some()
     }
 
+    /// Single non-blocking consume. Missing queues report `None` (the
+    /// resource cannot hold messages), storage failures propagate.
+    pub async fn pop(&self, queue_name: &str) -> Result<Option<Message>, BrokerError> {
+        match self
+            .consume_batch(queue_name.to_string(), Some(1), Some(0))
+            .await
+        {
+            Ok(mut msgs) => Ok(msgs.pop()),
+            Err(e) if e.kind == BrokerErrorKind::ResourceNotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Consume up to `max` messages, long-polling up to `wait_ms` when the
+    /// queue is empty. An empty page parks on the queue's watch until a
+    /// post-commit wakeup or the deadline elapses.
     pub async fn consume_batch(
         &self,
         queue_name: String,
         max: Option<usize>,
         wait_ms: Option<u64>,
     ) -> Result<Vec<Message>, BrokerError> {
-        let shared = self
-            .get_queue(&queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
         let max_val = max.unwrap_or(self.config.default_batch_size);
         let wait_val = wait_ms.unwrap_or(self.config.default_wait_ms);
-
         if max_val == 0 {
             return Err(BrokerError::invalid_argument("batch_size must be >= 1"));
         }
-
-        let msgs = {
-            let mut inner = Self::lock(&shared.inner);
-            let vt = inner.config.visibility_timeout_ms;
-            inner.state.take_batch(max_val, vt)
-        };
-        if !msgs.is_empty() {
-            shared
-                .store
-                .execute(StorageOp::UpdateState(msgs.clone()))
-                .await
-                .map_err(BrokerError::storage)?;
-            return Ok(msgs);
-        }
-
-        if wait_val == 0 {
-            return Ok(vec![]);
-        }
-
-        let deadline = Instant::now() + Duration::from_millis(wait_val);
-
+        let deadline = (wait_val > 0).then(|| Instant::now() + Duration::from_millis(wait_val));
         loop {
-            // Register interest before checking to avoid missed wakeups
-            let notified = shared.notify.notified();
-
-            let msgs = {
-                let mut inner = Self::lock(&shared.inner);
-                let vt = inner.config.visibility_timeout_ms;
-                inner.state.take_batch(max_val, vt)
+            // Subscribe BEFORE submitting so a commit landing between the two
+            // is observed as a version bump instead of a missed wakeup.
+            let mut watcher = self.queue_watcher(&queue_name);
+            let version = *watcher.borrow();
+            let reply = self
+                .submit(QueueRequest::Consume {
+                    name: queue_name.clone(),
+                    limit: max_val,
+                })
+                .await?
+                .wait()
+                .await?;
+            match reply {
+                QueueReply::Consumed(messages) if !messages.is_empty() => {
+                    return Ok(messages)
+                }
+                QueueReply::Consumed(_) => {}
+                other => return Err(Self::unexpected(other)),
+            }
+            let Some(deadline) = deadline else {
+                return Ok(Vec::new());
             };
-            if !msgs.is_empty() {
-                shared
-                    .store
-                    .execute(StorageOp::UpdateState(msgs.clone()))
-                    .await
-                    .map_err(BrokerError::storage)?;
-                return Ok(msgs);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(Vec::new());
             }
-
-            if Instant::now() >= deadline {
-                return Ok(vec![]);
+            if *watcher.borrow() != version {
+                continue; // work arrived between subscribe and submit
             }
-
             tokio::select! {
-                _ = notified => {}
-                _ = sleep_until(deadline) => return Ok(vec![]),
+                // Sender dropped (queue deleted) also resolves the wait:
+                // the resubmission then fails NOT_FOUND.
+                _ = watcher.changed() => continue,
+                _ = tokio::time::sleep(remaining) => return Ok(Vec::new()),
             }
         }
     }
 
-    pub async fn shutdown(&self) {
-        self.cancel.cancel();
-        for entry in self.queues.iter() {
-            entry.value().store.shutdown().await;
+    /// Complete the delivery identified by `delivery_token`. Stale tokens and
+    /// expired leases report `false`.
+    pub async fn ack(
+        &self,
+        queue_name: &str,
+        id: Uuid,
+        delivery_token: u64,
+    ) -> Result<bool, BrokerError> {
+        match self
+            .submit(QueueRequest::Ack {
+                name: queue_name.to_string(),
+                id,
+                delivery_token,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Bool(done) => Ok(done),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    /// Writer diagnostics: (sql statements, flushes, exec ns, commit ns).
-    /// Benchmarks read the delta across a workload — counters are process-wide
-    /// and shared by every queue.
-    #[doc(hidden)]
-    pub fn sql_stats(&self) -> (u64, u64, u64, u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        (
-            crate::brokers::queue::domain::persistence::SQL_STATEMENTS.load(Relaxed),
-            crate::brokers::queue::domain::persistence::FLUSHES.load(Relaxed),
-            crate::brokers::queue::domain::persistence::EXEC_NS.load(Relaxed),
-            crate::brokers::queue::domain::persistence::COMMIT_NS.load(Relaxed),
-        )
-    }
-
-    pub async fn exists(&self, name: &str) -> bool {
-        if Self::validate_queue_name(name).is_err() {
-            return false;
+    /// Requeue (or dead-letter at `max_deliveries`) the leased delivery.
+    pub async fn nack(
+        &self,
+        queue_name: &str,
+        id: Uuid,
+        delivery_token: u64,
+        reason: String,
+    ) -> Result<bool, BrokerError> {
+        match self
+            .submit(QueueRequest::Nack {
+                name: queue_name.to_string(),
+                id,
+                delivery_token,
+                reason,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Bool(done) => Ok(done),
+            other => Err(Self::unexpected(other)),
         }
-        self.queues.contains_key(name)
-    }
-
-    pub async fn describe(&self, name: &str) -> Result<QueueDefinition, BrokerError> {
-        Self::validate_queue_name(name)?;
-        let shared = self
-            .get_queue(name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", name)))?;
-        let config = Self::lock(&shared.inner).config.clone();
-        Ok(QueueDefinition {
-            name: name.to_string(),
-            config,
-        })
     }
 
     // --- DLQ Operations ---
 
-    /// Peek messages from DLQ without consuming them
+    /// Peek DLQ entries (most recent failure first) without consuming them.
     pub async fn peek_dlq(
         &self,
         queue_name: &str,
         limit: usize,
         offset: usize,
     ) -> Result<(usize, Vec<DlqMessage>), BrokerError> {
-        let shared = self
-            .get_queue(queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
-        let inner = Self::lock(&shared.inner);
-        Ok(inner.dlq.peek(offset, limit))
+        match self
+            .submit(QueueRequest::PeekDlq {
+                name: queue_name.to_string(),
+                limit,
+                offset,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::DlqPage(total, items) => Ok((total, items)),
+            other => Err(Self::unexpected(other)),
+        }
     }
 
-    /// Move a message from DLQ back to main queue (replay/retry)
+    /// Replay a DLQ entry back to the live queue (fresh delivery count).
     pub async fn move_to_queue(
         &self,
         queue_name: &str,
         message_id: Uuid,
     ) -> Result<bool, BrokerError> {
-        let shared = self
-            .get_queue(queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
-        let new_msg = {
-            let mut inner = Self::lock(&shared.inner);
-            if let Some(dlq_msg) = inner.dlq.remove(&message_id) {
-                let mut new_msg = dlq_msg.into_message();
-                inner.state.push(&mut new_msg);
-                Some(new_msg)
-            } else {
-                None
-            }
-        };
-
-        if let Some(new_msg) = new_msg {
-            shared
-                .store
-                .execute(StorageOp::MoveToMain(new_msg.clone()))
-                .await
-                .map_err(BrokerError::storage)?;
-            shared.notify.notify_waiters();
-            Ok(true)
-        } else {
-            Ok(false)
+        match self
+            .submit(QueueRequest::MoveToQueue {
+                name: queue_name.to_string(),
+                id: message_id,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Bool(done) => Ok(done),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    /// Delete a specific message from DLQ
+    /// Delete a specific entry from the DLQ.
     pub async fn delete_dlq(
         &self,
         queue_name: &str,
         message_id: Uuid,
     ) -> Result<bool, BrokerError> {
-        let shared = self
-            .get_queue(queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
-        let removed = {
-            let mut inner = Self::lock(&shared.inner);
-            inner.dlq.remove(&message_id).is_some()
-        };
-
-        if removed {
-            shared
-                .store
-                .execute(StorageOp::DeleteDLQ(message_id))
-                .await
-                .map_err(BrokerError::storage)?;
+        match self
+            .submit(QueueRequest::DeleteDlq {
+                name: queue_name.to_string(),
+                id: message_id,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Bool(done) => Ok(done),
+            other => Err(Self::unexpected(other)),
         }
-
-        Ok(removed)
     }
 
-    /// Purge all messages from DLQ
+    /// Remove every DLQ entry. Returns the number removed.
     pub async fn purge_dlq(&self, queue_name: &str) -> Result<usize, BrokerError> {
-        let shared = self
-            .get_queue(queue_name)
-            .ok_or_else(|| BrokerError::not_found(format!("Queue '{}' not found", queue_name)))?;
-
-        let count = {
-            let mut inner = Self::lock(&shared.inner);
-            let count = inner.dlq.len();
-            inner.dlq.clear();
-            count
-        };
-
-        shared
-            .store
-            .execute(StorageOp::PurgeDLQ)
-            .await
-            .map_err(BrokerError::storage)?;
-
-        Ok(count)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn queue_names_cannot_escape_the_persistence_directory() {
-        for invalid in [
-            "",
-            ".",
-            "..",
-            "../outside",
-            "nested/queue",
-            "nested\\queue",
-            "/tmp/queue",
-            "queue name",
-        ] {
-            assert!(
-                QueueManager::validate_queue_name(invalid).is_err(),
-                "{invalid:?} must be rejected"
-            );
+        match self
+            .submit(QueueRequest::PurgeDlq {
+                name: queue_name.to_string(),
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            QueueReply::Count(n) => Ok(n),
+            other => Err(Self::unexpected(other)),
         }
     }
 
-    #[test]
-    fn queue_names_accept_valid_characters() {
-        assert!(QueueManager::validate_queue_name("orders_42").is_ok());
-        assert!(QueueManager::validate_queue_name("email.queue").is_ok());
-        assert!(QueueManager::validate_queue_name("high-priority").is_ok());
-        assert!(QueueManager::validate_queue_name("a").is_ok());
-    }
-
-    #[test]
-    fn queue_names_reject_too_long() {
-        let long = "a".repeat(256);
-        assert!(QueueManager::validate_queue_name(&long).is_err());
-        let max = "a".repeat(255);
-        assert!(QueueManager::validate_queue_name(&max).is_ok());
+    /// Stop the timer, drain admitted work, checkpoint the WAL and join the
+    /// writer thread. `closed` is set first so no new work is admitted while
+    /// the barrier command is in flight; the shutdown itself bypasses
+    /// `submit` (which rejects once closed).
+    pub async fn shutdown(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.cancel.cancel();
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(Command {
+                op: QueueRequest::Shutdown,
+                bytes: 0,
+                reply: Some(tx),
+            })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+        let handle = self.worker.lock().ok().and_then(|mut h| h.take());
+        if let Some(handle) = handle {
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+        }
     }
 }

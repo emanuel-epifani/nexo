@@ -11,8 +11,8 @@ export async function run(spec: Spec): Promise<Row[]> {
     port: Number(env('NEXO_PORT', '7654')),
   });
   const conn: ChannelModel = await amqplib.connect(env('RABBITMQ_URL', 'amqp://127.0.0.1:5672'));
-  // Two durability tiers: nexo push confirms on enqueue to the persistence
-  // writer (async commit, synchronous=OFF), so it sits between rabbit-d
+  // Two durability tiers: nexo push confirms after the shared-WAL
+  // transaction commits (synchronous=NORMAL), so it sits between rabbit-d
   // (disk + confirm) and rabbit-v (fire-and-forget). Report both.
   const chD: ConfirmChannel = await conn.createConfirmChannel();
   const chV = await conn.createChannel();

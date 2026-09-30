@@ -61,11 +61,12 @@ Endpoints are overridable via env: `NEXO_HOST`/`NEXO_PORT`, `REDIS_URL`,
   instead of one "equivalent" config: `rabbit-d` (durable queue + persistent
   msgs + publisher confirms + manual ack) and `rabbit-v` (exclusive transient
   queue + non-persistent msgs + no confirms + auto-ack). nexo.queue push is
-  confirmed once the op is enqueued to the async persistence writer
-  (`synchronous=OFF`, batched commit) — semantically between the two tiers:
-  server-acknowledged but not yet durable. Read each nexo row against the tier
-  it actually matches. MQTT uses QoS 1 publish to match nexo's
-  server-confirmed publish.
+  confirmed only after its transaction commits to the shared SQLite WAL
+  (`synchronous=NORMAL`, batched commits) — crash-consistent at process level,
+  with a residual power-loss window on un-fsynced commits: semantically just
+  below `rabbit-d` (which fsyncs on confirm), clearly above `rabbit-v`.
+  Read each nexo row against the tier it actually matches. MQTT uses QoS 1
+  publish to match nexo's server-confirmed publish.
 - **Same machine, same network**: all services run in one compose project; both
   sides pay the same docker bridge cost.
 - **Isolated namespaces**: each workload uses fresh queue/stream/topic names so a
