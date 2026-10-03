@@ -25,17 +25,23 @@ use tracing::warn;
 use crate::brokers::stream::config::SystemStreamConfig;
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
 use crate::brokers::stream::domain::message::{
-    ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
+    BatchUpdate, ConsumerIdentity, DlsEntry, FetchLimits, FetchPage, Message, PubItem,
 };
 use crate::brokers::stream::domain::ops::{Command, StreamDomain, StreamReply, StreamRequest};
 use crate::brokers::stream::domain::storage::{self, SPEC};
-use crate::brokers::stream::domain::types::{event_logical_bytes, fetch_item_encoded_bytes};
+use crate::brokers::stream::domain::types::{
+    event_logical_bytes, fetch_batch_header_bytes, fetch_event_encoded_bytes,
+    FETCH_PAGE_HEADER_BYTES,
+};
 use crate::brokers::stream::options::{SeekTarget, StreamCreateOptions};
 use crate::brokers::{
     validate_resource_name, BrokerError, BrokerErrorKind, ProvisionResult,
 };
 use crate::durable::{now_millis, EngineHandle, Store};
-use crate::protocol::{STREAM_MAX_KEY_BYTES, STREAM_MAX_PUBLISH_BATCH};
+use crate::protocol::{
+    STREAM_MAX_FETCH_BATCH_SIZE, STREAM_MAX_KEY_BATCH_SIZE, STREAM_MAX_KEY_BYTES,
+    STREAM_MAX_PUBLISH_BATCH,
+};
 
 /// Absolute per-record storage bound (defense in depth; the effective fetch
 /// budget is usually much tighter).
@@ -49,7 +55,7 @@ const LEASE_SWEEP_MS: u64 = 50;
 pub struct JoinGroupResult {
     pub ack_floor: u64,
     pub consumer_id: String,
-    pub generation: u64,
+    pub epoch: [u8; 16],
 }
 
 /// Completion handle for a submitted command.
@@ -201,7 +207,9 @@ impl StreamManager {
                             record, MAX_STREAM_RECORD_BYTES
                         )));
                     }
-                    let encoded = 4 + fetch_item_encoded_bytes(item.key.len(), item.payload.len());
+                    let encoded = FETCH_PAGE_HEADER_BYTES
+                        + fetch_batch_header_bytes(item.key.len())
+                        + fetch_event_encoded_bytes(item.payload.len());
                     if encoded > self.config.fetch_response_bytes as u64 {
                         return Err(BrokerError::invalid_argument(format!(
                             "Stream record can never be fetched: {} bytes exceeds the fetch \
@@ -212,9 +220,25 @@ impl StreamManager {
                 }
                 Ok(())
             }
+            StreamRequest::Fetch {
+                name, limits, ..
+            } => {
+                validate_resource_name("stream", name)?;
+                if limits.max_messages > STREAM_MAX_FETCH_BATCH_SIZE
+                    || limits.max_key_messages == 0
+                    || limits.max_key_messages > STREAM_MAX_KEY_BATCH_SIZE
+                    || limits.max_key_batches > limits.max_messages
+                    || (limits.max_bytes as u64) < FETCH_PAGE_HEADER_BYTES
+                {
+                    return Err(BrokerError::invalid_argument(
+                        "Fetch limits out of range",
+                    ));
+                }
+                Ok(())
+            }
             StreamRequest::Join { name, .. }
-            | StreamRequest::Fetch { name, .. }
-            | StreamRequest::Ack { name, .. }
+            | StreamRequest::UpdateBatch { name, .. }
+            | StreamRequest::UpdateBatches { name, .. }
             | StreamRequest::Leave { name, .. }
             | StreamRequest::Seek { name, .. }
             | StreamRequest::PeekDls { name, .. }
@@ -400,11 +424,11 @@ impl StreamManager {
             StreamReply::Join {
                 ack_floor,
                 consumer_id,
-                generation,
+                epoch,
             } => Ok(JoinGroupResult {
                 ack_floor,
                 consumer_id,
-                generation,
+                epoch,
             }),
             other => Err(Self::unexpected(other)),
         }
@@ -418,10 +442,11 @@ impl StreamManager {
         name: &str,
         group: &str,
         identity: &ConsumerIdentity,
-        limit: usize,
+        limits: FetchLimits,
         wait_ms: u64,
-    ) -> Result<Vec<Delivery>, BrokerError> {
+    ) -> Result<FetchPage, BrokerError> {
         let deadline = (wait_ms > 0).then(|| Instant::now() + Duration::from_millis(wait_ms));
+        let mut empty: FetchPage;
         loop {
             // Subscribe BEFORE submitting so a commit landing between the two
             // is observed as a version bump instead of a missed wakeup.
@@ -432,24 +457,22 @@ impl StreamManager {
                     name: name.to_string(),
                     group: group.to_string(),
                     identity: identity.clone(),
-                    limit,
+                    limits,
                 })
                 .await?
                 .wait()
                 .await?;
             match reply {
-                StreamReply::Fetch(deliveries) if !deliveries.is_empty() => {
-                    return Ok(deliveries)
-                }
-                StreamReply::Fetch(_) => {}
+                StreamReply::Fetch(page) if !page.batches.is_empty() => return Ok(page),
+                StreamReply::Fetch(page) => empty = page,
                 other => return Err(Self::unexpected(other)),
             }
             let Some(deadline) = deadline else {
-                return Ok(Vec::new());
+                return Ok(empty);
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Ok(Vec::new());
+                return Ok(empty);
             }
             if *watcher.borrow() != version {
                 continue; // work arrived between subscribe and submit
@@ -458,34 +481,56 @@ impl StreamManager {
                 // Sender dropped (stream deleted) also resolves the wait:
                 // the resubmission then fails NOT_FOUND.
                 _ = watcher.changed() => continue,
-                _ = tokio::time::sleep(remaining) => return Ok(Vec::new()),
+                _ = tokio::time::sleep(remaining) => return Ok(empty),
             }
         }
     }
 
-    /// Consume the lease identified by `receipt`. Stale receipts/epochs and
-    /// unknown sequences are FENCED; unknown members are NOT_MEMBER.
-    pub async fn ack(
+    /// Apply one cumulative batch update (checkpoint / retry / release).
+    /// Stale receipts/epochs and invalid counts are FENCED / INVALID_ARGUMENT;
+    /// unknown members are NOT_MEMBER.
+    pub async fn update_batch(
         &self,
         name: &str,
         group: &str,
         identity: &ConsumerIdentity,
-        seq: u64,
-        receipt: [u8; 16],
+        update: BatchUpdate,
     ) -> Result<(), BrokerError> {
         match self
-            .submit(StreamRequest::Ack {
+            .submit(StreamRequest::UpdateBatch {
                 name: name.to_string(),
                 group: group.to_string(),
                 identity: identity.clone(),
-                seq,
-                receipt,
+                update,
             })
             .await?
             .wait()
             .await?
         {
             StreamReply::Unit => Ok(()),
+            other => Err(Self::unexpected(other)),
+        }
+    }
+
+    pub async fn update_batches(
+        &self,
+        name: &str,
+        group: &str,
+        identity: &ConsumerIdentity,
+        updates: Vec<BatchUpdate>,
+    ) -> Result<Vec<([u8; 16], BrokerErrorKind)>, BrokerError> {
+        match self
+            .submit(StreamRequest::UpdateBatches {
+                name: name.to_string(),
+                group: group.to_string(),
+                identity: identity.clone(),
+                updates,
+            })
+            .await?
+            .wait()
+            .await?
+        {
+            StreamReply::BatchOutcome(failures) => Ok(failures),
             other => Err(Self::unexpected(other)),
         }
     }

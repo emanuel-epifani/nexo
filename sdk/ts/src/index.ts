@@ -26,6 +26,7 @@ export {
    StreamCreateOptions,
    StreamDefinition,
    StreamHandler,
+   StreamHandlerMeta,
    StreamMessage,
    StreamMessageMeta,
    StreamPublishItem,

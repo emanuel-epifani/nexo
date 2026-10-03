@@ -2,23 +2,27 @@
 
 Last full run: 2026-09-12 (direct-reader transport + writer batching)
 MacBook Pro M4 Pro | Battery High Performance
+Stream rows refreshed 2026-10-03: local release server, protocol 10.
+Other rows retain the historical full run. Stream batch latency samples
+are amortized per event, not atomic-call or end-to-end latency.
+Stream consumption uses batch_size=100 and concurrency=10.
 
 THROUGHPUT (50k ops, 50 concurrent workers):
   STORE SET             92,305 ops/sec | p50: 0.51ms | p99: 1.10ms | MAX: 2.76ms
   STORE GET             97,869 ops/sec | p50: 0.50ms | p99: 0.68ms | MAX: 0.75ms
   QUEUE PUSH            75,318 ops/sec | p50: 0.65ms | p99: 0.81ms | MAX: 1.62ms
   QUEUE PUSH BATCH     326,959 ops/sec | p50: 0.13ms | p99: 0.43ms | MAX: 0.44ms
-    STREAM PUBLISH        54,396 ops/sec | p50: 0.91ms | p99: 1.13ms | MAX: 2.37ms
-    STREAM PUB BATCH     377,393 ops/sec | p50: 0.13ms | p99: 0.13ms | MAX: 0.13ms
+  STREAM PUBLISH        50,518 ops/sec | p50: 0.91ms | p99: 2.65ms | MAX: 3.38ms
+  STREAM PUB BATCH     368,109 ops/sec | p50: 0.12ms | p99: 0.19ms | MAX: 0.20ms
   PUBSUB PUBLISH        78,686 ops/sec | p50: 0.62ms | p99: 0.80ms | MAX: 1.13ms
   QUEUE CONSUME+ACK     90,428 ops/sec
-    STREAM SUB+ACK        26,225 ops/sec
+  STREAM SUB+ACK        66,205 ops/sec
 
 LATENCY (100k sequential ops):
   STORE SET             16,570 ops/sec | p50: 0.06ms | p99: 0.12ms | MAX: 0.31ms
   STORE GET             16,251 ops/sec | p50: 0.06ms | p99: 0.13ms | MAX: 0.28ms
   QUEUE PUSH            13,756 ops/sec | p50: 0.07ms | p99: 0.15ms | MAX: 3.65ms
-    STREAM PUBLISH        11,676 ops/sec | p50: 0.08ms | p99: 0.17ms | MAX: 1.39ms
+  STREAM PUBLISH         8,872 ops/sec | p50: 0.11ms | p99: 0.16ms | MAX: 8.14ms
   PUBSUB PUBLISH        14,598 ops/sec | p50: 0.07ms | p99: 0.14ms | MAX: 0.30ms
 
 UTILS:

@@ -14,11 +14,13 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
-use crate::brokers::stream::domain::message::{Delivery, DlsEntry, Message};
+use crate::brokers::stream::domain::message::{
+    BatchDisposition, BatchUpdate, DeliveryBatch, DlsEntry, FetchLimits, FetchPage, Message,
+};
 use crate::brokers::stream::domain::ops::{Continuation, Effects, StreamReply, StreamRequest};
 use crate::brokers::stream::domain::types::{
-    decode_u64, encode_u64, event_logical_bytes, fetch_item_encoded_bytes, DlsReason, LaneState,
-    Origin,
+    decode_u64, encode_u64, event_logical_bytes, fetch_batch_header_bytes,
+    fetch_event_encoded_bytes, DlsReason, LaneState, Origin, FETCH_PAGE_HEADER_BYTES,
 };
 use crate::brokers::stream::options::SeekTarget;
 use crate::brokers::{config_conflict_error, BrokerError, ProvisionOutcome, ProvisionResult};
@@ -28,6 +30,8 @@ use uuid::Uuid;
 
 /// Rows processed per continuation slice / maintenance batch.
 pub const BATCH_LIMIT: usize = 1024;
+
+const KEY_GC_PAGE: usize = 64;
 /// Groups reclaimed per GC slice; each group deletes its epoch rows + group
 /// row atomically (deferred `active_epoch` FK).
 const GROUP_GC_BATCH: usize = 64;
@@ -70,7 +74,9 @@ pub struct EpochRow {
     pub keyless_ticket: i64,
     pub next_ticket: i64,
     pub pending: i64,
+    pub pending_bytes: i64,
     pub max_pending: i64,
+    pub max_pending_bytes: i64,
 }
 
 #[derive(Clone)]
@@ -84,6 +90,13 @@ pub struct LaneRow {
     pub state: i64,
     pub attempts: i64,
     pub receipt: Option<Vec<u8>>,
+    pub owner: Option<String>,
+    pub connection_id: Option<String>,
+    pub deadline_ms: Option<i64>,
+    pub lease_first_pos: Option<u64>,
+    pub lease_count: i64,
+    pub lease_acked: i64,
+    pub lease_bytes: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +150,7 @@ pub fn config_json(config: &StreamConfig) -> serde_json::Value {
             "maxBytes": config.retention.max_bytes,
         },
         "maxAckPending": config.max_ack_pending,
+        "maxAckPendingBytes": config.max_ack_pending_bytes,
         "ackWaitMs": config.ack_wait_ms,
         "maxDeliveries": config.max_deliveries,
     })
@@ -187,29 +201,21 @@ fn require_stream(conn: &Connection, name: &str) -> R<StreamRow> {
 
 struct GroupRow {
     id: [u8; 16],
-    generation: u64,
     active_epoch: Option<[u8; 16]>,
 }
 
 fn load_group(conn: &Connection, stream_id: &[u8; 16], name: &str) -> R<Option<GroupRow>> {
     query_one(
         conn,
-        "SELECT id, generation, active_epoch FROM groups WHERE stream_id = ?1 AND name = ?2",
+        "SELECT id, active_epoch FROM groups WHERE stream_id = ?1 AND name = ?2",
         params![stream_id.as_slice(), name],
-        |r| {
-            Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                blob8(r, 1, "generation")?,
-                r.get::<_, Option<Vec<u8>>>(2)?,
-            ))
-        },
+        |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
     )
     .optional()
     .map_err(|e| fatal("Cannot load group", e))?
-    .map(|(id, generation, epoch)| {
+    .map(|(id, epoch)| {
         Ok(GroupRow {
             id: blob16(&id, "group id")?,
-            generation,
             active_epoch: epoch.map(|e| blob16(&e, "active epoch")).transpose()?,
         })
     })
@@ -226,7 +232,7 @@ fn load_epoch(conn: &Connection, epoch_id: &[u8; 16]) -> R<Option<EpochRow>> {
         conn,
         "SELECT id, group_id, stream_id, start_after_seq, initialized, init_key_cursor,
                 init_key_target, keyless_cursor_pos, keyless_ticket, next_ready_ticket,
-                pending_count, max_pending
+                pending_count, pending_bytes, max_pending, max_pending_bytes
          FROM group_epochs WHERE id = ?1",
         [epoch_id.as_slice()],
         |r| {
@@ -243,6 +249,8 @@ fn load_epoch(conn: &Connection, epoch_id: &[u8; 16]) -> R<Option<EpochRow>> {
                 r.get::<_, i64>(9)?,
                 r.get::<_, i64>(10)?,
                 r.get::<_, i64>(11)?,
+                r.get::<_, i64>(12)?,
+                r.get::<_, i64>(13)?,
             ))
         },
     )
@@ -261,7 +269,9 @@ fn load_epoch(conn: &Connection, epoch_id: &[u8; 16]) -> R<Option<EpochRow>> {
             keyless_ticket,
             next_ticket,
             pending,
+            pending_bytes,
             max_pending,
+            max_pending_bytes,
         )| {
             Ok(EpochRow {
                 id: blob16(&id, "epoch id")?,
@@ -275,7 +285,9 @@ fn load_epoch(conn: &Connection, epoch_id: &[u8; 16]) -> R<Option<EpochRow>> {
                 keyless_ticket,
                 next_ticket,
                 pending,
+                pending_bytes,
                 max_pending,
+                max_pending_bytes,
             })
         },
     )
@@ -300,7 +312,8 @@ fn save_epoch(conn: &Connection, epoch: &EpochRow) -> R<()> {
         exec(
             conn,
             "UPDATE group_epochs SET initialized=?2, init_key_cursor=?3, init_key_target=?4,
-                keyless_cursor_pos=?5, keyless_ticket=?6, next_ready_ticket=?7, pending_count=?8
+                keyless_cursor_pos=?5, keyless_ticket=?6, next_ready_ticket=?7,
+                pending_count=?8, pending_bytes=?9
              WHERE id=?1",
             params![
                 epoch.id.as_slice(),
@@ -311,6 +324,7 @@ fn save_epoch(conn: &Connection, epoch: &EpochRow) -> R<()> {
                 epoch.keyless_ticket,
                 epoch.next_ticket,
                 epoch.pending,
+                epoch.pending_bytes,
             ],
         ),
         "Cannot persist epoch",
@@ -445,7 +459,9 @@ fn insert_range(
 
 /// Recompute `normal_seq` (first unresolved original seq) and the lane head
 /// (min of next original and oldest replay intent, by position), then persist
-/// the EMPTY/READY state. PARKED and LEASED lanes must not call this.
+/// the EMPTY/READY state. LEASED lanes keep their in-flight lease; PARKED
+/// lanes must not call this. A WAITING caller whose head changed must drop
+/// the head first (retention path).
 /// Returns true when the lane transitioned into READY.
 fn recompute_lane(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow) -> R<bool> {
     let next_original = next_event_pos(conn, &epoch.stream_id, lane.key_id, lane.cursor_pos)?;
@@ -486,14 +502,17 @@ fn recompute_lane(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow) -> R<
         None => (LaneState::Empty as i64, 0, None, None, None, 0),
     };
     // cursor_pos is written from the in-memory row: callers that advance the
-    // cursor (ack) mutate the copy first, fusing the advance into this write.
+    // cursor (checkpoint) mutate the copy first, fusing the advance into this
+    // write.
     sql(
         exec(
             conn,
-            "UPDATE key_lanes SET cursor_pos=?3, normal_seq=?4, head_seq=?5, head_pos=?6,
-                head_origin=?7, state=?8, attempts=?9, ready_ticket=?10, receipt=NULL,
-                owner=NULL, connection_id=NULL, deadline_ms=NULL
-             WHERE epoch_id=?1 AND key_id=?2",
+            &format!(
+                "UPDATE key_lanes SET cursor_pos=?3, normal_seq=?4, head_seq=?5, head_pos=?6,
+                    head_origin=?7, state=?8, attempts=?9, ready_ticket=?10, deadline_ms=NULL,
+                    {CLEAR_LEASE}
+                 WHERE epoch_id=?1 AND key_id=?2"
+            ),
             params![
                 epoch.id.as_slice(),
                 lane.key_id,
@@ -554,12 +573,19 @@ fn ensure_lane(
         state: LaneState::Empty as i64,
         attempts: 0,
         receipt: None,
+        owner: None,
+        connection_id: None,
+        deadline_ms: None,
+        lease_first_pos: None,
+        lease_count: 0,
+        lease_acked: 0,
+        lease_bytes: 0,
     }))
 }
 
-/// Lane row mapping shared by every `key_lanes` select: the nine columns in
-/// canonical order starting at `base`, so point lookups and IN-scans map the
-/// same shape.
+/// Lane row mapping shared by every `key_lanes` select: the columns of
+/// `LANE_COLS` in canonical order starting at `base`, so point lookups and
+/// IN-scans map the same shape.
 fn lane_row(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<LaneRow> {
     Ok(LaneRow {
         key_id: r.get(base)?,
@@ -571,19 +597,26 @@ fn lane_row(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<LaneRow> {
         state: r.get(base + 6)?,
         attempts: r.get(base + 7)?,
         receipt: r.get(base + 8)?,
+        owner: r.get(base + 9)?,
+        connection_id: r.get(base + 10)?,
+        deadline_ms: r.get(base + 11)?,
+        lease_first_pos: opt_blob8(r, base + 12, "lease_first_pos")?,
+        lease_count: r.get(base + 13)?,
+        lease_acked: r.get(base + 14)?,
+        lease_bytes: r.get(base + 15)?,
     })
 }
 
 /// Lane columns in `lane_row` order — every `key_lanes` select uses this
 /// exact list so the mapping stays single-sourced by convention.
-/// key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state,
-/// attempts, receipt
+const LANE_COLS: &str = "key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state,
+    attempts, receipt, owner, connection_id, deadline_ms, lease_first_pos, lease_count,
+    lease_acked, lease_bytes";
+
 fn load_lane(conn: &Connection, epoch_id: &[u8; 16], key_id: i64) -> R<Option<LaneRow>> {
     query_one(
         conn,
-        "SELECT key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state,
-                attempts, receipt
-         FROM key_lanes WHERE epoch_id=?1 AND key_id=?2",
+        &format!("SELECT {LANE_COLS} FROM key_lanes WHERE epoch_id=?1 AND key_id=?2"),
         params![epoch_id.as_slice(), key_id],
         |r| lane_row(r, 0),
     )
@@ -591,17 +624,74 @@ fn load_lane(conn: &Connection, epoch_id: &[u8; 16], key_id: i64) -> R<Option<La
     .map_err(|e| fatal("Cannot load lane", e))
 }
 
+fn load_lane_by_receipt(
+    conn: &Connection,
+    epoch_id: &[u8; 16],
+    receipt: &[u8; 16],
+) -> R<Option<LaneRow>> {
+    query_one(
+        conn,
+        &format!(
+            "SELECT {LANE_COLS} FROM key_lanes
+             WHERE epoch_id=?1 AND state=2 AND receipt=?2"
+        ),
+        params![epoch_id.as_slice(), receipt.as_slice()],
+        |r| lane_row(r, 0),
+    )
+    .optional()
+    .map_err(|e| fatal("Cannot load lane by receipt", e))
+}
+
+const CLEAR_LEASE: &str = "receipt=NULL, owner=NULL, connection_id=NULL,
+    lease_first_pos=NULL, lease_count=0, lease_acked=0, lease_bytes=0";
+
 fn set_lane_ready(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow, attempts: i64) -> R<()> {
     let ticket = take_ticket(epoch)?;
     sql(
         exec(
             conn,
-            "UPDATE key_lanes SET state=1, attempts=?3, ready_ticket=?4, receipt=NULL, owner=NULL,
-                connection_id=NULL, deadline_ms=NULL
-             WHERE epoch_id=?1 AND key_id=?2",
+            &format!(
+                "UPDATE key_lanes SET state=1, attempts=?3, ready_ticket=?4, deadline_ms=NULL,
+                    {CLEAR_LEASE}
+                 WHERE epoch_id=?1 AND key_id=?2"
+            ),
             params![epoch.id.as_slice(), lane.key_id, attempts, ticket],
         ),
         "Cannot ready lane",
+    )?;
+    Ok(())
+}
+
+fn set_lane_waiting(
+    conn: &Connection,
+    epoch: &EpochRow,
+    lane: &LaneRow,
+    head: (u64, u64, i64),
+    attempts: i64,
+    retry_at_ms: u64,
+) -> R<()> {
+    sql(
+        exec(
+            conn,
+            &format!(
+                "UPDATE key_lanes SET state=4, attempts=?3, ready_ticket=0, head_seq=?4,
+                    head_pos=?5, head_origin=?6, deadline_ms=?7, cursor_pos=?8,
+                    normal_seq=?9, {CLEAR_LEASE}
+                 WHERE epoch_id=?1 AND key_id=?2"
+            ),
+            params![
+                epoch.id.as_slice(),
+                lane.key_id,
+                attempts,
+                encode_u64(head.0).as_slice(),
+                encode_u64(head.1).as_slice(),
+                head.2,
+                retry_at_ms as i64,
+                encode_u64(lane.cursor_pos).as_slice(),
+                lane.normal_seq.map(encode_u64).map(|b| b.to_vec()),
+            ],
+        ),
+        "Cannot wait lane",
     )?;
     Ok(())
 }
@@ -655,21 +745,29 @@ fn park_lane(conn: &Connection, epoch: &mut EpochRow, lane: &LaneRow, reason: Dl
     sql(
         exec(
             conn,
-            "UPDATE key_lanes SET state=3, normal_seq=NULL, head_seq=NULL, head_pos=NULL,
-                head_origin=NULL, attempts=0, ready_ticket=0, receipt=NULL, owner=NULL,
-                connection_id=NULL, deadline_ms=NULL
-             WHERE epoch_id=?1 AND key_id=?2",
-            params![epoch.id.as_slice(), lane.key_id],
+            &format!(
+                "UPDATE key_lanes SET state=3, normal_seq=NULL, head_seq=NULL, head_pos=NULL,
+                    head_origin=NULL, attempts=0, ready_ticket=0, deadline_ms=NULL,
+                    cursor_pos=?3, {CLEAR_LEASE}
+                 WHERE epoch_id=?1 AND key_id=?2"
+            ),
+            params![
+                epoch.id.as_slice(),
+                lane.key_id,
+                encode_u64(lane.cursor_pos).as_slice()
+            ],
         ),
         "Cannot park lane",
     )?;
     Ok(())
 }
 
-/// Release one leased keyed lane: READY again while attempts remain, PARKED
-/// once `max_deliveries` is exhausted. `charge_pending` decrements the epoch
+/// Reclaim one leased keyed lane after its lease is invalidated (expiry,
+/// member exit, recovery): refund the unconfirmed suffix, then READY the
+/// first unconfirmed head while attempts remain or PARK it once
+/// `max_deliveries` is exhausted. `charge_pending` decrements the epoch
 /// credit (recovery sweeps reconcile counters wholesale instead).
-fn release_lane_lease(
+fn reclaim_lane_lease(
     conn: &Connection,
     epoch: &mut EpochRow,
     lane: &LaneRow,
@@ -677,7 +775,8 @@ fn release_lane_lease(
     charge_pending: bool,
 ) -> R<()> {
     if charge_pending {
-        epoch.pending -= 1;
+        epoch.pending -= lane.lease_count - lane.lease_acked;
+        epoch.pending_bytes -= lane.lease_bytes;
     }
     if lane.attempts >= max_deliveries as i64 {
         park_lane(conn, epoch, lane, DlsReason::MaxDeliveries)?;
@@ -687,17 +786,19 @@ fn release_lane_lease(
     Ok(())
 }
 
-fn release_keyless_lease(
+fn reclaim_keyless_lease(
     conn: &Connection,
     epoch: &mut EpochRow,
     seq: u64,
     key_pos: u64,
     attempts: i64,
+    lease_bytes: i64,
     max_deliveries: u32,
     charge_pending: bool,
 ) -> R<()> {
     if charge_pending {
         epoch.pending -= 1;
+        epoch.pending_bytes -= lease_bytes;
     }
     if attempts >= max_deliveries as i64 {
         sql(
@@ -723,7 +824,7 @@ fn release_keyless_lease(
             exec(
                 conn,
                 "UPDATE keyless_deliveries SET state=1, ready_ticket=?3, receipt=NULL, owner=NULL,
-                    connection_id=NULL, deadline_ms=NULL
+                    connection_id=NULL, deadline_ms=NULL, lease_bytes=0
                  WHERE epoch_id=?1 AND seq=?2",
                 params![epoch.id.as_slice(), encode_u64(seq).as_slice(), ticket],
             ),
@@ -758,7 +859,7 @@ pub fn recover_lane_lease(
         .map_err(|e| e.into_error())?
         .ok_or_else(|| BrokerError::storage("Corrupt storage: leased lane missing"))?;
     let config = load_config_for_stream(conn, &epoch.stream_id)?;
-    release_lane_lease(conn, &mut epoch, &lane, config.max_deliveries, false)
+    reclaim_lane_lease(conn, &mut epoch, &lane, config.max_deliveries, false)
         .map_err(|e| e.into_error())?;
     save_epoch(conn, &epoch).map_err(|e| e.into_error())
 }
@@ -776,22 +877,25 @@ pub fn recover_keyless_lease(
     let mut epoch = load_epoch(conn, &epoch_id)
         .map_err(|e| e.into_error())?
         .ok_or_else(|| BrokerError::storage("Corrupt storage: leased delivery without epoch"))?;
-    let key_pos = query_one(
+    let row = query_one(
         conn,
-        "SELECT key_pos FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
+        "SELECT key_pos, lease_bytes FROM keyless_deliveries
+         WHERE epoch_id=?1 AND seq=?2",
         params![epoch_id.as_slice(), encode_u64(seq).as_slice()],
-        |r| blob8(r, 0, "key_pos"),
+        |r| Ok((blob8(r, 0, "key_pos")?, r.get::<_, i64>(1)?)),
     )
     .optional()
     .map_err(|e| BrokerError::storage(format!("Corrupt keyless delivery: {e}")))?
     .ok_or_else(|| BrokerError::storage("Corrupt storage: leased delivery missing"))?;
+    let (key_pos, lease_bytes) = row;
     let config = load_config_for_stream(conn, &epoch.stream_id)?;
-    release_keyless_lease(
+    reclaim_keyless_lease(
         conn,
         &mut epoch,
         seq,
         key_pos,
         attempts,
+        lease_bytes,
         config.max_deliveries,
         false,
     )
@@ -820,7 +924,7 @@ fn load_config_for_stream(
 /// Resolve stream/group/epoch and validate a durable membership in a single
 /// statement. The member join is keyed on the ACTIVE epoch (`members` PK is
 /// (epoch_id, consumer_id)), so a stale row on a dead epoch never matches —
-/// those identities are already fenced by the generation check above.
+/// those identities are already fenced by the epoch check above.
 /// `g/e/m` columns are NULL-able: their presence encodes which level failed
 /// (stream missing → no row; group missing → g NULL; epoch missing → e NULL;
 /// member missing → m NULL).
@@ -834,10 +938,11 @@ fn resolve_member(
         conn,
         "SELECT s.id, s.config_json, s.last_seq, s.retained_after_seq, s.last_key_id,
                 s.logical_bytes,
-                g.id, g.generation,
+                g.id,
                 e.id, e.group_id, e.stream_id, e.start_after_seq, e.initialized,
                 e.init_key_cursor, e.init_key_target, e.keyless_cursor_pos,
-                e.keyless_ticket, e.next_ready_ticket, e.pending_count, e.max_pending,
+                e.keyless_ticket, e.next_ready_ticket, e.pending_count, e.pending_bytes,
+                e.max_pending, e.max_pending_bytes,
                 m.connection_id
          FROM streams s
          LEFT JOIN groups g ON g.stream_id = s.id AND g.name = ?2
@@ -857,17 +962,18 @@ fn resolve_member(
                 r.get::<_, Option<Vec<u8>>>(7)?,
                 r.get::<_, Option<Vec<u8>>>(8)?,
                 r.get::<_, Option<Vec<u8>>>(9)?,
-                r.get::<_, Option<Vec<u8>>>(10)?,
-                opt_blob8(r, 11, "start_after_seq")?,
+                opt_blob8(r, 10, "start_after_seq")?,
+                r.get::<_, Option<i64>>(11)?,
                 r.get::<_, Option<i64>>(12)?,
                 r.get::<_, Option<i64>>(13)?,
-                r.get::<_, Option<i64>>(14)?,
-                opt_blob8(r, 15, "keyless_cursor_pos")?,
+                opt_blob8(r, 14, "keyless_cursor_pos")?,
+                r.get::<_, Option<i64>>(15)?,
                 r.get::<_, Option<i64>>(16)?,
                 r.get::<_, Option<i64>>(17)?,
                 r.get::<_, Option<i64>>(18)?,
                 r.get::<_, Option<i64>>(19)?,
-                r.get::<_, Option<String>>(20)?,
+                r.get::<_, Option<i64>>(20)?,
+                r.get::<_, Option<String>>(21)?,
             ))
         },
     )
@@ -881,7 +987,6 @@ fn resolve_member(
         last_key_id,
         logical,
         group_id,
-        generation,
         epoch_id,
         epoch_group,
         epoch_stream,
@@ -893,7 +998,9 @@ fn resolve_member(
         keyless_ticket,
         next_ticket,
         pending,
+        pending_bytes,
         max_pending,
+        max_pending_bytes,
         member_conn,
     )) = row
     else {
@@ -911,14 +1018,6 @@ fn resolve_member(
             "Group '{group}' not found"
         ))));
     }
-    let generation = generation
-        .map(|g| decode_u64(&g))
-        .transpose()
-        .map_err(CmdError::Fatal)?
-        .ok_or_else(|| CmdError::Fatal(BrokerError::storage("Corrupt storage: group row")))?;
-    if identity.generation != generation {
-        return Err(expected(BrokerError::fenced()));
-    }
     let (Some(epoch_id), Some(epoch_group), Some(epoch_stream)) =
         (epoch_id, epoch_group, epoch_stream)
     else {
@@ -926,8 +1025,12 @@ fn resolve_member(
             "Corrupt storage: group without active epoch",
         )));
     };
+    let epoch_id = blob16(&epoch_id, "epoch id")?;
+    if identity.epoch != epoch_id {
+        return Err(expected(BrokerError::fenced()));
+    }
     let epoch = EpochRow {
-        id: blob16(&epoch_id, "epoch id")?,
+        id: epoch_id,
         group_id: blob16(&epoch_group, "group id")?,
         stream_id: blob16(&epoch_stream, "stream id")?,
         start_after: start_after.ok_or_else(|| {
@@ -942,7 +1045,9 @@ fn resolve_member(
         keyless_ticket: keyless_ticket.unwrap_or(0),
         next_ticket: next_ticket.unwrap_or(0),
         pending: pending.unwrap_or(0),
+        pending_bytes: pending_bytes.unwrap_or(0),
         max_pending: max_pending.unwrap_or(0),
+        max_pending_bytes: max_pending_bytes.unwrap_or(0),
     };
     if member_conn.as_deref() != Some(identity.connection_id.as_str()) {
         return Err(expected(BrokerError::not_member()));
@@ -1004,29 +1109,37 @@ pub fn execute(
             name,
             group,
             identity,
-            limit,
-        } => fetch(conn, name, group, identity, *limit, ctx),
-        StreamRequest::Ack {
+            limits,
+        } => fetch(conn, name, group, identity, *limits, ctx),
+        StreamRequest::UpdateBatch {
             name,
             group,
             identity,
-            seq,
-            receipt,
-        } => ack(conn, name, group, identity, *seq, receipt),
-        StreamRequest::AckMany {
-            name,
-            group,
-            identity,
-            acks,
+            update,
         } => {
-            let (results, effects) = ack_many(conn, name, group, identity, acks)?;
-            let failed = acks
+            let (mut outcomes, effects) =
+                update_batches(conn, name, group, identity, &[*update], ctx)?;
+            match outcomes.pop() {
+                Some(Some(kind)) => {
+                    Err(expected(BrokerError::new(kind, "Batch update rejected")))
+                }
+                _ => Ok((StreamReply::Unit, effects)),
+            }
+        }
+        StreamRequest::UpdateBatches {
+            name,
+            group,
+            identity,
+            updates,
+        } => {
+            let (outcomes, effects) =
+                update_batches(conn, name, group, identity, updates, ctx)?;
+            let failures = updates
                 .iter()
-                .zip(&results)
-                .filter(|(_, r)| r.is_err())
-                .map(|((seq, _), _)| *seq)
+                .zip(outcomes)
+                .filter_map(|(u, o)| o.map(|k| (u.receipt, k)))
                 .collect();
-            Ok((StreamReply::AckOutcome(failed), effects))
+            Ok((StreamReply::BatchOutcome(failures), effects))
         }
         StreamRequest::Leave {
             name,
@@ -1069,6 +1182,14 @@ pub fn create_stream_with_config(
     name: &str,
     requested: &StreamConfig,
 ) -> Result<(StreamReply, Effects), CmdError> {
+    if requested.max_ack_pending_bytes == 0
+        || requested.max_ack_pending_bytes > i64::MAX as u64
+    {
+        return Err(expected(BrokerError::invalid_argument(format!(
+            "maxAckPendingBytes must be in 1..={}",
+            i64::MAX
+        ))));
+    }
     if let Some(existing) = load_stream(conn, name)? {
         if existing.config != *requested {
             return Err(expected(config_conflict_error(
@@ -1276,7 +1397,14 @@ pub fn publish(
                 last + 1
             }
         };
-        logical_added += event_logical_bytes(item.key.len(), item.payload.len());
+        let logical = event_logical_bytes(item.key.len(), item.payload.len());
+        if logical > stream.config.max_ack_pending_bytes {
+            return Err(expected(BrokerError::invalid_argument(format!(
+                "Stream event of {logical} logical bytes exceeds maxAckPendingBytes {}",
+                stream.config.max_ack_pending_bytes
+            ))));
+        }
+        logical_added += logical;
         if key_id != 0 {
             key_events.entry(key_id).or_default().push((pos, seq));
         }
@@ -1295,9 +1423,8 @@ pub fn publish(
         }
         let lanes: std::collections::HashMap<i64, LaneRow> = {
             let (text, values) = id_in_list(
-                "SELECT key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin,
-                        state, attempts, receipt FROM key_lanes
-                 WHERE epoch_id=?1 AND key_id IN (",
+                &format!("SELECT {LANE_COLS} FROM key_lanes
+                 WHERE epoch_id=?1 AND key_id IN ("),
                 &epoch.id,
                 &keyed_order,
             );
@@ -1350,7 +1477,7 @@ pub fn publish(
                         }
                     }
                 }
-                Some(LaneState::Ready) | Some(LaneState::Leased) => {
+                Some(LaneState::Ready) | Some(LaneState::Leased) | Some(LaneState::Waiting) => {
                     if lane.normal_seq.is_none() {
                         sql(
                             exec(
@@ -1560,13 +1687,12 @@ fn create_group_and_epoch(
     sql(
         exec(
             conn,
-            "INSERT INTO groups(id, stream_id, name, generation, active_epoch)
-             VALUES (?1,?2,?3,?4,?5)",
+            "INSERT INTO groups(id, stream_id, name, active_epoch)
+             VALUES (?1,?2,?3,?4)",
             params![
                 group_id.as_slice(),
                 stream.id.as_slice(),
                 group_name,
-                encode_u64(1).as_slice(),
                 epoch_id.as_slice(),
             ],
         ),
@@ -1577,8 +1703,8 @@ fn create_group_and_epoch(
             conn,
             "INSERT INTO group_epochs(id, group_id, stream_id, start_after_seq, initialized,
                 init_key_cursor, init_key_target, keyless_cursor_pos, keyless_ticket,
-                next_ready_ticket, pending_count, max_pending)
-             VALUES (?1,?2,?3,?4,0,0,?5,?6,1,2,0,?7)",
+                next_ready_ticket, pending_count, max_pending, max_pending_bytes)
+             VALUES (?1,?2,?3,?4,0,0,?5,?6,1,2,0,?7,?8)",
             params![
                 epoch_id.as_slice(),
                 group_id.as_slice(),
@@ -1587,13 +1713,13 @@ fn create_group_and_epoch(
                 stream.last_key_id,
                 encode_u64(keyless_cursor).as_slice(),
                 stream.config.max_ack_pending as i64,
+                stream.config.max_ack_pending_bytes as i64,
             ],
         ),
         "Cannot create epoch",
     )?;
     let group = GroupRow {
         id: group_id,
-        generation: 1,
         active_epoch: Some(epoch_id),
     };
     let epoch = load_epoch(conn, &epoch_id)?.ok_or_else(|| {
@@ -1696,115 +1822,165 @@ fn join(
         StreamReply::Join {
             ack_floor: floor,
             consumer_id,
-            generation: group.generation,
+            epoch: epoch.id,
         },
         effects,
     ))
 }
 
+struct EvMeta {
+    seq: u64,
+    key_pos: u64,
+    timestamp_ms: i64,
+    payload_bytes: u64,
+    logical: u64,
+}
+
+struct KeyedSel {
+    key_id: i64,
+    receipt: [u8; 16],
+    first_pos: u64,
+    upper_pos: u64,
+    metas: Vec<EvMeta>,
+    buf: std::collections::VecDeque<EvMeta>,
+    exhausted: bool,
+    logical: u64,
+    encoded: u64,
+}
+
+struct KeylessSel {
+    seq: Option<u64>,
+    receipt: [u8; 16],
+    meta: EvMeta,
+}
+
 /// One fetch attempt: validate the lease identity, then claim READY lane
-/// heads, ready keyless retries and the keyless fresh source in ticket order
-/// until the credit or the byte budget is exhausted.
+/// heads, ready keyless retries and the keyless fresh source in ticket order.
+/// Each keyed claim is a leased batch covering the head plus a contiguous
+/// original suffix grown under the per-key and response budgets.
 fn fetch(
     conn: &Connection,
     name: &str,
     group_name: &str,
     identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
-    limit: usize,
+    limits: FetchLimits,
     ctx: &ExecCtx,
 ) -> Result<(StreamReply, Effects), CmdError> {
     let (stream, mut epoch) = resolve_member(conn, name, group_name, identity)?;
-    if limit == 0 {
-        return Ok((StreamReply::Fetch(Vec::new()), Effects::default()));
-    }
-    let credit = ((epoch.max_pending - epoch.pending).max(0) as usize).min(limit);
-    if credit == 0 {
-        return Ok((StreamReply::Fetch(Vec::new()), Effects::default()));
-    }
+    let lease_ms = stream.config.ack_wait_ms;
+    let empty_page = || -> (StreamReply, Effects) {
+        (
+            StreamReply::Fetch(FetchPage {
+                lease_ms,
+                batches: Vec::new(),
+            }),
+            Effects::default(),
+        )
+    };
 
-    // Candidate scans carry event metadata (timestamp, payload size, key size)
-    // so the byte-budget check needs no per-message SELECT. Payloads are
-    // loaded in bulk afterwards, only for the claims actually taken.
+    let max_events = limits
+        .max_messages
+        .min(crate::protocol::STREAM_MAX_FETCH_BATCH_SIZE);
+    let response_cap = (limits.max_bytes as u64).min(ctx.fetch_response_bytes);
+    let mut resp_left = response_cap.saturating_sub(FETCH_PAGE_HEADER_BYTES);
+    let mut events_left = max_events.min((epoch.max_pending - epoch.pending).max(0) as usize);
+    let mut pending_bytes_left = (epoch.max_pending_bytes - epoch.pending_bytes).max(0) as u64;
+    if events_left == 0 || pending_bytes_left == 0 {
+        return Ok(empty_page());
+    }
+    // Per-key caps keep one hot key from monopolizing the group budget; a
+    // single oversized event may still go out alone inside the group/response
+    // budgets so legal large events are never stranded.
+    let key_grant = limits
+        .max_key_messages
+        .min(crate::protocol::STREAM_MAX_KEY_BATCH_SIZE)
+        .min((epoch.max_pending.max(0) as usize / 2).max(1));
+    let key_byte_cap = epoch.max_pending_bytes.max(0) as u64 / 2;
+    let keyed_cap = limits.max_key_batches.min(events_left);
+
     struct LaneCand {
         ticket: i64,
         key_id: i64,
-        head_seq: u64,
-        timestamp_ms: i64,
-        encoded_bytes: u64,
+        key_len: usize,
+        head_pos: u64,
+        head_origin: i64,
+        last_pos: u64,
+        ev: EvMeta,
     }
     struct RetryCand {
         ticket: i64,
         seq: u64,
-        timestamp_ms: i64,
-        encoded_bytes: u64,
+        ev: EvMeta,
     }
-
-    let mut lanes: std::collections::VecDeque<LaneCand> = query_vec(
-        conn,
-        "SELECT l.ready_ticket, l.key_id, l.head_seq, e.timestamp_ms,
-                e.payload_bytes, LENGTH(k.key)
-         FROM key_lanes l
-         JOIN events e ON e.stream_id=l.stream_id AND e.seq=l.head_seq
-         JOIN stream_keys k ON k.stream_id=l.stream_id AND k.key_id=l.key_id
-         WHERE l.epoch_id=?1 AND l.state=1
-         ORDER BY l.ready_ticket, l.key_id LIMIT ?2",
-        params![epoch.id.as_slice(), (credit + 1) as i64],
-        |r| {
-            Ok(LaneCand {
-                ticket: r.get(0)?,
-                key_id: r.get(1)?,
-                head_seq: blob8(r, 2, "head_seq")?,
-                timestamp_ms: r.get(3)?,
-                encoded_bytes: fetch_item_encoded_bytes(
-                    r.get::<_, i64>(5)? as usize,
-                    r.get::<_, i64>(4)? as usize,
-                ),
-            })
-        },
-        "Cannot scan ready lanes",
-    )?
-    .into();
+    let mut lanes: std::collections::VecDeque<LaneCand> = if keyed_cap == 0 {
+        std::collections::VecDeque::new()
+    } else {
+        query_vec(
+            conn,
+            "SELECT l.ready_ticket, l.key_id, l.head_pos, l.head_origin,
+                    e.seq, e.key_pos, e.timestamp_ms, e.payload_bytes, e.logical_bytes,
+                    LENGTH(k.key), k.last_pos
+             FROM key_lanes l
+             JOIN events e ON e.stream_id=l.stream_id AND e.key_id=l.key_id
+                 AND e.key_pos=l.head_pos
+             JOIN stream_keys k ON k.stream_id=l.stream_id AND k.key_id=l.key_id
+             WHERE l.epoch_id=?1 AND l.state=1
+             ORDER BY l.ready_ticket, l.key_id LIMIT ?2",
+            params![epoch.id.as_slice(), keyed_cap as i64],
+            |r| {
+                Ok(LaneCand {
+                    ticket: r.get(0)?,
+                    key_id: r.get(1)?,
+                    head_pos: blob8(r, 2, "head_pos")?,
+                    head_origin: r.get(3)?,
+                    last_pos: blob8(r, 10, "last_pos")?,
+                    ev: EvMeta {
+                        seq: blob8(r, 4, "seq")?,
+                        key_pos: blob8(r, 5, "key_pos")?,
+                        timestamp_ms: r.get(6)?,
+                        payload_bytes: r.get::<_, i64>(7)?.max(0) as u64,
+                        logical: r.get::<_, i64>(8)?.max(0) as u64,
+                    },
+                    key_len: r.get::<_, i64>(9)?.max(0) as usize,
+                })
+            },
+            "Cannot scan ready lanes",
+        )?
+        .into()
+    };
     let mut retries: std::collections::VecDeque<RetryCand> = query_vec(
         conn,
-        "SELECT d.ready_ticket, d.seq, e.timestamp_ms, e.payload_bytes
+        "SELECT d.ready_ticket, d.seq, d.key_pos, e.timestamp_ms, e.payload_bytes,
+                e.logical_bytes
          FROM keyless_deliveries d
          JOIN events e ON e.stream_id=d.stream_id AND e.seq=d.seq
-         WHERE d.epoch_id=?1 AND d.state=1 ORDER BY d.seq LIMIT ?2",
-        params![epoch.id.as_slice(), (credit + 1) as i64],
+         WHERE d.epoch_id=?1 AND d.state=1 ORDER BY d.ready_ticket, d.seq LIMIT ?2",
+        params![epoch.id.as_slice(), (events_left + 1) as i64],
         |r| {
+            let seq = blob8(r, 1, "seq")?;
             Ok(RetryCand {
                 ticket: r.get(0)?,
-                seq: blob8(r, 1, "seq")?,
-                timestamp_ms: r.get(2)?,
-                encoded_bytes: fetch_item_encoded_bytes(0, r.get::<_, i64>(3)? as usize),
+                seq,
+                ev: EvMeta {
+                    seq,
+                    key_pos: blob8(r, 2, "key_pos")?,
+                    timestamp_ms: r.get(3)?,
+                    payload_bytes: r.get::<_, i64>(4)?.max(0) as u64,
+                    logical: r.get::<_, i64>(5)?.max(0) as u64,
+                },
             })
         },
         "Cannot scan keyless retries",
     )?
     .into();
 
-    let deadline = (ctx.now_ms + stream.config.ack_wait_ms) as i64;
-    let mut used_bytes: u64 = 4; // FETCH response count prefix
-
-    // Selection pass in ticket order: decides the claims without touching the
-    // lease tables. Fresh keyless events are scanned in pages; a short page
-    // marks the source exhausted for this fetch.
-    enum Claim {
-        Lane {
-            key_id: i64,
-            seq: u64,
-            timestamp_ms: i64,
-        },
-        Retry {
-            seq: u64,
-            timestamp_ms: i64,
-        },
-        Source {
-            ev: FreshSource,
-        },
+    enum Selected {
+        Keyed(Box<KeyedSel>),
+        Keyless(KeylessSel),
     }
-    let mut claims: Vec<Claim> = Vec::with_capacity(credit);
-    let mut sources: std::collections::VecDeque<FreshSource> = std::collections::VecDeque::new();
+    let mut selected: Vec<Selected> = Vec::new();
+    let mut keyed_taken = 0usize;
+    let mut sources: std::collections::VecDeque<EvMeta> = std::collections::VecDeque::new();
     let mut fresh_exhausted = false;
     // Sources consume ready tickets at selection time; the commit pass calls
     // take_ticket in the same order, so a virtual ticket keeps comparisons
@@ -1813,12 +1989,13 @@ fn fetch(
     let mut next_source_ticket = epoch.keyless_ticket;
     let mut scan_cursor = epoch.keyless_cursor;
 
-    while claims.len() < credit && used_bytes < ctx.fetch_response_bytes {
+    while events_left > 0 {
         if sources.is_empty() && !fresh_exhausted {
-            let page = ((credit - claims.len()).min(256)) as i64;
-            let found: Vec<FreshSource> = query_vec(
+            let page = events_left.min(256) as i64;
+            let found: Vec<EvMeta> = query_vec(
                 conn,
-                "SELECT key_pos, seq, timestamp_ms, payload FROM events
+                "SELECT key_pos, seq, timestamp_ms, payload_bytes, logical_bytes
+                 FROM events
                  WHERE stream_id=?1 AND key_id=0 AND key_pos>?2
                  ORDER BY key_pos LIMIT ?3",
                 params![
@@ -1827,11 +2004,12 @@ fn fetch(
                     page
                 ],
                 |r| {
-                    Ok(FreshSource {
+                    Ok(EvMeta {
                         key_pos: blob8(r, 0, "key_pos")?,
                         seq: blob8(r, 1, "seq")?,
                         timestamp_ms: r.get(2)?,
-                        payload: r.get(3)?,
+                        payload_bytes: r.get::<_, i64>(3)?.max(0) as u64,
+                        logical: r.get::<_, i64>(4)?.max(0) as u64,
                     })
                 },
                 "Cannot scan fresh keyless events",
@@ -1850,149 +2028,272 @@ fn fetch(
         // the slot, and pending retries win over the source on ties.
         let retry_ticket = retries.front().map(|c| c.ticket).unwrap_or(i64::MAX);
         let keyless_ticket = retry_ticket.min(source_ticket);
-
-        let (encoded_bytes, claim) =
-            if lane_ticket != i64::MAX && lane_ticket <= keyless_ticket {
-                let Some(c) = lanes.pop_front() else {
-                    break;
-                };
-                (
-                    c.encoded_bytes,
-                    Claim::Lane {
-                        key_id: c.key_id,
-                        seq: c.head_seq,
-                        timestamp_ms: c.timestamp_ms,
-                    },
-                )
-            } else if retries.front().is_some() {
-                let Some(c) = retries.pop_front() else {
-                    break;
-                };
-                (
-                    c.encoded_bytes,
-                    Claim::Retry {
-                        seq: c.seq,
-                        timestamp_ms: c.timestamp_ms,
-                    },
-                )
-            } else if source_ticket != i64::MAX {
-                let Some(ev) = sources.pop_front() else {
-                    break;
-                };
-                next_source_ticket += 1;
-                scan_cursor = ev.key_pos;
-                (fetch_item_encoded_bytes(0, ev.payload.len()), Claim::Source { ev })
-            } else {
-                break;
-            };
-
-        if used_bytes + encoded_bytes > ctx.fetch_response_bytes {
-            if claims.is_empty() {
-                return Err(expected(BrokerError::invalid_argument(format!(
-                    "Single stream event ({} bytes) exceeds the fetch response budget ({} bytes)",
-                    encoded_bytes, ctx.fetch_response_bytes
-                ))));
-            }
+        if lane_ticket == i64::MAX && keyless_ticket == i64::MAX {
             break;
         }
-        used_bytes += encoded_bytes;
-        claims.push(claim);
-    }
 
-    // Payloads + key bytes for claimed lanes/retries load in one chunked
-    // IN-lookup. Seq is unique per stream.
-    let keyed_seqs: Vec<u64> = claims
-        .iter()
-        .filter_map(|c| match c {
-            Claim::Lane { seq, .. } | Claim::Retry { seq, .. } => Some(*seq),
-            Claim::Source { .. } => None,
-        })
-        .collect();
-    let mut events: std::collections::HashMap<u64, (Vec<u8>, Vec<u8>)> =
-        std::collections::HashMap::with_capacity(keyed_seqs.len());
-    for chunk in keyed_seqs.chunks(400) {
-        let mut text = String::from(
-            "SELECT e.seq, e.payload, k.key FROM events e
-             JOIN stream_keys k ON k.stream_id=e.stream_id AND k.key_id=e.key_id
-             WHERE e.stream_id=?1 AND e.seq IN (",
-        );
-        let mut params: Vec<&dyn rusqlite::types::ToSql> =
-            Vec::with_capacity(chunk.len() + 1);
-        let sid: &[u8] = epoch.stream_id.as_slice();
-        params.push(&sid);
-        let mut enc: Vec<Vec<u8>> = Vec::with_capacity(chunk.len());
-        for (i, seq) in chunk.iter().enumerate() {
-            if i > 0 {
-                text.push(',');
+        if lane_ticket != i64::MAX && lane_ticket <= keyless_ticket {
+            let Some(c) = lanes.pop_front() else { break };
+            if keyed_taken >= limits.max_key_batches {
+                continue;
             }
-            text.push('?');
-            enc.push(encode_u64(*seq).to_vec());
-        }
-        text.push(')');
-        for b in &enc {
-            params.push(b);
-        }
-        for row in query_vec(
-            conn,
-            &text,
-            rusqlite::params_from_iter(params),
-            |r| {
-                Ok((
-                    blob8(r, 0, "seq")?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-            "Cannot load events for delivery",
-        )? {
-            events.insert(row.0, (row.1, row.2));
-        }
-    }
-
-    // Commit pass: lease rows for the chosen claims in selection order.
-    let mut deliveries: Vec<Delivery> = Vec::with_capacity(claims.len());
-    let mut fresh_claims: Vec<(u64, u64, [u8; 16])> = Vec::new();
-    for claim in claims {
-        let receipt = Uuid::new_v4().into_bytes();
-        match claim {
-            Claim::Source { ev } => {
-                fresh_claims.push((ev.seq, ev.key_pos, receipt));
-                epoch.keyless_cursor = ev.key_pos;
-                epoch.keyless_ticket = take_ticket(&mut epoch)?;
-                deliveries.push(Delivery {
-                    message: Message {
-                        seq: ev.seq,
-                        timestamp: ev.timestamp_ms as u64,
-                        key: Bytes::new(),
-                        payload: Bytes::from(ev.payload),
-                    },
-                    receipt,
-                });
+            let encoded = fetch_batch_header_bytes(c.key_len)
+                + fetch_event_encoded_bytes(c.ev.payload_bytes as usize);
+            if encoded > resp_left || c.ev.logical > pending_bytes_left {
+                continue;
             }
-            Claim::Lane {
-                key_id,
+            let mut upper_pos = c.head_pos;
+            if c.head_origin == Origin::Original as i64
+                && key_grant > 1
+                && c.head_pos < c.last_pos
+            {
+                upper_pos = c.last_pos;
+                let bound: Option<u64> = query_one(
+                    conn,
+                    "SELECT MIN(key_pos) FROM replay_intents
+                     WHERE epoch_id=?1 AND key_id=?2",
+                    params![epoch.id.as_slice(), c.key_id],
+                    |r| r.get::<_, Option<Vec<u8>>>(0),
+                )
+                .map_err(|e| fatal("Cannot bound batch suffix", e))?
+                .map(|b| decode_u64(&b))
+                .transpose()
+                .map_err(CmdError::Fatal)?;
+                if let Some(p) = bound {
+                    upper_pos = upper_pos.min(p.saturating_sub(1));
+                }
+            }
+            if upper_pos < c.head_pos {
+                continue;
+            }
+            resp_left -= encoded;
+            pending_bytes_left -= c.ev.logical;
+            events_left -= 1;
+            keyed_taken += 1;
+            selected.push(Selected::Keyed(Box::new(KeyedSel {
+                key_id: c.key_id,
+                receipt: Uuid::new_v4().into_bytes(),
+                first_pos: c.head_pos,
+                upper_pos,
+                logical: c.ev.logical,
+                encoded,
+                buf: std::collections::VecDeque::new(),
+                exhausted: c.head_origin == Origin::Replay as i64
+                    || upper_pos <= c.head_pos
+                    || key_grant <= 1,
+                metas: vec![c.ev],
+            })));
+        } else {
+            let (seq, ev) = if let Some(c) = retries.pop_front() {
+                (Some(c.seq), c.ev)
+            } else {
+                let Some(ev) = sources.front() else { break };
+                let encoded = fetch_batch_header_bytes(0)
+                    + fetch_event_encoded_bytes(ev.payload_bytes as usize);
+                if encoded > resp_left || ev.logical > pending_bytes_left {
+                    fresh_exhausted = true;
+                    sources.clear();
+                    continue;
+                }
+                let ev = sources.pop_front().expect("front checked");
+                next_source_ticket += 1;
+                scan_cursor = ev.key_pos;
+                (None, ev)
+            };
+            let encoded = fetch_batch_header_bytes(0)
+                + fetch_event_encoded_bytes(ev.payload_bytes as usize);
+            if encoded > resp_left || ev.logical > pending_bytes_left {
+                continue;
+            }
+            resp_left -= encoded;
+            pending_bytes_left -= ev.logical;
+            events_left -= 1;
+            selected.push(Selected::Keyless(KeylessSel {
                 seq,
-                timestamp_ms,
-            } => {
-                let Some((payload, key)) = events.remove(&seq) else {
-                    // Retention removed the row between candidate scan and
-                    // claim; the lease tables keep no stale reference after
-                    // normalization.
+                receipt: Uuid::new_v4().into_bytes(),
+                meta: ev,
+            }));
+        }
+    }
+
+    // Growth pass: round-robin over growable keyed batches, appending one
+    // contiguous original position at a time until per-key grants, group
+    // budgets or the response cap stop them.
+    {
+        let mut growable: std::collections::VecDeque<usize> = selected
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                Selected::Keyed(b) if !b.exhausted && b.metas.len() < key_grant => Some(i),
+                _ => None,
+            })
+            .collect();
+        while events_left > 0 {
+            let Some(i) = growable.pop_front() else {
+                break;
+            };
+            let Selected::Keyed(batch) = &mut selected[i] else {
+                continue;
+            };
+            if batch.buf.is_empty() {
+                let Some(next_pos) = batch
+                    .first_pos
+                    .checked_add(batch.metas.len() as u64)
+                else {
+                    batch.exhausted = true;
                     continue;
                 };
+                if next_pos > batch.upper_pos {
+                    batch.exhausted = true;
+                    continue;
+                }
+                let share = events_left.div_ceil(growable.len() + 1);
+                let want = (key_grant - batch.metas.len()).min(share).max(1) as i64;
+                let found: Vec<EvMeta> = query_vec(
+                    conn,
+                    "SELECT seq, key_pos, timestamp_ms, payload_bytes, logical_bytes
+                     FROM events
+                     WHERE stream_id=?1 AND key_id=?2 AND key_pos>=?3 AND key_pos<=?4
+                     ORDER BY key_pos LIMIT ?5",
+                    params![
+                        epoch.stream_id.as_slice(),
+                        batch.key_id,
+                        encode_u64(next_pos).as_slice(),
+                        encode_u64(batch.upper_pos).as_slice(),
+                        want
+                    ],
+                    |r| {
+                        Ok(EvMeta {
+                            seq: blob8(r, 0, "seq")?,
+                            key_pos: blob8(r, 1, "key_pos")?,
+                            timestamp_ms: r.get(2)?,
+                            payload_bytes: r.get::<_, i64>(3)?.max(0) as u64,
+                            logical: r.get::<_, i64>(4)?.max(0) as u64,
+                        })
+                    },
+                    "Cannot load batch suffix",
+                )?;
+                if found.is_empty() {
+                    batch.exhausted = true;
+                    continue;
+                }
+                batch.buf = found.into();
+            }
+            let ev = batch.buf.front().expect("batch buffer non-empty");
+            let enc = fetch_event_encoded_bytes(ev.payload_bytes as usize);
+            let fits = enc <= resp_left
+                && ev.logical <= pending_bytes_left
+                && batch.logical + ev.logical <= key_byte_cap;
+            if !fits {
+                batch.exhausted = true;
+                continue;
+            }
+            let ev = batch.buf.pop_front().expect("batch buffer non-empty");
+            batch.logical += ev.logical;
+            batch.encoded += enc;
+            resp_left -= enc;
+            pending_bytes_left -= ev.logical;
+            events_left -= 1;
+            batch.metas.push(ev);
+            if batch.metas.len() < key_grant {
+                growable.push_back(i);
+            } else {
+                batch.exhausted = true;
+            }
+        }
+    }
+
+    if selected.is_empty() {
+        return Ok(empty_page());
+    }
+
+    // Commit pass: write the leases for the chosen batches in selection
+    // order, loading payloads and key bytes only for the claimed positions.
+    let deadline = ctx.now_ms.saturating_add(lease_ms) as i64;
+    let mut batches: Vec<DeliveryBatch> = Vec::with_capacity(selected.len());
+    let mut fresh_claims: Vec<(u64, u64, [u8; 16], u64)> = Vec::new();
+    let total_events = selected
+        .iter()
+        .map(|s| match s {
+            Selected::Keyed(b) => b.metas.len(),
+            Selected::Keyless(_) => 1,
+        })
+        .sum::<usize>();
+    let mut payloads: std::collections::HashMap<u64, Vec<u8>> =
+        std::collections::HashMap::with_capacity(total_events);
+    {
+        let mut seqs = Vec::with_capacity(total_events);
+        for item in &selected {
+            match item {
+                Selected::Keyed(batch) => seqs.extend(batch.metas.iter().map(|m| m.seq)),
+                Selected::Keyless(batch) => seqs.push(batch.meta.seq),
+            }
+        }
+        for chunk in seqs.chunks(400) {
+            let (text, values) = seq_in_list(
+                "SELECT seq, payload FROM events WHERE stream_id=?1 AND seq IN (",
+                &epoch.stream_id,
+                chunk,
+            );
+            for (seq, payload) in query_vec(
+                conn,
+                &text,
+                rusqlite::params_from_iter(values),
+                |r| Ok((blob8(r, 0, "seq")?, r.get::<_, Vec<u8>>(1)?)),
+                "Cannot load fetch payloads",
+            )? {
+                payloads.insert(seq, payload);
+            }
+        }
+    }
+    let mut key_bytes: std::collections::HashMap<i64, Bytes> =
+        std::collections::HashMap::new();
+    {
+        let ids: Vec<i64> = selected
+            .iter()
+            .filter_map(|s| match s {
+                Selected::Keyed(b) => Some(b.key_id),
+                _ => None,
+            })
+            .collect();
+        for chunk in ids.chunks(400) {
+            let (text, values) = id_in_list(
+                "SELECT key_id, key FROM stream_keys
+                 WHERE stream_id=?1 AND key_id IN (",
+                &epoch.stream_id,
+                chunk,
+            );
+            for (key_id, key) in query_vec(
+                conn,
+                &text,
+                rusqlite::params_from_iter(values),
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                "Cannot load batch keys",
+            )? {
+                key_bytes.insert(key_id, Bytes::from(key));
+            }
+        }
+    }
+    for sel in selected {
+        match sel {
+            Selected::Keyed(batch) => {
                 let changed = sql(
                     exec(
                         conn,
                         "UPDATE key_lanes SET state=2, receipt=?3, owner=?4, connection_id=?5,
-                            deadline_ms=?6, attempts=attempts+1
+                            deadline_ms=?6, attempts=attempts+1, lease_first_pos=?7,
+                            lease_count=?8, lease_acked=0, lease_bytes=?9
                          WHERE epoch_id=?1 AND key_id=?2 AND state=1",
                         params![
                             epoch.id.as_slice(),
-                            key_id,
-                            receipt.as_slice(),
+                            batch.key_id,
+                            batch.receipt.as_slice(),
                             identity.consumer_id,
                             identity.connection_id,
                             deadline,
+                            encode_u64(batch.first_pos).as_slice(),
+                            batch.metas.len() as i64,
+                            batch.logical as i64,
                         ],
                     ),
                     "Cannot lease lane",
@@ -2000,69 +2301,99 @@ fn fetch(
                 if changed == 0 {
                     continue;
                 }
-                deliveries.push(Delivery {
-                    message: Message {
-                        seq,
-                        timestamp: timestamp_ms as u64,
-                        key: Bytes::from(key),
-                        payload: Bytes::from(payload),
-                    },
-                    receipt,
+                epoch.pending += batch.metas.len() as i64;
+                epoch.pending_bytes += batch.logical as i64;
+                let key = key_bytes
+                    .get(&batch.key_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CmdError::Fatal(BrokerError::storage(
+                            "Corrupt storage: claimed lane has no key row",
+                        ))
+                    })?;
+                let messages = batch
+                    .metas
+                    .into_iter()
+                    .map(|m| {
+                        let payload = payloads.remove(&m.seq).ok_or_else(|| {
+                            CmdError::Fatal(BrokerError::storage(
+                                "Corrupt storage: claimed batch position has no event",
+                            ))
+                        })?;
+                        Ok(Message {
+                            seq: m.seq,
+                            timestamp: m.timestamp_ms as u64,
+                            key: key.clone(),
+                            payload: Bytes::from(payload),
+                        })
+                    })
+                    .collect::<Result<Vec<Message>, CmdError>>()?;
+                batches.push(DeliveryBatch {
+                    receipt: batch.receipt,
+                    messages,
                 });
             }
-            Claim::Retry { seq, timestamp_ms } => {
-                let Some((payload, key)) = events.remove(&seq) else {
-                    continue;
-                };
-                let changed = sql(
-                    exec(
-                        conn,
-                        "UPDATE keyless_deliveries SET state=2, receipt=?3, owner=?4,
-                            connection_id=?5, deadline_ms=?6, attempts=attempts+1
-                         WHERE epoch_id=?1 AND seq=?2 AND state=1",
-                        params![
-                            epoch.id.as_slice(),
-                            encode_u64(seq).as_slice(),
-                            receipt.as_slice(),
-                            identity.consumer_id,
-                            identity.connection_id,
-                            deadline,
-                        ],
-                    ),
-                    "Cannot lease keyless delivery",
-                )?;
-                if changed == 0 {
-                    continue;
+            Selected::Keyless(kl) => {
+                let encoded_seq = encode_u64(kl.meta.seq);
+                match kl.seq {
+                    Some(_seq) => {
+                        let changed = sql(
+                            exec(
+                                conn,
+                                "UPDATE keyless_deliveries SET state=2, receipt=?3, owner=?4,
+                                    connection_id=?5, deadline_ms=?6, attempts=attempts+1,
+                                    lease_bytes=?7
+                                 WHERE epoch_id=?1 AND seq=?2 AND state=1",
+                                params![
+                                    epoch.id.as_slice(),
+                                    encoded_seq.as_slice(),
+                                    kl.receipt.as_slice(),
+                                    identity.consumer_id,
+                                    identity.connection_id,
+                                    deadline,
+                                    kl.meta.logical as i64,
+                                ],
+                            ),
+                            "Cannot lease keyless delivery",
+                        )?;
+                        if changed == 0 {
+                            continue;
+                        }
+                    }
+                    None => {
+                        fresh_claims.push((
+                            kl.meta.seq,
+                            kl.meta.key_pos,
+                            kl.receipt,
+                            kl.meta.logical,
+                        ));
+                        epoch.keyless_cursor = kl.meta.key_pos;
+                        epoch.keyless_ticket = take_ticket(&mut epoch)?;
+                    }
                 }
-                deliveries.push(Delivery {
-                    message: Message {
-                        seq,
-                        timestamp: timestamp_ms as u64,
-                        key: Bytes::from(key),
+                epoch.pending += 1;
+                epoch.pending_bytes += kl.meta.logical as i64;
+                let payload = payloads.remove(&kl.meta.seq).ok_or_else(|| {
+                    CmdError::Fatal(BrokerError::storage(
+                        "Corrupt storage: claimed keyless event has no payload",
+                    ))
+                })?;
+                batches.push(DeliveryBatch {
+                    receipt: kl.receipt,
+                    messages: vec![Message {
+                        seq: kl.meta.seq,
+                        timestamp: kl.meta.timestamp_ms as u64,
+                        key: Bytes::new(),
                         payload: Bytes::from(payload),
-                    },
-                    receipt,
+                    }],
                 });
             }
         }
     }
 
-    if deliveries.is_empty() {
-        return Ok((StreamReply::Fetch(deliveries), Effects::default()));
-    }
     admit_fresh_keyless(conn, &epoch, &fresh_claims, identity, deadline)?;
-    epoch.pending += deliveries.len() as i64;
     save_epoch(conn, &epoch)?;
-    Ok((StreamReply::Fetch(deliveries), Effects::default()))
-}
-
-/// Fresh keyless event prefetched for the claim loop: the whole payload is
-/// read up front so the byte budget needs no second query.
-struct FreshSource {
-    key_pos: u64,
-    seq: u64,
-    timestamp_ms: i64,
-    payload: Vec<u8>,
+    Ok((StreamReply::Fetch(FetchPage { lease_ms, batches }), Effects::default()))
 }
 
 /// Admission rows for fresh keyless claims, written as chunked multi-row
@@ -2071,23 +2402,24 @@ struct FreshSource {
 fn admit_fresh_keyless(
     conn: &Connection,
     epoch: &EpochRow,
-    claims: &[(u64, u64, [u8; 16])],
+    claims: &[(u64, u64, [u8; 16], u64)],
     identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
     deadline: i64,
 ) -> R<()> {
-    // 8 bound params per row; chunks stay under the 999-variable limit.
-    for chunk in claims.chunks(120) {
+    // 9 bound params per row; chunks stay under the 999-variable limit.
+    for chunk in claims.chunks(110) {
         let mut text = String::from(
             "INSERT INTO keyless_deliveries(epoch_id, stream_id, seq, key_pos, origin,
-                state, attempts, ready_ticket, receipt, owner, connection_id, deadline_ms)
+                state, attempts, ready_ticket, receipt, owner, connection_id, deadline_ms,
+                lease_bytes)
              VALUES ",
         );
-        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 8);
-        for (row, (seq, key_pos, receipt)) in chunk.iter().enumerate() {
+        let mut values: Vec<rusqlite::types::Value> = Vec::with_capacity(chunk.len() * 9);
+        for (row, (seq, key_pos, receipt, logical)) in chunk.iter().enumerate() {
             if row > 0 {
                 text.push(',');
             }
-            text.push_str("(?,?,?,?,0,2,1,0,?,?,?,?)");
+            text.push_str("(?,?,?,?,0,2,1,0,?,?,?,?,?)");
             values.extend([
                 rusqlite::types::Value::Blob(epoch.id.to_vec()),
                 rusqlite::types::Value::Blob(epoch.stream_id.to_vec()),
@@ -2097,6 +2429,7 @@ fn admit_fresh_keyless(
                 rusqlite::types::Value::Text(identity.consumer_id.clone()),
                 rusqlite::types::Value::Text(identity.connection_id.clone()),
                 rusqlite::types::Value::Integer(deadline),
+                rusqlite::types::Value::Integer(*logical as i64),
             ]);
         }
         sql(
@@ -2108,100 +2441,35 @@ fn admit_fresh_keyless(
 }
 
 // ---------------------------------------------------------------------------
-// ACK / leave / disconnect / seek
+// Batch updates / leave / disconnect / seek
 // ---------------------------------------------------------------------------
 
-/// Consume the lease for `seq` fenced by `receipt`. A lease that is missing or
-/// carries a different receipt is a stale epoch/receipt → FENCED.
-fn ack(
-    conn: &Connection,
-    name: &str,
-    group_name: &str,
-    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
-    seq: u64,
-    receipt: &[u8; 16],
-) -> Result<(StreamReply, Effects), CmdError> {
-    let (_stream, mut epoch) = resolve_member(conn, name, group_name, identity)?;
-    let mut effects = Effects::default();
+/// `(seq, pos, origin)` of a lane's first unconfirmed event.
+fn fatal_pos_overflow() -> CmdError {
+    CmdError::Fatal(BrokerError::storage("Batch position overflow"))
+}
 
-    // Keyed lease: one full-row hit on the (stream, head_seq) index.
-    let lane = query_one(
-        conn,
-        "SELECT key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state,
-                attempts, receipt
-         FROM key_lanes
-         WHERE stream_id=?1 AND head_seq=?2 AND epoch_id=?3 AND state=2",
-        params![
-            epoch.stream_id.as_slice(),
-            encode_u64(seq).as_slice(),
-            epoch.id.as_slice()
-        ],
-        |r| lane_row(r, 0),
-    )
-    .optional()
-    .map_err(|e| fatal("Cannot locate lease", e))?;
-
-    if let Some(lane) = lane {
-        let stored = lane.receipt.as_deref().unwrap_or(&[]);
-        if stored != receipt.as_slice() {
-            return Err(expected(BrokerError::fenced()));
-        }
-        consume_lane_lease(conn, &mut epoch, &lane, name, group_name, &mut effects)?;
-        save_epoch(conn, &epoch)?;
-        // Credit freed: pending fetches retry even when the lane went EMPTY.
-        effects.wake(name, group_name);
-        return Ok((StreamReply::Unit, effects));
-    }
-
-    // Keyless lease: primary-key lookup on the epoch table.
-    let keyless = query_one(
-        conn,
-        "SELECT receipt, state FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
-        params![epoch.id.as_slice(), encode_u64(seq).as_slice()],
-        |r| Ok((r.get::<_, Option<Vec<u8>>>(0)?, r.get::<_, i64>(1)?)),
-    )
-    .optional()
-    .map_err(|e| fatal("Cannot locate keyless lease", e))?;
-    match keyless {
-        Some((Some(stored), 2)) if stored.as_slice() == receipt.as_slice() => {
-            sql(
-                exec(
-                    conn,
-                    "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq=?2",
-                    params![epoch.id.as_slice(), encode_u64(seq).as_slice()],
-                ),
-                "Cannot consume keyless delivery",
-            )?;
-            epoch.pending -= 1;
-            save_epoch(conn, &epoch)?;
-            effects.wake(name, group_name);
-            Ok((StreamReply::Unit, effects))
-        }
-        _ => Err(expected(BrokerError::fenced())),
+fn lane_head(lane: &LaneRow) -> R<(u64, u64, i64)> {
+    match (lane.head_seq, lane.head_pos, lane.head_origin) {
+        (Some(s), Some(p), Some(o)) => Ok((s, p, o)),
+        _ => Err(CmdError::Fatal(BrokerError::storage(
+            "Corrupt storage: lease without head",
+        ))),
     }
 }
 
-/// Consume one leased lane head after the receipt check: drop the replay
-/// obligation or advance the durable cursor, then recompute the next head.
-/// Shared by `ack` and `ack_many`; decrements the epoch pending counter.
-fn consume_lane_lease(
+/// Close a fully confirmed batch: drop the replay obligation or keep the
+/// advanced original cursor, then rebuild the next head. Returns the
+/// recompute result (true when a new head became READY).
+fn close_lane_lease(
     conn: &Connection,
     epoch: &mut EpochRow,
     lane: &LaneRow,
-    name: &str,
-    group_name: &str,
-    effects: &mut Effects,
-) -> R<()> {
-    epoch.pending -= 1;
-    let origin = lane.head_origin.unwrap_or(Origin::Original as i64);
-    let head_pos = lane.head_pos.ok_or_else(|| {
-        CmdError::Fatal(BrokerError::storage(
-            "Corrupt storage: leased lane without head",
-        ))
-    })?;
-    let mut consumed = lane.clone();
-    if origin == Origin::Replay as i64 {
-        // The delivery obligation is consumed only when it is acked.
+    replay: bool,
+    first_pos: u64,
+) -> R<bool> {
+    if replay {
+        // Only the assigned intent is consumed; later intents stay pending.
         sql(
             exec(
                 conn,
@@ -2209,33 +2477,380 @@ fn consume_lane_lease(
                 params![
                     epoch.id.as_slice(),
                     lane.key_id,
-                    encode_u64(head_pos).as_slice()
+                    encode_u64(first_pos).as_slice()
                 ],
             ),
             "Cannot consume replay intent",
         )?;
-    } else {
-        // Original progress: the resolved position becomes the new cursor,
-        // persisted by the recompute write below.
-        consumed.cursor_pos = head_pos;
     }
-    if recompute_lane(conn, epoch, &consumed)? {
-        effects.wake(name, group_name);
-    }
-    Ok(())
+    recompute_lane(conn, epoch, lane)
 }
 
-/// `(text, params)` for `... WHERE epoch_id=?1 AND <col> IN (?2..)`: values
-/// bind as numbered placeholders past the epoch. Bounded by the worker's
-/// batch cap (256), well under the SQLite variable limit.
+fn lease_valid(
+    owner: Option<&str>,
+    connection_id: Option<&str>,
+    deadline_ms: Option<i64>,
+    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
+    ctx: &ExecCtx,
+) -> bool {
+    owner == Some(identity.consumer_id.as_str())
+        && connection_id == Some(identity.connection_id.as_str())
+        && deadline_ms.is_some_and(|d| d > ctx.now_ms as i64)
+}
+
+fn sum_logical_range(
+    conn: &Connection,
+    stream_id: &[u8; 16],
+    key_id: i64,
+    first_pos: u64,
+    last_pos: u64,
+) -> R<u64> {
+    query_one(
+        conn,
+        "SELECT COALESCE(SUM(logical_bytes),0) FROM events
+         WHERE stream_id=?1 AND key_id=?2 AND key_pos>=?3 AND key_pos<=?4",
+        params![
+            stream_id.as_slice(),
+            key_id,
+            encode_u64(first_pos).as_slice(),
+            encode_u64(last_pos).as_slice()
+        ],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v.max(0) as u64)
+    .map_err(|e| fatal("Cannot sum batch bytes", e))
+}
+
+fn event_seq_at(conn: &Connection, stream_id: &[u8; 16], key_id: i64, pos: u64) -> R<u64> {
+    query_one(
+        conn,
+        "SELECT seq FROM events WHERE stream_id=?1 AND key_id=?2 AND key_pos=?3",
+        params![stream_id.as_slice(), key_id, encode_u64(pos).as_slice()],
+        |r| blob8(r, 0, "seq"),
+    )
+    .optional()
+    .map_err(|e| fatal("Cannot load batch head", e))?
+    .ok_or_else(|| {
+        CmdError::Fatal(BrokerError::storage(
+            "Corrupt storage: unconfirmed batch position has no event",
+        ))
+    })
+}
+
+fn update_lane(
+    conn: &Connection,
+    epoch: &mut EpochRow,
+    stream: &StreamRow,
+    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
+    lane: &LaneRow,
+    update: &BatchUpdate,
+    ctx: &ExecCtx,
+) -> Result<Option<crate::brokers::BrokerErrorKind>, CmdError> {
+    use crate::brokers::BrokerErrorKind;
+    if !lease_valid(
+        lane.owner.as_deref(),
+        lane.connection_id.as_deref(),
+        lane.deadline_ms,
+        identity,
+        ctx,
+    ) {
+        return Ok(Some(BrokerErrorKind::Fenced));
+    }
+    let first_pos = lane.lease_first_pos.ok_or_else(|| {
+        CmdError::Fatal(BrokerError::storage("Corrupt storage: lease without first_pos"))
+    })?;
+    let count = lane.lease_count.max(0) as u64;
+    let acked = lane.lease_acked.max(0) as u64;
+    let completed = update.completed as u64;
+    if completed > count || completed < acked {
+        return Ok(Some(BrokerErrorKind::InvalidArgument));
+    }
+    if update.disposition == BatchDisposition::Retry && completed == count {
+        return Ok(Some(BrokerErrorKind::InvalidArgument));
+    }
+    let replay = lane.head_origin == Some(Origin::Replay as i64);
+    let mut lane = lane.clone();
+    let mut lease_bytes = lane.lease_bytes.max(0) as u64;
+
+    let delta = completed - acked;
+    if delta > 0 {
+        let confirmed_bytes = if completed < count {
+            sum_logical_range(
+                conn,
+                &epoch.stream_id,
+                lane.key_id,
+                first_pos
+                    .checked_add(acked)
+                    .ok_or_else(|| fatal_pos_overflow())?,
+                first_pos
+                    .checked_add(completed - 1)
+                    .ok_or_else(|| fatal_pos_overflow())?,
+            )?
+        } else {
+            lease_bytes
+        };
+        epoch.pending -= delta as i64;
+        epoch.pending_bytes -= confirmed_bytes as i64;
+        lease_bytes -= confirmed_bytes;
+        if !replay {
+            lane.cursor_pos = first_pos
+                .checked_add(completed - 1)
+                .ok_or_else(|| fatal_pos_overflow())?;
+        }
+        if completed < count {
+            let head_pos = first_pos
+                .checked_add(completed)
+                .ok_or_else(|| fatal_pos_overflow())?;
+            lane.head_pos = Some(head_pos);
+            lane.head_seq = Some(event_seq_at(conn, &epoch.stream_id, lane.key_id, head_pos)?);
+            lane.head_origin = Some(Origin::Original as i64);
+            lane.attempts = 1;
+            lane.normal_seq = lane.head_seq;
+        }
+    }
+    let remaining = count - completed;
+    let renew_deadline = ctx.now_ms.saturating_add(stream.config.ack_wait_ms) as i64;
+
+    match update.disposition {
+        BatchDisposition::Checkpoint => {
+            if remaining == 0 {
+                close_lane_lease(conn, epoch, &lane, replay, first_pos)?;
+                return Ok(None);
+            }
+            sql(
+                exec(
+                    conn,
+                    "UPDATE key_lanes SET lease_acked=?3, lease_bytes=?4, head_seq=?5,
+                        head_pos=?6, head_origin=?7, attempts=?8, deadline_ms=?9,
+                        cursor_pos=?10, normal_seq=?11
+                     WHERE epoch_id=?1 AND key_id=?2 AND state=2",
+                    params![
+                        epoch.id.as_slice(),
+                        lane.key_id,
+                        completed as i64,
+                        lease_bytes as i64,
+                        lane.head_seq.map(encode_u64).map(|b| b.to_vec()),
+                        lane.head_pos.map(encode_u64).map(|b| b.to_vec()),
+                        lane.head_origin,
+                        lane.attempts,
+                        renew_deadline,
+                        encode_u64(lane.cursor_pos).as_slice(),
+                        lane.normal_seq.map(encode_u64).map(|b| b.to_vec()),
+                    ],
+                ),
+                "Cannot checkpoint lane",
+            )?;
+            Ok(None)
+        }
+        BatchDisposition::Retry => {
+            epoch.pending -= remaining as i64;
+            epoch.pending_bytes -= lease_bytes as i64;
+            if lane.attempts >= stream.config.max_deliveries as i64 {
+                park_lane(conn, epoch, &lane, DlsReason::MaxDeliveries)?;
+            } else {
+                let head = lane_head(&lane)?;
+                set_lane_waiting(
+                    conn,
+                    epoch,
+                    &lane,
+                    head,
+                    lane.attempts,
+                    ctx.now_ms.saturating_add(stream.config.ack_wait_ms),
+                )?;
+            }
+            Ok(None)
+        }
+        BatchDisposition::Release => {
+            if remaining == 0 {
+                close_lane_lease(conn, epoch, &lane, replay, first_pos)?;
+                return Ok(None);
+            }
+            epoch.pending -= remaining as i64;
+            epoch.pending_bytes -= lease_bytes as i64;
+            lane.attempts = lane.attempts.saturating_sub(1);
+            let ticket = take_ticket(epoch)?;
+            let head = lane_head(&lane)?;
+            sql(
+                exec(
+                    conn,
+                    &format!(
+                        "UPDATE key_lanes SET state=1, ready_ticket=?3, head_seq=?4,
+                            head_pos=?5, head_origin=?6, attempts=?7, deadline_ms=NULL,
+                            cursor_pos=?8, normal_seq=?9, {CLEAR_LEASE}
+                         WHERE epoch_id=?1 AND key_id=?2"
+                    ),
+                    params![
+                        epoch.id.as_slice(),
+                        lane.key_id,
+                        ticket,
+                        encode_u64(head.0).as_slice(),
+                        encode_u64(head.1).as_slice(),
+                        head.2,
+                        lane.attempts,
+                        encode_u64(lane.cursor_pos).as_slice(),
+                        lane.normal_seq.map(encode_u64).map(|b| b.to_vec()),
+                    ],
+                ),
+                "Cannot release lane",
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+struct KeylessRow {
+    seq: u64,
+    key_pos: u64,
+    attempts: i64,
+    receipt: Option<Vec<u8>>,
+    owner: Option<String>,
+    connection_id: Option<String>,
+    deadline_ms: Option<i64>,
+    lease_bytes: i64,
+}
+
+const KEYLESS_COLS: &str =
+    "seq, key_pos, attempts, receipt, owner, connection_id, deadline_ms, lease_bytes";
+
+fn keyless_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KeylessRow> {
+    Ok(KeylessRow {
+        seq: blob8(r, 0, "seq")?,
+        key_pos: blob8(r, 1, "key_pos")?,
+        attempts: r.get(2)?,
+        receipt: r.get(3)?,
+        owner: r.get(4)?,
+        connection_id: r.get(5)?,
+        deadline_ms: r.get(6)?,
+        lease_bytes: r.get(7)?,
+    })
+}
+
+fn load_keyless_by_receipt(
+    conn: &Connection,
+    epoch_id: &[u8; 16],
+    receipt: &[u8; 16],
+) -> R<Option<KeylessRow>> {
+    query_one(
+        conn,
+        &format!(
+            "SELECT {KEYLESS_COLS} FROM keyless_deliveries
+             WHERE epoch_id=?1 AND state=2 AND receipt=?2"
+        ),
+        params![epoch_id.as_slice(), receipt.as_slice()],
+        keyless_row,
+    )
+    .optional()
+    .map_err(|e| fatal("Cannot load keyless delivery by receipt", e))
+}
+
+fn update_keyless(
+    conn: &Connection,
+    epoch: &mut EpochRow,
+    stream: &StreamRow,
+    identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
+    kl: &KeylessRow,
+    update: &BatchUpdate,
+    ctx: &ExecCtx,
+    delete_seqs: &mut Vec<u64>,
+) -> Result<Option<crate::brokers::BrokerErrorKind>, CmdError> {
+    use crate::brokers::BrokerErrorKind;
+    if !lease_valid(
+        kl.owner.as_deref(),
+        kl.connection_id.as_deref(),
+        kl.deadline_ms,
+        identity,
+        ctx,
+    ) {
+        return Ok(Some(BrokerErrorKind::Fenced));
+    }
+    if update.completed > 1 {
+        return Ok(Some(BrokerErrorKind::InvalidArgument));
+    }
+    if update.disposition == BatchDisposition::Retry && update.completed == 1 {
+        return Ok(Some(BrokerErrorKind::InvalidArgument));
+    }
+    let retry_at = ctx.now_ms.saturating_add(stream.config.ack_wait_ms) as i64;
+    match (update.disposition, update.completed) {
+        (BatchDisposition::Checkpoint, 0) => {
+            sql(
+                exec(
+                    conn,
+                    "UPDATE keyless_deliveries SET deadline_ms=?3
+                     WHERE epoch_id=?1 AND seq=?2 AND state=2",
+                    params![epoch.id.as_slice(), encode_u64(kl.seq).as_slice(), retry_at],
+                ),
+                "Cannot renew keyless lease",
+            )?;
+        }
+        (BatchDisposition::Checkpoint, 1) | (BatchDisposition::Release, 1) => {
+            delete_seqs.push(kl.seq);
+            epoch.pending -= 1;
+            epoch.pending_bytes -= kl.lease_bytes;
+        }
+        (BatchDisposition::Retry, 0) => {
+            epoch.pending -= 1;
+            epoch.pending_bytes -= kl.lease_bytes;
+            if kl.attempts >= stream.config.max_deliveries as i64 {
+                delete_seqs.push(kl.seq);
+                insert_range(
+                    conn,
+                    epoch,
+                    0,
+                    kl.key_pos,
+                    Some(kl.key_pos),
+                    DlsReason::MaxDeliveries,
+                    kl.attempts,
+                )?;
+            } else {
+                sql(
+                    exec(
+                        conn,
+                        "UPDATE keyless_deliveries SET state=4, receipt=NULL, owner=NULL,
+                            connection_id=NULL, deadline_ms=?3, lease_bytes=0
+                         WHERE epoch_id=?1 AND seq=?2",
+                        params![epoch.id.as_slice(), encode_u64(kl.seq).as_slice(), retry_at],
+                    ),
+                    "Cannot wait keyless delivery",
+                )?;
+            }
+        }
+        (BatchDisposition::Release, 0) => {
+            epoch.pending -= 1;
+            epoch.pending_bytes -= kl.lease_bytes;
+            let ticket = take_ticket(epoch)?;
+            sql(
+                exec(
+                    conn,
+                    "UPDATE keyless_deliveries SET state=1, ready_ticket=?3, receipt=NULL,
+                        owner=NULL, connection_id=NULL, deadline_ms=NULL, lease_bytes=0,
+                        attempts=?4
+                     WHERE epoch_id=?1 AND seq=?2",
+                    params![
+                        epoch.id.as_slice(),
+                        encode_u64(kl.seq).as_slice(),
+                        ticket,
+                        kl.attempts.saturating_sub(1),
+                    ],
+                ),
+                "Cannot release keyless delivery",
+            )?;
+        }
+        _ => unreachable!("keyless completed validated to 0..=1"),
+    }
+    Ok(None)
+}
+
+/// `(text, params)` for `... WHERE <scope>=?1 AND <col> IN (?2..)`: values
+/// bind as numbered placeholders past the scope blob. Bounded by the
+/// caller's chunk size, well under the SQLite variable limit.
 fn in_list(
     base: &str,
-    epoch_id: &[u8; 16],
+    scope: &[u8; 16],
     mut values: Vec<rusqlite::types::Value>,
 ) -> (String, Vec<rusqlite::types::Value>) {
     let mut text = String::from(base);
     let mut bound = Vec::with_capacity(values.len() + 1);
-    bound.push(rusqlite::types::Value::Blob(epoch_id.to_vec()));
+    bound.push(rusqlite::types::Value::Blob(scope.to_vec()));
     for i in 0..values.len() {
         if i > 0 {
             text.push(',');
@@ -2249,12 +2864,12 @@ fn in_list(
 
 fn seq_in_list(
     base: &str,
-    epoch_id: &[u8; 16],
+    stream_id: &[u8; 16],
     seqs: &[u64],
 ) -> (String, Vec<rusqlite::types::Value>) {
     in_list(
         base,
-        epoch_id,
+        stream_id,
         seqs.iter()
             .map(|s| rusqlite::types::Value::Blob(encode_u64(*s).to_vec()))
             .collect(),
@@ -2275,120 +2890,190 @@ fn id_in_list(
     )
 }
 
-/// Consecutive acks for one (stream, group, consumer), merged by the worker:
-/// member resolution and the epoch write happen once per run, and keyless
-/// releases collapse into a single IN-list delete (~1 statement per run, not
-/// per message). Per-ack results are preserved: a fenced seq fails alone.
-pub fn ack_many(
+/// Receipt rows load through the partial unique receipt indexes in chunks
+/// this size, keeping each IN-list statement bounded.
+const RECEIPT_LOOKUP_CHUNK: usize = 512;
+
+pub fn update_batches(
     conn: &Connection,
     name: &str,
     group_name: &str,
     identity: &crate::brokers::stream::domain::message::ConsumerIdentity,
-    acks: &[(u64, [u8; 16])],
-) -> Result<(Vec<Result<StreamReply, BrokerError>>, Effects), CmdError> {
-    let (_stream, mut epoch) = resolve_member(conn, name, group_name, identity)?;
+    updates: &[BatchUpdate],
+    ctx: &ExecCtx,
+) -> Result<(Vec<Option<crate::brokers::BrokerErrorKind>>, Effects), CmdError> {
+    use crate::brokers::BrokerErrorKind;
+    let (stream, mut epoch) = resolve_member(conn, name, group_name, identity)?;
     let mut effects = Effects::default();
-    let mut ok = vec![false; acks.len()];
-    // A seq already released inside this run: a repeated ack behaves like
-    // the second sequential call would — the row is gone → FENCED.
-    let mut consumed = std::collections::HashSet::with_capacity(acks.len());
-
-    let mut seqs: Vec<u64> = acks.iter().map(|(seq, _)| *seq).collect();
-    seqs.sort_unstable();
-    seqs.dedup();
-    if seqs.is_empty() {
-        return Ok((Vec::new(), Effects::default()));
+    if updates.is_empty() {
+        return Ok((Vec::new(), effects));
+    }
+    if updates.len() > crate::protocol::STREAM_MAX_FETCH_BATCH_SIZE {
+        return Err(expected(BrokerError::invalid_argument(format!(
+            "Update batch too large: {} items (max: {})",
+            updates.len(),
+            crate::protocol::STREAM_MAX_FETCH_BATCH_SIZE
+        ))));
     }
 
-    // Lanes whose leased head is one of the acked seqs, and leased keyless
-    // rows: two IN-list scans, one row per lane and per delivery.
-    let lane_of: std::collections::HashMap<u64, LaneRow> = {
-        let (text, values) = seq_in_list(
-            "SELECT head_seq, key_id, cursor_pos, normal_seq, head_seq, head_pos,
-                    head_origin, state, attempts, receipt FROM key_lanes
-             WHERE epoch_id=?1 AND state=2 AND head_seq IN (",
+    // Bulk-load the leased rows behind the presented receipts. The partial
+    // unique receipt indexes guarantee at most one live lease per receipt.
+    let mut lane_of: std::collections::HashMap<[u8; 16], LaneRow> =
+        std::collections::HashMap::new();
+    let mut keyless_of: std::collections::HashMap<[u8; 16], KeylessRow> =
+        std::collections::HashMap::new();
+    for chunk in updates.chunks(RECEIPT_LOOKUP_CHUNK) {
+        let receipts: Vec<rusqlite::types::Value> = chunk
+            .iter()
+            .map(|u| rusqlite::types::Value::Blob(u.receipt.to_vec()))
+            .collect();
+        let (lane_text, lane_values) = in_list(
+            &format!(
+                "SELECT {LANE_COLS} FROM key_lanes
+                 WHERE epoch_id=?1 AND state=2 AND receipt IN ("
+            ),
             &epoch.id,
-            &seqs,
+            receipts.clone(),
         );
-        query_vec(
+        for lane in query_vec(
             conn,
-            &text,
-            rusqlite::params_from_iter(values),
-            |r| Ok((blob8(r, 0, "head_seq")?, lane_row(r, 1)?)),
+            &lane_text,
+            rusqlite::params_from_iter(lane_values),
+            |r| lane_row(r, 0),
             "Cannot locate lane leases",
-        )?
-        .into_iter()
-        .collect()
-    };
-    let keyless_of: std::collections::HashMap<u64, Vec<u8>> = {
-        let (text, values) = seq_in_list(
-            "SELECT seq, receipt FROM keyless_deliveries
-             WHERE epoch_id=?1 AND state=2 AND seq IN (",
-            &epoch.id,
-            &seqs,
-        );
-        query_vec(
-            conn,
-            &text,
-            rusqlite::params_from_iter(values),
-            |r| Ok((blob8(r, 0, "seq")?, r.get::<_, Vec<u8>>(1)?)),
-            "Cannot locate keyless leases",
-        )?
-        .into_iter()
-        .collect()
-    };
-
-    let mut keyless_done: Vec<u64> = Vec::new();
-    for (i, (seq, receipt)) in acks.iter().enumerate() {
-        if consumed.contains(seq) {
-            continue;
-        }
-        if let Some(lane) = lane_of.get(seq) {
-            if lane.receipt.as_deref() == Some(receipt.as_slice()) {
-                consume_lane_lease(conn, &mut epoch, lane, name, group_name, &mut effects)?;
-                consumed.insert(*seq);
-                ok[i] = true;
+        )? {
+            if let Some(key) = lane
+                .receipt
+                .as_deref()
+                .and_then(|r| <[u8; 16]>::try_from(r).ok())
+            {
+                lane_of.insert(key, lane);
             }
-            continue;
         }
-        if let Some(stored) = keyless_of.get(seq) {
-            if stored.as_slice() == receipt.as_slice() {
-                keyless_done.push(*seq);
-                consumed.insert(*seq);
-                ok[i] = true;
+        let (kl_text, kl_values) = in_list(
+            &format!(
+                "SELECT {KEYLESS_COLS} FROM keyless_deliveries
+                 WHERE epoch_id=?1 AND state=2 AND receipt IN ("
+            ),
+            &epoch.id,
+            receipts,
+        );
+        for row in query_vec(
+            conn,
+            &kl_text,
+            rusqlite::params_from_iter(kl_values),
+            keyless_row,
+            "Cannot locate keyless leases",
+        )? {
+            if let Some(key) = row
+                .receipt
+                .as_deref()
+                .and_then(|r| <[u8; 16]>::try_from(r).ok())
+            {
+                keyless_of.insert(key, row);
             }
         }
     }
 
-    if !keyless_done.is_empty() {
+    let mut remaining: std::collections::HashMap<[u8; 16], usize> =
+        std::collections::HashMap::new();
+    for u in updates {
+        *remaining.entry(u.receipt).or_default() += 1;
+    }
+
+    enum Post {
+        Keep,
+        Remove,
+        Reload,
+    }
+    let mut outcomes: Vec<Option<BrokerErrorKind>> = Vec::with_capacity(updates.len());
+    let mut any_applied = false;
+    let mut keyless_done: Vec<u64> = Vec::new();
+    for update in updates {
+        if let Some(n) = remaining.get_mut(&update.receipt) {
+            *n -= 1;
+        }
+        let again = remaining.get(&update.receipt).copied().unwrap_or(0) > 0;
+        let (item, post) = if let Some(lane) = lane_of.get(&update.receipt) {
+            let survives = update.disposition == BatchDisposition::Checkpoint
+                && (update.completed as u64) < lane.lease_count.max(0) as u64;
+            match update_lane(conn, &mut epoch, &stream, identity, lane, update, ctx)? {
+                None if survives && again => (None, Post::Reload),
+                None if survives => (None, Post::Keep),
+                None => (None, Post::Remove),
+                Some(kind) => (Some(kind), Post::Keep),
+            }
+        } else if let Some(kl) = keyless_of.get(&update.receipt) {
+            let survives =
+                update.disposition == BatchDisposition::Checkpoint && update.completed == 0;
+            match update_keyless(
+                conn,
+                &mut epoch,
+                &stream,
+                identity,
+                kl,
+                update,
+                ctx,
+                &mut keyless_done,
+            )? {
+                None if survives && again => (None, Post::Reload),
+                None if survives => (None, Post::Keep),
+                None => (None, Post::Remove),
+                Some(kind) => (Some(kind), Post::Keep),
+            }
+        } else {
+            (Some(BrokerErrorKind::Fenced), Post::Keep)
+        };
+        if item.is_none() {
+            any_applied = true;
+        }
+        match post {
+            Post::Keep => {}
+            Post::Remove => {
+                lane_of.remove(&update.receipt);
+                keyless_of.remove(&update.receipt);
+            }
+            Post::Reload => {
+                if lane_of.contains_key(&update.receipt) {
+                    match load_lane_by_receipt(conn, &epoch.id, &update.receipt)? {
+                        Some(lane) => {
+                            lane_of.insert(update.receipt, lane);
+                        }
+                        None => {
+                            lane_of.remove(&update.receipt);
+                        }
+                    }
+                } else if keyless_of.contains_key(&update.receipt) {
+                    match load_keyless_by_receipt(conn, &epoch.id, &update.receipt)? {
+                        Some(row) => {
+                            keyless_of.insert(update.receipt, row);
+                        }
+                        None => {
+                            keyless_of.remove(&update.receipt);
+                        }
+                    }
+                }
+            }
+        }
+        outcomes.push(item);
+    }
+    for chunk in keyless_done.chunks(400) {
         let (text, values) = seq_in_list(
             "DELETE FROM keyless_deliveries WHERE epoch_id=?1 AND seq IN (",
             &epoch.id,
-            &keyless_done,
+            chunk,
         );
         sql(
             exec(conn, &text, rusqlite::params_from_iter(values)),
             "Cannot consume keyless deliveries",
         )?;
-        epoch.pending -= keyless_done.len() as i64;
     }
-    if ok.iter().any(|done| *done) {
+    if any_applied {
         save_epoch(conn, &epoch)?;
-        // Credit freed once per run; wakes are deduplicated anyway.
+        // Freed credit / re-armed lanes let pending fetches make progress.
         effects.wake(name, group_name);
     }
-    Ok((
-        ok.into_iter()
-            .map(|done| {
-                if done {
-                    Ok(StreamReply::Unit)
-                } else {
-                    Err(BrokerError::fenced())
-                }
-            })
-            .collect(),
-        effects,
-    ))
+    Ok((outcomes, effects))
 }
 
 /// Member exit: drop the membership row and release every lease it holds so
@@ -2446,11 +3131,11 @@ fn release_member_leases(
         let Some(lane) = load_lane(conn, &epoch.id, key_id)? else {
             continue;
         };
-        release_lane_lease(conn, epoch, &lane, stream.config.max_deliveries, true)?;
+        reclaim_lane_lease(conn, epoch, &lane, stream.config.max_deliveries, true)?;
     }
-    let keyless_rows: Vec<(u64, u64, i64)> = query_vec(
+    let keyless_rows: Vec<(u64, u64, i64, i64)> = query_vec(
         conn,
-        "SELECT seq, key_pos, attempts FROM keyless_deliveries
+        "SELECT seq, key_pos, attempts, lease_bytes FROM keyless_deliveries
          WHERE epoch_id=?1 AND owner=?2 AND connection_id=?3 AND state=2",
         params![epoch.id.as_slice(), consumer_id, connection_id],
         |r| {
@@ -2458,17 +3143,19 @@ fn release_member_leases(
                 blob8(r, 0, "seq")?,
                 blob8(r, 1, "key_pos")?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         },
         "Cannot scan member keyless leases",
     )?;
-    for (seq, key_pos, attempts) in keyless_rows {
-        release_keyless_lease(
+    for (seq, key_pos, attempts, lease_bytes) in keyless_rows {
+        reclaim_keyless_lease(
             conn,
             epoch,
             seq,
             key_pos,
             attempts,
+            lease_bytes,
             stream.config.max_deliveries,
             true,
         )?;
@@ -2600,15 +3287,12 @@ fn seek(
         Some(group) => {
             let epoch_id = Uuid::new_v4().into_bytes();
             let keyless_cursor = epoch_keyless_boundary(conn, &stream.id, start_after)?;
-            let generation = group.generation.checked_add(1).ok_or_else(|| {
-                CmdError::Fatal(BrokerError::storage("Group generation exhausted"))
-            })?;
             sql(
                 exec(conn,
                     "INSERT INTO group_epochs(id, group_id, stream_id, start_after_seq, initialized,
                         init_key_cursor, init_key_target, keyless_cursor_pos, keyless_ticket,
-                        next_ready_ticket, pending_count, max_pending)
-                     VALUES (?1,?2,?3,?4,0,0,?5,?6,1,2,0,?7)",
+                        next_ready_ticket, pending_count, max_pending, max_pending_bytes)
+                     VALUES (?1,?2,?3,?4,0,0,?5,?6,1,2,0,?7,?8)",
                     params![
                         epoch_id.as_slice(),
                         group.id.as_slice(),
@@ -2617,6 +3301,7 @@ fn seek(
                         stream.last_key_id,
                         encode_u64(keyless_cursor).as_slice(),
                         stream.config.max_ack_pending as i64,
+                        stream.config.max_ack_pending_bytes as i64,
                     ],
                 ),
                 "Cannot create epoch",
@@ -2624,12 +3309,8 @@ fn seek(
             sql(
                 exec(
                     conn,
-                    "UPDATE groups SET generation=?2, active_epoch=?3 WHERE id=?1",
-                    params![
-                        group.id.as_slice(),
-                        encode_u64(generation).as_slice(),
-                        epoch_id.as_slice()
-                    ],
+                    "UPDATE groups SET active_epoch=?2 WHERE id=?1",
+                    params![group.id.as_slice(), epoch_id.as_slice()],
                 ),
                 "Cannot swap epoch",
             )?;
@@ -2954,8 +3635,9 @@ fn purge_dls(
 
     let parked: Vec<LaneRow> = query_vec(
         conn,
-        "SELECT key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin, state,
-                attempts, receipt FROM key_lanes WHERE epoch_id=?1 AND state=3",
+        &format!(
+            "SELECT {LANE_COLS} FROM key_lanes WHERE epoch_id=?1 AND state=3"
+        ),
         [epoch.id.as_slice()],
         |r| lane_row(r, 0),
         "Cannot scan parked lanes",
@@ -3036,9 +3718,10 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
     // the scan and the release, so no per-row reload is needed.
     let due_lanes: Vec<(Vec<u8>, LaneRow)> = query_vec(
         conn,
-        "SELECT epoch_id, key_id, cursor_pos, normal_seq, head_seq, head_pos, head_origin,
-                state, attempts, receipt FROM key_lanes
-         WHERE state=2 AND deadline_ms<=?1 ORDER BY deadline_ms LIMIT ?2",
+        &format!(
+            "SELECT epoch_id, {LANE_COLS} FROM key_lanes
+             WHERE state IN (2, 4) AND deadline_ms<=?1 ORDER BY deadline_ms LIMIT ?2"
+        ),
         params![now_ms as i64, BATCH_LIMIT as i64],
         |r| Ok((r.get::<_, Vec<u8>>(0)?, lane_row(r, 1)?)),
         "Cannot scan due lanes",
@@ -3076,16 +3759,20 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
             }
         }
         let epoch = epoch_for!(&epoch_id);
-        release_lane_lease(conn, epoch, &lane, max_deliveries, true)?;
+        if LaneState::from_i64(lane.state) == Some(LaneState::Waiting) {
+            set_lane_ready(conn, epoch, &lane, lane.attempts)?;
+        } else {
+            reclaim_lane_lease(conn, epoch, &lane, max_deliveries, true)?;
+        }
         if let Some((sname, gname)) = name_cache.get(&epoch_id) {
             effects.wake(&sname.clone(), &gname.clone());
         }
     }
 
-    let due_keyless: Vec<(Vec<u8>, u64, u64, i64)> = query_vec(
+    let due_keyless: Vec<(Vec<u8>, u64, u64, i64, i64, i64)> = query_vec(
         conn,
-        "SELECT epoch_id, seq, key_pos, attempts FROM keyless_deliveries
-         WHERE state=2 AND deadline_ms<=?1 ORDER BY deadline_ms LIMIT ?2",
+        "SELECT epoch_id, seq, key_pos, attempts, state, lease_bytes FROM keyless_deliveries
+         WHERE state IN (2, 4) AND deadline_ms<=?1 ORDER BY deadline_ms LIMIT ?2",
         params![now_ms as i64, BATCH_LIMIT as i64],
         |r| {
             Ok((
@@ -3093,12 +3780,14 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
                 blob8(r, 1, "seq")?,
                 blob8(r, 2, "key_pos")?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
             ))
         },
         "Cannot scan due keyless leases",
     )?;
     let more_keyless = due_keyless.len() == BATCH_LIMIT;
-    for (epoch_id, seq, key_pos, attempts) in due_keyless {
+    for (epoch_id, seq, key_pos, attempts, state, lease_bytes) in due_keyless {
         let Ok(epoch_id) = <[u8; 16]>::try_from(epoch_id.as_slice()) else {
             continue;
         };
@@ -3132,15 +3821,30 @@ fn expire_leases(conn: &Connection, now_ms: u64) -> Result<(StreamReply, Effects
         // The scan ran inside this same transaction and this loop is the
         // only mutator of these rows, so state/key_pos/attempts are current.
         let epoch = epoch_for!(&epoch_id);
-        release_keyless_lease(
-            conn,
-            epoch,
-            seq,
-            key_pos,
-            attempts,
-            max_deliveries,
-            true,
-        )?;
+        if state == LaneState::Waiting as i64 {
+            let ticket = take_ticket(epoch)?;
+            sql(
+                exec(
+                    conn,
+                    "UPDATE keyless_deliveries SET state=1, ready_ticket=?3, deadline_ms=NULL,
+                        lease_bytes=0
+                     WHERE epoch_id=?1 AND seq=?2",
+                    params![epoch_id.as_slice(), encode_u64(seq).as_slice(), ticket],
+                ),
+                "Cannot requeue keyless delivery",
+            )?;
+        } else {
+            reclaim_keyless_lease(
+                conn,
+                epoch,
+                seq,
+                key_pos,
+                attempts,
+                lease_bytes,
+                max_deliveries,
+                true,
+            )?;
+        }
         if let Some((sname, gname)) = name_cache.get(&epoch_id) {
             effects.wake(&sname.clone(), &gname.clone());
         }
@@ -3182,6 +3886,8 @@ fn retention_tick(conn: &Connection, ctx: &ExecCtx) -> Result<(StreamReply, Effe
     }
     if more {
         effects.followups.push(Continuation::Retention);
+    } else {
+        effects.followups.push(Continuation::PruneKeys { after: None });
     }
     Ok((StreamReply::Unit, effects))
 }
@@ -3279,9 +3985,9 @@ fn retain_stream(
     };
 
     // Phase B: drop FK references into the deleted prefix and refund credits.
-    let expired_keyless: Vec<(Vec<u8>, Vec<u8>, i64)> = query_vec(
+    let expired_keyless: Vec<(Vec<u8>, Vec<u8>, i64, i64)> = query_vec(
         conn,
-        "SELECT epoch_id, seq, state FROM keyless_deliveries
+        "SELECT epoch_id, seq, state, lease_bytes FROM keyless_deliveries
          WHERE stream_id=?1 AND seq<=?2",
         params![stream.id.as_slice(), encode_u64(boundary_seq).as_slice()],
         |r| {
@@ -3289,15 +3995,17 @@ fn retain_stream(
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         },
         "Cannot scan keyless deliveries for retention",
     )?;
-    for (epoch_blob, seq_blob, state) in expired_keyless {
+    for (epoch_blob, seq_blob, state, lease_bytes) in expired_keyless {
         let epoch_id = blob16(&epoch_blob, "epoch id")?;
         if epoch_of(conn, &mut dirty_epochs, epoch_id)? && state == LaneState::Leased as i64 {
             if let Some(e) = dirty_epochs.get_mut(&epoch_id) {
                 e.pending -= 1;
+                e.pending_bytes -= lease_bytes;
             }
         }
         sql(
@@ -3533,18 +4241,20 @@ fn retain_stream_lanes(
                         effects.wake(&names.0, &names.1);
                     }
                 }
-                Some(LaneState::Leased) => {
+                Some(LaneState::Leased) | Some(LaneState::Waiting) => {
                     if lane.head_seq.is_some_and(|s| s <= boundary_seq) {
-                        // The leased head is gone: retire the lease, refund
-                        // the credit, and rebuild the lane.
-                        epoch.pending -= 1;
+                        if lane.state == LaneState::Leased as i64 {
+                            epoch.pending -= lane.lease_count - lane.lease_acked;
+                            epoch.pending_bytes -= lane.lease_bytes;
+                        }
                         sql(
                             exec(
                                 conn,
-                                "UPDATE key_lanes SET state=0, head_seq=NULL, head_pos=NULL,
-                                    head_origin=NULL, receipt=NULL, owner=NULL,
-                                    connection_id=NULL, deadline_ms=NULL
-                                 WHERE epoch_id=?1 AND key_id=?2",
+                                &format!(
+                                    "UPDATE key_lanes SET state=0, head_seq=NULL, head_pos=NULL,
+                                        head_origin=NULL, deadline_ms=NULL, {CLEAR_LEASE}
+                                     WHERE epoch_id=?1 AND key_id=?2"
+                                ),
                                 params![epoch_id.as_slice(), key_id],
                             ),
                             "Cannot retire expired lease",
@@ -3591,13 +4301,22 @@ pub fn init_epoch(
     let Some(mut epoch) = load_epoch(conn, epoch_id)? else {
         return Ok((StreamReply::Unit, effects));
     };
+    let active: bool = sql(
+        query_one(
+            conn,
+            "SELECT EXISTS(SELECT 1 FROM groups g JOIN streams s ON s.id = g.stream_id
+             WHERE g.id = ?1 AND g.active_epoch = ?2 AND s.deleted = 0)",
+            params![epoch.group_id.as_slice(), epoch.id.as_slice()],
+            |r| r.get(0),
+        ),
+        "Cannot check active epoch",
+    )?;
+    if !active {
+        return Ok((StreamReply::Unit, effects));
+    }
     if epoch.initialized {
         return Ok((StreamReply::Unit, effects));
     }
-    // Skip init work for epochs of streams already deleted; GC reclaims them.
-    let Some(_stream) = load_stream_by_id(conn, &epoch.stream_id)? else {
-        return Ok((StreamReply::Unit, effects));
-    };
     let keys: Vec<(i64, u64)> = query_vec(
         conn,
         "SELECT key_id, last_pos FROM stream_keys
@@ -3853,6 +4572,117 @@ pub fn gc_slice(conn: &Connection) -> Result<(StreamReply, Effects), CmdError> {
     Ok((StreamReply::Unit, effects))
 }
 
+pub fn prune_keys(
+    conn: &Connection,
+    after: Option<([u8; 16], i64)>,
+) -> Result<(StreamReply, Effects), CmdError> {
+    let mut effects = Effects::default();
+    let mut budget = BATCH_LIMIT as i64;
+    let page_limit = (KEY_GC_PAGE as i64).min(budget);
+
+    let candidates: Vec<(Vec<u8>, i64)> = match after {
+        Some((sid, kid)) => query_vec(
+            conn,
+            "SELECT stream_id, key_id FROM stream_keys
+             WHERE key_id > 0 AND last_pos = retained_after_pos
+               AND (stream_id, key_id) > (?1, ?2)
+             ORDER BY stream_id, key_id LIMIT ?3",
+            params![sid.as_slice(), kid, page_limit],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+            "Cannot scan retired stream keys",
+        )?,
+        None => query_vec(
+            conn,
+            "SELECT stream_id, key_id FROM stream_keys
+             WHERE key_id > 0 AND last_pos = retained_after_pos
+             ORDER BY stream_id, key_id LIMIT ?1",
+            params![page_limit],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+            "Cannot scan retired stream keys",
+        )?,
+    };
+    let page_full = candidates.len() as i64 == page_limit;
+
+    let mut cursor: Option<([u8; 16], i64)> = after;
+
+    for (sid_blob, key_id) in &candidates {
+        budget -= 1;
+        if budget <= 0 {
+            effects
+                .followups
+                .push(Continuation::PruneKeys { after: cursor });
+            return Ok((StreamReply::Unit, effects));
+        }
+        let stream_id = blob16(sid_blob, "stream id")?;
+        let blocked: bool = query_one(
+            conn,
+            "SELECT EXISTS(SELECT 1 FROM events
+                WHERE stream_id = ?1 AND key_id = ?2)
+              OR EXISTS(SELECT 1 FROM key_lanes
+                WHERE stream_id = ?1 AND key_id = ?2 AND state <> 0)
+              OR EXISTS(SELECT 1 FROM replay_intents
+                WHERE stream_id = ?1 AND key_id = ?2)
+              OR EXISTS(SELECT 1 FROM dls_ranges
+                WHERE stream_id = ?1 AND key_id = ?2)",
+            params![stream_id.as_slice(), key_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| fatal("Cannot check key obligations", e))?;
+        if blocked {
+            cursor = Some((stream_id, *key_id));
+            continue;
+        }
+
+        let deleted = sql(
+            exec(
+                conn,
+                "DELETE FROM key_lanes WHERE rowid IN (
+                   SELECT rowid FROM key_lanes
+                   WHERE stream_id = ?1 AND key_id = ?2 AND state = 0
+                   LIMIT ?3)",
+                params![stream_id.as_slice(), key_id, budget],
+            ),
+            "Cannot prune empty key lanes",
+        )? as i64;
+        budget -= deleted;
+
+        let lanes_left: bool = query_one(
+            conn,
+            "SELECT EXISTS(SELECT 1 FROM key_lanes
+                WHERE stream_id = ?1 AND key_id = ?2)",
+            params![stream_id.as_slice(), key_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| fatal("Cannot recount key lanes", e))?;
+        if budget <= 0 || lanes_left {
+            effects
+                .followups
+                .push(Continuation::PruneKeys { after: cursor });
+            return Ok((StreamReply::Unit, effects));
+        }
+
+        sql(
+            exec(
+                conn,
+                "DELETE FROM stream_keys
+                 WHERE stream_id = ?1 AND key_id = ?2
+                   AND last_pos = retained_after_pos",
+                params![stream_id.as_slice(), key_id],
+            ),
+            "Cannot prune retired stream key",
+        )?;
+        budget -= 1;
+        cursor = Some((stream_id, *key_id));
+    }
+
+    if page_full || budget <= 0 {
+        effects
+            .followups
+            .push(Continuation::PruneKeys { after: cursor });
+    }
+    Ok((StreamReply::Unit, effects))
+}
+
 /// Dispatch a continuation item inside the shared writer transaction.
 pub fn run_continuation(
     conn: &Connection,
@@ -3864,6 +4694,7 @@ pub fn run_continuation(
         Continuation::ExpireLeases => expire_leases(conn, ctx.now_ms),
         Continuation::Retention => retention_tick(conn, ctx),
         Continuation::Gc => gc_slice(conn),
+        Continuation::PruneKeys { after } => prune_keys(conn, *after),
     }
 }
 
@@ -3910,12 +4741,11 @@ mod tests {
             let tx = conn.transaction().unwrap();
             exec(
                 &tx,
-                "INSERT INTO groups(id,stream_id,name,generation,active_epoch)
-                 VALUES (?1,?2,'g',?3,?4)",
+                "INSERT INTO groups(id,stream_id,name,active_epoch)
+                 VALUES (?1,?2,'g',?3)",
                 params![
                     group_id.as_slice(),
                     stream_id.as_slice(),
-                    encode_u64(1).as_slice(),
                     epoch_id.as_slice()
                 ],
             )
@@ -4020,11 +4850,11 @@ mod tests {
         }
     }
 
-    /// A merged ack run consumes keyless leases in bulk while keeping
-    /// per-ack outcomes: duplicate seqs, stale receipts and unknown seqs are
-    /// FENCED alone; valid releases drop `pending` and delete the rows.
+    /// A merged update run consumes keyless leases in bulk while keeping
+    /// per-item outcomes: duplicate and stale receipts are FENCED alone;
+    /// valid completions drop `pending` and delete the rows.
     #[test]
-    fn ack_many_consumes_keyless_run_with_per_ack_outcomes() {
+    fn update_batches_consumes_keyless_run_with_per_item_outcomes() {
         let conn = test_conn();
         let stream_id = [7u8; 16];
         let group_id = [8u8; 16];
@@ -4032,7 +4862,7 @@ mod tests {
         let identity = crate::brokers::stream::domain::message::ConsumerIdentity {
             connection_id: "conn1".to_string(),
             consumer_id: "c1".to_string(),
-            generation: 1,
+            epoch: epoch_id,
         };
 
         exec(
@@ -4041,7 +4871,7 @@ mod tests {
             params![
                 stream_id.as_slice(),
                 encode_u64(0).as_slice(),
-                r#"{"retention":{"max_age_ms":null,"max_bytes":null},"max_ack_pending":1000,"ack_wait_ms":30000,"max_deliveries":3}"#
+                r#"{"retention":{"max_age_ms":null,"max_bytes":null},"max_ack_pending":1000,"max_ack_pending_bytes":67108864,"ack_wait_ms":30000,"max_deliveries":3}"#
             ],
         )
         .unwrap();
@@ -4055,12 +4885,11 @@ mod tests {
         conn.execute_batch("BEGIN").unwrap();
         exec(
             &conn,
-            "INSERT INTO groups(id,stream_id,name,generation,active_epoch)
-             VALUES (?1,?2,'g',?3,?4)",
+            "INSERT INTO groups(id,stream_id,name,active_epoch)
+             VALUES (?1,?2,'g',?3)",
             params![
                 group_id.as_slice(),
                 stream_id.as_slice(),
-                encode_u64(1).as_slice(),
                 epoch_id.as_slice()
             ],
         )
@@ -4110,14 +4939,26 @@ mod tests {
             now_ms: 1_000,
             fetch_response_bytes: 1 << 20,
         };
-        let (reply, _) = match fetch(&conn, "s", "g", &identity, 10, &ctx) {
+        let (reply, _) = match fetch(
+            &conn,
+            "s",
+            "g",
+            &identity,
+            FetchLimits {
+                max_messages: 10,
+                max_key_messages: 1,
+                max_key_batches: 10,
+                max_bytes: 1 << 20,
+            },
+            &ctx,
+        ) {
             Ok(out) => out,
             Err(e) => panic!("fetch failed: {}", e.into_error()),
         };
-        let StreamReply::Fetch(deliveries) = reply else {
+        let StreamReply::Fetch(page) = reply else {
             panic!("expected a fetch reply")
         };
-        assert_eq!(deliveries.len(), 5);
+        assert_eq!(page.batches.len(), 5);
         // The deferred bulk admit actually wrote the lease rows.
         let leased: i64 = conn
             .query_row(
@@ -4128,30 +4969,36 @@ mod tests {
             .unwrap();
         assert_eq!(leased, 5);
 
-        // Run: [ok 1, dup 1, stale receipt on 2, unknown 99, ok 3, ok 4, ok 5]
-        let mut run: Vec<(u64, [u8; 16])> = vec![
-            (deliveries[0].message.seq, deliveries[0].receipt),
-            (deliveries[0].message.seq, deliveries[0].receipt),
-            (deliveries[1].message.seq, [0xAA; 16]),
-            (99, [0xBB; 16]),
+        // Run: [ok 1, dup 1, stale receipt, unknown receipt, ok 3, ok 4, ok 5]
+        let done = |receipt: [u8; 16]| BatchUpdate {
+            receipt,
+            completed: 1,
+            disposition: BatchDisposition::Checkpoint,
+        };
+        let mut run: Vec<BatchUpdate> = vec![
+            done(page.batches[0].receipt),
+            done(page.batches[0].receipt),
+            done([0xAA; 16]),
+            done([0xBB; 16]),
         ];
-        for d in &deliveries[2..] {
-            run.push((d.message.seq, d.receipt));
+        for b in &page.batches[2..] {
+            run.push(done(b.receipt));
         }
 
-        let (results, _) = match ack_many(&conn, "s", "g", &identity, &run) {
+        let (outcomes, _) = match update_batches(&conn, "s", "g", &identity, &run, &ctx) {
             Ok(out) => out,
-            Err(e) => panic!("ack_many failed: {}", e.into_error()),
+            Err(e) => panic!("update_batches failed: {}", e.into_error()),
         };
-        assert!(results[0].is_ok());
+        assert_eq!(outcomes.len(), run.len());
+        assert!(outcomes[0].is_none());
         assert!(
-            results[1].is_err(),
-            "second ack of a consumed seq is fenced"
+            outcomes[1].is_some(),
+            "second update of a consumed receipt is fenced"
         );
-        assert!(results[2].is_err(), "stale receipt is fenced");
-        assert!(results[3].is_err(), "unknown seq is fenced");
-        for r in &results[4..] {
-            assert!(r.is_ok());
+        assert!(outcomes[2].is_some(), "stale receipt is fenced");
+        assert!(outcomes[3].is_some(), "unknown receipt is fenced");
+        for o in &outcomes[4..] {
+            assert!(o.is_none());
         }
 
         let leased: i64 = conn
@@ -4170,5 +5017,2540 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending, 1);
+    }
+
+    fn test_config() -> StreamConfig {
+        StreamConfig {
+            retention: crate::brokers::stream::options::RetentionOptions {
+                max_age_ms: None,
+                max_bytes: None,
+            },
+            max_ack_pending: 1000,
+            max_ack_pending_bytes: 64 * 1024 * 1024,
+            ack_wait_ms: 30_000,
+            max_deliveries: 3,
+        }
+    }
+
+    #[test]
+    fn init_epoch_skips_superseded_epochs() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &[crate::brokers::stream::domain::message::PubItem {
+                key: Bytes::from_static(b"k"),
+                payload: Bytes::from_static(b"p"),
+            }],
+            &ctx,
+        )
+        .unwrap();
+
+        let stream = require_stream(&conn, "s").unwrap();
+        let epoch0;
+        let epoch1;
+        let epoch2;
+        {
+            let tx = conn.transaction().unwrap();
+            let (_group, epoch) = create_group_and_epoch(&tx, &stream, "g", 0).unwrap();
+            epoch0 = epoch.id;
+            seek(&tx, "s", "g", &SeekTarget::Beginning, &ctx).unwrap();
+            epoch1 = load_group(&tx, &stream.id, "g")
+                .unwrap()
+                .unwrap()
+                .active_epoch
+                .unwrap();
+            seek(&tx, "s", "g", &SeekTarget::Beginning, &ctx).unwrap();
+            epoch2 = load_group(&tx, &stream.id, "g")
+                .unwrap()
+                .unwrap()
+                .active_epoch
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        assert_ne!(epoch0, epoch1);
+        assert_ne!(epoch1, epoch2);
+
+        for stale in [epoch0, epoch1] {
+            let (_reply, effects) = init_epoch(&conn, &stale).unwrap();
+            assert!(effects.followups.is_empty());
+            let initialized: i64 = conn
+                .query_row(
+                    "SELECT initialized FROM group_epochs WHERE id=?1",
+                    [stale.as_slice()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(initialized, 0, "superseded epoch must stay uninitialized");
+            let lanes: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM key_lanes WHERE epoch_id=?1",
+                    [stale.as_slice()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(lanes, 0);
+        }
+
+        let (_reply, effects) = init_epoch(&conn, &epoch2).unwrap();
+        assert!(effects.followups.is_empty());
+        let initialized: i64 = conn
+            .query_row(
+                "SELECT initialized FROM group_epochs WHERE id=?1",
+                [epoch2.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(initialized, 1);
+        let lanes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM key_lanes WHERE epoch_id=?1",
+                [epoch2.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lanes, 1, "only the key with pending events gets a lane");
+    }
+
+    #[test]
+    fn recover_resumes_only_active_epoch_and_schedules_orphan_gc() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let orphan_epoch;
+        let active_epoch;
+        {
+            let mut store = crate::durable::Store::open(
+                dir.path(),
+                crate::brokers::stream::domain::storage::SPEC,
+            )
+            .unwrap();
+            {
+                let tx = store.conn.transaction().unwrap();
+                create_stream_with_config(&tx, "s", &test_config()).unwrap();
+                tx.commit().unwrap();
+            }
+            publish(
+                &store.conn,
+                "s",
+                &[crate::brokers::stream::domain::message::PubItem {
+                    key: Bytes::from_static(b"k"),
+                    payload: Bytes::from_static(b"p"),
+                }],
+                &ctx,
+            )
+            .unwrap();
+            {
+                let tx = store.conn.transaction().unwrap();
+                let stream = require_stream(&tx, "s").unwrap();
+                let (_group, epoch) = create_group_and_epoch(&tx, &stream, "g", 0).unwrap();
+                orphan_epoch = epoch.id;
+                seek(&tx, "s", "g", &SeekTarget::Beginning, &ctx).unwrap();
+                active_epoch = load_group(&tx, &stream.id, "g")
+                    .unwrap()
+                    .unwrap()
+                    .active_epoch
+                    .unwrap();
+                tx.commit().unwrap();
+            }
+        }
+        let mut store = crate::durable::Store::open(
+            dir.path(),
+            crate::brokers::stream::domain::storage::SPEC,
+        )
+        .unwrap();
+
+        let deleted: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM streams WHERE deleted=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(deleted, 0);
+        let continuations =
+            crate::brokers::stream::domain::storage::recover(&mut store).unwrap();
+        let init = |continuations: &[Continuation], id: [u8; 16]| {
+            continuations
+                .iter()
+                .any(|c| matches!(c, Continuation::InitEpoch { epoch_id } if *epoch_id == id))
+        };
+        assert!(init(&continuations, active_epoch));
+        assert!(
+            !init(&continuations, orphan_epoch),
+            "orphan epoch must not be initialized"
+        );
+        assert!(
+            continuations.iter().any(|c| matches!(c, Continuation::Gc)),
+            "recovery must schedule GC for the orphan epoch alone"
+        );
+
+        let mut queue = continuations;
+        for _ in 0..128 {
+            let Some(cont) = queue.pop() else { break };
+            let followups = {
+                let tx = store.conn.transaction().unwrap();
+                let (_reply, effects) = run_continuation(&tx, &cont, &ctx).unwrap();
+                tx.commit().unwrap();
+                effects.followups
+            };
+            queue.extend(followups);
+        }
+
+        let orphan_rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM group_epochs WHERE id=?1",
+                [orphan_epoch.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_rows, 0, "orphan epoch reclaimed by GC");
+        let initialized: i64 = store
+            .conn
+            .query_row(
+                "SELECT initialized FROM group_epochs WHERE id=?1",
+                [active_epoch.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(initialized, 1);
+
+        let (reply, _) = join(&store.conn, "s", "g", "conn1", &ctx).unwrap();
+        let StreamReply::Join {
+            consumer_id, epoch, ..
+        } = reply
+        else {
+            panic!("expected a join reply")
+        };
+        assert_eq!(epoch, active_epoch);
+        let identity = crate::brokers::stream::domain::message::ConsumerIdentity {
+            connection_id: "conn1".to_string(),
+            consumer_id,
+            epoch,
+        };
+        let (reply, _) = fetch(
+            &store.conn,
+            "s",
+            "g",
+            &identity,
+            FetchLimits {
+                max_messages: 10,
+                max_key_messages: 1,
+                max_key_batches: 10,
+                max_bytes: 1 << 20,
+            },
+            &ctx,
+        )
+        .unwrap();
+        let StreamReply::Fetch(page) = reply else {
+            panic!("expected a fetch reply")
+        };
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(page.batches[0].messages[0].payload.as_ref(), b"p");
+
+        let dead_epoch = [14u8; 16];
+        {
+            let tx = store.conn.transaction().unwrap();
+            create_stream_with_config(&tx, "dead", &test_config()).unwrap();
+            let dead_stream_id: Vec<u8> = tx
+                .query_row("SELECT id FROM streams WHERE name='dead'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            exec(&tx, "UPDATE streams SET deleted=1 WHERE name='dead'", []).unwrap();
+            let dead_group = [13u8; 16];
+            exec(
+                &tx,
+                "INSERT INTO groups(id,stream_id,name,active_epoch)
+                 VALUES (?1,?2,'g',?3)",
+                params![
+                    dead_group.as_slice(),
+                    dead_stream_id.as_slice(),
+                    dead_epoch.as_slice()
+                ],
+            )
+            .unwrap();
+            exec(
+                &tx,
+                "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,initialized,
+                    init_key_cursor,init_key_target,keyless_cursor_pos,keyless_ticket,
+                    next_ready_ticket,pending_count,max_pending)
+                 VALUES (?1,?2,?3,?4,0,0,0,?4,0,1,0,100)",
+                params![
+                    dead_epoch.as_slice(),
+                    dead_group.as_slice(),
+                    dead_stream_id.as_slice(),
+                    encode_u64(0).as_slice()
+                ],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let continuations =
+            crate::brokers::stream::domain::storage::recover(&mut store).unwrap();
+        assert!(
+            !init(&continuations, dead_epoch),
+            "deleted-stream epoch must not be initialized"
+        );
+        assert!(
+            continuations.iter().any(|c| matches!(c, Continuation::Gc)),
+            "deleted stream must schedule GC"
+        );
+
+        let (_reply, effects) = init_epoch(&store.conn, &dead_epoch).unwrap();
+        assert!(effects.followups.is_empty());
+        assert!(effects.wakes.is_empty());
+        let initialized: i64 = store
+            .conn
+            .query_row(
+                "SELECT initialized FROM group_epochs WHERE id=?1",
+                [dead_epoch.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(initialized, 0, "deleted-stream epoch stays uninitialized");
+    }
+
+
+    use crate::brokers::stream::domain::message::{ConsumerIdentity, PubItem};
+    use crate::brokers::BrokerErrorKind;
+
+    fn keyed(key: &[u8], payload: &[u8]) -> PubItem {
+        PubItem {
+            key: Bytes::copy_from_slice(key),
+            payload: Bytes::copy_from_slice(payload),
+        }
+    }
+
+    fn keyless(payload: &[u8]) -> PubItem {
+        PubItem {
+            key: Bytes::new(),
+            payload: Bytes::copy_from_slice(payload),
+        }
+    }
+
+    fn new_member(
+        conn: &mut Connection,
+        name: &str,
+        group: &str,
+        connection_id: &str,
+        ctx: &ExecCtx,
+    ) -> ConsumerIdentity {
+        let (reply, effects) = {
+            let tx = conn.transaction().unwrap();
+            let out = join(&tx, name, group, connection_id, ctx).unwrap();
+            tx.commit().unwrap();
+            out
+        };
+        let mut queue: std::collections::VecDeque<Continuation> =
+            effects.followups.into();
+        while let Some(c) = queue.pop_front() {
+            let (_r, more) = run_continuation(conn, &c, ctx).unwrap();
+            queue.extend(more.followups);
+        }
+        let StreamReply::Join {
+            consumer_id, epoch, ..
+        } = reply
+        else {
+            panic!("expected a join reply")
+        };
+        ConsumerIdentity {
+            connection_id: connection_id.to_string(),
+            consumer_id,
+            epoch,
+        }
+    }
+
+    fn fetch_page(
+        conn: &Connection,
+        name: &str,
+        identity: &ConsumerIdentity,
+        max_messages: usize,
+        max_key_messages: usize,
+        max_key_batches: usize,
+        max_bytes: usize,
+        ctx: &ExecCtx,
+    ) -> FetchPage {
+        let (reply, _) = fetch(
+            conn,
+            name,
+            "g",
+            identity,
+            FetchLimits {
+                max_messages,
+                max_key_messages,
+                max_key_batches,
+                max_bytes,
+            },
+            ctx,
+        )
+        .unwrap();
+        let StreamReply::Fetch(page) = reply else {
+            panic!("expected a fetch page")
+        };
+        page
+    }
+
+    fn upd(
+        conn: &Connection,
+        name: &str,
+        identity: &ConsumerIdentity,
+        receipt: [u8; 16],
+        completed: u32,
+        disposition: BatchDisposition,
+        ctx: &ExecCtx,
+    ) -> Option<BrokerErrorKind> {
+        let (outcomes, _) = update_batches(
+            conn,
+            name,
+            "g",
+            identity,
+            &[BatchUpdate {
+                receipt,
+                completed,
+                disposition,
+            }],
+            ctx,
+        )
+        .unwrap();
+        outcomes.into_iter().next().flatten()
+    }
+
+    fn pending(conn: &Connection, epoch: &[u8; 16]) -> (i64, i64) {
+        conn.query_row(
+            "SELECT pending_count, pending_bytes FROM group_epochs WHERE id=?1",
+            [epoch.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    fn lane_of(conn: &Connection, epoch: &[u8; 16], key: &[u8]) -> LaneRow {
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM key_lanes l
+                 JOIN stream_keys k ON k.stream_id=l.stream_id AND k.key_id=l.key_id
+                 WHERE l.epoch_id=?1 AND k.key=?2",
+                LANE_COLS
+                    .split(',')
+                    .map(|c| format!("l.{}", c.trim()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            params![epoch.as_slice(), key],
+            |r| lane_row(r, 0),
+        )
+        .unwrap()
+    }
+
+    fn seqs(batch: &DeliveryBatch) -> Vec<u64> {
+        batch.messages.iter().map(|m| m.seq).collect()
+    }
+
+    #[test]
+    fn keyed_batches_interleave_keys_and_isolate_leases() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &[
+                keyed(b"a", b"1"),
+                keyed(b"b", b"2"),
+                keyed(b"a", b"3"),
+                keyed(b"b", b"4"),
+                keyed(b"a", b"5"),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g", "connB", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 3, 2, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 2);
+        assert!(page.batches[0]
+            .messages
+            .iter()
+            .all(|m| m.key.as_ref() == b"a"));
+        assert_eq!(seqs(&page.batches[0]), vec![1, 3, 5]);
+        assert!(page.batches[1]
+            .messages
+            .iter()
+            .all(|m| m.key.as_ref() == b"b"));
+        assert_eq!(seqs(&page.batches[1]), vec![2, 4]);
+
+        let other = fetch_page(&conn, "s", &c2, 5, 3, 2, 1 << 20, &ctx);
+        assert!(other.batches.is_empty());
+
+        assert_eq!(
+            upd(
+                &conn,
+                "s",
+                &c1,
+                page.batches[1].receipt,
+                2,
+                BatchDisposition::Checkpoint,
+                &ctx
+            ),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+        let other = fetch_page(&conn, "s", &c2, 5, 3, 2, 1 << 20, &ctx);
+        assert!(other.batches.is_empty());
+    }
+
+    #[test]
+    fn keyed_prefix_checkpoint_is_cumulative_and_idempotent() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g", "connB", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(seqs(&page.batches[0]), vec![1, 2, 3, 4, 5]);
+        assert_eq!(pending(&conn, &c1.epoch).0, 5);
+
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Leased as i64);
+        assert_eq!(lane.lease_acked, 2);
+        assert_eq!(lane.cursor_pos, 2);
+        assert_eq!(lane.normal_seq, Some(3));
+        let stream = require_stream(&conn, "s").unwrap();
+        let epoch = load_epoch(&conn, &c1.epoch).unwrap().unwrap();
+        assert_eq!(ack_floor(&conn, &epoch, &stream).unwrap(), 2);
+
+        assert!(fetch_page(&conn, "s", &c2, 5, 5, 1, 1 << 20, &ctx)
+            .batches
+            .is_empty());
+
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 6, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::InvalidArgument)
+        );
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 1, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::InvalidArgument)
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 5, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.cursor_pos, 5);
+        let epoch = load_epoch(&conn, &c1.epoch).unwrap().unwrap();
+        assert_eq!(ack_floor(&conn, &epoch, &stream).unwrap(), 5);
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 5, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::Fenced)
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+    }
+
+    #[test]
+    fn keyed_checkpoint_at_position_max() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        let stream = require_stream(&conn, "s").unwrap();
+        conn.execute(
+            "INSERT INTO stream_keys(stream_id, key_id, key, last_pos, retained_after_pos)
+             VALUES (?1,1,?2,?3,?3)",
+            params![
+                stream.id.as_slice(),
+                b"a".as_slice(),
+                encode_u64(u64::MAX - 2).as_slice()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE streams SET last_key_id=1 WHERE id=?1",
+            params![stream.id.as_slice()],
+        )
+        .unwrap();
+        publish(&conn, "s", &[keyed(b"a", b"1"), keyed(b"a", b"2")], &ctx).unwrap();
+        let c = new_member(&mut conn, "s", "g", "conn", &ctx);
+
+        let page = fetch_page(&conn, "s", &c, 4, 4, 1, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(seqs(&page.batches[0]), vec![1, 2]);
+        let receipt = page.batches[0].receipt;
+
+        assert_eq!(
+            upd(&conn, "s", &c, receipt, 1, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(lane_of(&conn, &c.epoch, b"a").cursor_pos, u64::MAX - 1);
+        assert_eq!(
+            upd(&conn, "s", &c, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c.epoch).0, 0);
+        assert_eq!(lane_of(&conn, &c.epoch, b"a").cursor_pos, u64::MAX);
+        let epoch = load_epoch(&conn, &c.epoch).unwrap().unwrap();
+        let stream = require_stream(&conn, "s").unwrap();
+        assert_eq!(ack_floor(&conn, &epoch, &stream).unwrap(), 2);
+    }
+
+    #[test]
+    fn keyed_retry_preserves_prefix_and_parks_head() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.max_deliveries = 5;
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .chain(std::iter::once(keyed(b"b", b"x")))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 6, 5, 2, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 2);
+        let a_receipt = page.batches[0].receipt;
+        let b_receipt = page.batches[1].receipt;
+        assert_eq!(seqs(&page.batches[0]), vec![1, 2, 3, 4, 5]);
+        assert_eq!(seqs(&page.batches[1]), vec![6]);
+        assert_eq!(pending(&conn, &c1.epoch).0, 6);
+
+        assert_eq!(
+            upd(&conn, "s", &c1, b_receipt, 1, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(
+            upd(&conn, "s", &c1, a_receipt, 2, BatchDisposition::Retry, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Waiting as i64);
+        assert_eq!(lane.head_pos, Some(3));
+        assert_eq!(lane.attempts, 1);
+        assert_eq!(lane.cursor_pos, 2);
+
+        assert!(fetch_page(&conn, "s", &c1, 6, 5, 2, 1 << 20, &ctx)
+            .batches
+            .is_empty());
+        expire_leases(&conn, config.ack_wait_ms + 1).unwrap();
+
+        let mut last_receipt = [0u8; 16];
+        for _ in 0..4 {
+            let retry = fetch_page(&conn, "s", &c1, 6, 5, 2, 1 << 20, &ctx);
+            assert_eq!(retry.batches.len(), 1);
+            assert_eq!(seqs(&retry.batches[0]), vec![3, 4, 5]);
+            last_receipt = retry.batches[0].receipt;
+            assert_eq!(
+                upd(&conn, "s", &c1, last_receipt, 0, BatchDisposition::Retry, &ctx),
+                None
+            );
+            let lane = lane_of(&conn, &c1.epoch, b"a");
+            if lane.state == LaneState::Waiting as i64 {
+                expire_leases(&conn, 2 * (config.ack_wait_ms + 1)).unwrap();
+            }
+        }
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Parked as i64);
+        let (first, last): (Vec<u8>, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT first_pos, last_pos FROM dls_ranges WHERE epoch_id=?1",
+                [c1.epoch.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(decode_u64(&first).unwrap(), 3);
+        assert!(last.is_none(), "parked suffix is the open tail range");
+        assert!(fetch_page(&conn, "s", &c1, 6, 5, 2, 1 << 20, &ctx)
+            .batches
+            .is_empty());
+        let _ = last_receipt;
+    }
+
+    #[test]
+    fn keyed_release_redelivers_tail_immediately() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g", "connB", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Release, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Ready as i64);
+        assert_eq!(lane.attempts, 0, "unstarted head's charge is rolled back");
+        assert_eq!(lane.cursor_pos, 2);
+
+        let page = fetch_page(&conn, "s", &c2, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1);
+        assert_ne!(page.batches[0].receipt, receipt);
+        assert_eq!(seqs(&page.batches[0]), vec![3, 4, 5]);
+        assert_eq!(
+            upd(
+                &conn,
+                "s",
+                &c2,
+                page.batches[0].receipt,
+                3,
+                BatchDisposition::Release,
+                &ctx
+            ),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Empty as i64);
+    }
+
+    #[test]
+    fn keyed_cursor_survives_retry_release_cycles() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let config = test_config();
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8).map(|i| keyed(b"a", &[i])).collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Retry, &ctx),
+            None
+        );
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Waiting as i64);
+        assert_eq!(lane.cursor_pos, 2);
+
+        expire_leases(&conn, config.ack_wait_ms + 1).unwrap();
+        let page = fetch_page(
+            &conn,
+            "s",
+            &c1,
+            5,
+            5,
+            1,
+            1 << 20,
+            &ExecCtx {
+                now_ms: config.ack_wait_ms + 1,
+                ..ctx
+            },
+        );
+        assert_eq!(seqs(&page.batches[0]), vec![3, 4, 5]);
+        let receipt = page.batches[0].receipt;
+
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 0, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 0, BatchDisposition::Release, &ctx),
+            None
+        );
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.cursor_pos, 2);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(seqs(&page.batches[0]), vec![3, 4, 5]);
+        assert_eq!(
+            upd(
+                &conn,
+                "s",
+                &c1,
+                page.batches[0].receipt,
+                3,
+                BatchDisposition::Checkpoint,
+                &ctx
+            ),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.cursor_pos, 5);
+        assert!(fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx)
+            .batches
+            .is_empty());
+    }
+
+    #[test]
+    fn keyed_lease_expiry_fences_stale_receipt() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 1_000,
+            fetch_response_bytes: 1 << 20,
+        };
+        let config = test_config();
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=3u8)
+                .map(|i| keyed(b"a", &[i]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g", "connB", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 3, 3, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(page.lease_ms, config.ack_wait_ms);
+
+        let ctx2 = ExecCtx { now_ms: 2_000, ..ctx };
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 0, BatchDisposition::Checkpoint, &ctx2),
+            None
+        );
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Leased as i64);
+        assert_eq!(
+            lane.deadline_ms,
+            Some((2_000 + config.ack_wait_ms) as i64),
+            "heartbeat renews the deadline"
+        );
+
+        let late = ExecCtx {
+            now_ms: 2_000 + config.ack_wait_ms + 1,
+            ..ctx
+        };
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 0, BatchDisposition::Checkpoint, &late),
+            Some(BrokerErrorKind::Fenced)
+        );
+        expire_leases(&conn, late.now_ms).unwrap();
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Ready as i64);
+        assert_eq!(pending(&conn, &c1.epoch).0, 0, "expiry refunds the suffix");
+
+        let page = fetch_page(&conn, "s", &c2, 3, 3, 1, 1 << 20, &late);
+        assert_eq!(page.batches.len(), 1);
+        assert_ne!(page.batches[0].receipt, receipt);
+        assert_eq!(seqs(&page.batches[0]), vec![1, 2, 3]);
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 3, BatchDisposition::Checkpoint, &late),
+            Some(BrokerErrorKind::Fenced),
+            "reassigned work cannot be settled by the old receipt"
+        );
+        let active: Vec<u8> = conn
+            .query_row(
+                "SELECT g.active_epoch FROM groups g JOIN streams s ON s.id=g.stream_id
+                 WHERE s.name='s' AND g.name='g'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active.as_slice(), c1.epoch.as_slice());
+    }
+
+    #[test]
+    fn keyed_lease_update_requires_owner() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(&conn, "s", &[keyed(b"a", b"1"), keyed(b"a", b"2")], &ctx).unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g", "connB", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 2, 2, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(
+            upd(&conn, "s", &c2, receipt, 0, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::Fenced),
+            "another member cannot renew the lease"
+        );
+        assert_eq!(
+            upd(&conn, "s", &c2, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::Fenced),
+            "another member cannot confirm the lease"
+        );
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+    }
+
+    #[test]
+    fn seek_supersedes_active_batch_epoch() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(&conn, "s", &[keyed(b"a", b"1"), keyed(b"a", b"2")], &ctx).unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 2, 2, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(pending(&conn, &c1.epoch).0, 2);
+
+        let seek_effects = {
+            let tx = conn.transaction().unwrap();
+            let (_r, effects) = seek(&tx, "s", "g", &SeekTarget::Beginning, &ctx).unwrap();
+            tx.commit().unwrap();
+            effects
+        };
+        let mut queue: std::collections::VecDeque<Continuation> = seek_effects.followups.into();
+        while let Some(c) = queue.pop_front() {
+            let (_r, more) = run_continuation(&conn, &c, &ctx).unwrap();
+            queue.extend(more.followups);
+        }
+
+        let err = update_batches(
+            &conn,
+            "s",
+            "g",
+            &c1,
+            &[BatchUpdate {
+                receipt,
+                completed: 2,
+                disposition: BatchDisposition::Checkpoint,
+            }],
+            &ctx,
+        )
+        .unwrap_err();
+        match err {
+            CmdError::Expected(e) => assert_eq!(e.kind, BrokerErrorKind::Fenced),
+            other => panic!("expected a fenced epoch error, got {other:?}"),
+        }
+        let c1b = new_member(&mut conn, "s", "g", "connA2", &ctx);
+        assert_ne!(c1b.epoch, c1.epoch);
+        assert_eq!(pending(&conn, &c1b.epoch).0, 0);
+        let page = fetch_page(&conn, "s", &c1b, 2, 2, 1, 1 << 20, &ctx);
+        assert_eq!(seqs(&page.batches[0]), vec![1, 2]);
+    }
+
+    #[test]
+    fn recovery_recovers_committed_prefix_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let identity;
+        let epoch_id;
+        {
+            let mut store = crate::durable::Store::open(
+                dir.path(),
+                crate::brokers::stream::domain::storage::SPEC,
+            )
+            .unwrap();
+            create_stream_with_config(&store.conn, "s", &test_config()).unwrap();
+            publish(
+                &store.conn,
+                "s",
+                &(1..=5u8)
+                    .map(|i| keyed(b"a", &[i]))
+                    .collect::<Vec<_>>(),
+                &ctx,
+            )
+            .unwrap();
+            identity = {
+                let (reply, effects) = {
+                    let tx = store.conn.transaction().unwrap();
+                    let out = join(&tx, "s", "g", "connA", &ctx).unwrap();
+                    tx.commit().unwrap();
+                    out
+                };
+                let mut queue: std::collections::VecDeque<Continuation> =
+                    effects.followups.into();
+                while let Some(c) = queue.pop_front() {
+                    let (_r, more) = run_continuation(&store.conn, &c, &ctx).unwrap();
+                    queue.extend(more.followups);
+                }
+                let StreamReply::Join {
+                    consumer_id, epoch, ..
+                } = reply
+                else {
+                    panic!("expected a join reply")
+                };
+                epoch_id = epoch;
+                ConsumerIdentity {
+                    connection_id: "connA".to_string(),
+                    consumer_id,
+                    epoch,
+                }
+            };
+            let page = fetch_page(&store.conn, "s", &identity, 5, 5, 1, 1 << 20, &ctx);
+            let receipt = page.batches[0].receipt;
+
+            {
+                let tx = store.conn.transaction().unwrap();
+                assert_eq!(
+                    upd(&tx, "s", &identity, receipt, 3, BatchDisposition::Checkpoint, &ctx),
+                    None
+                );
+                tx.rollback().unwrap();
+            }
+            assert_eq!(lane_of(&store.conn, &epoch_id, b"a").lease_acked, 0);
+
+            assert_eq!(
+                upd(&store.conn, "s", &identity, receipt, 2, BatchDisposition::Checkpoint, &ctx),
+                None
+            );
+        }
+
+        let mut store = crate::durable::Store::open(
+            dir.path(),
+            crate::brokers::stream::domain::storage::SPEC,
+        )
+        .unwrap();
+        let continuations =
+            crate::brokers::stream::domain::storage::recover(&mut store).unwrap();
+        {
+            let tx = store.conn.transaction().unwrap();
+            for c in &continuations {
+                run_continuation(&tx, c, &ctx).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let identity = new_member(&mut store.conn, "s", "g", "connA", &ctx);
+        assert_eq!(identity.epoch, epoch_id);
+
+        let page = fetch_page(&store.conn, "s", &identity, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(seqs(&page.batches[0]), vec![3, 4, 5]);
+
+        let receipt = page.batches[0].receipt;
+        assert_eq!(
+            upd(&store.conn, "s", &identity, receipt, 3, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&store.conn, &epoch_id).0, 0);
+        assert_eq!(
+            upd(&store.conn, "s", &identity, receipt, 3, BatchDisposition::Checkpoint, &ctx),
+            Some(BrokerErrorKind::Fenced)
+        );
+        assert_eq!(pending(&store.conn, &epoch_id).0, 0);
+    }
+
+    #[test]
+    fn replay_intents_are_singleton_and_preserve_cursor() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.max_deliveries = 1;
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Retry, &ctx),
+            None
+        );
+        assert_eq!(lane_of(&conn, &c1.epoch, b"a").state, LaneState::Parked as i64);
+
+        dls_point_op(&conn, "s", "g", 3, true).unwrap();
+        dls_point_op(&conn, "s", "g", 4, true).unwrap();
+        purge_dls(&conn, "s", "g").unwrap();
+
+        let intents = |conn: &Connection| -> Vec<u64> {
+            query_vec(
+                conn,
+                "SELECT key_pos FROM replay_intents WHERE epoch_id=?1 ORDER BY key_pos",
+                [c1.epoch.as_slice()],
+                |r| blob8(r, 0, "key_pos"),
+                "Cannot list replay intents",
+            )
+            .unwrap()
+        };
+        assert_eq!(intents(&conn), vec![3, 4]);
+        let tail: u64 = conn
+            .query_row(
+                "SELECT last_pos FROM stream_keys k JOIN streams s ON s.id=k.stream_id
+                 WHERE s.name='s' AND k.key=?1",
+                [b"a".as_slice()],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .map(|b| decode_u64(&b).unwrap())
+            .unwrap();
+        assert_eq!(
+            lane_of(&conn, &c1.epoch, b"a").cursor_pos,
+            tail,
+            "unpark anchors the cursor at the parked tail"
+        );
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(seqs(&page.batches[0]), vec![3]);
+        assert_eq!(
+            upd(&conn, "s", &c1, page.batches[0].receipt, 1, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(
+            intents(&conn),
+            vec![4],
+            "consuming one intent must not delete the other"
+        );
+        assert_eq!(
+            lane_of(&conn, &c1.epoch, b"a").cursor_pos,
+            tail,
+            "replays never rewind the original cursor"
+        );
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(seqs(&page.batches[0]), vec![4]);
+        assert_eq!(
+            upd(&conn, "s", &c1, page.batches[0].receipt, 1, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+
+        publish(&conn, "s", &[keyed(b"a", b"6")], &ctx).unwrap();
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        assert_eq!(seqs(&page.batches[0]), vec![6]);
+    }
+
+    #[test]
+    fn retention_refunds_unconfirmed_suffix_and_stales_receipt() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.retention.max_age_ms = Some(500);
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(pending(&conn, &c1.epoch).0, 5);
+
+        let old = ExecCtx {
+            now_ms: 1_000,
+            ..ctx
+        };
+        retention_tick(&conn, &old).unwrap();
+        assert_eq!(pending(&conn, &c1.epoch), (0, 0));
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 5, BatchDisposition::Checkpoint, &old),
+            Some(BrokerErrorKind::Fenced),
+            "retention-invalidated receipt stays fenced"
+        );
+
+        publish(&conn, "s", &[keyed(b"a", b"6")], &old).unwrap();
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &old);
+        assert_eq!(seqs(&page.batches[0]), vec![6]);
+    }
+
+    #[test]
+    fn retention_below_unconfirmed_head_keeps_lease() {
+        let mut conn = test_conn();
+        let mut config = test_config();
+        config.retention.max_age_ms = Some(500);
+        let ctx0 = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &[keyed(b"a", b"1"), keyed(b"a", b"2")],
+            &ctx0,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx0);
+        let ctx600 = ExecCtx {
+            now_ms: 600,
+            ..ctx0
+        };
+        publish(
+            &conn,
+            "s",
+            &[keyed(b"a", b"3"), keyed(b"a", b"4"), keyed(b"a", b"5")],
+            &ctx600,
+        )
+        .unwrap();
+
+        let page = fetch_page(&conn, "s", &c1, 5, 5, 1, 1 << 20, &ctx600);
+        let receipt = page.batches[0].receipt;
+        assert_eq!(page.batches[0].messages.len(), 5);
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 2, BatchDisposition::Checkpoint, &ctx600),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+
+        let ctx1000 = ExecCtx {
+            now_ms: 1_000,
+            ..ctx0
+        };
+        retention_tick(&conn, &ctx1000).unwrap();
+        let lane = lane_of(&conn, &c1.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Leased as i64);
+        assert_eq!(
+            upd(&conn, "s", &c1, receipt, 5, BatchDisposition::Checkpoint, &ctx1000),
+            None,
+            "only confirmed positions expired — the lease survives"
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+    }
+
+    #[test]
+    fn keyed_fairness_caps_and_mixed_keyless() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.max_ack_pending = 4;
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .chain(std::iter::once(keyless(b"z")))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 10, 100, 3, 1 << 20, &ctx);
+        assert_eq!(pending(&conn, &c1.epoch).0, 3);
+        let per_key: Vec<(Bytes, usize)> = page
+            .batches
+            .iter()
+            .map(|b| (b.messages[0].key.clone(), b.messages.len()))
+            .collect();
+        assert_eq!(per_key[0], (Bytes::new(), 1));
+        assert!(per_key.contains(&(Bytes::from_static(b"a"), 2)));
+        let a_receipt = page
+            .batches
+            .iter()
+            .find(|b| b.messages[0].key.as_ref() == b"a")
+            .unwrap()
+            .receipt;
+
+        publish(
+            &conn,
+            "s",
+            &(1..=3u8).map(|i| keyed(b"b", &[0x80 + i])).collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let page = fetch_page(&conn, "s", &c1, 10, 100, 3, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 1, "B must be served while A is held");
+        assert!(page.batches[0]
+            .messages
+            .iter()
+            .all(|m| m.key.as_ref() == b"b"));
+        assert_eq!(seqs(&page.batches[0]), vec![7]);
+        assert_eq!(pending(&conn, &c1.epoch).0, 4);
+        assert!(fetch_page(&conn, "s", &c1, 10, 100, 3, 1 << 20, &ctx)
+            .batches
+            .is_empty());
+
+        assert_eq!(
+            upd(&conn, "s", &c1, a_receipt, 2, BatchDisposition::Release, &ctx),
+            None
+        );
+        let page = fetch_page(&conn, "s", &c1, 10, 100, 3, 1 << 20, &ctx);
+        let sizes: Vec<usize> = page.batches.iter().map(|b| b.messages.len()).collect();
+        assert!(sizes.iter().all(|&n| n <= 2), "per-key grant holds: {sizes:?}");
+
+        let g2 = new_member(&mut conn, "s", "g2", "connC", &ctx);
+        let one_batch = FETCH_PAGE_HEADER_BYTES
+            + fetch_batch_header_bytes(1)
+            + fetch_event_encoded_bytes(1);
+        let (reply, _) = fetch(
+            &conn,
+            "s",
+            "g2",
+            &g2,
+            FetchLimits {
+                max_messages: 10,
+                max_key_messages: 100,
+                max_key_batches: 3,
+                max_bytes: one_batch as usize,
+            },
+            &ctx,
+        )
+        .unwrap();
+        let StreamReply::Fetch(page) = reply else {
+            panic!("expected a fetch page")
+        };
+        let total: u64 = FETCH_PAGE_HEADER_BYTES
+            + page
+                .batches
+                .iter()
+                .map(|b| {
+                    fetch_batch_header_bytes(b.messages[0].key.len())
+                        + b.messages
+                            .iter()
+                            .map(|m| fetch_event_encoded_bytes(m.payload.len()))
+                            .sum::<u64>()
+                })
+                .sum::<u64>();
+        assert!(total <= one_batch, "response never exceeds the budget");
+        assert_eq!(page.batches.len(), 1);
+        assert_eq!(page.batches[0].messages.len(), 1);
+        assert_eq!(page.batches[0].messages[0].payload.as_ref(), b"z");
+    }
+
+    #[test]
+    fn bulk_update_isolates_keyed_failures() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &[
+                keyed(b"a", b"1"),
+                keyed(b"a", b"2"),
+                keyed(b"a", b"3"),
+                keyed(b"b", b"4"),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 4, 3, 2, 1 << 20, &ctx);
+        let (a, b) = (
+            page.batches[0].receipt,
+            page.batches[1].receipt,
+        );
+
+        let run = vec![
+            BatchUpdate {
+                receipt: a,
+                completed: 3,
+                disposition: BatchDisposition::Checkpoint,
+            },
+            BatchUpdate {
+                receipt: [0xAA; 16],
+                completed: 1,
+                disposition: BatchDisposition::Checkpoint,
+            },
+            BatchUpdate {
+                receipt: b,
+                completed: 9,
+                disposition: BatchDisposition::Checkpoint,
+            },
+        ];
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &run, &ctx).unwrap();
+        assert_eq!(outcomes[0], None);
+        assert_eq!(outcomes[1], Some(BrokerErrorKind::Fenced));
+        assert_eq!(outcomes[2], Some(BrokerErrorKind::InvalidArgument));
+        assert_eq!(pending(&conn, &c1.epoch).0, 1, "only A's completion applied");
+
+        assert_eq!(
+            upd(&conn, "s", &c1, b, 1, BatchDisposition::Checkpoint, &ctx),
+            None
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+    }
+
+    #[test]
+    fn keyless_byte_budget_never_skips_unassigned_event() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &[keyless(b"a"), keyless(&[b'b'; 100]), keyless(b"c")],
+            &ctx,
+        )
+        .unwrap();
+        let c = new_member(&mut conn, "s", "g", "conn", &ctx);
+
+        let first = fetch_page(&conn, "s", &c, 3, 1, 0, 100, &ctx);
+        let first_seqs: Vec<u64> = first.batches.iter().flat_map(seqs).collect();
+        assert_eq!(first_seqs, vec![1]);
+        let second = fetch_page(&conn, "s", &c, 3, 1, 0, 512, &ctx);
+        let second_seqs: Vec<u64> = second.batches.iter().flat_map(seqs).collect();
+        assert_eq!(second_seqs, vec![2, 3]);
+    }
+
+    #[test]
+    fn fetch_bulk_payloads_preserve_many_keys_and_keyless() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        let keys: Vec<Vec<u8>> = (0..32u8)
+            .map(|i| vec![0xC0, i, 0x5A, 0x7F])
+            .collect();
+        let mut items: Vec<PubItem> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| keyed(k, format!("payload-{i}").as_bytes()))
+            .collect();
+        items.push(keyless(b"free-a"));
+        items.push(keyless(b"free-b"));
+        publish(&conn, "s", &items, &ctx).unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let page = fetch_page(&conn, "s", &c1, 64, 32, 32, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 34);
+        let mut seen: std::collections::HashMap<u64, (Vec<u8>, Vec<u8>)> =
+            std::collections::HashMap::new();
+        for batch in &page.batches {
+            assert_eq!(batch.messages.len(), 1);
+            let m = &batch.messages[0];
+            assert!(seen
+                .insert(m.seq, (m.key.to_vec(), m.payload.to_vec()))
+                .is_none());
+        }
+        for (i, key) in keys.iter().enumerate() {
+            let (k, p) = seen.get(&(i as u64 + 1)).expect("keyed event");
+            assert_eq!(k, key);
+            assert_eq!(p, format!("payload-{i}").as_bytes());
+        }
+        let (k, p) = seen.get(&33).expect("keyless event");
+        assert!(k.is_empty());
+        assert_eq!(p, b"free-a");
+        let (k, p) = seen.get(&34).expect("keyless event");
+        assert!(k.is_empty());
+        assert_eq!(p, b"free-b");
+
+        let updates: Vec<BatchUpdate> = page
+            .batches
+            .iter()
+            .map(|b| BatchUpdate {
+                receipt: b.receipt,
+                completed: 1,
+                disposition: BatchDisposition::Checkpoint,
+            })
+            .collect();
+        let (outcomes, _) =
+            update_batches(&conn, "s", "g", &c1, &updates, &ctx).unwrap();
+        assert!(outcomes.iter().all(|o| o.is_none()));
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+        let stream = require_stream(&conn, "s").unwrap();
+        let epoch = load_epoch(&conn, &c1.epoch).unwrap().unwrap();
+        assert_eq!(ack_floor(&conn, &epoch, &stream).unwrap(), 34);
+    }
+
+    #[test]
+    fn bulk_update_revisits_same_receipt() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(1..=5u8)
+                .map(|i| keyed(b"a", &[i]))
+                .chain(std::iter::once(keyless(b"z")))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 6, 5, 1, 1 << 20, &ctx);
+        let keyless_receipt = page
+            .batches
+            .iter()
+            .find(|b| b.messages[0].key.is_empty())
+            .unwrap()
+            .receipt;
+        let a_receipt = page
+            .batches
+            .iter()
+            .find(|b| b.messages[0].key.as_ref() == b"a")
+            .unwrap()
+            .receipt;
+
+        let run = [2, 2, 5].map(|completed| BatchUpdate {
+            receipt: a_receipt,
+            completed,
+            disposition: BatchDisposition::Checkpoint,
+        });
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &run, &ctx).unwrap();
+        assert_eq!(outcomes, vec![None, None, None]);
+        assert_eq!(lane_of(&conn, &c1.epoch, b"a").cursor_pos, 5);
+        assert_eq!(pending(&conn, &c1.epoch).0, 1, "only keyless z remains");
+
+        let run = [
+            BatchUpdate {
+                receipt: keyless_receipt,
+                completed: 0,
+                disposition: BatchDisposition::Checkpoint,
+            },
+            BatchUpdate {
+                receipt: keyless_receipt,
+                completed: 1,
+                disposition: BatchDisposition::Checkpoint,
+            },
+            BatchUpdate {
+                receipt: keyless_receipt,
+                completed: 1,
+                disposition: BatchDisposition::Checkpoint,
+            },
+        ];
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &run, &ctx).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![None, None, Some(BrokerErrorKind::Fenced)],
+            "heartbeat renews, first completion consumes, the duplicate fences"
+        );
+        assert_eq!(pending(&conn, &c1.epoch).0, 0);
+
+        publish(&conn, "s", &[keyed(b"a", b"6"), keyed(b"a", b"7")], &ctx).unwrap();
+        let page = fetch_page(&conn, "s", &c1, 2, 2, 1, 1 << 20, &ctx);
+        let a_receipt = page.batches[0].receipt;
+        let run = [
+            BatchUpdate {
+                receipt: a_receipt,
+                completed: 9,
+                disposition: BatchDisposition::Checkpoint,
+            },
+            BatchUpdate {
+                receipt: a_receipt,
+                completed: 2,
+                disposition: BatchDisposition::Checkpoint,
+            },
+        ];
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &run, &ctx).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![Some(BrokerErrorKind::InvalidArgument), None]
+        );
+        assert_eq!(lane_of(&conn, &c1.epoch, b"a").cursor_pos, 7);
+    }
+
+    #[test]
+    fn bulk_update_unknown_receipts_fence_per_item() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+
+        let updates: Vec<BatchUpdate> = (0u32..5000)
+            .map(|i| {
+                let mut receipt = [0u8; 16];
+                receipt[..4].copy_from_slice(&i.to_be_bytes());
+                BatchUpdate {
+                    receipt,
+                    completed: 1,
+                    disposition: BatchDisposition::Checkpoint,
+                }
+            })
+            .collect();
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &updates, &ctx).unwrap();
+        assert_eq!(outcomes.len(), 5000);
+        assert!(outcomes
+            .iter()
+            .all(|o| *o == Some(BrokerErrorKind::Fenced)));
+    }
+
+    #[test]
+    fn bulk_keyless_completions_delete_in_one_run() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        create_stream_with_config(&conn, "s", &test_config()).unwrap();
+        publish(
+            &conn,
+            "s",
+            &(0u8..100).map(|i| keyless(&[i])).collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 100, 1, 0, 1 << 20, &ctx);
+        assert_eq!(page.batches.len(), 100);
+        let updates: Vec<BatchUpdate> = page
+            .batches
+            .iter()
+            .map(|b| BatchUpdate {
+                receipt: b.receipt,
+                completed: 1,
+                disposition: BatchDisposition::Checkpoint,
+            })
+            .collect();
+        let (outcomes, _) = update_batches(&conn, "s", "g", &c1, &updates, &ctx).unwrap();
+        assert_eq!(outcomes.len(), 100);
+        assert!(outcomes.iter().all(|o| o.is_none()));
+        assert_eq!(pending(&conn, &c1.epoch), (0, 0));
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM keyless_deliveries WHERE epoch_id=?1",
+                [c1.epoch.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn recover_keeps_waiting_leases_until_their_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let config = test_config();
+        {
+            let mut store = crate::durable::Store::open(
+                dir.path(),
+                crate::brokers::stream::domain::storage::SPEC,
+            )
+            .unwrap();
+            create_stream_with_config(&store.conn, "s", &config).unwrap();
+            publish(
+                &store.conn,
+                "s",
+                &[keyed(b"a", b"1"), keyed(b"a", b"2"), keyless(b"z")],
+                &ctx,
+            )
+            .unwrap();
+            let c = new_member(&mut store.conn, "s", "g", "connA", &ctx);
+            let page = fetch_page(&store.conn, "s", &c, 3, 3, 2, 1 << 20, &ctx);
+            assert_eq!(page.batches.len(), 2);
+            for batch in &page.batches {
+                assert_eq!(
+                    upd(
+                        &store.conn,
+                        "s",
+                        &c,
+                        batch.receipt,
+                        0,
+                        BatchDisposition::Retry,
+                        &ctx
+                    ),
+                    None
+                );
+            }
+            let lane = lane_of(&store.conn, &c.epoch, b"a");
+            assert_eq!(lane.state, LaneState::Waiting as i64);
+            assert_eq!(lane.attempts, 1);
+        }
+
+        let mut store = crate::durable::Store::open(
+            dir.path(),
+            crate::brokers::stream::domain::storage::SPEC,
+        )
+        .unwrap();
+        let continuations =
+            crate::brokers::stream::domain::storage::recover(&mut store).unwrap();
+        {
+            let tx = store.conn.transaction().unwrap();
+            for c in &continuations {
+                run_continuation(&tx, c, &ctx).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let c = new_member(&mut store.conn, "s", "g", "connA", &ctx);
+
+        let early = ExecCtx {
+            now_ms: config.ack_wait_ms - 1,
+            ..ctx
+        };
+        expire_leases(&store.conn, config.ack_wait_ms - 1).unwrap();
+        assert!(fetch_page(&store.conn, "s", &c, 3, 3, 2, 1 << 20, &early)
+            .batches
+            .is_empty());
+        let lane = lane_of(&store.conn, &c.epoch, b"a");
+        assert_eq!(lane.state, LaneState::Waiting as i64);
+        assert_eq!(lane.attempts, 1);
+
+        let late = ExecCtx {
+            now_ms: config.ack_wait_ms,
+            ..ctx
+        };
+        expire_leases(&store.conn, config.ack_wait_ms).unwrap();
+        let page = fetch_page(&store.conn, "s", &c, 3, 3, 2, 1 << 20, &late);
+        assert_eq!(page.batches.len(), 2);
+        let mut keyed_seqs: Vec<u64> = Vec::new();
+        let mut keyless_seqs: Vec<u64> = Vec::new();
+        for b in &page.batches {
+            if b.messages[0].key.is_empty() {
+                keyless_seqs.extend(seqs(b));
+            } else {
+                keyed_seqs.extend(seqs(b));
+            }
+        }
+        assert_eq!(keyed_seqs, vec![1, 2]);
+        assert_eq!(keyless_seqs, vec![3]);
+        assert_eq!(lane_of(&store.conn, &c.epoch, b"a").attempts, 2);
+    }
+
+    #[test]
+    fn prune_keys_reclaims_retained_out_metadata() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.retention.max_age_ms = Some(500);
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        let keys: Vec<Vec<u8>> = (0u8..8)
+            .map(|i| format!("k{i}").into_bytes())
+            .collect();
+        publish(
+            &conn,
+            "s",
+            &keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| keyed(k, &[i as u8]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g2", "connB", &ctx);
+        let page = fetch_page(&conn, "s", &c1, 10, 10, 8, 1 << 20, &ctx);
+        let stale_receipt = page.batches[0].receipt;
+
+        let old = ExecCtx {
+            now_ms: 1_000,
+            ..ctx
+        };
+        let mut queue: std::collections::VecDeque<Continuation> = {
+            let tx = conn.transaction().unwrap();
+            let (_r, fx) = retention_tick(&tx, &old).unwrap();
+            tx.commit().unwrap();
+            fx.followups.into()
+        };
+        let mut slices = 0;
+        while let Some(c) = queue.pop_front() {
+            slices += 1;
+            assert!(slices < 64, "prune queue must terminate");
+            let tx = conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &old).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+
+        let count = |sql_text: &str| -> i64 {
+            conn.query_row(sql_text, [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM events"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM key_lanes"), 0);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM stream_keys WHERE key_id > 0"),
+            0,
+            "retired key metadata must be reclaimed"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM stream_keys WHERE key_id = 0"),
+            1,
+            "keyless sentinel is never reclaimed"
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM groups"), 2);
+        assert_eq!(count("SELECT COUNT(*) FROM group_epochs"), 2);
+        assert_eq!(
+            upd(&conn, "s", &c1, stale_receipt, 1, BatchDisposition::Checkpoint, &old),
+            Some(BrokerErrorKind::Fenced),
+            "old receipt stays fenced after reclamation"
+        );
+
+        publish(&conn, "s", &[keyed(b"k0", b"9"), keyed(b"new", b"10")], &old)
+            .unwrap();
+        let new_key_id: i64 = conn
+            .query_row(
+                "SELECT key_id FROM stream_keys WHERE key = ?1",
+                [b"k0".as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(new_key_id > 8, "republished key gets a fresh key_id");
+        let new_seq: Vec<u8> = conn
+            .query_row(
+                "SELECT seq FROM events WHERE key_id = ?1",
+                [new_key_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            new_seq.as_slice() > encode_u64(8).as_slice(),
+            "global sequence stays monotonic"
+        );
+
+        let page1 = fetch_page(&conn, "s", &c1, 10, 10, 8, 1 << 20, &old);
+        assert_eq!(page1.batches.len(), 2);
+        let (reply2, _) = fetch(
+            &conn,
+            "s",
+            "g2",
+            &c2,
+            FetchLimits {
+                max_messages: 10,
+                max_key_messages: 10,
+                max_key_batches: 8,
+                max_bytes: 1 << 20,
+            },
+            &old,
+        )
+        .unwrap();
+        let StreamReply::Fetch(page2) = reply2 else {
+            panic!("expected a fetch page")
+        };
+        assert_eq!(page2.batches.len(), 2);
+    }
+
+    #[test]
+    fn prune_keys_is_bounded_and_resumes_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        {
+            let mut store = crate::durable::Store::open(
+                dir.path(),
+                crate::brokers::stream::domain::storage::SPEC,
+            )
+            .unwrap();
+            {
+                let tx = store.conn.transaction().unwrap();
+                create_stream_with_config(&tx, "s", &test_config()).unwrap();
+                let stream_id = require_stream(&tx, "s").unwrap().id;
+                exec(
+                    &tx,
+                    "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
+                     VALUES (?1,1,'k',?2,?2)",
+                    params![stream_id.as_slice(), encode_u64(1).as_slice()],
+                )
+                .unwrap();
+                for i in 0..(BATCH_LIMIT + 76) as i64 {
+                    let mut group_id = [0u8; 16];
+                    group_id[8..].copy_from_slice(&i.to_be_bytes());
+                    let mut epoch_id = [1u8; 16];
+                    epoch_id[8..].copy_from_slice(&i.to_be_bytes());
+                    exec(
+                        &tx,
+                        "INSERT INTO groups(id,stream_id,name,active_epoch)
+                         VALUES (?1,?2,?3,?4)",
+                        params![
+                            group_id.as_slice(),
+                            stream_id.as_slice(),
+                            format!("g{i}"),
+                            epoch_id.as_slice()
+                        ],
+                    )
+                    .unwrap();
+                    exec(
+                        &tx,
+                        "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,
+                            initialized,init_key_cursor,init_key_target,
+                            keyless_cursor_pos,keyless_ticket,next_ready_ticket,
+                            pending_count,max_pending)
+                         VALUES (?1,?2,?3,?4,1,0,0,?4,0,1,0,100)",
+                        params![
+                            epoch_id.as_slice(),
+                            group_id.as_slice(),
+                            stream_id.as_slice(),
+                            encode_u64(0).as_slice()
+                        ],
+                    )
+                    .unwrap();
+                    exec(
+                        &tx,
+                        "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,
+                            state,attempts,ready_ticket)
+                         VALUES (?1,?2,1,?3,0,0,0)",
+                        params![
+                            epoch_id.as_slice(),
+                            stream_id.as_slice(),
+                            encode_u64(1).as_slice()
+                        ],
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+
+            let tx = store.conn.transaction().unwrap();
+            let (_r, fx) = prune_keys(&tx, None).unwrap();
+            tx.commit().unwrap();
+            let lanes_left: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM key_lanes", [], |r| r.get(0))
+                .unwrap();
+            assert!(lanes_left > 0, "slice must leave lanes beyond the budget");
+            assert_eq!(
+                lanes_left,
+                (BATCH_LIMIT + 76 - (BATCH_LIMIT - 1)) as i64,
+                "one candidate check plus 1023 lane deletions exhausts the 1024 budget"
+            );
+            let key_row: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM stream_keys WHERE key_id = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(key_row, 1, "partial lane cleanup keeps the key row");
+            assert!(
+                fx.followups
+                    .iter()
+                    .any(|c| matches!(c, Continuation::PruneKeys { .. })),
+                "budget exhaustion must reschedule the prune"
+            );
+        }
+
+        let mut store = crate::durable::Store::open(
+            dir.path(),
+            crate::brokers::stream::domain::storage::SPEC,
+        )
+        .unwrap();
+        let continuations =
+            crate::brokers::stream::domain::storage::recover(&mut store).unwrap();
+        assert!(
+            continuations
+                .iter()
+                .any(|c| matches!(c, Continuation::PruneKeys { after: None })),
+            "recovery must schedule key pruning for retired metadata"
+        );
+
+        let mut queue: std::collections::VecDeque<Continuation> =
+            continuations.into();
+        let mut slices = 0;
+        while let Some(c) = queue.pop_front() {
+            slices += 1;
+            assert!(slices < 64, "prune queue must terminate");
+            let tx = store.conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &ctx).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+        let lanes: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM key_lanes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lanes, 0);
+        let retired: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM stream_keys
+                 WHERE key_id > 0 AND last_pos = retained_after_pos",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired, 0);
+        let keyless: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM stream_keys WHERE key_id = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(keyless, 1, "keyless sentinel is never reclaimed");
+    }
+
+    #[test]
+    fn prune_keys_revived_after_partial_lane_cleanup() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut queue: std::collections::VecDeque<Continuation>;
+        {
+            let tx = conn.transaction().unwrap();
+            create_stream_with_config(&tx, "s", &test_config()).unwrap();
+            let stream_id = require_stream(&tx, "s").unwrap().id;
+            exec(
+                &tx,
+                "UPDATE streams SET last_key_id=1, last_seq=?2, retained_after_seq=?2
+                 WHERE id=?1",
+                params![stream_id.as_slice(), encode_u64(1).as_slice()],
+            )
+            .unwrap();
+            exec(
+                &tx,
+                "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
+                 VALUES (?1,1,?2,?3,?3)",
+                params![
+                    stream_id.as_slice(),
+                    b"k".as_slice(),
+                    encode_u64(1).as_slice()
+                ],
+            )
+            .unwrap();
+            for i in 0..(BATCH_LIMIT + 76) as i64 {
+                let mut group_id = [0u8; 16];
+                group_id[8..].copy_from_slice(&i.to_be_bytes());
+                let mut epoch_id = [1u8; 16];
+                epoch_id[8..].copy_from_slice(&i.to_be_bytes());
+                exec(
+                    &tx,
+                    "INSERT INTO groups(id,stream_id,name,active_epoch)
+                     VALUES (?1,?2,?3,?4)",
+                    params![
+                        group_id.as_slice(),
+                        stream_id.as_slice(),
+                        format!("g{i}"),
+                        epoch_id.as_slice()
+                    ],
+                )
+                .unwrap();
+                exec(
+                    &tx,
+                    "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,
+                        initialized,init_key_cursor,init_key_target,
+                        keyless_cursor_pos,keyless_ticket,next_ready_ticket,
+                        pending_count,max_pending)
+                     VALUES (?1,?2,?3,?4,1,0,0,?4,0,1,0,100)",
+                    params![
+                        epoch_id.as_slice(),
+                        group_id.as_slice(),
+                        stream_id.as_slice(),
+                        encode_u64(0).as_slice()
+                    ],
+                )
+                .unwrap();
+                exec(
+                    &tx,
+                    "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,
+                        state,attempts,ready_ticket)
+                     VALUES (?1,?2,1,?3,0,0,0)",
+                    params![
+                        epoch_id.as_slice(),
+                        stream_id.as_slice(),
+                        encode_u64(1).as_slice()
+                    ],
+                )
+                .unwrap();
+            }
+            let (_r, fx) = prune_keys(&tx, None).unwrap();
+            tx.commit().unwrap();
+            queue = fx.followups.into();
+        }
+        let stream_id = require_stream(&conn, "s").unwrap().id;
+        let lanes_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM key_lanes", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            lanes_left > 0,
+            "first slice must leave some empty lanes behind"
+        );
+        let laneless: String = conn
+            .query_row(
+                "SELECT g.name FROM groups g
+                 JOIN group_epochs e ON e.group_id=g.id AND e.stream_id=g.stream_id
+                 WHERE g.stream_id=?1
+                   AND NOT EXISTS(SELECT 1 FROM key_lanes l WHERE l.epoch_id=e.id)
+                 ORDER BY g.name LIMIT 1",
+                [stream_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let kept: String = conn
+            .query_row(
+                "SELECT g.name FROM groups g
+                 JOIN group_epochs e ON e.group_id=g.id AND e.stream_id=g.stream_id
+                 WHERE g.stream_id=?1
+                   AND EXISTS(SELECT 1 FROM key_lanes l WHERE l.epoch_id=e.id)
+                 ORDER BY g.name LIMIT 1",
+                [stream_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            publish(&tx, "s", &[keyed(b"k", b"revived")], &ctx).unwrap();
+            tx.commit().unwrap();
+        }
+        for group in [&laneless, &kept] {
+            let identity = new_member(&mut conn, "s", group, "connX", &ctx);
+            let (reply, _) = fetch(
+                &conn,
+                "s",
+                group,
+                &identity,
+                FetchLimits {
+                    max_messages: 10,
+                    max_key_messages: 10,
+                    max_key_batches: 4,
+                    max_bytes: 1 << 20,
+                },
+                &ctx,
+            )
+            .unwrap();
+            let StreamReply::Fetch(page) = reply else {
+                panic!("expected a fetch page")
+            };
+            assert_eq!(page.batches.len(), 1);
+            assert_eq!(
+                page.batches[0]
+                    .messages
+                    .iter()
+                    .map(|m| m.seq)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+            let (outcomes, _) = update_batches(
+                &conn,
+                "s",
+                group,
+                &identity,
+                &[BatchUpdate {
+                    receipt: page.batches[0].receipt,
+                    completed: 1,
+                    disposition: BatchDisposition::Checkpoint,
+                }],
+                &ctx,
+            )
+            .unwrap();
+            assert_eq!(outcomes, vec![None], "new receipt must ack the lease");
+            let (outcomes, _) = update_batches(
+                &conn,
+                "s",
+                group,
+                &identity,
+                &[BatchUpdate {
+                    receipt: [0xAA; 16],
+                    completed: 1,
+                    disposition: BatchDisposition::Checkpoint,
+                }],
+                &ctx,
+            )
+            .unwrap();
+            assert_eq!(
+                outcomes,
+                vec![Some(crate::brokers::BrokerErrorKind::Fenced)],
+                "no old receipt validates the new lease"
+            );
+        }
+        let mut slices = 0;
+        while let Some(c) = queue.pop_front() {
+            slices += 1;
+            assert!(slices < 64, "prune queue must terminate");
+            let tx = conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &ctx).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+        let key_row: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM stream_keys WHERE stream_id=?1 AND key_id=1",
+                [stream_id.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(key_row, 1, "revived key must not be pruned");
+        let events_left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE stream_id=?1 AND seq=?2",
+                params![stream_id.as_slice(), encode_u64(2).as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events_left, 1, "revived event must survive pruning");
+    }
+
+    #[test]
+    fn prune_keys_skips_parked_keys_without_starvation() {
+        let mut conn = test_conn();
+        let stream_id = [7u8; 16];
+        let group_id = [8u8; 16];
+        let epoch_id = [9u8; 16];
+        exec(
+            &conn,
+            "INSERT INTO streams VALUES (?1,'s',0,?3,?2,?2,0,0)",
+            params![
+                stream_id.as_slice(),
+                encode_u64(0).as_slice(),
+                r#"{"retention":{"max_age_ms":null,"max_bytes":null},"max_ack_pending":1000,"max_ack_pending_bytes":67108864,"ack_wait_ms":30000,"max_deliveries":3}"#
+            ],
+        )
+        .unwrap();
+        exec(
+            &conn,
+            "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
+             VALUES (?1,0,'',?2,?2)",
+            params![stream_id.as_slice(), encode_u64(0).as_slice()],
+        )
+        .unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            exec(
+                &tx,
+                "INSERT INTO groups(id,stream_id,name,active_epoch)
+                 VALUES (?1,?2,'g',?3)",
+                params![
+                    group_id.as_slice(),
+                    stream_id.as_slice(),
+                    epoch_id.as_slice()
+                ],
+            )
+            .unwrap();
+            exec(
+                &tx,
+                "INSERT INTO group_epochs(id,group_id,stream_id,start_after_seq,
+                    initialized,init_key_cursor,init_key_target,
+                    keyless_cursor_pos,keyless_ticket,next_ready_ticket,
+                    pending_count,max_pending)
+                 VALUES (?1,?2,?3,?4,1,0,0,?4,0,1,0,100)",
+                params![
+                    epoch_id.as_slice(),
+                    group_id.as_slice(),
+                    stream_id.as_slice(),
+                    encode_u64(0).as_slice()
+                ],
+            )
+            .unwrap();
+            exec(
+                &tx,
+                "INSERT INTO events(stream_id,seq,key_id,key_pos,timestamp_ms,
+                    payload,payload_bytes,logical_bytes)
+                 VALUES (?1,?2,0,?2,1,X'78',1,1)",
+                params![stream_id.as_slice(), encode_u64(1).as_slice()],
+            )
+            .unwrap();
+            for key_id in 1..=70i64 {
+                exec(
+                    &tx,
+                    "INSERT INTO stream_keys(stream_id,key_id,key,last_pos,retained_after_pos)
+                     VALUES (?1,?2,?3,?4,?4)",
+                    params![
+                        stream_id.as_slice(),
+                        key_id,
+                        format!("k{key_id}").as_bytes(),
+                        encode_u64(1).as_slice()
+                    ],
+                )
+                .unwrap();
+                match key_id {
+                    1 => exec(
+                        &tx,
+                        "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,
+                            state,attempts,ready_ticket)
+                         VALUES (?1,?2,?3,?4,3,0,0)",
+                        params![
+                            epoch_id.as_slice(),
+                            stream_id.as_slice(),
+                            key_id,
+                            encode_u64(1).as_slice()
+                        ],
+                    ),
+                    3 => exec(
+                        &tx,
+                        "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,
+                            state,normal_seq,head_seq,head_pos,head_origin,receipt,
+                            owner,connection_id,deadline_ms,lease_first_pos,
+                            lease_count,lease_acked,lease_bytes,attempts,ready_ticket)
+                         VALUES (?1,?2,?3,?4,2,?5,?5,?5,1,?6,'owner','conn1',
+                            1000,?5,2,0,100,0,0)",
+                        params![
+                            epoch_id.as_slice(),
+                            stream_id.as_slice(),
+                            key_id,
+                            encode_u64(1).as_slice(),
+                            encode_u64(1).as_slice(),
+                            [9u8; 16].as_slice()
+                        ],
+                    ),
+                    _ => exec(
+                        &tx,
+                        "INSERT INTO key_lanes(epoch_id,stream_id,key_id,cursor_pos,
+                            state,attempts,ready_ticket)
+                         VALUES (?1,?2,?3,?4,0,0,0)",
+                        params![
+                            epoch_id.as_slice(),
+                            stream_id.as_slice(),
+                            key_id,
+                            encode_u64(1).as_slice()
+                        ],
+                    ),
+                }
+                .unwrap();
+            }
+            exec(
+                &tx,
+                "INSERT INTO dls_ranges(epoch_id,stream_id,key_id,first_pos,
+                    reason,attempts)
+                 VALUES (?1,?2,1,?3,0,0)",
+                params![
+                    epoch_id.as_slice(),
+                    stream_id.as_slice(),
+                    encode_u64(1).as_slice()
+                ],
+            )
+            .unwrap();
+            exec(
+                &tx,
+                "INSERT INTO replay_intents(epoch_id,stream_id,key_id,key_pos,seq)
+                 VALUES (?1,?2,2,?3,?3)",
+                params![
+                    epoch_id.as_slice(),
+                    stream_id.as_slice(),
+                    encode_u64(1).as_slice()
+                ],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut queue: std::collections::VecDeque<Continuation> =
+            [Continuation::PruneKeys { after: None }].into();
+        let mut slices = 0;
+        while let Some(c) = queue.pop_front() {
+            slices += 1;
+            assert!(slices < 64, "prune queue must terminate");
+            let tx = conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &ctx).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+
+        let keys_left: Vec<i64> = conn
+            .prepare("SELECT key_id FROM stream_keys WHERE key_id > 0 ORDER BY key_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(keys_left, vec![1, 2, 3]);
+        let lanes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM key_lanes WHERE key_id IN (1, 3)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lanes, 2, "parked and leased lanes must remain");
+        let dls: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dls_ranges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dls, 1);
+        let intents: i64 = conn
+            .query_row("SELECT COUNT(*) FROM replay_intents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(intents, 1);
+    }
+
+    #[test]
+    fn publish_between_prune_slices_preserves_live_key() {
+        let mut conn = test_conn();
+        let ctx = ExecCtx {
+            now_ms: 0,
+            fetch_response_bytes: 1 << 20,
+        };
+        let mut config = test_config();
+        config.retention.max_age_ms = Some(500);
+        create_stream_with_config(&conn, "s", &config).unwrap();
+        let keys: Vec<Vec<u8>> = (0u8..70)
+            .map(|i| format!("k{i}").into_bytes())
+            .collect();
+        publish(
+            &conn,
+            "s",
+            &keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| keyed(k, &[i as u8]))
+                .collect::<Vec<_>>(),
+            &ctx,
+        )
+        .unwrap();
+        let c1 = new_member(&mut conn, "s", "g", "connA", &ctx);
+        let c2 = new_member(&mut conn, "s", "g2", "connB", &ctx);
+
+        let old = ExecCtx {
+            now_ms: 1_000,
+            ..ctx
+        };
+        let mut queue: std::collections::VecDeque<Continuation> = {
+            let tx = conn.transaction().unwrap();
+            let (_r, fx) = retention_tick(&tx, &old).unwrap();
+            tx.commit().unwrap();
+            fx.followups.into()
+        };
+
+        let c = queue.pop_front().unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &old).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+        {
+            let tx = conn.transaction().unwrap();
+            publish(&tx, "s", &[keyed(b"k69", b"late"), keyed(b"fresh", b"new")], &old)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let mut slices = 0;
+        while let Some(c) = queue.pop_front() {
+            slices += 1;
+            assert!(slices < 64, "prune queue must terminate");
+            let tx = conn.transaction().unwrap();
+            let (_r, more) = run_continuation(&tx, &c, &old).unwrap();
+            tx.commit().unwrap();
+            queue.extend(more.followups);
+        }
+
+        let keys_left: Vec<i64> = conn
+            .prepare("SELECT key_id FROM stream_keys WHERE key_id > 0 ORDER BY key_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(keys_left.len(), 2, "live keys keep their metadata");
+        let k69: i64 = conn
+            .query_row(
+                "SELECT key_id FROM stream_keys WHERE key = ?1",
+                [b"k69".as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(k69, 70, "republished before pruning keeps its key_id");
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT key_id FROM stream_keys WHERE key = ?1",
+                [b"fresh".as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 71);
+
+        let page1 = fetch_page(&conn, "s", &c1, 10, 10, 8, 1 << 20, &old);
+        assert_eq!(page1.batches.len(), 2);
+        let (reply2, _) = fetch(
+            &conn,
+            "s",
+            "g2",
+            &c2,
+            FetchLimits {
+                max_messages: 10,
+                max_key_messages: 10,
+                max_key_batches: 8,
+                max_bytes: 1 << 20,
+            },
+            &old,
+        )
+        .unwrap();
+        let StreamReply::Fetch(page2) = reply2 else {
+            panic!("expected a fetch page")
+        };
+        assert_eq!(page2.batches.len(), 2);
     }
 }

@@ -6,8 +6,8 @@
 //! drain so leases and epoch changes are not held uncommitted behind a bulk
 //! publish batch. Consecutive publishes for the same stream fold into a
 //! `PubRun` (one recipe call, seqs sliced back per command); consecutive
-//! acks for the same (stream, group, consumer) fold into an `AckRun` (one
-//! `ack_many` call, outcomes mapped back per command).
+//! batch updates for the same (stream, group, consumer) fold into an
+//! `UpdateRun` (one `update_batches` call, outcomes mapped back per command).
 
 use std::collections::VecDeque;
 
@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use rusqlite::Connection;
 use tokio::sync::watch;
 
-use crate::brokers::stream::domain::message::{ConsumerIdentity, PubItem};
+use crate::brokers::stream::domain::message::{BatchUpdate, ConsumerIdentity, PubItem};
 use crate::brokers::stream::domain::ops::{
     Command, Continuation, Effects, StreamDomain, StreamReply, StreamRequest,
 };
@@ -26,6 +26,8 @@ use crate::durable::{CmdError, Domain, Item, ReplyTx};
 /// Max items a merged publish run may carry: bounds the rows one commit
 /// writes so a queued barrier never waits behind an unbounded insert.
 const MAX_PUB_RUN_ITEMS: usize = 4096;
+
+const MAX_UPDATE_RUN_ITEMS: usize = 4096;
 
 /// Group-level watch signals: `watches[stream][group]` is bumped on every
 /// commit that may have made new work visible (publishes, acks, lease
@@ -39,7 +41,7 @@ pub type WatchMap = DashMap<String, DashMap<String, watch::Sender<u64>>>;
 /// `take_replies`.
 pub enum Run {
     Publish(Vec<Command>),
-    Ack(Vec<Command>),
+    Update(Vec<Command>),
 }
 
 impl Domain for StreamDomain {
@@ -107,19 +109,19 @@ impl Domain for StreamDomain {
         recipes::run_continuation(conn, cont, ctx).map(|(_, fx)| fx)
     }
 
-    /// Fold runs of consecutive mergeable commands into `Run::Ack` (acks for
-    /// the same stream/group/consumer) or `Run::Publish` (publishes for the
-    /// same stream, capped by item count).
+    /// Fold runs of consecutive mergeable commands into `Run::Update`
+    /// (updates for the same stream/group/consumer) or `Run::Publish`
+    /// (publishes for the same stream, capped by item count).
     fn merge_runs(&self, batch: Vec<Item<StreamDomain>>) -> Vec<Item<StreamDomain>> {
-        fn ack_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
+        fn update_key(cmd: &Command) -> Option<(&String, &String, &ConsumerIdentity)> {
             match &cmd.op {
-                StreamRequest::Ack {
+                StreamRequest::UpdateBatch {
                     name,
                     group,
                     identity,
                     ..
                 }
-                | StreamRequest::AckMany {
+                | StreamRequest::UpdateBatches {
                     name,
                     group,
                     identity,
@@ -130,16 +132,26 @@ impl Domain for StreamDomain {
         }
         let mut out: Vec<Item<StreamDomain>> = Vec::with_capacity(batch.len());
         let mut pub_run_items = 0usize;
+        let mut update_run_items = 0usize;
         for item in batch {
-            if matches!(&item, Item::Cmd(cmd) if ack_key(cmd).is_some()) {
+            if matches!(&item, Item::Cmd(cmd) if update_key(cmd).is_some()) {
                 let Item::Cmd(cmd) = item else { unreachable!() };
-                if let Some(Item::Run(Run::Ack(run))) = out.last_mut() {
-                    if ack_key(&run[0]) == ack_key(&cmd) {
+                let n = match &cmd.op {
+                    StreamRequest::UpdateBatch { .. } => 1,
+                    StreamRequest::UpdateBatches { updates, .. } => updates.len(),
+                    _ => unreachable!(),
+                };
+                if let Some(Item::Run(Run::Update(run))) = out.last_mut() {
+                    if update_key(&run[0]) == update_key(&cmd)
+                        && update_run_items + n <= MAX_UPDATE_RUN_ITEMS
+                    {
+                        update_run_items += n;
                         run.push(cmd);
                         continue;
                     }
                 }
-                out.push(Item::Run(Run::Ack(vec![cmd])));
+                update_run_items = n;
+                out.push(Item::Run(Run::Update(vec![cmd])));
                 continue;
             }
             if matches!(&item, Item::Cmd(cmd) if matches!(cmd.op, StreamRequest::Publish { .. }))
@@ -172,14 +184,14 @@ impl Domain for StreamDomain {
 
     fn take_replies(run: &mut Run) -> Vec<Option<ReplyTx<StreamReply>>> {
         match run {
-            Run::Publish(cmds) | Run::Ack(cmds) => {
+            Run::Publish(cmds) | Run::Update(cmds) => {
                 cmds.iter_mut().map(|c| c.reply.take()).collect()
             }
         }
     }
 
     /// Execute one merged run; the returned vec maps 1:1 to the peeled
-    /// reply slots (publish: seq slices per command; ack: one outcome per
+    /// reply slots (publish: seq slices per command; update: one outcome per
     /// command shaped by its variant).
     fn execute_run(
         &self,
@@ -218,72 +230,71 @@ impl Domain for StreamDomain {
                     .collect();
                 Ok((results, fx))
             }
-            Run::Ack(cmds) => {
+            Run::Update(cmds) => {
                 let (name, group, identity) = match &cmds[0].op {
-                    StreamRequest::Ack {
+                    StreamRequest::UpdateBatch {
                         name,
                         group,
                         identity,
                         ..
                     }
-                    | StreamRequest::AckMany {
+                    | StreamRequest::UpdateBatches {
                         name,
                         group,
                         identity,
                         ..
                     } => (name, group, identity),
-                    _ => unreachable!("ack run carries only ack commands"),
+                    _ => unreachable!("update run carries only update commands"),
                 };
-                // Flatten every command's (seq, receipt) pairs into one
-                // ack_many call; `counts` remembers how many pairs each
-                // command owns so replies can be sliced back per command.
-                let mut acks: Vec<(u64, [u8; 16])> = Vec::new();
+                // Flatten every command's updates into one update_batches
+                // call; `counts` remembers how many items each command owns
+                // so replies can be sliced back per command.
+                let mut updates: Vec<BatchUpdate> = Vec::new();
                 let mut counts: Vec<usize> = Vec::with_capacity(cmds.len());
                 for cmd in &cmds {
                     match &cmd.op {
-                        StreamRequest::Ack { seq, receipt, .. } => {
-                            acks.push((*seq, *receipt));
+                        StreamRequest::UpdateBatch { update, .. } => {
+                            updates.push(*update);
                             counts.push(1);
                         }
-                        StreamRequest::AckMany { acks: more, .. } => {
-                            acks.extend_from_slice(more);
+                        StreamRequest::UpdateBatches { updates: more, .. } => {
+                            updates.extend_from_slice(more);
                             counts.push(more.len());
                         }
-                        _ => unreachable!("ack run carries only ack commands"),
+                        _ => unreachable!("update run carries only update commands"),
                     }
                 }
-                let (results, fx) = recipes::ack_many(conn, name, group, identity, &acks)?;
-                let mut results = results.into_iter();
-                let outcomes = cmds
+                let (outcomes, fx) =
+                    recipes::update_batches(conn, name, group, identity, &updates, ctx)?;
+                let mut outcomes = outcomes.into_iter();
+                let results = cmds
                     .iter()
                     .zip(&counts)
                     .map(|(cmd, n)| {
-                        let slice: Vec<Result<StreamReply, BrokerError>> =
-                            results.by_ref().take(*n).collect();
+                        let slice: Vec<Option<crate::brokers::BrokerErrorKind>> =
+                            outcomes.by_ref().take(*n).collect();
                         match &cmd.op {
-                            StreamRequest::Ack { .. } => slice
-                                .into_iter()
-                                .next()
-                                .unwrap_or_else(|| {
-                                    Err(BrokerError::new(
-                                        crate::brokers::BrokerErrorKind::Internal,
-                                        "Ack run result missing",
-                                    ))
-                                }),
-                            StreamRequest::AckMany { acks: mine, .. } => {
-                                let failed = mine
+                            StreamRequest::UpdateBatch { .. } => match slice.into_iter().next() {
+                                Some(Some(kind)) => Err(BrokerError::new(kind, "Batch update rejected")),
+                                Some(None) => Ok(StreamReply::Unit),
+                                None => Err(BrokerError::new(
+                                    crate::brokers::BrokerErrorKind::Internal,
+                                    "Batch update produced no outcome",
+                                )),
+                            },
+                            StreamRequest::UpdateBatches { updates: mine, .. } => {
+                                let failures = mine
                                     .iter()
-                                    .zip(&slice)
-                                    .filter(|(_, r)| r.is_err())
-                                    .map(|((seq, _), _)| *seq)
+                                    .zip(slice)
+                                    .filter_map(|(u, o)| o.map(|k| (u.receipt, k)))
                                     .collect();
-                                Ok(StreamReply::AckOutcome(failed))
+                                Ok(StreamReply::BatchOutcome(failures))
                             }
                             _ => unreachable!(),
                         }
                     })
                     .collect();
-                Ok((outcomes, fx))
+                Ok((results, fx))
             }
         }
     }
@@ -307,5 +318,52 @@ impl Domain for StreamDomain {
             watches.remove(&stream);
         }
         followups.extend(effects.followups);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brokers::stream::domain::message::BatchDisposition;
+
+    fn update_cmd(n: usize) -> Command {
+        Command {
+            op: StreamRequest::UpdateBatches {
+                name: "s".into(),
+                group: "g".into(),
+                identity: ConsumerIdentity {
+                    connection_id: "conn".into(),
+                    consumer_id: "c".into(),
+                    epoch: [0u8; 16],
+                },
+                updates: vec![
+                    BatchUpdate {
+                        receipt: [0u8; 16],
+                        completed: 0,
+                        disposition: BatchDisposition::Checkpoint,
+                    };
+                    n
+                ],
+            },
+            bytes: 0,
+            reply: None,
+        }
+    }
+
+    #[test]
+    fn update_runs_split_at_item_cap() {
+        let domain = StreamDomain(1 << 20);
+        let runs = domain.merge_runs(vec![
+            Item::Cmd(update_cmd(3000)),
+            Item::Cmd(update_cmd(3000)),
+        ]);
+        assert_eq!(runs.len(), 2);
+        let runs = domain.merge_runs(vec![
+            Item::Cmd(update_cmd(2000)),
+            Item::Cmd(update_cmd(2000)),
+        ]);
+        assert_eq!(runs.len(), 1, "requests within the cap still fold");
+        let runs = domain.merge_runs(vec![Item::Cmd(update_cmd(5000))]);
+        assert_eq!(runs.len(), 1, "an oversized single request runs alone");
     }
 }

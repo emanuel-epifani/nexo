@@ -2,7 +2,14 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FrameWriter, Cursor } from '../../src/protocol/codec';
-import { FrameType, DataType, HEADER_SIZE, PROTOCOL_VERSION } from '../../src/protocol/generated';
+import {
+  FrameType,
+  DataType,
+  FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+  FLAG_STREAM_S_UPDATE_BATCH_RETRY,
+  HEADER_SIZE,
+  PROTOCOL_VERSION,
+} from '../../src/protocol/generated';
 
 interface PayloadValue {
   data_type: 'raw' | 'string' | 'json';
@@ -18,6 +25,12 @@ interface Fixture {
   input: any;
   expected_bytes: string;
 }
+
+const DISPOSITION_FLAGS: Record<string, number> = {
+  checkpoint: 0,
+  retry: FLAG_STREAM_S_UPDATE_BATCH_RETRY,
+  release: FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+};
 
 const fixturesPath = path.join(__dirname, '../../../codec-fixtures.json');
 const fixtures: Fixture[] = JSON.parse(fs.readFileSync(fixturesPath, 'utf-8'));
@@ -233,26 +246,42 @@ function encodeFixture(fixture: Fixture): Buffer {
       w.string(inp.stream)
         .string(inp.group)
         .string(inp.consumer_id)
-        .u64(BigInt(inp.generation))
+        .uuid(inp.epoch)
         .u32(inp.batch_size)
+        .u32(inp.key_batch_size)
+        .u32(inp.max_key_batches)
+        .u32(inp.max_bytes)
         .u32(inp.wait_ms);
       break;
     case 'STREAM_JOIN':
       w.string(inp.stream).string(inp.group);
       break;
-    case 'STREAM_ACK':
+    case 'STREAM_UPDATE_BATCH': {
+      const flags = DISPOSITION_FLAGS[inp.disposition as string]!;
       w.string(inp.stream)
         .string(inp.group)
         .string(inp.consumer_id)
-        .u64(BigInt(inp.generation))
-        .u64(BigInt(inp.seq))
-        .uuid(inp.receipt);
+        .uuid(inp.epoch)
+        .uuid(inp.receipt)
+        .u32(inp.completed)
+        .u8(flags);
       break;
+    }
+    case 'STREAM_UPDATE_BATCHES': {
+      const flags = (d: string) => DISPOSITION_FLAGS[d]!;
+      w.string(inp.stream)
+        .string(inp.group)
+        .string(inp.consumer_id)
+        .uuid(inp.epoch)
+        .u32(inp.updates.length);
+      for (const u of inp.updates as any[]) w.uuid(u.receipt).u32(u.completed).u8(flags(u.disposition));
+      break;
+    }
     case 'STREAM_SEEK_END':
       w.string(inp.stream).string(inp.group).u8(inp.target === 'beginning' ? 0 : 1);
       break;
     case 'STREAM_LEAVE':
-      w.string(inp.stream).string(inp.group).string(inp.consumer_id).u64(BigInt(inp.generation));
+      w.string(inp.stream).string(inp.group).string(inp.consumer_id).uuid(inp.epoch);
       break;
     case 'STREAM_PEEK_DLS':
       w.string(inp.stream).string(inp.group).u32(inp.limit).u32(inp.offset);
@@ -398,21 +427,41 @@ function decodeFixture(fixture: Fixture): any {
         stream: c.readString(),
         group: c.readString(),
         consumer_id: c.readString(),
-        generation: Number(c.readU64()),
+        epoch: c.readUUID(),
         batch_size: c.readU32(),
+        key_batch_size: c.readU32(),
+        max_key_batches: c.readU32(),
+        max_bytes: c.readU32(),
         wait_ms: c.readU32(),
       };
     case 'STREAM_JOIN':
       return { stream: c.readString(), group: c.readString() };
-    case 'STREAM_ACK':
+    case 'STREAM_UPDATE_BATCH':
       return {
         stream: c.readString(),
         group: c.readString(),
         consumer_id: c.readString(),
-        generation: Number(c.readU64()),
-        seq: Number(c.readU64()),
+        epoch: c.readUUID(),
         receipt: c.readUUID(),
+        completed: c.readU32(),
+        disposition: (['checkpoint', 'retry', 'release'] as const)[c.readU8()],
       };
+    case 'STREAM_UPDATE_BATCHES': {
+      const stream = c.readString();
+      const group = c.readString();
+      const consumer_id = c.readString();
+      const epoch = c.readUUID();
+      const count = c.readU32();
+      const updates: any[] = [];
+      for (let i = 0; i < count; i++) {
+        updates.push({
+          receipt: c.readUUID(),
+          completed: c.readU32(),
+          disposition: (['checkpoint', 'retry', 'release'] as const)[c.readU8()],
+        });
+      }
+      return { stream, group, consumer_id, epoch, updates };
+    }
     case 'STREAM_SEEK_END': {
       const stream = c.readString();
       const group = c.readString();
@@ -424,7 +473,7 @@ function decodeFixture(fixture: Fixture): any {
         stream: c.readString(),
         group: c.readString(),
         consumer_id: c.readString(),
-        generation: Number(c.readU64()),
+        epoch: c.readUUID(),
       };
     case 'STREAM_PEEK_DLS':
       return { stream: c.readString(), group: c.readString(), limit: c.readU32(), offset: c.readU32() };

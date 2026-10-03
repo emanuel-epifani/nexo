@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 9,
+  "protocolVersion": 10,
   "header": {
     "size": 11,
     "offsets": {
@@ -93,7 +93,7 @@
         "S_PUB": 49,
         "S_FETCH": 50,
         "S_JOIN": 51,
-        "S_ACK": 52,
+        "S_UPDATE_BATCH": 52,
         "S_EXISTS": 53,
         "S_DELETE": 54,
         "S_DESCRIBE": 55,
@@ -103,7 +103,7 @@
         "S_MOVE_TO_STREAM": 59,
         "S_DELETE_DLS": 60,
         "S_PURGE_DLS": 61,
-        "S_ACK_MANY": 62
+        "S_UPDATE_BATCHES": 62
       }
     }
   },
@@ -133,6 +133,10 @@
       "S_CREATE": {
         "HAS_MAX_AGE": 1,
         "HAS_MAX_BYTES": 2
+      },
+      "S_UPDATE_BATCH": {
+        "RETRY": 1,
+        "RELEASE": 2
       }
     }
   },
@@ -140,6 +144,7 @@
     "QUEUE_MAX_PUSH_ITEMS": 10000,
     "STREAM_MAX_PUBLISH_BATCH": 65536,
     "STREAM_MAX_FETCH_BATCH_SIZE": 65536,
+    "STREAM_MAX_KEY_BATCH_SIZE": 1024,
     "STREAM_MAX_KEY_BYTES": 65535
   }
 }

@@ -54,6 +54,31 @@ fn parse_uuid(hex: &str) -> uuid::Uuid {
     uuid::Uuid::parse_str(hex).unwrap_or_else(|e| panic!("invalid uuid {hex}: {e}"))
 }
 
+fn assert_update(
+    update: &nexo::brokers::stream::BatchUpdate,
+    inp: &Value,
+    id: &str,
+) {
+    use nexo::brokers::stream::BatchDisposition;
+    assert_eq!(
+        update.receipt,
+        *parse_uuid(inp["receipt"].as_str().unwrap()).as_bytes(),
+        "{id}: receipt"
+    );
+    assert_eq!(
+        update.completed,
+        inp["completed"].as_u64().unwrap() as u32,
+        "{id}: completed"
+    );
+    let expected = match inp["disposition"].as_str().unwrap() {
+        "checkpoint" => BatchDisposition::Checkpoint,
+        "retry" => BatchDisposition::Retry,
+        "release" => BatchDisposition::Release,
+        other => panic!("{id}: unknown disposition {other}"),
+    };
+    assert_eq!(update.disposition, expected, "{id}: disposition");
+}
+
 // ─── Store ───────────────────────────────────────────────────────────
 
 #[test]
@@ -350,8 +375,8 @@ fn stream_fixtures() {
                 name: t,
                 group,
                 consumer_id,
-                generation,
-                limit,
+                epoch,
+                limits,
                 wait_ms,
             } => {
                 assert_eq!(t, name, "{id}: name");
@@ -362,14 +387,29 @@ fn stream_fixtures() {
                     "{id}: consumer_id"
                 );
                 assert_eq!(
-                    generation,
-                    inp["generation"].as_u64().unwrap(),
-                    "{id}: generation"
+                    epoch,
+                    *parse_uuid(inp["epoch"].as_str().unwrap()).as_bytes(),
+                    "{id}: epoch"
                 );
                 assert_eq!(
-                    limit,
-                    inp["batch_size"].as_u64().unwrap() as u32,
+                    limits.max_messages,
+                    inp["batch_size"].as_u64().unwrap() as usize,
                     "{id}: batch_size"
+                );
+                assert_eq!(
+                    limits.max_key_messages,
+                    inp["key_batch_size"].as_u64().unwrap() as usize,
+                    "{id}: key_batch_size"
+                );
+                assert_eq!(
+                    limits.max_key_batches,
+                    inp["max_key_batches"].as_u64().unwrap() as usize,
+                    "{id}: max_key_batches"
+                );
+                assert_eq!(
+                    limits.max_bytes,
+                    inp["max_bytes"].as_u64().unwrap() as usize,
+                    "{id}: max_bytes"
                 );
                 assert_eq!(
                     wait_ms,
@@ -381,13 +421,12 @@ fn stream_fixtures() {
                 assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
             }
-            StreamCommand::Ack {
+            StreamCommand::UpdateBatch {
                 name: t,
                 group,
                 consumer_id,
-                generation,
-                seq,
-                receipt,
+                epoch,
+                update,
             } => {
                 assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
@@ -397,23 +436,18 @@ fn stream_fixtures() {
                     "{id}: consumer_id"
                 );
                 assert_eq!(
-                    generation,
-                    inp["generation"].as_u64().unwrap(),
-                    "{id}: generation"
+                    epoch,
+                    *parse_uuid(inp["epoch"].as_str().unwrap()).as_bytes(),
+                    "{id}: epoch"
                 );
-                assert_eq!(seq, inp["seq"].as_u64().unwrap(), "{id}: seq");
-                assert_eq!(
-                    receipt,
-                    *parse_uuid(inp["receipt"].as_str().unwrap()).as_bytes(),
-                    "{id}: receipt"
-                );
+                assert_update(&update, inp, id);
             }
-            StreamCommand::AckMany {
+            StreamCommand::UpdateBatches {
                 name: t,
                 group,
                 consumer_id,
-                generation,
-                acks,
+                epoch,
+                updates,
             } => {
                 assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
@@ -423,20 +457,14 @@ fn stream_fixtures() {
                     "{id}: consumer_id"
                 );
                 assert_eq!(
-                    generation,
-                    inp["generation"].as_u64().unwrap(),
-                    "{id}: generation"
+                    epoch,
+                    *parse_uuid(inp["epoch"].as_str().unwrap()).as_bytes(),
+                    "{id}: epoch"
                 );
-                if let Some(exp_acks) = inp["acks"].as_array() {
-                    assert_eq!(acks.len(), exp_acks.len(), "{id}: ack count");
-                    for (i, ((seq, receipt), exp)) in acks.iter().zip(exp_acks).enumerate() {
-                        assert_eq!(*seq, exp["seq"].as_u64().unwrap(), "{id}: ack {i} seq");
-                        assert_eq!(
-                            receipt,
-                            parse_uuid(exp["receipt"].as_str().unwrap()).as_bytes(),
-                            "{id}: ack {i} receipt"
-                        );
-                    }
+                let exp_updates = inp["updates"].as_array().unwrap();
+                assert_eq!(updates.len(), exp_updates.len(), "{id}: update count");
+                for (i, (update, exp)) in updates.iter().zip(exp_updates).enumerate() {
+                    assert_update(update, exp, &format!("{id}:{i}"));
                 }
             }
             StreamCommand::Seek {
@@ -463,7 +491,7 @@ fn stream_fixtures() {
                 name: t,
                 group,
                 consumer_id,
-                generation,
+                epoch,
             } => {
                 assert_eq!(t, name, "{id}: name");
                 assert_eq!(group, inp["group"].as_str().unwrap(), "{id}: group");
@@ -473,9 +501,9 @@ fn stream_fixtures() {
                     "{id}: consumer_id"
                 );
                 assert_eq!(
-                    generation,
-                    inp["generation"].as_u64().unwrap(),
-                    "{id}: generation"
+                    epoch,
+                    *parse_uuid(inp["epoch"].as_str().unwrap()).as_bytes(),
+                    "{id}: epoch"
                 );
             }
             StreamCommand::PeekDls {

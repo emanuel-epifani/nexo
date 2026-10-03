@@ -64,7 +64,7 @@ impl BrokerError {
     }
 
     pub fn fenced() -> Self {
-        Self::new(BrokerErrorKind::Fenced, "Consumer generation is fenced")
+        Self::new(BrokerErrorKind::Fenced, "Consumer epoch is fenced")
     }
 
     pub fn not_member() -> Self {

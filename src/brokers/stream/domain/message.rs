@@ -20,22 +20,52 @@ pub struct PubItem {
     pub payload: Bytes,
 }
 
-/// A leased delivery returned by `fetch`: the receipt fences this lease and
-/// must be echoed back by the consumer on ACK.
+/// One leased batch returned by `fetch`: consecutive original positions of a
+/// single key, one replay event, or one keyless event. `receipt` fences the
+/// lease and is echoed back on batch updates.
 #[derive(Debug, Clone)]
-pub struct Delivery {
-    pub message: Message,
+pub struct DeliveryBatch {
     pub receipt: [u8; 16],
+    pub messages: Vec<Message>,
 }
 
-/// Durable membership identity used by fetch/ack/leave.
+/// One fetch result: the lease deadline horizon plus the granted batches.
+#[derive(Debug, Clone)]
+pub struct FetchPage {
+    pub lease_ms: u64,
+    pub batches: Vec<DeliveryBatch>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FetchLimits {
+    pub max_messages: usize,
+    pub max_key_messages: usize,
+    pub max_key_batches: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchDisposition {
+    Checkpoint,
+    Retry,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BatchUpdate {
+    pub receipt: [u8; 16],
+    pub completed: u32,
+    pub disposition: BatchDisposition,
+}
+
 /// `connection_id` binds the lease to its TCP session, `consumer_id` is the
-/// member inside the group epoch, `generation` fences pre-seek identities.
+/// member inside the group epoch, `epoch` is the group's opaque active epoch
+/// id fencing pre-seek identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerIdentity {
     pub connection_id: String,
     pub consumer_id: String,
-    pub generation: u64,
+    pub epoch: [u8; 16],
 }
 
 /// One parked entry surfaced by `peek_dls`.

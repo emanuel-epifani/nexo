@@ -4,6 +4,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,12 +20,12 @@ BUILD_MODE = "release"
 ROOT_DIR = Path(__file__).resolve().parents[3]
 BINARY_PATH = ROOT_DIR / "target" / BUILD_MODE / "nexo"
 CARGO_BUILD_CMD = ["cargo", "build", "--release"] if BUILD_MODE == "release" else ["cargo", "build"]
-DATA_DIR = ROOT_DIR / "data"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7654
 
 _server_process: subprocess.Popen | None = None
+_data_dir: Path | None = None
 
 
 def _is_server_running(host: str, port: int) -> bool:
@@ -35,22 +36,17 @@ def _is_server_running(host: str, port: int) -> bool:
         return False
 
 
-def _kill_existing_server(port: int) -> None:
-    try:
-        subprocess.run(
-            f"lsof -ti tcp:{port} | xargs kill -9 2>/dev/null || true",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+def _create_data_dir() -> Path:
+    global _data_dir
+    _data_dir = Path(tempfile.mkdtemp(prefix="nexo-sdk-py-"))
+    return _data_dir
 
 
 def _clean_data_dir() -> None:
-    if DATA_DIR.exists():
-        shutil.rmtree(DATA_DIR, ignore_errors=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    global _data_dir
+    if _data_dir is not None:
+        shutil.rmtree(_data_dir, ignore_errors=True)
+        _data_dir = None
 
 
 def _wait_for_port(host: str, port: int, retries: int = 20) -> None:
@@ -63,12 +59,21 @@ def _wait_for_port(host: str, port: int, retries: int = 20) -> None:
 
 def _run_nexo_server(host: str, port: int) -> None:
     global _server_process
+    assert _data_dir is not None
     print(f"[TestSetup] Spawning Nexo server from: {BINARY_PATH}")
     _server_process = subprocess.Popen(
         [str(BINARY_PATH)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        cwd=str(ROOT_DIR),
+        cwd=str(_data_dir),
+        env={
+            **os.environ,
+            "SERVER_HOST": host,
+            "SERVER_SOCKET_TCP_PORT": str(port),
+            "QUEUE_ROOT_PERSISTENCE_PATH": str(_data_dir / "queues"),
+            "STREAM_ROOT_PERSISTENCE_PATH": str(_data_dir / "streams"),
+            "PUBSUB_ROOT_PERSISTENCE_PATH": str(_data_dir / "pubsub"),
+        },
     )
     _wait_for_port(host, port)
     print("[TestSetup] Server is ready.")
@@ -94,13 +99,20 @@ def nexo_server():
     host = DEFAULT_HOST
     port = DEFAULT_PORT
 
-    _kill_existing_server(port)
-    _clean_data_dir()
+    if _is_server_running(host, port):
+        raise RuntimeError(f"[TestSetup] Port {port} on {host} is already in use")
 
-    print(f'--- 🛠️  Building Nexo Server in "{BUILD_MODE}" mode ---')
-    subprocess.run(CARGO_BUILD_CMD, cwd=str(ROOT_DIR), check=True)
+    _create_data_dir()
 
-    _run_nexo_server(host, port)
+    try:
+        print(f'--- 🛠️  Building Nexo Server in "{BUILD_MODE}" mode ---')
+        subprocess.run(CARGO_BUILD_CMD, cwd=str(ROOT_DIR), check=True)
+
+        _run_nexo_server(host, port)
+    except BaseException:
+        _kill_server()
+        _clean_data_dir()
+        raise
 
     yield
 

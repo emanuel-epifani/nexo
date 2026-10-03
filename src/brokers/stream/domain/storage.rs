@@ -66,7 +66,6 @@ CREATE TABLE groups (
     id           BLOB(16) PRIMARY KEY,
     stream_id    BLOB(16) NOT NULL REFERENCES streams(id),
     name         TEXT NOT NULL,
-    generation   BLOB(8) NOT NULL,
     active_epoch BLOB(16),
     UNIQUE (stream_id, name),
     UNIQUE (id, stream_id),
@@ -89,7 +88,10 @@ CREATE TABLE group_epochs (
     keyless_ticket     INTEGER NOT NULL,
     next_ready_ticket  INTEGER NOT NULL,
     pending_count      INTEGER NOT NULL CHECK (pending_count >= 0),
+    pending_bytes      INTEGER NOT NULL DEFAULT 0 CHECK (pending_bytes >= 0),
     max_pending        INTEGER NOT NULL CHECK (max_pending > 0),
+    max_pending_bytes  INTEGER NOT NULL DEFAULT 67108864
+        CHECK (max_pending_bytes > 0),
     PRIMARY KEY (id),
     UNIQUE (id, stream_id),
     FOREIGN KEY (group_id, stream_id) REFERENCES groups(id, stream_id)
@@ -98,36 +100,48 @@ CREATE INDEX epochs_of_stream ON group_epochs(stream_id);
 CREATE INDEX group_active_epoch ON groups(stream_id, active_epoch);
 
 CREATE TABLE key_lanes (
-    epoch_id       BLOB(16) NOT NULL,
-    stream_id      BLOB(16) NOT NULL,
-    key_id         INTEGER NOT NULL CHECK (key_id > 0),
-    cursor_pos     BLOB(8) NOT NULL,
-    normal_seq     BLOB(8),
-    head_seq       BLOB(8),
-    head_pos       BLOB(8),
-    head_origin    INTEGER,
-    state          INTEGER NOT NULL CHECK (state BETWEEN 0 AND 3),
-    attempts       INTEGER NOT NULL CHECK (attempts >= 0),
-    ready_ticket   INTEGER NOT NULL,
-    receipt        BLOB(16),
-    owner          TEXT,
-    connection_id  TEXT,
-    deadline_ms    INTEGER,
+    epoch_id        BLOB(16) NOT NULL,
+    stream_id       BLOB(16) NOT NULL,
+    key_id          INTEGER NOT NULL CHECK (key_id > 0),
+    cursor_pos      BLOB(8) NOT NULL,
+    normal_seq      BLOB(8),
+    head_seq        BLOB(8),
+    head_pos        BLOB(8),
+    head_origin     INTEGER,
+    state           INTEGER NOT NULL CHECK (state BETWEEN 0 AND 4),
+    attempts        INTEGER NOT NULL CHECK (attempts >= 0),
+    ready_ticket    INTEGER NOT NULL,
+    receipt         BLOB(16),
+    owner           TEXT,
+    connection_id   TEXT,
+    deadline_ms     INTEGER,
+    lease_first_pos BLOB(8),
+    lease_count     INTEGER NOT NULL DEFAULT 0 CHECK (lease_count >= 0),
+    lease_acked     INTEGER NOT NULL DEFAULT 0 CHECK (lease_acked >= 0
+                                                    AND lease_acked <= lease_count),
+    lease_bytes     INTEGER NOT NULL DEFAULT 0 CHECK (lease_bytes >= 0),
     PRIMARY KEY (epoch_id, key_id),
-    -- LEASED iff the lease quadruple is set.
+    -- LEASED iff the lease owner triple is set.
     CHECK ((state = 2) = (receipt IS NOT NULL AND owner IS NOT NULL
-                          AND connection_id IS NOT NULL AND deadline_ms IS NOT NULL)),
-    -- READY/LEASED iff a head exists.
-    CHECK ((state = 1 OR state = 2) =
+                          AND connection_id IS NOT NULL)),
+    -- LEASED/WAITING iff a deadline is armed (lease or retry wait).
+    CHECK ((state IN (2, 4)) = (deadline_ms IS NOT NULL)),
+    -- READY/LEASED/WAITING iff a head exists.
+    CHECK ((state IN (1, 2, 4)) =
            (head_seq IS NOT NULL AND head_pos IS NOT NULL AND head_origin IS NOT NULL)),
     -- PARKED lanes carry no frontier or head: every original is resolved or parked.
     CHECK (state != 3 OR (normal_seq IS NULL AND head_seq IS NULL AND receipt IS NULL)),
+    -- Only LEASED carries an in-flight batch range.
+    CHECK ((state = 2) = (lease_first_pos IS NOT NULL AND lease_count > 0)),
+    CHECK (state = 2 OR (lease_first_pos IS NULL AND lease_count = 0
+                         AND lease_acked = 0 AND lease_bytes = 0)),
     FOREIGN KEY (epoch_id, stream_id) REFERENCES group_epochs(id, stream_id),
     FOREIGN KEY (stream_id, key_id) REFERENCES stream_keys(stream_id, key_id)
 );
 CREATE INDEX ready_lanes ON key_lanes(epoch_id, ready_ticket, key_id) WHERE state = 1;
-CREATE INDEX lane_deadlines ON key_lanes(deadline_ms, epoch_id, key_id) WHERE state = 2;
+CREATE INDEX lane_deadlines ON key_lanes(deadline_ms, epoch_id, key_id) WHERE state IN (2, 4);
 CREATE INDEX lane_owners ON key_lanes(connection_id, owner, epoch_id) WHERE state = 2;
+CREATE UNIQUE INDEX lane_receipts ON key_lanes(epoch_id, receipt) WHERE state = 2;
 CREATE INDEX lane_normal_frontier ON key_lanes(epoch_id, normal_seq)
     WHERE normal_seq IS NOT NULL AND state <> 3;
 CREATE INDEX lane_head_expiry ON key_lanes(stream_id, head_seq) WHERE head_seq IS NOT NULL;
@@ -140,22 +154,26 @@ CREATE TABLE keyless_deliveries (
     seq           BLOB(8) NOT NULL,
     key_pos       BLOB(8) NOT NULL,
     origin        INTEGER NOT NULL CHECK (origin IN (0, 1)),
-    state         INTEGER NOT NULL CHECK (state IN (1, 2)),
+    state         INTEGER NOT NULL CHECK (state IN (1, 2, 4)),
     attempts      INTEGER NOT NULL CHECK (attempts >= 0),
     ready_ticket  INTEGER NOT NULL,
     receipt       BLOB(16),
     owner         TEXT,
     connection_id TEXT,
     deadline_ms   INTEGER,
+    lease_bytes   INTEGER NOT NULL DEFAULT 0 CHECK (lease_bytes >= 0),
     PRIMARY KEY (epoch_id, seq),
     CHECK ((state = 2) = (receipt IS NOT NULL AND owner IS NOT NULL
-                          AND connection_id IS NOT NULL AND deadline_ms IS NOT NULL)),
+                          AND connection_id IS NOT NULL)),
+    CHECK ((state IN (2, 4)) = (deadline_ms IS NOT NULL)),
     FOREIGN KEY (epoch_id, stream_id) REFERENCES group_epochs(id, stream_id),
     FOREIGN KEY (stream_id, seq) REFERENCES events(stream_id, seq)
 );
 CREATE INDEX keyless_ready ON keyless_deliveries(epoch_id, ready_ticket, seq) WHERE state = 1;
-CREATE INDEX keyless_deadlines ON keyless_deliveries(deadline_ms, epoch_id, seq) WHERE state = 2;
+CREATE INDEX keyless_deadlines ON keyless_deliveries(deadline_ms, epoch_id, seq)
+    WHERE state IN (2, 4);
 CREATE INDEX keyless_owners ON keyless_deliveries(connection_id, owner, epoch_id) WHERE state = 2;
+CREATE UNIQUE INDEX keyless_receipts ON keyless_deliveries(epoch_id, receipt) WHERE state = 2;
 CREATE INDEX keyless_original_frontier ON keyless_deliveries(epoch_id, seq) WHERE origin = 0;
 CREATE INDEX keyless_expiry ON keyless_deliveries(stream_id, seq);
 
@@ -202,6 +220,11 @@ CREATE TABLE dls_ranges (
 CREATE INDEX dls_order ON dls_ranges(epoch_id, first_seq, key_id, first_pos)
     WHERE first_seq IS NOT NULL;
 CREATE INDEX dls_by_key ON dls_ranges(stream_id, key_id, epoch_id, first_pos);
+CREATE INDEX retired_stream_keys ON stream_keys(stream_id, key_id)
+    WHERE key_id > 0 AND last_pos = retained_after_pos;
+CREATE INDEX nonempty_lanes_by_key ON key_lanes(stream_id, key_id)
+    WHERE state <> 0;
+CREATE INDEX replay_by_key ON replay_intents(stream_id, key_id);
 "#;
 
 pub const SPEC: Spec = Spec {
@@ -225,7 +248,9 @@ pub fn recover(store: &mut Store) -> Result<Vec<Continuation>, BrokerError> {
     tx.execute("DELETE FROM members", [])
         .map_err(|e| BrokerError::storage(format!("Recovery failed to clear members: {e}")))?;
 
-    // Reclaim leased keyed lanes in slices until none remain.
+    // Reclaim leased keyed lanes in slices until none remain. WAITING rows
+    // keep their durable retry deadline across restart: the periodic expiry
+    // sweep re-arms them when actually due.
     loop {
         let leased: Vec<(Vec<u8>, i64, i64)> = tx
             .prepare_cached(
@@ -247,7 +272,7 @@ pub fn recover(store: &mut Store) -> Result<Vec<Continuation>, BrokerError> {
         }
     }
 
-    // Reclaim leased keyless deliveries.
+    // Reclaim leased keyless deliveries; WAITING rows keep their deadline.
     loop {
         let leased: Vec<(Vec<u8>, Vec<u8>, i64)> = tx
             .prepare_cached(
@@ -272,7 +297,7 @@ pub fn recover(store: &mut Store) -> Result<Vec<Continuation>, BrokerError> {
     }
 
     // All leases are gone by construction: reconcile counters wholesale.
-    tx.execute("UPDATE group_epochs SET pending_count = 0", [])
+    tx.execute("UPDATE group_epochs SET pending_count = 0, pending_bytes = 0", [])
         .map_err(|e| {
             BrokerError::storage(format!("Recovery failed to reconcile counters: {e}"))
         })?;
@@ -284,7 +309,12 @@ pub fn recover(store: &mut Store) -> Result<Vec<Continuation>, BrokerError> {
     {
         let mut stmt = store
             .conn
-            .prepare_cached("SELECT id FROM group_epochs WHERE initialized = 0")
+            .prepare_cached(
+                "SELECT e.id FROM group_epochs e
+                 JOIN groups g ON g.active_epoch = e.id AND g.stream_id = e.stream_id
+                 JOIN streams s ON s.id = e.stream_id
+                 WHERE e.initialized = 0 AND s.deleted = 0",
+            )
             .map_err(|e| {
                 BrokerError::storage(format!("Recovery resume scan failed: {e}"))
             })?;
@@ -301,16 +331,33 @@ pub fn recover(store: &mut Store) -> Result<Vec<Continuation>, BrokerError> {
             continuations.push(Continuation::InitEpoch { epoch_id: id });
         }
     }
-    let deleted: i64 = store
+    let needs_gc: bool = store
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM streams WHERE deleted = 1",
+            "SELECT EXISTS(SELECT 1 FROM streams WHERE deleted = 1)
+                OR EXISTS(SELECT 1 FROM group_epochs e
+                   WHERE NOT EXISTS(SELECT 1 FROM groups g
+                      WHERE g.stream_id = e.stream_id AND g.active_epoch = e.id))",
             [],
             |r| r.get(0),
         )
         .map_err(|e| BrokerError::storage(format!("Recovery GC scan failed: {e}")))?;
-    if deleted > 0 {
+    if needs_gc {
         continuations.push(Continuation::Gc);
+    }
+    let needs_key_prune: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM stream_keys
+                WHERE key_id > 0 AND last_pos = retained_after_pos)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| {
+            BrokerError::storage(format!("Recovery key-prune scan failed: {e}"))
+        })?;
+    if needs_key_prune {
+        continuations.push(Continuation::PruneKeys { after: None });
     }
     Ok(continuations)
 }
@@ -333,12 +380,14 @@ fn validate_schema(conn: &Connection) -> Result<(), BrokerError> {
         "ready_lanes",
         "lane_deadlines",
         "lane_owners",
+        "lane_receipts",
         "lane_normal_frontier",
         "lane_head_expiry",
         "lanes_by_key",
         "keyless_ready",
         "keyless_deadlines",
         "keyless_owners",
+        "keyless_receipts",
         "keyless_original_frontier",
         "keyless_expiry",
         "replay_expiry",
@@ -346,6 +395,9 @@ fn validate_schema(conn: &Connection) -> Result<(), BrokerError> {
         "members_stream",
         "dls_order",
         "dls_by_key",
+        "retired_stream_keys",
+        "nonempty_lanes_by_key",
+        "replay_by_key",
     ];
     for name in OBJECTS {
         let exists: bool = conn

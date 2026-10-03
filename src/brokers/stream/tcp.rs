@@ -9,15 +9,19 @@
 use bytes::Bytes;
 
 use crate::brokers::stream::domain::definition::StreamDefinition;
-use crate::brokers::stream::domain::message::{Delivery, DlsEntry, PubItem};
+use crate::brokers::stream::domain::message::{
+    BatchDisposition, BatchUpdate, DlsEntry, FetchLimits, FetchPage, PubItem,
+};
 use crate::brokers::stream::domain::ops::{StreamReply, StreamRequest};
+use crate::brokers::stream::domain::types::FETCH_PAGE_HEADER_BYTES;
 use crate::brokers::stream::manager::PendingReply;
 use crate::brokers::stream::options::{RetentionOptions, SeekTarget, StreamCreateOptions};
-use crate::brokers::{ProvisionOutcome, ProvisionResult};
+use crate::brokers::{BrokerErrorKind, ProvisionOutcome, ProvisionResult};
 use crate::protocol::wire::{PayloadCursor, PayloadWriter};
 use crate::protocol::{
     ErrorCode, ParseError, ProvisionStatus, Response, FLAG_STREAM_S_CREATE_HAS_MAX_AGE,
-    FLAG_STREAM_S_CREATE_HAS_MAX_BYTES,
+    FLAG_STREAM_S_CREATE_HAS_MAX_BYTES, FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+    FLAG_STREAM_S_UPDATE_BATCH_RETRY,
 };
 use crate::transport::tcp::error_response;
 use crate::NexoEngine;
@@ -27,13 +31,16 @@ use crate::NexoEngine;
 // ==========================================
 
 use crate::protocol::STREAM_MAX_FETCH_BATCH_SIZE;
+use crate::protocol::STREAM_MAX_KEY_BATCH_SIZE;
 use crate::protocol::STREAM_MAX_PUBLISH_BATCH as MAX_PUBLISH_BATCH;
 pub use crate::protocol::{
-    OP_S_ACK, OP_S_ACK_MANY, OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLS, OP_S_DESCRIBE, OP_S_EXISTS,
-    OP_S_FETCH, OP_S_JOIN, OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLS, OP_S_PUB,
-    OP_S_PURGE_DLS, OP_S_SEEK, STREAM_OPCODE_MAX as OPCODE_MAX, STREAM_OPCODE_MIN as OPCODE_MIN,
+    OP_S_CREATE, OP_S_DELETE, OP_S_DELETE_DLS, OP_S_DESCRIBE, OP_S_EXISTS, OP_S_FETCH, OP_S_JOIN,
+    OP_S_LEAVE, OP_S_MOVE_TO_STREAM, OP_S_PEEK_DLS, OP_S_PUB, OP_S_PURGE_DLS, OP_S_SEEK,
+    OP_S_UPDATE_BATCH, OP_S_UPDATE_BATCHES, STREAM_OPCODE_MAX as OPCODE_MAX,
+    STREAM_OPCODE_MIN as OPCODE_MIN,
 };
 const MIN_PUBLISH_ITEM_BYTES: usize = 6;
+const MIN_UPDATE_ITEM_BYTES: usize = 21;
 
 // ==========================================
 // COMMANDS
@@ -53,30 +60,29 @@ pub enum StreamCommand {
         name: String,
         group: String,
         consumer_id: String,
-        generation: u64,
-        limit: u32,
+        epoch: [u8; 16],
+        limits: FetchLimits,
         wait_ms: u32,
     },
     Join {
         name: String,
         group: String,
     },
-    Ack {
+    UpdateBatch {
         name: String,
         group: String,
         consumer_id: String,
-        generation: u64,
-        seq: u64,
-        receipt: [u8; 16],
+        epoch: [u8; 16],
+        update: BatchUpdate,
     },
-    /// Batched ack: one frame carries N (seq, receipt) pairs so a fetch
-    /// batch is released in a single round trip instead of N awaits.
-    AckMany {
+    /// Bulk update: one frame carries N cumulative batch updates so a fetch
+    /// page is settled in a single round trip instead of N awaits.
+    UpdateBatches {
         name: String,
         group: String,
         consumer_id: String,
-        generation: u64,
-        acks: Vec<(u64, [u8; 16])>,
+        epoch: [u8; 16],
+        updates: Vec<BatchUpdate>,
     },
     Seek {
         name: String,
@@ -96,7 +102,7 @@ pub enum StreamCommand {
         name: String,
         group: String,
         consumer_id: String,
-        generation: u64,
+        epoch: [u8; 16],
     },
     PeekDls {
         name: String,
@@ -182,15 +188,44 @@ impl StreamCommand {
                 let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
-                let generation = cursor.read_u64()?;
-                let limit = cursor.read_u32()?;
+                let epoch = cursor.read_uuid_bytes()?;
+                let max_messages = cursor.read_u32()?;
+                let max_key_messages = cursor.read_u32()?;
+                let max_key_batches = cursor.read_u32()?;
+                let max_bytes = cursor.read_u32()?;
                 let wait_ms = cursor.read_u32()?;
+                if max_messages as usize > STREAM_MAX_FETCH_BATCH_SIZE {
+                    return Err(ParseError::Invalid(format!(
+                        "Fetch max_messages {max_messages} exceeds {STREAM_MAX_FETCH_BATCH_SIZE}"
+                    )));
+                }
+                if max_key_messages == 0 || max_key_messages as usize > STREAM_MAX_KEY_BATCH_SIZE
+                {
+                    return Err(ParseError::Invalid(format!(
+                        "Fetch max_key_messages must be 1..={STREAM_MAX_KEY_BATCH_SIZE}"
+                    )));
+                }
+                if max_key_batches > max_messages {
+                    return Err(ParseError::Invalid(
+                        "Fetch max_key_batches exceeds max_messages".to_string(),
+                    ));
+                }
+                if (max_bytes as u64) < FETCH_PAGE_HEADER_BYTES {
+                    return Err(ParseError::Invalid(format!(
+                        "Fetch max_bytes must be at least {FETCH_PAGE_HEADER_BYTES}"
+                    )));
+                }
                 Ok(Self::Fetch {
                     name,
                     group,
                     consumer_id,
-                    generation,
-                    limit,
+                    epoch,
+                    limits: FetchLimits {
+                        max_messages: max_messages as usize,
+                        max_key_messages: max_key_messages as usize,
+                        max_key_batches: max_key_batches as usize,
+                        max_bytes: max_bytes as usize,
+                    },
                     wait_ms,
                 })
             }
@@ -199,47 +234,37 @@ impl StreamCommand {
                 let group = cursor.read_string()?;
                 Ok(Self::Join { name, group })
             }
-            OP_S_ACK => {
-                let name = cursor.read_string()?;
-                let group = cursor.read_string()?;
-                let consumer_id = cursor.read_string()?;
-                let generation = cursor.read_u64()?;
-                let seq = cursor.read_u64()?;
-                let receipt = cursor.read_uuid_bytes()?;
-                Ok(Self::Ack {
+            OP_S_UPDATE_BATCH => {
+                let (name, group, consumer_id, epoch) = read_identity(cursor)?;
+                let update = read_batch_update(cursor)?;
+                Ok(Self::UpdateBatch {
                     name,
                     group,
                     consumer_id,
-                    generation,
-                    seq,
-                    receipt,
+                    epoch,
+                    update,
                 })
             }
-            OP_S_ACK_MANY => {
-                let name = cursor.read_string()?;
-                let group = cursor.read_string()?;
-                let consumer_id = cursor.read_string()?;
-                let generation = cursor.read_u64()?;
+            OP_S_UPDATE_BATCHES => {
+                let (name, group, consumer_id, epoch) = read_identity(cursor)?;
                 let count = cursor.read_u32()? as usize;
-                // 24 bytes per item (seq u64 + receipt 16B); the cap mirrors
-                // the fetch batch ceiling since a batch can't ack more than
-                // a fetch could have delivered.
-                if count > STREAM_MAX_FETCH_BATCH_SIZE || count > cursor.len() / 24 {
+                if count > STREAM_MAX_FETCH_BATCH_SIZE
+                    || count > cursor.len() / MIN_UPDATE_ITEM_BYTES
+                {
                     return Err(ParseError::Invalid(format!(
-                        "Ack batch count {} exceeds remaining payload",
-                        count
+                        "Update batch count {count} exceeds remaining payload"
                     )));
                 }
-                let mut acks = Vec::with_capacity(count);
+                let mut updates = Vec::with_capacity(count);
                 for _ in 0..count {
-                    acks.push((cursor.read_u64()?, cursor.read_uuid_bytes()?));
+                    updates.push(read_batch_update(cursor)?);
                 }
-                Ok(Self::AckMany {
+                Ok(Self::UpdateBatches {
                     name,
                     group,
                     consumer_id,
-                    generation,
-                    acks,
+                    epoch,
+                    updates,
                 })
             }
             OP_S_SEEK => {
@@ -278,12 +303,12 @@ impl StreamCommand {
                 let name = cursor.read_string()?;
                 let group = cursor.read_string()?;
                 let consumer_id = cursor.read_string()?;
-                let generation = cursor.read_u64()?;
+                let epoch = cursor.read_uuid_bytes()?;
                 Ok(Self::Leave {
                     name,
                     group,
                     consumer_id,
-                    generation,
+                    epoch,
                 })
             }
             OP_S_PEEK_DLS => {
@@ -323,6 +348,44 @@ impl StreamCommand {
     }
 }
 
+fn read_identity(
+    cursor: &mut PayloadCursor,
+) -> Result<(String, String, String, [u8; 16]), ParseError> {
+    Ok((
+        cursor.read_string()?,
+        cursor.read_string()?,
+        cursor.read_string()?,
+        cursor.read_uuid_bytes()?,
+    ))
+}
+
+fn read_batch_update(cursor: &mut PayloadCursor) -> Result<BatchUpdate, ParseError> {
+    let receipt = cursor.read_uuid_bytes()?;
+    let completed = cursor.read_u32()?;
+    let flags = cursor.read_u8()?;
+    let known = FLAG_STREAM_S_UPDATE_BATCH_RETRY | FLAG_STREAM_S_UPDATE_BATCH_RELEASE;
+    if flags & !known != 0 {
+        return Err(ParseError::Invalid(format!(
+            "Invalid update flags: 0x{flags:02X}"
+        )));
+    }
+    let disposition = match flags {
+        0 => BatchDisposition::Checkpoint,
+        f if f == FLAG_STREAM_S_UPDATE_BATCH_RETRY => BatchDisposition::Retry,
+        f if f == FLAG_STREAM_S_UPDATE_BATCH_RELEASE => BatchDisposition::Release,
+        _ => {
+            return Err(ParseError::Invalid(format!(
+                "Invalid update flags: 0x{flags:02X}"
+            )))
+        }
+    };
+    Ok(BatchUpdate {
+        receipt,
+        completed,
+        disposition,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,71 +413,168 @@ mod tests {
     }
 
     #[test]
-    fn ack_parser_reads_receipt() {
+    fn update_parser_reads_receipt_and_disposition() {
         let mut writer = PayloadWriter::new();
         writer
             .put_str("s")
             .put_str("g")
             .put_str("c")
-            .put_u64(3)
-            .put_u64(9)
-            .put_uuid(&[0xAB; 16]);
-        let mut cursor = PayloadCursor::new(writer.into_bytes());
-        match StreamCommand::parse(OP_S_ACK, &mut cursor).unwrap() {
-            StreamCommand::Ack { receipt, seq, .. } => {
-                assert_eq!(seq, 9);
-                assert_eq!(receipt, [0xAB; 16]);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn ack_parser_rejects_truncated_receipt() {
-        let mut writer = PayloadWriter::new();
-        writer
-            .put_str("s")
-            .put_str("g")
-            .put_str("c")
-            .put_u64(3)
-            .put_u64(9);
-        let mut cursor = PayloadCursor::new(writer.into_bytes());
-        assert!(StreamCommand::parse(OP_S_ACK, &mut cursor).is_err());
-    }
-
-    #[test]
-    fn ack_many_parser_reads_pairs() {
-        let mut writer = PayloadWriter::new();
-        writer
-            .put_str("s")
-            .put_str("g")
-            .put_str("c")
-            .put_u64(3)
-            .put_u32(2)
-            .put_u64(9)
+            .put_uuid(&[3; 16])
             .put_uuid(&[0xAB; 16])
-            .put_u64(10)
-            .put_uuid(&[0xCD; 16]);
+            .put_u32(9)
+            .put_u8(FLAG_STREAM_S_UPDATE_BATCH_RETRY);
         let mut cursor = PayloadCursor::new(writer.into_bytes());
-        match StreamCommand::parse(OP_S_ACK_MANY, &mut cursor).unwrap() {
-            StreamCommand::AckMany { acks, .. } => {
-                assert_eq!(acks, vec![(9, [0xAB; 16]), (10, [0xCD; 16])]);
+        match StreamCommand::parse(OP_S_UPDATE_BATCH, &mut cursor).unwrap() {
+            StreamCommand::UpdateBatch { update, .. } => {
+                assert_eq!(update.receipt, [0xAB; 16]);
+                assert_eq!(update.completed, 9);
+                assert_eq!(update.disposition, BatchDisposition::Retry);
             }
             _ => panic!(),
         }
     }
 
     #[test]
-    fn ack_many_parser_rejects_oversized_count() {
+    fn update_parser_rejects_truncated_receipt() {
         let mut writer = PayloadWriter::new();
         writer
             .put_str("s")
             .put_str("g")
             .put_str("c")
-            .put_u64(3)
+            .put_uuid(&[3; 16])
+            .put_uuid(&[0xAB; 16])
+            .put_u32(9);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        assert!(StreamCommand::parse(OP_S_UPDATE_BATCH, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn update_parser_rejects_combined_flags() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_uuid(&[0xAB; 16])
+            .put_u32(9)
+            .put_u8(FLAG_STREAM_S_UPDATE_BATCH_RETRY | FLAG_STREAM_S_UPDATE_BATCH_RELEASE);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        assert!(StreamCommand::parse(OP_S_UPDATE_BATCH, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn update_batches_parser_reads_items() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_u32(2)
+            .put_uuid(&[0xAB; 16])
+            .put_u32(2)
+            .put_u8(0)
+            .put_uuid(&[0xCD; 16])
+            .put_u32(0)
+            .put_u8(FLAG_STREAM_S_UPDATE_BATCH_RETRY);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        match StreamCommand::parse(OP_S_UPDATE_BATCHES, &mut cursor).unwrap() {
+            StreamCommand::UpdateBatches { updates, .. } => {
+                assert_eq!(updates[0].receipt, [0xAB; 16]);
+                assert_eq!(updates[0].completed, 2);
+                assert_eq!(updates[0].disposition, BatchDisposition::Checkpoint);
+                assert_eq!(updates[1].receipt, [0xCD; 16]);
+                assert_eq!(updates[1].disposition, BatchDisposition::Retry);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn update_batches_parser_rejects_oversized_count() {
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
             .put_u32(1000);
         let mut cursor = PayloadCursor::new(writer.into_bytes());
-        assert!(StreamCommand::parse(OP_S_ACK_MANY, &mut cursor).is_err());
+        assert!(StreamCommand::parse(OP_S_UPDATE_BATCHES, &mut cursor).is_err());
+    }
+
+    #[test]
+    fn fetch_and_update_parsers_never_panic_on_garbage() {
+        let mut fetch = PayloadWriter::new();
+        fetch
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_u32(10)
+            .put_u32(3)
+            .put_u32(2)
+            .put_u32(1024)
+            .put_u32(5000);
+        let mut single = PayloadWriter::new();
+        single
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_uuid(&[0xAB; 16])
+            .put_u32(2)
+            .put_u8(0);
+        let mut plural = PayloadWriter::new();
+        plural
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_u32(2)
+            .put_uuid(&[0xAB; 16])
+            .put_u32(2)
+            .put_u8(0)
+            .put_uuid(&[0xCD; 16])
+            .put_u32(0)
+            .put_u8(FLAG_STREAM_S_UPDATE_BATCH_RETRY);
+        let cases = [
+            (OP_S_FETCH, fetch.into_bytes()),
+            (OP_S_UPDATE_BATCH, single.into_bytes()),
+            (OP_S_UPDATE_BATCHES, plural.into_bytes()),
+        ];
+        for (opcode, payload) in &cases {
+            for cut in 0..payload.len() {
+                let mut cursor = PayloadCursor::new(Bytes::copy_from_slice(&payload[..cut]));
+                let _ = StreamCommand::parse(*opcode, &mut cursor);
+            }
+        }
+
+        let mut state = 1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for len in 0..=256usize {
+            let buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            for (opcode, _) in &cases {
+                let mut cursor = PayloadCursor::new(Bytes::copy_from_slice(&buf));
+                let _ = StreamCommand::parse(*opcode, &mut cursor);
+            }
+        }
+
+        let mut writer = PayloadWriter::new();
+        writer
+            .put_str("s")
+            .put_str("g")
+            .put_str("c")
+            .put_uuid(&[3; 16])
+            .put_u32(u32::MAX);
+        let mut cursor = PayloadCursor::new(writer.into_bytes());
+        assert!(StreamCommand::parse(OP_S_UPDATE_BATCHES, &mut cursor).is_err());
     }
 }
 
@@ -431,38 +591,50 @@ fn encode_publish_batch(seqs: &[u64]) -> Bytes {
     w.into_bytes()
 }
 
-/// FETCH item: seq u64 | receipt 16B | timestamp u64 | key_len u16 | key |
-/// payload_len u32 | payload. The receipt fences the lease and is echoed on ACK.
-fn encode_fetch(deliveries: &[Delivery]) -> Bytes {
+/// FETCH DATA: `u64 lease_ms | u32 batch_count` then per batch
+/// `uuid receipt | u16 key_len | key | u32 message_count` followed by
+/// `u64 seq | u64 timestamp | u32 payload_len | payload` per message.
+/// A receipt is shared by all messages of its batch and fences the lease.
+fn encode_fetch(page: &FetchPage) -> Bytes {
     let mut w = PayloadWriter::new();
-    w.put_u32(deliveries.len() as u32);
-    for d in deliveries {
-        w.put_u64(d.message.seq);
-        w.put_uuid(&d.receipt);
-        w.put_u64(d.message.timestamp);
-        w.put_u16(d.message.key.len() as u16);
-        w.put_raw(&d.message.key);
-        w.put_bytes(&d.message.payload);
+    w.put_u64(page.lease_ms);
+    w.put_u32(page.batches.len() as u32);
+    for batch in &page.batches {
+        w.put_uuid(&batch.receipt);
+        let key = batch.messages.first().map(|m| m.key.as_ref()).unwrap_or(&[]);
+        w.put_u16(key.len() as u16);
+        w.put_raw(key);
+        w.put_u32(batch.messages.len() as u32);
+        for m in &batch.messages {
+            w.put_u64(m.seq);
+            w.put_u64(m.timestamp);
+            w.put_bytes(&m.payload);
+        }
     }
     w.into_bytes()
 }
 
-fn encode_join_group(ack_floor: u64, generation: u64, consumer_id: &str) -> Bytes {
-    let mut w = PayloadWriter::with_capacity(16 + 4 + consumer_id.len());
+fn encode_join_group(ack_floor: u64, epoch: [u8; 16], consumer_id: &str) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(24 + 4 + consumer_id.len());
     w.put_u64(ack_floor);
-    w.put_u64(generation);
+    w.put_uuid(&epoch);
     w.put_str(consumer_id);
     w.into_bytes()
 }
 
-/// S_ACK_MANY reply: `[u32 failed_count][seq u64]*` — empty means all acks
-/// consumed. Kept as DATA (not ERR) so whole-op failures stay distinct from
-/// per-seq fencing, and valid acks still commit.
-fn encode_ack_outcome(failed: &[u64]) -> Bytes {
-    let mut w = PayloadWriter::with_capacity(4 + failed.len() * 8);
-    w.put_u32(failed.len() as u32);
-    for &seq in failed {
-        w.put_u64(seq);
+/// S_UPDATE_BATCHES reply: `[u32 failure_count][uuid receipt | u8 code]*` —
+/// empty means every update was consumed. Kept as DATA (not ERR) so whole-op
+/// membership failures stay distinct from per-batch fencing, and valid
+/// updates still commit.
+fn encode_batch_outcome(failures: &[([u8; 16], BrokerErrorKind)]) -> Bytes {
+    let mut w = PayloadWriter::with_capacity(4 + failures.len() * 17);
+    w.put_u32(failures.len() as u32);
+    for (receipt, kind) in failures {
+        w.put_uuid(receipt);
+        w.put_u8(match kind {
+            BrokerErrorKind::InvalidArgument => ErrorCode::InvalidArgument as u8,
+            _ => ErrorCode::Fenced as u8,
+        });
     }
     w.into_bytes()
 }
@@ -513,6 +685,7 @@ fn put_definition(writer: &mut PayloadWriter, definition: &StreamDefinition) {
     }
     writer
         .put_u64(definition.config.max_ack_pending as u64)
+        .put_u64(definition.config.max_ack_pending_bytes)
         .put_u64(definition.config.ack_wait_ms)
         .put_u32(definition.config.max_deliveries);
 }
@@ -549,8 +722,8 @@ enum CallKind {
     DlsPeek,
     Count,
     Unit,
-    /// S_ACK_MANY: DATA reply listing the seqs that failed fencing.
-    AckOutcome,
+    /// S_UPDATE_BATCHES: DATA reply listing the receipts that failed.
+    BatchOutcome,
 }
 
 pub struct StreamCall {
@@ -576,17 +749,17 @@ fn encode_reply(kind: CallKind, reply: StreamReply) -> Response {
         (CallKind::Publish, StreamReply::Published(seqs)) => {
             Response::Data(encode_publish_batch(&seqs))
         }
-        (CallKind::Fetch, StreamReply::Fetch(deliveries)) => {
-            Response::Data(encode_fetch(&deliveries))
+        (CallKind::Fetch, StreamReply::Fetch(page)) => {
+            Response::Data(encode_fetch(&page))
         }
         (
             CallKind::Join,
             StreamReply::Join {
                 ack_floor,
                 consumer_id,
-                generation,
+                epoch,
             },
-        ) => Response::Data(encode_join_group(ack_floor, generation, &consumer_id)),
+        ) => Response::Data(encode_join_group(ack_floor, epoch, &consumer_id)),
         (CallKind::Bool, StreamReply::Bool(v)) => Response::Data(encode_bool(v)),
         (CallKind::Definition, StreamReply::Definition(def)) => {
             Response::Data(encode_definition(&def))
@@ -595,8 +768,8 @@ fn encode_reply(kind: CallKind, reply: StreamReply) -> Response {
             Response::Data(encode_peek_dls(&entries))
         }
         (CallKind::Count, StreamReply::Count(n)) => Response::Data(encode_purge_dls(n)),
-        (CallKind::AckOutcome, StreamReply::AckOutcome(failed)) => {
-            Response::Data(encode_ack_outcome(&failed))
+        (CallKind::BatchOutcome, StreamReply::BatchOutcome(failures)) => {
+            Response::Data(encode_batch_outcome(&failures))
         }
         (CallKind::Unit, StreamReply::Unit) => Response::Ok,
         _ => Response::error(ErrorCode::Internal, "Unexpected stream reply"),
@@ -638,8 +811,8 @@ pub async fn submit(
             name,
             group,
             consumer_id,
-            generation,
-            limit,
+            epoch,
+            limits,
             wait_ms,
         } => {
             // Fetch is the only command that may long-poll: the wait loop is
@@ -649,8 +822,8 @@ pub async fn submit(
                 name,
                 group,
                 consumer_id,
-                generation,
-                limit,
+                epoch,
+                limits,
                 wait_ms,
                 connection,
             ));
@@ -663,45 +836,43 @@ pub async fn submit(
             },
             CallKind::Join,
         ),
-        StreamCommand::Ack {
+        StreamCommand::UpdateBatch {
             name,
             group,
             consumer_id,
-            generation,
-            seq,
-            receipt,
+            epoch,
+            update,
         } => (
-            StreamRequest::Ack {
+            StreamRequest::UpdateBatch {
                 name,
                 group,
                 identity: crate::brokers::stream::domain::message::ConsumerIdentity {
                     connection_id: connection,
                     consumer_id,
-                    generation,
+                    epoch,
                 },
-                seq,
-                receipt,
+                update,
             },
             CallKind::Unit,
         ),
-        StreamCommand::AckMany {
+        StreamCommand::UpdateBatches {
             name,
             group,
             consumer_id,
-            generation,
-            acks,
+            epoch,
+            updates,
         } => (
-            StreamRequest::AckMany {
+            StreamRequest::UpdateBatches {
                 name,
                 group,
                 identity: crate::brokers::stream::domain::message::ConsumerIdentity {
                     connection_id: connection,
                     consumer_id,
-                    generation,
+                    epoch,
                 },
-                acks,
+                updates,
             },
-            CallKind::AckOutcome,
+            CallKind::BatchOutcome,
         ),
         StreamCommand::Seek {
             name,
@@ -724,7 +895,7 @@ pub async fn submit(
             name,
             group,
             consumer_id,
-            generation,
+            epoch,
         } => (
             StreamRequest::Leave {
                 name,
@@ -732,7 +903,7 @@ pub async fn submit(
                 identity: crate::brokers::stream::domain::message::ConsumerIdentity {
                     connection_id: connection,
                     consumer_id,
-                    generation,
+                    epoch,
                 },
             },
             CallKind::Unit,
@@ -778,22 +949,20 @@ fn submit_fetch(
     name: String,
     group: String,
     consumer_id: String,
-    generation: u64,
-    limit: u32,
+    epoch: [u8; 16],
+    limits: FetchLimits,
     wait_ms: u32,
     connection: String,
 ) -> StreamCall {
     let identity = crate::brokers::stream::domain::message::ConsumerIdentity {
         connection_id: connection,
         consumer_id,
-        generation,
+        epoch,
     };
     let wait = wait_ms as u64;
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = stream
-            .fetch(&name, &group, &identity, limit as usize, wait)
-            .await;
+        let result = stream.fetch(&name, &group, &identity, limits, wait).await;
         let _ = tx.send(result.map(StreamReply::Fetch));
     });
     StreamCall {

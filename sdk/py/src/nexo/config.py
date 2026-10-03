@@ -29,9 +29,12 @@ class _QueueDefaults:
 @dataclass(frozen=True)
 class _StreamDefaults:
     batch_size: int = 100
+    key_batch_size: int = 32
     wait_ms: int = 20000
-    concurrency: int = 1
+    concurrency: int = 16
     stop_timeout_ms: int = 30000
+    callback_timeout_ms: int = 30000
+    max_buffered_bytes: int = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True)

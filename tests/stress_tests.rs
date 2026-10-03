@@ -1,97 +1,16 @@
-//! NEXO Cross-Broker Stress Benchmarks
+//! NEXO Native Manager Performance Tests
 //!
-//! Command run to generate this snapshot:
-//! `cargo test --release bench_ -- --test-threads=1 --nocapture`
+//! Full suite: `cargo test --release --test stress_tests bench_ -- --test-threads=1 --nocapture`
+//! Stream: `cargo test --release --test stress_tests stream::bench_stream_ -- --test-threads=1 --nocapture`
 //!
-//! Reference output (macOS, release profile):
-//!
-//! ```text
-//! Running tests/stress_tests.rs (target/release/deps/stress_tests-b8b3d0ca528459fd)
-//!
-//! running 11 tests
-//! 📊 PUBSUB - Fanout 1->100
-//!    Throughput:  188720 ops/sec
-//!    Total Time:  52.99ms
-//!    Latency:     Avg: 5µs | p50: 5µs | p95: 8µs | p99: 14µs | Max: 66µs
-//!    Count:       10000
-//!
-//! 📊 PUBSUB - Exact Match Throughput
-//!    Throughput:  9918855 ops/sec
-//!    Total Time:  50.41ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 74µs
-//!    Count:       500000
-//!
-//! 📊 PUBSUB - Wildcard Match Throughput
-//!    Throughput:  7443735 ops/sec
-//!    Total Time:  67.17ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 52µs
-//!    Count:       500000
-//!
-//! 📊 PUSH - Queue Throughput (Sequential)
-//!    Throughput:  11983 ops/sec
-//!    Total Time:  41.72s
-//!    Latency:     Avg: 83µs | p50: 64µs | p95: 108µs | p99: 151µs | Max: 18331µs
-//!    Count:       500000
-//!    (durable commit per op — synchronous=NORMAL, one WAL commit per push)
-//!
-//! 📊 QUEUE PUSH concurrent x16
-//!    Throughput:  47332 ops/sec
-//!    Total Time:  1.69s
-//!    Latency:     Avg: 337µs | p50: 299µs | p95: 376µs | p99: 540µs | Max: 11331µs
-//!    Count:       80000
-//!    (drain merges backlogged pushes into shared commits — ~8 ops/commit here)
-//!
-//! 📊 QUEUE PUSH BATCH 100
-//!    Throughput:  56611 ops/sec
-//!    Total Time:  8.83s
-//!    Latency:     Avg: 1764µs | p50: 1193µs | p95: 1513µs | p99: 24038µs | Max: 32481µs
-//!    Count:       500000
-//!    (one request = one tx slice of 100 rows — ~97 messages per commit)
-//!
-//! 📊 STORE - Read (GET)
-//!    Throughput:  11417861 ops/sec
-//!    Total Time:  17.52ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 8µs
-//!    Count:       200000
-//!
-//! 📊 STORE - Write (PUT)
-//!    Throughput:  11215582 ops/sec
-//!    Total Time:  17.83ms
-//!    Latency:     Avg: 0µs | p50: 0µs | p95: 0µs | p99: 0µs | Max: 33µs
-//!    Count:       200000
-//!
-//! 📊 STREAM FETCH+ACK keyless (pages of 100)
-//!    Throughput:  180 ops/sec
-//!    Total Time:  2.78s
-//!    Latency:     Avg: 5564µs | p50: 5349µs | p95: 7213µs | p99: 7919µs | Max: 12845µs
-//!    Count:       500
-//!
-//! 📊 STREAM PUBLISH (Write Confirmed)
-//!    Throughput:  20480 ops/sec
-//!    Total Time:  24.41s
-//!    Latency:     Avg: 48µs | p50: 40µs | p95: 71µs | p99: 114µs | Max: 12572µs
-//!    Count:       500000
-//!
-//! 📊 STREAM PUBLISH BATCH 100 keyed x2 groups
-//!    Throughput:  749 ops/sec
-//!    Total Time:  2.67s
-//!    Latency:     Avg: 1334µs | p50: 1119µs | p95: 1755µs | p99: 6039µs | Max: 8036µs
-//!    Count:       2000
-//!
-//! 📊 STREAM PUBLISH BATCH 100 keyless
-//!    Throughput:  4516 ops/sec
-//!    Total Time:  664.27ms
-//!    Latency:     Avg: 221µs | p50: 182µs | p95: 244µs | p99: 556µs | Max: 6192µs
-//!    Count:       3000
-//!
-//! 📊 STREAM PUBLISH concurrent x16
-//!    Throughput:  122185 ops/sec
-//!    Total Time:  654.74ms
-//!    Latency:     Avg: 130µs | p50: 114µs | p95: 175µs | p99: 333µs | Max: 3516µs
-//!    Count:       80000
-//!
-//! test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.12s
-//! ```
+//! Calls managers directly; no TCP, SDK or container is part of the measured path.
+//! This file measures operations and timings. Only API-error, progress and expected
+//! total-count guards remain; payload/order/identity/DLS/recovery assertions belong
+//! in the broker's functional test file.
+//! STREAM_MANAGER_PERF reports source events/s separately from completed deliveries/s,
+//! actual assignment sizes, manager calls and writer SQL/timing counters. Setup and
+//! prefill are outside drain/pipeline timing; final update confirmations are inside.
+//! No per-event latency samples are collected for these workload records.
 
 mod common;
 use bytes::Bytes;
@@ -463,8 +382,200 @@ mod stress_tests {
 
     mod stream {
         use super::*;
-        use nexo::brokers::stream::PubItem;
+        use nexo::brokers::stream::{
+            BatchDisposition, BatchUpdate, ConsumerIdentity, FetchLimits, PubItem,
+        };
+        use tokio::task::JoinSet;
+
         const COUNT: usize = 500_000;
+        const PERF_STREAM: &str = "native-stream-perf";
+        const PAYLOAD_BYTES: usize = 128;
+        const CASE_TIMEOUT: Duration = Duration::from_secs(120);
+
+        struct Consumption {
+            deliveries: usize,
+            batches: usize,
+            fetches: usize,
+            updates: usize,
+        }
+
+        fn event(id: usize, keys: usize) -> PubItem {
+            let mut payload = vec![b'x'; PAYLOAD_BYTES];
+            payload[..8].copy_from_slice(&(id as u64).to_be_bytes());
+            PubItem {
+                key: if keys == 0 {
+                    Bytes::new()
+                } else {
+                    Bytes::copy_from_slice(&((id % keys) as u64).to_be_bytes())
+                },
+                payload: Bytes::from(payload),
+            }
+        }
+
+        async fn perf_setup(
+            groups: usize,
+        ) -> (
+            tempfile::TempDir,
+            Arc<StreamManager>,
+            Vec<(String, ConsumerIdentity)>,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let config = SystemStreamConfig {
+                persistence_path: dir.path().to_str().unwrap().to_string(),
+                ..SystemStreamConfig::default()
+            };
+            let manager = build_stream_manager(config).await;
+            manager
+                .create_stream(PERF_STREAM.to_string(), StreamCreateOptions::default())
+                .await
+                .unwrap();
+            let mut members = Vec::with_capacity(groups);
+            for g in 0..groups {
+                let group = format!("g{g}");
+                let connection_id = format!("perf-consumer-{g}");
+                let joined = manager
+                    .join_group(PERF_STREAM, &group, &connection_id)
+                    .await
+                    .unwrap();
+                members.push((
+                    group,
+                    ConsumerIdentity {
+                        connection_id,
+                        consumer_id: joined.consumer_id,
+                        epoch: joined.epoch,
+                    },
+                ));
+            }
+            (dir, manager, members)
+        }
+
+        async fn publish_seed(manager: &StreamManager, items: &[PubItem]) {
+            for chunk in items.chunks(100) {
+                let sequences = manager
+                    .publish_batch(PERF_STREAM, chunk.to_vec())
+                    .await
+                    .unwrap();
+                assert_eq!(sequences.len(), chunk.len());
+            }
+        }
+
+        async fn leave_members(
+            manager: &StreamManager,
+            members: &[(String, ConsumerIdentity)],
+        ) {
+            for (group, identity) in members {
+                manager
+                    .leave_group(PERF_STREAM, group, identity)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        async fn consume(
+            manager: Arc<StreamManager>,
+            group: String,
+            identity: ConsumerIdentity,
+            count: usize,
+            limits: FetchLimits,
+            bulk_ack: bool,
+            wait_ms: u64,
+        ) -> Consumption {
+            let mut result = Consumption {
+                deliveries: 0,
+                batches: 0,
+                fetches: 0,
+                updates: 0,
+            };
+            while result.deliveries < count {
+                let page = manager
+                    .fetch(PERF_STREAM, &group, &identity, limits, wait_ms)
+                    .await
+                    .unwrap();
+                result.fetches += 1;
+                if page.batches.is_empty() {
+                    assert!(wait_ms > 0, "prefilled stream made no progress");
+                    continue;
+                }
+                let page_messages: usize = page.batches.iter().map(|b| b.messages.len()).sum();
+                assert!(page_messages > 0 && result.deliveries + page_messages <= count);
+                let mut updates = Vec::with_capacity(page.batches.len());
+                for batch in page.batches {
+                    assert!(!batch.messages.is_empty());
+                    result.batches += 1;
+                    let update = BatchUpdate {
+                        receipt: batch.receipt,
+                        completed: batch.messages.len() as u32,
+                        disposition: BatchDisposition::Checkpoint,
+                    };
+                    if bulk_ack {
+                        updates.push(update);
+                    } else {
+                        manager
+                            .update_batch(PERF_STREAM, &group, &identity, update)
+                            .await
+                            .unwrap();
+                        result.updates += 1;
+                    }
+                }
+                if !updates.is_empty() {
+                    let failures = manager
+                        .update_batches(PERF_STREAM, &group, &identity, updates)
+                        .await
+                        .unwrap();
+                    assert!(failures.is_empty(), "batch confirmation failed: {failures:?}");
+                    result.updates += 1;
+                }
+                result.deliveries += page_messages;
+            }
+            assert_eq!(result.deliveries, count);
+            result
+        }
+
+        fn report_case(
+            scenario: serde_json::Value,
+            elapsed: Duration,
+            count: usize,
+            before: (u64, u64, u64, u64),
+            after: (u64, u64, u64, u64),
+            consumers: &[Consumption],
+        ) {
+            let seconds = elapsed.as_secs_f64();
+            assert!(seconds > 0.0);
+            let deliveries: usize = consumers.iter().map(|c| c.deliveries).sum();
+            let batches: usize = consumers.iter().map(|c| c.batches).sum();
+            println!(
+                "STREAM_MANAGER_PERF {}",
+                serde_json::json!({
+                    "scope": "StreamManager in-process; SQLite WAL synchronous=NORMAL; no TCP or SDK",
+                    "scenario": scenario,
+                    "payload_bytes": PAYLOAD_BYTES,
+                    "source_events": count,
+                    "completed_deliveries": deliveries,
+                    "elapsed_seconds": seconds,
+                    "source_events_per_second": count as f64 / seconds,
+                    "completed_deliveries_per_second": if consumers.is_empty() {
+                        None
+                    } else {
+                        Some(deliveries as f64 / seconds)
+                    },
+                    "assigned_batches": batches,
+                    "events_per_batch": if batches == 0 {
+                        None
+                    } else {
+                        Some(deliveries as f64 / batches as f64)
+                    },
+                    "fetch_calls": consumers.iter().map(|c| c.fetches).sum::<usize>(),
+                    "update_calls": consumers.iter().map(|c| c.updates).sum::<usize>(),
+                    "sql_statements": after.0 - before.0,
+                    "sql_statements_per_source_event": (after.0 - before.0) as f64 / count as f64,
+                    "writer_batches": after.1 - before.1,
+                    "writer_exec_ms": (after.2 - before.2) as f64 / 1e6,
+                    "writer_commit_ms": (after.3 - before.3) as f64 / 1e6,
+                    "latency_scope": "whole workload through final confirmation; no per-event samples",
+                    "completion_checked": true,
+                })
+            );
+        }
 
         fn sql_stats_diff(
             manager: &StreamManager,
@@ -651,7 +762,7 @@ mod stress_tests {
             let identity = nexo::brokers::stream::ConsumerIdentity {
                 connection_id: "consumer-conn".to_string(),
                 consumer_id: joined.consumer_id.clone(),
-                generation: joined.generation,
+                epoch: joined.epoch,
             };
 
             let stats = manager.sql_stats();
@@ -662,21 +773,221 @@ mod stress_tests {
             let mut consumed = 0usize;
             while consumed < MESSAGES {
                 let start = Instant::now();
-                let deliveries = manager
-                    .fetch(name, "g", &identity, PAGE, 0)
+                let page = manager
+                    .fetch(
+                        name,
+                        "g",
+                        &identity,
+                        nexo::brokers::stream::FetchLimits {
+                            max_messages: PAGE,
+                            max_key_messages: 1,
+                            max_key_batches: PAGE,
+                            max_bytes: 10 * 1024 * 1024,
+                        },
+                        0,
+                    )
                     .await
                     .unwrap();
-                for d in &deliveries {
+                for batch in &page.batches {
                     manager
-                        .ack(name, "g", &identity, d.message.seq, d.receipt)
+                        .update_batch(
+                            name,
+                            "g",
+                            &identity,
+                            nexo::brokers::stream::BatchUpdate {
+                                receipt: batch.receipt,
+                                completed: batch.messages.len() as u32,
+                                disposition: nexo::brokers::stream::BatchDisposition::Checkpoint,
+                            },
+                        )
                         .await
                         .unwrap();
+                    consumed += batch.messages.len();
                 }
-                consumed += deliveries.len();
                 bench.record(start.elapsed());
             }
             bench.stop();
             sql_stats_diff(&manager, stats, consumed);
+        }
+
+        async fn publish_case(count: usize, keys: usize, groups: usize) {
+            let (_dir, manager, _members) = perf_setup(groups).await;
+            let items: Vec<PubItem> = (0..count).map(|id| event(id, keys)).collect();
+            let before = manager.sql_stats();
+            let start = Instant::now();
+            publish_seed(&manager, &items).await;
+            let elapsed = start.elapsed();
+            let after = manager.sql_stats();
+            report_case(
+                serde_json::json!({
+                    "kind": "publish-batch", "keys": keys, "groups": groups,
+                    "publish_batch": 100, "producers": 1,
+                    "checks": "successful publish results and expected totals",
+                }),
+                elapsed, count, before, after, &[],
+            );
+            manager.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn bench_stream_publish_fanout() {
+            tokio::time::timeout(CASE_TIMEOUT, async {
+                for groups in [0, 1, 4] {
+                    publish_case(20_000, 64, groups).await;
+                }
+            })
+            .await
+            .expect("publish fan-out benchmark exceeded its deadline");
+        }
+
+        #[tokio::test]
+        async fn bench_stream_publish_high_cardinality() {
+            tokio::time::timeout(CASE_TIMEOUT, async {
+                for groups in [0, 4] {
+                    publish_case(20_000, 20_000, groups).await;
+                }
+            })
+            .await
+            .expect("high-cardinality benchmark exceeded its deadline");
+        }
+
+        async fn drain_case(keys: usize, key_batch: usize, bulk_ack: bool) {
+            const MESSAGES: usize = 24_000;
+            let (_dir, manager, members) = perf_setup(1).await;
+            let items: Vec<PubItem> = (0..MESSAGES).map(|id| event(id, keys)).collect();
+            publish_seed(&manager, &items).await;
+            let limits = FetchLimits {
+                max_messages: 512,
+                max_key_messages: key_batch,
+                max_key_batches: 16,
+                max_bytes: 10 * 1024 * 1024,
+            };
+            let before = manager.sql_stats();
+            let start = Instant::now();
+            let result = consume(
+                Arc::clone(&manager), members[0].0.clone(), members[0].1.clone(),
+                MESSAGES, limits, bulk_ack, 0,
+            )
+            .await;
+            let elapsed = start.elapsed();
+            let after = manager.sql_stats();
+            leave_members(&manager, &members).await;
+            report_case(
+                serde_json::json!({
+                    "kind": "drain", "keys": keys, "groups": 1,
+                    "max_messages": limits.max_messages,
+                    "max_key_messages": limits.max_key_messages,
+                    "max_key_batches": limits.max_key_batches,
+                    "max_bytes": limits.max_bytes,
+                    "bulk_ack": bulk_ack,
+                    "checks": "successful confirmations and expected delivery totals",
+                }),
+                elapsed, MESSAGES, before, after, &[result],
+            );
+            manager.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn bench_stream_drain_keyless_updates() {
+            tokio::time::timeout(CASE_TIMEOUT, async {
+                for bulk_ack in [false, true] {
+                    drain_case(0, 1, bulk_ack).await;
+                }
+            })
+            .await
+            .expect("keyless drain benchmark exceeded its deadline");
+        }
+
+        #[tokio::test]
+        async fn bench_stream_drain_keyed_batches() {
+            tokio::time::timeout(CASE_TIMEOUT, async {
+                for keys in [1, 64] {
+                    for key_batch in [1, 32] {
+                        drain_case(keys, key_batch, true).await;
+                    }
+                }
+            })
+            .await
+            .expect("keyed drain benchmark exceeded its deadline");
+        }
+
+        async fn pipeline_case(keys: usize, groups: usize, producers: usize) {
+            const MESSAGES: usize = 12_000;
+            assert!(keys == 0 || keys % producers == 0);
+            let (_dir, manager, members) = perf_setup(groups).await;
+            let limits = FetchLimits {
+                max_messages: 64,
+                max_key_messages: 32,
+                max_key_batches: 16,
+                max_bytes: 10 * 1024 * 1024,
+            };
+            let before = manager.sql_stats();
+            let start = Instant::now();
+            let results = tokio::time::timeout(CASE_TIMEOUT, async {
+                let mut readers = JoinSet::new();
+                for (group, identity) in &members {
+                    readers.spawn(consume(
+                        Arc::clone(&manager), group.clone(), identity.clone(),
+                        MESSAGES, limits, true, 1000,
+                    ));
+                }
+                let mut publishers = JoinSet::new();
+                for producer in 0..producers {
+                    let manager = Arc::clone(&manager);
+                    publishers.spawn(async move {
+                        let mut published = 0;
+                        for id in (producer..MESSAGES).step_by(producers) {
+                            let item = event(id, keys);
+                            manager
+                                .publish(PERF_STREAM, item.key, item.payload)
+                                .await
+                                .unwrap();
+                            published += 1;
+                        }
+                        published
+                    });
+                }
+                let mut published = 0;
+                while let Some(result) = publishers.join_next().await {
+                    published += result.unwrap();
+                }
+                assert_eq!(published, MESSAGES);
+                let mut results = Vec::with_capacity(groups);
+                while let Some(consumed) = readers.join_next().await {
+                    results.push(consumed.unwrap());
+                }
+                results
+            })
+            .await
+            .expect("live pipeline benchmark exceeded its deadline");
+            let elapsed = start.elapsed();
+            let after = manager.sql_stats();
+            assert_eq!(results.len(), groups);
+            assert!(results.iter().all(|result| result.deliveries == MESSAGES));
+            leave_members(&manager, &members).await;
+            report_case(
+                serde_json::json!({
+                    "kind": "pipeline", "keys": keys, "groups": groups,
+                    "producers": producers,
+                    "max_messages": limits.max_messages,
+                    "max_key_messages": limits.max_key_messages,
+                    "max_key_batches": limits.max_key_batches,
+                    "max_bytes": limits.max_bytes,
+                    "bulk_ack": true,
+                    "checks": "successful confirmations and expected delivery totals",
+                }),
+                elapsed, MESSAGES, before, after, &results,
+            );
+            manager.shutdown().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn bench_stream_live_pipelines() {
+            for (keys, groups, producers) in [
+                (0, 1, 4), (0, 4, 4), (64, 1, 4), (64, 4, 4), (1, 1, 1),
+            ] {
+                pipeline_case(keys, groups, producers).await;
+            }
         }
     }
 }

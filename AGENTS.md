@@ -43,9 +43,9 @@ sdk/py/src/nexo/               # Python SDK package (typed, py.typed)
     codec.py                   # frame serialization/deserialization
   transport/tcp/connection.py  # TCP adapter
 sdk/integration-test-matrix.md # source of truth: test scenario IDs + TS/Python test names
-benchmarks/                    # e2e cross-system benchmarks (nexo vs redis/rabbitmq/jetstream/mqtt)
-  scenarios/*.json             # shared workload specs — single source of truth for both harnesses
-  ts/, py/                     # per-SDK harnesses, interpret the same spec for both systems
+tests/stress_tests.rs          # in-process manager performance tests (no TCP or SDK)
+sdk/ts/tests/brokers/test-stress.test.ts # SDK end-to-end performance against local binary
+sdk/py/tests/brokers/test_stress.py     # Python equivalent
 docs/guide/                    # functional docs
 ```
 
@@ -119,6 +119,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/) — see [doc
 
 ```bash
 cargo test --test queue_tests          # single suite (also: store_/pubsub_/stream_tests)
+cargo test --release --test stress_tests stream::bench_stream_ -- --test-threads=1 --nocapture
 cd sdk/ts && npm test                  # TS SDK (vitest)
 cd sdk/ts && npm run build             # clean TypeScript package build
 cd sdk/py && pytest                    # Python SDK (pytest)
@@ -129,3 +130,16 @@ node scripts/generate-protocol.js --check  # verify generated files are in sync
 ```
 
 Release: `node scripts/release.js` → bumps version, runs checks, tags. Push `v*` tag → CI builds Docker, npm, PyPI, docs.
+
+**SDK integration test safety:** `sdk/ts/tests/global-setup.ts` and `sdk/py/tests/conftest.py` fail fast if port 7654 is already bound (they never kill a foreign listener) and run the server against an isolated temporary persistence directory (queues/streams/pubsub under an `mkdtemp` dir), never the repository's `data/`.
+
+## Stream Contract
+
+- Protocol version **10**; stream storage schema **2** (unreleased layout — no migrations). Group identity is a single opaque UUID epoch (`groups.active_epoch`); there is no numeric generation.
+- Delivery is the **keyed cumulative batch model**: at most one leased batch per `(stream, group, key)`, cumulative completed-prefix updates via `S_UPDATE_BATCH`/`S_UPDATE_BATCHES`, fresh receipt per assignment, checkpoint/retry/release dispositions.
+- SDKs run a **continuous bounded executor**: per-key sequential callbacks, parallel independent keys, single in-flight fetch with message/byte/key-slot credit reservation, coalesced updates, per-callback timeout with cooperative cancellation.
+- SDK defaults: `concurrency` 16, `keyBatchSize`/`key_batch_size` 32, `callbackTimeoutMs`/`callback_timeout_ms` 30000, buffered messages `2 × batchSize`, buffered bytes 20 MiB.
+- Unused-key metadata is pruned incrementally by the `PruneKeys` continuation (empty lanes first, then `stream_keys` rows; the keyless sentinel `key_id = 0` is never pruned, and positive key IDs and global sequence numbers are never reused).
+- Focused verification: `cargo test --lib brokers::stream::`, `cargo test --test stream_tests`, `cargo test --test codec_fixtures`; SDK mock subsets `vitest -t 'stream continuous executor'` / `pytest -k StreamContinuousExecutor` (sequential — both suites share port 7654); `tsc --noEmit`, `mypy sdk/py/src/nexo`, `node scripts/generate-protocol.js --check`.
+- Lease ownership and local callback execution are distinct: a retired callback keeps its per-key execution gate until it settles, including across reconnect/seek. Different keys continue if capacity is free. Stop cannot forcibly terminate user code or guarantee external exactly-once effects.
+Manager performance lives in tests/stress_tests.rs::stream; SDK stress suites remain separate E2E diagnostics. Stress tests measure operations, counts and timings, with only progress/completion and API-error guards. Functional assertions for payloads, key ordering, delivery identity, DLS and recovery belong in tests/stream_tests.rs and the corresponding SDK suites. STREAM_MANAGER_PERF records report source events/s, completed deliveries/s, assignment sizes, fetch/update calls and writer SQL/timing counters; never mix these with socket/SDK measurements.

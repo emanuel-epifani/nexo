@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 0x09;
+export const PROTOCOL_VERSION = 0x0A;
 
 export enum FrameType {
   REQUEST = 0x01,
@@ -83,7 +83,7 @@ export enum StreamOpcode {
   S_PUB = 0x31,
   S_FETCH = 0x32,
   S_JOIN = 0x33,
-  S_ACK = 0x34,
+  S_UPDATE_BATCH = 0x34,
   S_EXISTS = 0x35,
   S_DELETE = 0x36,
   S_DESCRIBE = 0x37,
@@ -93,12 +93,13 @@ export enum StreamOpcode {
   S_MOVE_TO_STREAM = 0x3B,
   S_DELETE_DLS = 0x3C,
   S_PURGE_DLS = 0x3D,
-  S_ACK_MANY = 0x3E,
+  S_UPDATE_BATCHES = 0x3E,
 }
 
 export const QUEUE_MAX_PUSH_ITEMS = 10_000;
 export const STREAM_MAX_PUBLISH_BATCH = 65_536;
 export const STREAM_MAX_FETCH_BATCH_SIZE = 65_536;
+export const STREAM_MAX_KEY_BATCH_SIZE = 1_024;
 export const STREAM_MAX_KEY_BYTES = 65_535;
 
 export const FLAG_STORE_MAP_SET_HAS_TTL = 0x01;
@@ -110,3 +111,5 @@ export const FLAG_PUBSUB_PUB_HAS_TTL = 0x02;
 export const FLAG_PUBSUB_PUB_CLEAR = 0x04;
 export const FLAG_STREAM_S_CREATE_HAS_MAX_AGE = 0x01;
 export const FLAG_STREAM_S_CREATE_HAS_MAX_BYTES = 0x02;
+export const FLAG_STREAM_S_UPDATE_BATCH_RETRY = 0x01;
+export const FLAG_STREAM_S_UPDATE_BATCH_RELEASE = 0x02;

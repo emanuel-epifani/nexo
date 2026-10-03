@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn test_blocking_opcodes_are_not_inline() {
         // Stream opcodes take the ordered-submit path, not inline dispatch.
-        assert!(!is_inline_opcode(stream::tcp::OP_S_ACK));
+        assert!(!is_inline_opcode(stream::tcp::OP_S_UPDATE_BATCH));
         assert!(!is_inline_opcode(stream::tcp::OP_S_SEEK));
         assert!(!is_inline_opcode(stream::tcp::OP_S_LEAVE));
         assert!(!is_inline_opcode(stream::tcp::OP_S_JOIN));

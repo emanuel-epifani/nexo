@@ -8,6 +8,7 @@ import pytest
 from nexo import (
     NexoClient,
     NotConnectedError,
+    ProtocolError,
     ProvisionOutcome,
     ResourceConfigurationConflictError,
     ResourceNotFoundError,
@@ -234,9 +235,9 @@ class TestStream:
 
         await nexo.stream.delete(name)
 
-    async def test_stop_exposes_ack_failure(self, nexo: NexoClient):
-        name = f"stream-stop-ack-failure-{uuid.uuid4()}"
-        group = "stop-ack-failure-group"
+    async def test_stop_exposes_batch_update_failure(self, nexo: NexoClient):
+        name = f"stream-stop-update-failure-{uuid.uuid4()}"
+        group = "stop-update-failure-group"
         stream = await _create_stream(nexo, name)
 
         started = asyncio.Event()
@@ -253,14 +254,14 @@ class TestStream:
 
         stopping = asyncio.create_task(sub.stop())
         release.set()
-        with pytest.raises(Exception, match=r"stream ACK request\(s\) failed"):
+        with pytest.raises(Exception, match="epoch is fenced"):
             await stopping
 
         await nexo.stream.delete(name)
 
-    async def test_active_subscription_rejoins_after_ack_failure(self, nexo: NexoClient):
-        name = f"stream-active-ack-failure-{uuid.uuid4()}"
-        group = "active-ack-failure-group"
+    async def test_active_subscription_rejoins_after_update_failure(self, nexo: NexoClient):
+        name = f"stream-active-update-failure-{uuid.uuid4()}"
+        group = "active-update-failure-group"
         stream = await _create_stream(nexo, name)
 
         attempts = 0
@@ -284,12 +285,14 @@ class TestStream:
         await sub.stop()
         await nexo.stream.delete(name)
 
-    async def test_preserve_ordering_default_concurrency(self, nexo: NexoClient):
+    async def test_preserve_ordering_concurrency_1(self, nexo: NexoClient):
         name = f"stream-order-{uuid.uuid4()}"
         stream = await _create_stream(nexo, name)
 
         received: list[int] = []
-        sub = await stream.group("order-group").subscribe(lambda d: received.append(d["i"]))
+        sub = await stream.group("order-group").subscribe(
+            lambda d: received.append(d["i"]), concurrency=1
+        )
 
         for i in range(30):
             await stream.publish({"i": i})
@@ -354,7 +357,10 @@ class TestStream:
         slow_started = asyncio.Event()
         release_slow = asyncio.Event()
 
+        received: list[int] = []
+
         async def first_callback(data):
+            received.append(data["id"])
             if data["id"] == 1:
                 fast_finished.set()
             elif data["id"] == 2:
@@ -365,6 +371,7 @@ class TestStream:
             first_callback,
             batch_size=2,
             concurrency=2,
+            max_buffered_messages=2,
         )
         await asyncio.wait_for(
             asyncio.gather(fast_finished.wait(), slow_started.wait()),
@@ -378,7 +385,9 @@ class TestStream:
                 lambda data: received_by_second.append(data["id"]),
                 batch_size=1,
             )
-            await wait_for(lambda: received_by_second == [3], timeout=2.0)
+            await wait_for(
+                lambda: 3 in received or 3 in received_by_second, timeout=2.0
+            )
             release_slow.set()
             await first.stop()
             await second.stop()
@@ -625,6 +634,46 @@ class TestStream:
             await group.subscribe(lambda _: None, stop_timeout_ms=0)
         await nexo.stream.delete(name)
 
+    async def test_reject_invalid_continuous_executor_options(self, nexo: NexoClient):
+        name = f"stream-opt-validation-{uuid.uuid4()}"
+        stream = await _create_stream(nexo, name)
+        group = stream.group("group")
+
+        bad = [0, -1, 1.5, float("nan"), float("inf"), True, "10"]
+        for v in bad:
+            for kwarg in (
+                "batch_size",
+                "key_batch_size",
+                "wait_ms",
+                "concurrency",
+                "stop_timeout_ms",
+                "callback_timeout_ms",
+                "max_buffered_messages",
+                "max_buffered_bytes",
+            ):
+                with pytest.raises(ValueError, match=kwarg):
+                    await group.subscribe(lambda _: None, **{kwarg: v})
+
+        with pytest.raises(ValueError, match="wait_ms"):
+            await group.subscribe(lambda _: None, wait_ms=0x80000000)
+        with pytest.raises(ValueError, match="stop_timeout_ms"):
+            await group.subscribe(lambda _: None, stop_timeout_ms=0x80000000)
+        with pytest.raises(ValueError, match="callback_timeout_ms"):
+            await group.subscribe(lambda _: None, callback_timeout_ms=0x80000000)
+        with pytest.raises(ValueError, match="concurrency"):
+            await group.subscribe(lambda _: None, concurrency=65537)
+        with pytest.raises(ValueError, match="batch_size"):
+            await group.subscribe(lambda _: None, batch_size=65537)
+        with pytest.raises(ValueError, match="key_batch_size"):
+            await group.subscribe(lambda _: None, key_batch_size=1025)
+        with pytest.raises(ValueError, match="max_buffered_messages"):
+            await group.subscribe(lambda _: None, max_buffered_messages=131073)
+        with pytest.raises(ValueError, match="max_buffered_bytes"):
+            await group.subscribe(lambda _: None, max_buffered_bytes=53)
+        with pytest.raises(ValueError, match="max_buffered_bytes"):
+            await group.subscribe(lambda _: None, max_buffered_bytes=0x100000000)
+        await nexo.stream.delete(name)
+
     async def test_get_nonexistent_stream_fails(self, nexo: NexoClient):
         name = f"stream-get-missing-{uuid.uuid4()}"
         with pytest.raises(ResourceNotFoundError):
@@ -779,3 +828,1600 @@ class TestStream:
 
         await sub.stop()
         await nexo.stream.delete(name)
+
+    async def test_same_key_messages_processed_strictly_sequentially(self, nexo: NexoClient):
+        name = f"stream-keyed-seq-{uuid.uuid4()}"
+        group = "keyed-seq-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(6):
+            await stream.publish({"i": i}, key="user-A")
+
+        received: list[int] = []
+        in_flight = 0
+
+        async def callback(d):
+            nonlocal in_flight
+            in_flight += 1
+            assert in_flight == 1
+            await asyncio.sleep(0.005)
+            received.append(d["i"])
+            in_flight -= 1
+
+        sub = await stream.group(group).subscribe(
+            callback, batch_size=10, key_batch_size=10, concurrency=5
+        )
+
+        await wait_for(lambda: received == [0, 1, 2, 3, 4, 5])
+        await sub.stop()
+        await nexo.stream.delete(name)
+
+    async def test_mid_batch_failure_does_not_replay_confirmed_prefix(
+        self, nexo: NexoClient
+    ):
+        name = f"stream-keyed-retry-{uuid.uuid4()}"
+        group = "keyed-retry-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(5):
+            await stream.publish({"i": i}, key="user-A")
+
+        attempts: list[int] = []
+        failed_once = False
+
+        async def callback(d):
+            nonlocal failed_once
+            attempts.append(d["i"])
+            if d["i"] == 2 and not failed_once:
+                failed_once = True
+                raise RuntimeError("boom")
+
+        sub = await stream.group(group).subscribe(
+            callback, batch_size=10, key_batch_size=10
+        )
+
+        await wait_for(lambda: attempts == [0, 1, 2, 2, 3, 4], timeout=45.0)
+        await sub.stop()
+        await nexo.stream.delete(name)
+
+    async def test_same_key_not_leased_to_two_consumers(self, nexo: NexoClient):
+        name = f"stream-keyed-exclusive-{uuid.uuid4()}"
+        group = "keyed-exclusive-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(4):
+            await stream.publish({"i": i}, key="user-A")
+
+        received_a: list[int] = []
+        received_b: list[int] = []
+        started_a = asyncio.Event()
+        held_a = asyncio.Event()
+
+        async def callback_a(d):
+            received_a.append(d["i"])
+            if d["i"] == 0:
+                started_a.set()
+            await held_a.wait()
+
+        async def callback_b(d):
+            received_b.append(d["i"])
+
+        sub_a = await stream.group(group).subscribe(callback_a)
+        await asyncio.wait_for(started_a.wait(), timeout=5.0)
+
+        sub_b = await stream.group(group).subscribe(callback_b)
+        await asyncio.sleep(0.3)
+        assert received_b == []
+
+        stopping = asyncio.create_task(sub_a.stop())
+        await asyncio.sleep(0)
+        held_a.set()
+        await stopping
+        await wait_for(lambda: received_b == [1, 2, 3])
+        await sub_b.stop()
+        await nexo.stream.delete(name)
+
+    async def test_stop_mid_batch_keeps_prefix_and_redelivers_tail(
+        self, nexo: NexoClient
+    ):
+        name = f"stream-stop-midbatch-{uuid.uuid4()}"
+        group = "stop-midbatch-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(5):
+            await stream.publish({"i": i}, key="user-A")
+
+        received_a: list[int] = []
+        started_third = asyncio.Event()
+        held_third = asyncio.Event()
+
+        async def callback_a(d):
+            received_a.append(d["i"])
+            if d["i"] == 2:
+                started_third.set()
+                await held_third.wait()
+
+        sub_a = await stream.group(group).subscribe(callback_a)
+        await asyncio.wait_for(started_third.wait(), timeout=5.0)
+
+        stopping = asyncio.create_task(sub_a.stop())
+        await asyncio.sleep(0)
+        held_third.set()
+        await stopping
+        assert received_a == [0, 1, 2]
+
+        received_b: list[int] = []
+        sub_b = await stream.group(group).subscribe(lambda d: received_b.append(d["i"]))
+        await wait_for(lambda: received_b == [3, 4])
+        await sub_b.stop()
+        await nexo.stream.delete(name)
+
+    async def test_continuous_refill_independent_keys_while_batch_held(
+        self, nexo: NexoClient
+    ):
+        name = f"stream-refill-{uuid.uuid4()}"
+        group = "refill-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(4):
+            await stream.publish({"i": i}, key="key-A")
+        for i in range(6):
+            await stream.publish({"i": i}, key="key-B")
+
+        started_a: list[int] = []
+        done_b: list[int] = []
+        in_flight = 0
+        max_in_flight = 0
+        gate_a = asyncio.Event()
+        a_held = True
+
+        async def callback(d, meta=None):
+            nonlocal in_flight, max_in_flight, a_held
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                if meta["key"] == b"key-A":
+                    started_a.append(d["i"])
+                    if a_held:
+                        a_held = False
+                        await gate_a.wait()
+                else:
+                    done_b.append(d["i"])
+            finally:
+                in_flight -= 1
+
+        sub = await stream.group(group).subscribe(
+            callback,
+            batch_size=4,
+            key_batch_size=2,
+            concurrency=2,
+            max_buffered_messages=8,
+        )
+        try:
+            await wait_for(lambda: done_b == [0, 1, 2, 3, 4, 5], timeout=10.0)
+            assert started_a == [0]
+            assert max_in_flight <= 2
+        finally:
+            gate_a.set()
+            await sub.stop()
+        await nexo.stream.delete(name)
+
+    async def test_callback_timeout_cancels_and_keeps_other_keys_running(
+        self, nexo: NexoClient
+    ):
+        name = f"stream-cb-timeout-{uuid.uuid4()}"
+        group = "cb-timeout-group"
+        stream = await _create_stream(nexo, name)
+
+        for i in range(2):
+            await stream.publish({"i": i}, key="key-A")
+        for i in range(4):
+            await stream.publish({"i": i}, key="key-B")
+
+        started_a: list[int] = []
+        done_b: list[int] = []
+        in_flight = 0
+        max_in_flight = 0
+        cancelled = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def callback(d, meta=None):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                if meta["key"] == b"key-A":
+                    started_a.append(d["i"])
+                    try:
+                        await gate_a.wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                else:
+                    done_b.append(d["i"])
+            finally:
+                in_flight -= 1
+
+        sub = await stream.group(group).subscribe(
+            callback,
+            batch_size=4,
+            key_batch_size=2,
+            concurrency=2,
+            max_buffered_messages=8,
+            callback_timeout_ms=60,
+        )
+        try:
+            await wait_for(lambda: done_b == [0, 1, 2, 3], timeout=10.0)
+            await asyncio.wait_for(cancelled.wait(), timeout=5.0)
+            assert started_a == [0]
+            assert max_in_flight <= 2
+        finally:
+            gate_a.set()
+            await sub.stop()
+        await nexo.stream.delete(name)
+
+    async def test_local_key_gate_survives_seek_with_uncooperative_callback(
+        self, nexo: NexoClient
+    ):
+        name = f"stream-seek-key-gate-{uuid.uuid4()}"
+        group = "seek-key-gate-group"
+        stream = await _create_stream(nexo, name)
+        await stream.publish({"i": 1}, key="key-A")
+        await stream.publish({"i": 2}, key="key-B")
+
+        a_started: list[int] = []
+        done_b = 0
+        a_in_flight = 0
+        a_peak = 0
+        first_a = True
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+        cancel_seen = asyncio.Event()
+
+        async def callback(_d, meta=None):
+            nonlocal done_b, a_in_flight, a_peak, first_a
+            if meta["key"] == b"key-A":
+                a_in_flight += 1
+                a_peak = max(a_peak, a_in_flight)
+                try:
+                    a_started.append(meta["seq"])
+                    if first_a:
+                        first_a = False
+                        started_a.set()
+                        while True:
+                            try:
+                                await gate_a.wait()
+                                break
+                            except asyncio.CancelledError:
+                                cancel_seen.set()
+                finally:
+                    a_in_flight -= 1
+            else:
+                done_b += 1
+
+        sub = await stream.group(group).subscribe(
+            callback,
+            batch_size=4,
+            key_batch_size=2,
+            concurrency=2,
+            callback_timeout_ms=30000,
+        )
+        try:
+            await asyncio.wait_for(started_a.wait(), timeout=10.0)
+            await wait_for(lambda: done_b == 1, timeout=10.0)
+
+            await stream.group(group).seek("beginning")
+            await wait_for(lambda: done_b == 2, timeout=10.0)
+            await asyncio.wait_for(cancel_seen.wait(), timeout=10.0)
+            assert a_started == [1]
+            assert a_peak == 1
+            assert sub.error is None
+
+            gate_a.set()
+            await wait_for(lambda: len(a_started) == 2, timeout=10.0)
+            assert a_peak == 1
+        finally:
+            gate_a.set()
+            await sub.stop()
+            await nexo.stream.delete(name)
+
+
+def _write_fetch_page(batches, lease_ms=30000):
+    from nexo.protocol.codec import FrameWriter
+    from nexo.protocol.generated import HEADER_SIZE, DataType
+
+    payload = bytes([DataType.STRING]) + b"x"
+    w = FrameWriter().begin()
+    w.u64(lease_ms).u32(len(batches))
+    for key, seqs, receipt in batches:
+        w.uuid(receipt)
+        w.u16(len(key) if key else 0)
+        if key:
+            w.raw_bytes(key)
+        w.u32(len(seqs))
+        for seq in seqs:
+            w.u64(seq).u64(0).u32(len(payload)).raw_bytes(payload)
+    return w.finish(0, 0)[HEADER_SIZE:]
+
+
+_LIMITS = dict(max_messages=10, max_key_messages=5, max_key_batches=4, max_bytes=1 << 20)
+
+
+def _decode_page(buf, **overrides):
+    from nexo.brokers.stream import _decode_fetch_page
+    from nexo.protocol.codec import Cursor
+
+    return _decode_fetch_page(Cursor(bytes(buf)), **{**_LIMITS, **overrides})
+
+
+class TestDecodeFetchPage:
+    def test_decode_fetch_valid_mixed_page(self):
+        r1, r2, r3 = uuid.uuid4().hex, uuid.uuid4().hex, uuid.uuid4().hex
+        buf = _write_fetch_page(
+            [(b"a", [1, 2], r1), (b"b", [3], r2), (None, [4], r3)]
+        )
+        lease_ms, batches = _decode_page(buf)
+        assert lease_ms == 30000
+        assert [[m["seq"] for m in b["messages"]] for b in batches] == [[1, 2], [3], [4]]
+        assert batches[2]["key"] is None
+        assert batches[2]["messages"][0]["data"] == "x"
+
+    def test_decode_fetch_rejects_oversized_response(self):
+        buf = _write_fetch_page([])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf, max_bytes=4)
+
+    def test_decode_fetch_rejects_invalid_lease_ms(self):
+        with pytest.raises(ProtocolError):
+            _decode_page(_write_fetch_page([], lease_ms=0))
+        with pytest.raises(ProtocolError):
+            _decode_page(_write_fetch_page([], lease_ms=0x100000000))
+
+    def test_decode_fetch_rejects_batch_count_beyond_payload(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import HEADER_SIZE, DataType
+
+        payload = bytes([DataType.STRING]) + b"x"
+        w = FrameWriter().begin()
+        w.u64(30000).u32(2)
+        w.uuid(uuid.uuid4().hex).u16(1).raw_bytes(b"a").u32(1)
+        w.u64(1).u64(0).u32(len(payload)).raw_bytes(payload)
+        with pytest.raises(ProtocolError):
+            _decode_page(w.finish(0, 0)[HEADER_SIZE:])
+
+    def test_decode_fetch_rejects_zero_message_batch(self):
+        buf = _write_fetch_page([(b"a", [], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_non_singleton_keyless_batch(self):
+        buf = _write_fetch_page([(None, [1, 2], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_keyed_batch_above_limit(self):
+        buf = _write_fetch_page([(b"a", [1, 2, 3, 4, 5, 6], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_more_keyed_batches_than_requested(self):
+        buf = _write_fetch_page(
+            [(bytes([i + 1]), [i + 1], uuid.uuid4().hex) for i in range(5)]
+        )
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_more_messages_than_requested(self):
+        buf = _write_fetch_page([(b"a", [1, 2, 3, 4], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf, max_messages=3, max_key_batches=1)
+
+    def test_decode_fetch_rejects_out_of_order_keyed_seqs(self):
+        buf = _write_fetch_page([(b"a", [2, 1], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_duplicate_receipts_and_keys(self):
+        dup = uuid.uuid4().hex
+        buf = _write_fetch_page([(b"a", [1], dup), (b"b", [2], dup)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+        buf = _write_fetch_page(
+            [(b"a", [1], uuid.uuid4().hex), (b"a", [2], uuid.uuid4().hex)]
+        )
+        with pytest.raises(ProtocolError):
+            _decode_page(buf)
+
+    def test_decode_fetch_rejects_trailing_bytes(self):
+        buf = _write_fetch_page([(None, [1], uuid.uuid4().hex)])
+        with pytest.raises(ProtocolError):
+            _decode_page(buf + b"\x00")
+        with pytest.raises(ProtocolError):
+            _decode_page(_write_fetch_page([]) + b"\x00")
+
+    def test_decode_fetch_copies_key_and_raw_payload(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import DataType, HEADER_SIZE
+
+        raw = bytes([DataType.RAW]) + b"\x07" * 64
+        w = FrameWriter().begin()
+        w.u64(30000).u32(1)
+        w.uuid(uuid.uuid4().hex).u16(1).raw_bytes(b"a").u32(1)
+        w.u64(1).u64(0).u32(len(raw)).raw_bytes(raw)
+        buf = w.finish(0, 0)[HEADER_SIZE:]
+        _, batches = _decode_page(buf)
+        assert batches[0]["key"] == b"a"
+        assert isinstance(batches[0]["key"], bytes)
+        assert batches[0]["messages"][0]["data"] == b"\x07" * 64
+        assert isinstance(batches[0]["messages"][0]["data"], bytes)
+
+
+class _FakeStreamConnection:
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.joins: list[str] = []
+        self.leaves: list[tuple[str, str]] = []
+        self.updates: list[dict] = []
+        self.fetches: list[dict] = []
+        self.order: list[int] = []
+        self.pending_fetch: asyncio.Future | None = None
+        self.fetch_queue: list = []
+        self.fetch_handler = None
+        self.update_handler = None
+        self.next_join_epochs: list[str] = []
+        self.join_hold: asyncio.Future | None = None
+        self.epoch = "e" * 32
+
+    async def send(self, opcode, build=None, *, timeout_ms=None):
+        from nexo.errors import NotMemberError
+        from nexo.protocol.codec import Cursor, FrameWriter
+        from nexo.protocol.generated import HEADER_SIZE, ResponseStatus, StreamOpcode
+
+        w = FrameWriter().begin()
+        if build is not None:
+            build(w)
+        cursor = Cursor(w.finish(1, opcode)[HEADER_SIZE:])
+        self.order.append(opcode)
+        if opcode == StreamOpcode.S_JOIN:
+            epoch = (
+                self.next_join_epochs.pop(0) if self.next_join_epochs else self.epoch
+            )
+            self.joins.append(epoch)
+            member = f"consumer-{len(self.joins)}"
+            if self.join_hold is not None and len(self.joins) > 1:
+                await self.join_hold
+            out = (
+                FrameWriter()
+                .begin()
+                .u64(0)
+                .uuid(epoch)
+                .string(member)
+                .finish(0, opcode)
+            )
+            return ResponseStatus.DATA, Cursor(out[HEADER_SIZE:])
+        if opcode == StreamOpcode.S_LEAVE:
+            cursor.read_string()
+            cursor.read_string()
+            consumer = cursor.read_string()
+            epoch = cursor.read_uuid()
+            self.leaves.append((consumer, epoch))
+            pending = self.pending_fetch
+            if pending is not None and not pending.done():
+                self.pending_fetch = None
+                pending.set_exception(NotMemberError("member left"))
+            return ResponseStatus.OK, Cursor(b"")
+        if opcode == StreamOpcode.S_FETCH:
+            cursor.read_string()
+            cursor.read_string()
+            cursor.read_string()
+            cursor.read_uuid()
+            self.fetches.append(
+                {
+                    "max_messages": cursor.read_u32(),
+                    "max_key_messages": cursor.read_u32(),
+                    "max_key_batches": cursor.read_u32(),
+                    "max_bytes": cursor.read_u32(),
+                    "wait_ms": cursor.read_u32(),
+                }
+            )
+            nxt = (
+                self.fetch_queue.pop(0)
+                if self.fetch_queue
+                else self.fetch_handler() if self.fetch_handler is not None else None
+            )
+            if asyncio.isfuture(nxt) or asyncio.iscoroutine(nxt):
+                nxt = await nxt
+            if isinstance(nxt, BaseException):
+                raise nxt
+            if nxt is not None:
+                return ResponseStatus.DATA, Cursor(nxt)
+            loop = asyncio.get_running_loop()
+            self.pending_fetch = loop.create_future()
+            return await self.pending_fetch
+        if opcode == StreamOpcode.S_UPDATE_BATCHES:
+            cursor.read_string()
+            cursor.read_string()
+            consumer = cursor.read_string()
+            epoch = cursor.read_uuid()
+            count = cursor.read_u32()
+            items = []
+            for _ in range(count):
+                items.append(
+                    {
+                        "receipt": cursor.read_uuid(),
+                        "completed": cursor.read_u32(),
+                        "flags": cursor.read_u8(),
+                    }
+                )
+            self.updates.append(
+                {"consumer": consumer, "epoch": epoch, "items": items}
+            )
+            if self.update_handler is not None:
+                payload = self.update_handler(items)
+                if asyncio.isfuture(payload) or asyncio.iscoroutine(payload):
+                    payload = await payload
+            else:
+                payload = FrameWriter().begin().u32(0).finish(0, 0)[HEADER_SIZE:]
+            return ResponseStatus.DATA, Cursor(payload)
+        raise RuntimeError(f"unexpected opcode {opcode}")
+
+
+def _mock_page(batches, lease_ms=30000):
+    from nexo.protocol.codec import FrameWriter
+    from nexo.protocol.generated import DataType, HEADER_SIZE
+
+    payload = bytes([DataType.STRING]) + b"x"
+    w = FrameWriter().begin()
+    w.u64(lease_ms).u32(len(batches))
+    for key, seqs, receipt in batches:
+        w.uuid(receipt)
+        w.u16(len(key) if key else 0)
+        if key:
+            w.raw_bytes(key)
+        w.u32(len(seqs))
+        for seq in seqs:
+            w.u64(seq).u64(0).u32(len(payload)).raw_bytes(payload)
+    return w.finish(0, 0)[HEADER_SIZE:]
+
+
+RECEIPT_A = "a" * 32
+RECEIPT_B = "b" * 32
+RECEIPT_C = "c" * 32
+RECEIPT_D = "d" * 32
+EPOCH_2 = "2" * 32
+
+
+def _mock_group(conn):
+    from nexo.brokers.stream import NexoStreamGroup
+    from nexo.utils.logger import Logger
+
+    return NexoStreamGroup(conn, "s", "g", Logger(level="OFF"))
+
+
+@pytest.mark.asyncio
+class TestStreamContinuousExecutor:
+    async def test_renews_held_batch_through_coalesced_updates(self):
+        from nexo.protocol.generated import StreamOpcode
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page([(b"a", [1], RECEIPT_A)], lease_ms=90)
+        )
+
+        held = asyncio.Event()
+        sub = await _mock_group(fake).subscribe(
+            lambda _d: held.wait(), callback_timeout_ms=1000
+        )
+        try:
+            await wait_for(
+                lambda: len(
+                    [
+                        u
+                        for u in fake.updates
+                        if any(
+                            i["receipt"] == RECEIPT_A
+                            and i["completed"] == 0
+                            and i["flags"] == 0
+                            for i in u["items"]
+                        )
+                    ]
+                )
+                >= 2,
+                timeout=3.0,
+            )
+            held.set()
+            await wait_for(
+                lambda: any(
+                    i["receipt"] == RECEIPT_A and i["completed"] == 1 and i["flags"] == 0
+                    for u in fake.updates
+                    for i in u["items"]
+                ),
+                timeout=3.0,
+            )
+        finally:
+            held.set()
+            await sub.stop()
+
+    async def test_stale_batch_fenced_without_rejoin(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import ErrorCode, HEADER_SIZE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [
+                    (b"a", [1, 2], RECEIPT_A),
+                    (b"b", [10, 11], RECEIPT_B),
+                ],
+                lease_ms=60,
+            )
+        )
+        fake.fetch_queue.append(_mock_page([(b"c", [12], RECEIPT_C)], lease_ms=60))
+
+        fenced_a = False
+
+        def update_handler(items):
+            nonlocal fenced_a
+            failures = []
+            for i in items:
+                if i["receipt"] == RECEIPT_A and not fenced_a:
+                    fenced_a = True
+                    failures.append(i)
+            w = FrameWriter().begin()
+            w.u32(len(failures))
+            for f in failures:
+                w.uuid(f["receipt"]).u8(ErrorCode.FENCED)
+            return w.finish(0, 0)[HEADER_SIZE:]
+
+        fake.update_handler = update_handler
+
+        got_a: list[int] = []
+        got_b: list[int] = []
+        held_a = asyncio.Event()
+        first_a = True
+
+        async def callback(_d, meta=None):
+            nonlocal first_a
+            seq = meta["seq"]
+            if meta["key"] == b"a":
+                got_a.append(seq)
+                if first_a:
+                    first_a = False
+                    await held_a.wait()
+            else:
+                got_b.append(seq)
+
+        sub = await _mock_group(fake).subscribe(callback, callback_timeout_ms=5000)
+        try:
+            await wait_for(lambda: fenced_a, timeout=3.0)
+            await wait_for(lambda: sorted(got_b) == [10, 11, 12], timeout=3.0)
+            assert len(fake.joins) == 1
+            held_a.set()
+            await asyncio.sleep(0.05)
+            assert got_a == [1]
+        finally:
+            held_a.set()
+            await sub.stop()
+
+    async def test_rejoins_with_new_epoch_after_session_fence(self):
+        from nexo.errors import FencedError
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [
+                    (b"a", [1, 2], RECEIPT_A),
+                    (b"b", [10], RECEIPT_B),
+                ]
+            )
+        )
+        fake.next_join_epochs.extend([fake.epoch, EPOCH_2])
+        a_started = asyncio.Event()
+        phase = 0
+
+        async def fetch_handler():
+            nonlocal phase
+            if phase == 0:
+                await a_started.wait()
+                phase = 1
+                return FencedError("epoch is fenced")
+            if phase == 1:
+                phase = 2
+                return _mock_page([(b"a", [1, 2], RECEIPT_C)])
+            return None
+
+        fake.fetch_handler = fetch_handler
+
+        got_a: list[int] = []
+        got_b: list[int] = []
+        held_a = asyncio.Event()
+        first_a = True
+
+        async def callback(_d, meta=None):
+            nonlocal first_a
+            seq = meta["seq"]
+            if meta["key"] == b"a":
+                got_a.append(seq)
+                if first_a:
+                    first_a = False
+                    a_started.set()
+                    await held_a.wait()
+            else:
+                got_b.append(seq)
+
+        sub = await _mock_group(fake).subscribe(callback, callback_timeout_ms=5000)
+        try:
+            await wait_for(
+                lambda: fake.joins == [fake.epoch, EPOCH_2], timeout=3.0
+            )
+            held_a.set()
+            await wait_for(lambda: len(got_a) >= 3, timeout=3.0)
+            assert got_b == [10]
+            await asyncio.sleep(0.05)
+            assert any(
+                i["receipt"] == RECEIPT_C
+                for u in fake.updates
+                if u["epoch"] == EPOCH_2
+                for i in u["items"]
+            )
+            assert all(
+                all(i["receipt"] == RECEIPT_C for i in u["items"])
+                for u in fake.updates
+                if u["epoch"] == EPOCH_2
+            )
+            assert got_a == [1, 1, 2]
+        finally:
+            held_a.set()
+            await sub.stop()
+
+    async def test_stop_during_pending_fetch_leaves_without_waiting_long_poll(self):
+        from nexo.protocol.generated import (
+            FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+            StreamOpcode,
+        )
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1, 2], RECEIPT_A)]))
+
+        got: list[int] = []
+        held = asyncio.Event()
+
+        async def callback(_d, meta=None):
+            got.append(meta["seq"])
+            await held.wait()
+
+        sub = await _mock_group(fake).subscribe(
+            callback, batch_size=4, wait_ms=20000
+        )
+        await wait_for(lambda: got == [1], timeout=3.0)
+        await wait_for(lambda: fake.pending_fetch is not None, timeout=3.0)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        stopping = asyncio.create_task(sub.stop())
+        await asyncio.sleep(0)
+        held.set()
+        await stopping
+        assert loop.time() - started < 5.0
+
+        last_update = len(fake.order) - 1 - fake.order[::-1].index(
+            StreamOpcode.S_UPDATE_BATCHES
+        )
+        leave_idx = fake.order.index(StreamOpcode.S_LEAVE)
+        assert -1 < last_update < leave_idx
+        assert len(fake.leaves) == 1
+        assert any(
+            i["receipt"] == RECEIPT_A
+            and i["completed"] == 1
+            and i["flags"] & FLAG_STREAM_S_UPDATE_BATCH_RELEASE
+            for u in fake.updates
+            for i in u["items"]
+        )
+        assert got == [1]
+
+    async def test_never_exceeds_buffered_credits_while_callbacks_held(self):
+        fake = _FakeStreamConnection()
+
+        pages = 0
+
+        def fetch_handler():
+            nonlocal pages
+            pages += 1
+            if pages > 2:
+                return None
+            limit = max(1, fake.fetches[-1]["max_messages"])
+            return _mock_page(
+                [(None, [i + 1], uuid.uuid4().hex) for i in range(min(4, limit))]
+            )
+
+        fake.fetch_handler = fetch_handler
+        gate = asyncio.Event()
+        running = 0
+        max_running = 0
+        calls = 0
+
+        async def callback(_d, meta=None):
+            nonlocal running, max_running, calls
+            calls += 1
+            running += 1
+            max_running = max(max_running, running)
+            try:
+                await gate.wait()
+            finally:
+                running -= 1
+
+        sub = await _mock_group(fake).subscribe(
+            callback,
+            batch_size=4,
+            key_batch_size=2,
+            concurrency=2,
+            max_buffered_messages=6,
+            wait_ms=20000,
+        )
+        try:
+            await wait_for(lambda: calls >= 2, timeout=3.0)
+            await asyncio.sleep(0.2)
+            assert len(fake.fetches) == 1
+            assert fake.fetches[0]["max_messages"] <= 6
+            assert fake.fetches[0]["max_bytes"] <= 20 * 1024 * 1024
+            assert fake.fetches[0]["max_key_batches"] <= 2
+            assert max_running <= 2
+
+            gate.set()
+            await wait_for(lambda: len(fake.fetches) >= 2, timeout=3.0)
+            assert len(fake.fetches) <= 8
+            assert max_running <= 2
+            assert any(
+                i["completed"] == 1
+                for u in fake.updates
+                for i in u["items"]
+            )
+        finally:
+            gate.set()
+            await sub.stop()
+
+    async def test_reserves_callback_slots_before_starting_runners(self):
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [
+                    (None, [1], RECEIPT_A),
+                    (None, [2], RECEIPT_B),
+                    (None, [3], RECEIPT_C),
+                    (None, [4], RECEIPT_D),
+                ]
+            )
+        )
+
+        running = 0
+        max_running = 0
+        gate = asyncio.Event()
+
+        async def callback(_d, meta=None):
+            nonlocal running, max_running
+            running += 1
+            max_running = max(max_running, running)
+            try:
+                await gate.wait()
+            finally:
+                running -= 1
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=2, max_buffered_messages=8
+        )
+        try:
+            await wait_for(lambda: running >= 2, timeout=3.0)
+            await asyncio.sleep(0.03)
+            assert max_running <= 2
+            gate.set()
+            await wait_for(
+                lambda: sum(
+                    1
+                    for u in fake.updates
+                    for i in u["items"]
+                    if i["completed"] == 1
+                )
+                == 4,
+                timeout=3.0,
+            )
+            assert max_running <= 2
+        finally:
+            gate.set()
+            await sub.stop()
+
+    async def test_leaves_once_on_fatal_update_outcome_with_pending_fetch(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import ErrorCode, HEADER_SIZE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1], RECEIPT_A)]))
+
+        def update_handler(items):
+            w = FrameWriter().begin()
+            w.u32(len(items))
+            for f in items:
+                w.uuid(f["receipt"]).u8(ErrorCode.INVALID_ARGUMENT)
+            return w.finish(0, 0)[HEADER_SIZE:]
+
+        fake.update_handler = update_handler
+
+        sub = await _mock_group(fake).subscribe(
+            lambda _d: None, callback_timeout_ms=5000
+        )
+        await wait_for(
+            lambda: sub.error is not None and "rejected" in str(sub.error),
+            timeout=5.0,
+        )
+        await wait_for(lambda: len(fake.leaves) == 1, timeout=3.0)
+        with pytest.raises(Exception, match="rejected"):
+            await asyncio.wait_for(sub.wait_closed(), timeout=3.0)
+        with pytest.raises(Exception):
+            await sub.stop()
+
+    async def test_cooperative_cancel_does_not_fail_subscription(self):
+        from nexo.protocol.generated import FLAG_STREAM_S_UPDATE_BATCH_RETRY
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1, 2], RECEIPT_A)]))
+        fake.fetch_queue.append(_mock_page([(b"b", [10], RECEIPT_B)]))
+        fake.fetch_queue.append(_mock_page([(b"b", [11], RECEIPT_C)]))
+
+        got_b: list[int] = []
+        cancelled = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def callback(_d, meta=None):
+            if meta["key"] == b"a":
+                try:
+                    await gate_a.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            else:
+                got_b.append(meta["seq"])
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=1, callback_timeout_ms=40
+        )
+        try:
+            await asyncio.wait_for(cancelled.wait(), timeout=3.0)
+            await wait_for(lambda: sorted(got_b) == [10, 11], timeout=3.0)
+            await wait_for(
+                lambda: any(
+                    i["receipt"] == RECEIPT_A
+                    and i["completed"] == 0
+                    and i["flags"] & FLAG_STREAM_S_UPDATE_BATCH_RETRY
+                    for u in fake.updates
+                    for i in u["items"]
+                ),
+                timeout=3.0,
+            )
+            gate_a.set()
+            await asyncio.sleep(0.08)
+            assert sub.error is None
+            assert all(
+                i["receipt"] != RECEIPT_A or i["completed"] == 0
+                for u in fake.updates
+                for i in u["items"]
+            )
+        finally:
+            gate_a.set()
+            await sub.stop()
+
+    async def test_fails_on_duplicate_outcome_receipt_in_update_response(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import ErrorCode, HEADER_SIZE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [(b"a", [1], RECEIPT_A), (b"b", [2], RECEIPT_B)],
+                lease_ms=60,
+            )
+        )
+
+        loop = asyncio.get_running_loop()
+        update_gate: asyncio.Future = loop.create_future()
+        first = True
+
+        def ok_payload():
+            return FrameWriter().begin().u32(0).finish(0, 0)[HEADER_SIZE:]
+
+        def update_handler(items):
+            nonlocal first
+            if first:
+                first = False
+                return update_gate
+            w = FrameWriter().begin()
+            w.u32(len(items))
+            for _f in items:
+                w.uuid(items[0]["receipt"]).u8(ErrorCode.FENCED)
+            return w.finish(0, 0)[HEADER_SIZE:]
+
+        fake.update_handler = update_handler
+
+        gate = asyncio.Event()
+        sub = await _mock_group(fake).subscribe(
+            lambda _d: gate.wait(), concurrency=2, callback_timeout_ms=60000
+        )
+        try:
+            await wait_for(lambda: len(fake.updates) == 1, timeout=3.0)
+            await asyncio.sleep(0.06)
+            if not update_gate.done():
+                update_gate.set_result(ok_payload())
+            await wait_for(
+                lambda: sub.error is not None
+                and "duplicate" in str(sub.error),
+                timeout=5.0,
+            )
+            with pytest.raises(Exception):
+                await sub.stop()
+        finally:
+            if not update_gate.done():
+                update_gate.set_result(ok_payload())
+            gate.set()
+
+    async def test_fails_subscription_when_timed_out_callbacks_never_settle(self):
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page([(b"a", [1], RECEIPT_A), (b"b", [2], RECEIPT_B)])
+        )
+
+        releases: list[asyncio.Event] = []
+        calls = 0
+
+        async def callback(_d, meta=None):
+            nonlocal calls
+            calls += 1
+            gate = asyncio.Event()
+            releases.append(gate)
+            while not gate.is_set():
+                try:
+                    await gate.wait()
+                except asyncio.CancelledError:
+                    continue
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=2, callback_timeout_ms=40
+        )
+
+        try:
+            await wait_for(
+                lambda: sub.error is not None
+                and "capacity exhausted" in str(sub.error),
+                timeout=5.0,
+            )
+            assert calls == 2
+            await wait_for(lambda: len(fake.leaves) == 1, timeout=3.0)
+            with pytest.raises(Exception, match="capacity exhausted"):
+                await asyncio.wait_for(sub.wait_closed(), timeout=3.0)
+
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            with pytest.raises(Exception, match="capacity exhausted"):
+                await sub.stop()
+            assert loop.time() - started < 1.0
+        finally:
+            for gate in releases:
+                gate.set()
+
+    async def test_capacity_stays_balanced_when_abort_races_settlement(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import ErrorCode, HEADER_SIZE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page([(b"a", [1], RECEIPT_A)], lease_ms=90)
+        )
+        fake.fetch_queue.append(
+            _mock_page([(b"b", [10], RECEIPT_B)], lease_ms=90)
+        )
+        fenced_a = False
+
+        def update_handler(items):
+            nonlocal fenced_a
+            failures = []
+            for i in items:
+                if i["receipt"] == RECEIPT_A and not fenced_a:
+                    fenced_a = True
+                    failures.append(i)
+            w = FrameWriter().begin()
+            w.u32(len(failures))
+            for f in failures:
+                w.uuid(f["receipt"]).u8(ErrorCode.FENCED)
+            return w.finish(0, 0)[HEADER_SIZE:]
+
+        fake.update_handler = update_handler
+
+        got: list[int] = []
+        a_gate = asyncio.Event()
+        first_a = True
+
+        async def callback(_d, meta=None):
+            nonlocal first_a
+            if meta["key"] == b"a" and first_a:
+                first_a = False
+                try:
+                    await a_gate.wait()
+                except asyncio.CancelledError:
+                    a_gate.set()
+                    raise
+            else:
+                got.append(meta["seq"])
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=1, callback_timeout_ms=60000
+        )
+        try:
+            await wait_for(lambda: fenced_a, timeout=3.0)
+            await wait_for(lambda: got == [10], timeout=3.0)
+            assert fake.joins == [fake.epoch]
+            await asyncio.sleep(0.4)
+            assert sub.error is None
+        finally:
+            a_gate.set()
+            await sub.stop()
+
+    async def test_leaves_member_whose_join_completes_during_stop(self):
+        from nexo.errors import FencedError
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(FencedError("epoch is fenced"))
+        fake.next_join_epochs.extend([fake.epoch, EPOCH_2])
+        loop = asyncio.get_running_loop()
+        fake.join_hold = loop.create_future()
+        sub = await _mock_group(fake).subscribe(lambda _d: None)
+        await wait_for(
+            lambda: fake.joins == [fake.epoch, EPOCH_2], timeout=3.0
+        )
+
+        stopping = asyncio.ensure_future(sub.stop())
+        await asyncio.sleep(0.05)
+        assert not any(c == "consumer-2" for c, _ in fake.leaves)
+        fake.join_hold.set_result(None)
+        await asyncio.wait_for(stopping, timeout=5.0)
+
+        assert ("consumer-2", EPOCH_2) in fake.leaves
+
+    async def test_reports_unsettled_join_during_teardown_and_leaves_late_member(
+        self,
+    ):
+        from nexo.errors import FencedError
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(FencedError("epoch is fenced"))
+        fake.next_join_epochs.extend([fake.epoch, EPOCH_2])
+        loop = asyncio.get_running_loop()
+        fake.join_hold = loop.create_future()
+        sub = await _mock_group(fake).subscribe(lambda _d: None)
+        await wait_for(
+            lambda: fake.joins == [fake.epoch, EPOCH_2], timeout=3.0
+        )
+
+        with pytest.raises(Exception, match="join did not settle"):
+            await sub.stop()
+        await wait_for(lambda: sub.error is not None, timeout=1.0)
+        fake.join_hold.set_result(None)
+        await wait_for(
+            lambda: ("consumer-2", EPOCH_2) in fake.leaves, timeout=3.0
+        )
+
+    async def test_accepts_successor_before_previous_update_response(self):
+        from nexo.protocol.codec import FrameWriter
+        from nexo.protocol.generated import HEADER_SIZE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1], RECEIPT_A)]))
+        loop = asyncio.get_running_loop()
+        fetch_gate = loop.create_future()
+        reply_gate = loop.create_future()
+        fetches_seen = 0
+
+        async def fetch_handler():
+            nonlocal fetches_seen
+            fetches_seen += 1
+            if fetches_seen == 1:
+                await fetch_gate
+                return _mock_page([(b"a", [2], RECEIPT_B)])
+            return None
+
+        first = True
+
+        async def update_handler(items):
+            nonlocal first
+            if first:
+                first = False
+                assert items == [
+                    {"receipt": RECEIPT_A, "completed": 1, "flags": 0}
+                ]
+                fetch_gate.set_result(None)
+                await reply_gate
+            return FrameWriter().begin().u32(0).finish(0, 0)[HEADER_SIZE:]
+
+        fake.fetch_handler = fetch_handler
+        fake.update_handler = update_handler
+        got: list[int] = []
+
+        async def callback(_d, meta=None):
+            got.append(meta["seq"])
+
+        sub = await _mock_group(fake).subscribe(callback, concurrency=2)
+        try:
+            await wait_for(lambda: got == [1, 2], timeout=3.0)
+            assert len(fake.fetches) >= 2
+            assert fake.joins == [fake.epoch]
+            assert sub.error is None
+            reply_gate.set_result(None)
+            await wait_for(
+                lambda: any(
+                    i["receipt"] == RECEIPT_B and i["completed"] == 1
+                    for u in fake.updates
+                    for i in u["items"]
+                ),
+                timeout=3.0,
+            )
+        finally:
+            if not reply_gate.done():
+                reply_gate.set_result(None)
+            await sub.stop()
+
+    async def test_waits_for_uncooperative_callback_before_regranted_key(self):
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page([(b"a", [1], RECEIPT_A), (b"b", [10], RECEIPT_C)])
+        )
+        loop = asyncio.get_running_loop()
+        regrant_gate = loop.create_future()
+        regrant_calls = 0
+
+        async def fetch_handler():
+            nonlocal regrant_calls
+            if regrant_calls == 0:
+                regrant_calls = 1
+                await regrant_gate
+                return _mock_page([(b"a", [2], RECEIPT_B)])
+            if regrant_calls == 1:
+                regrant_calls = 2
+                return _mock_page([(b"b", [11], RECEIPT_D)])
+            return None
+
+        fake.fetch_handler = fetch_handler
+        held_a = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        got_a: list[int] = []
+        got_b: list[int] = []
+        in_flight = 0
+        peak = 0
+        a_in_flight = 0
+        a_peak = 0
+        first_a = True
+
+        async def callback(_d, meta=None):
+            nonlocal in_flight, peak, a_in_flight, a_peak, first_a
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                seq = meta["seq"]
+                if meta["key"] == b"a":
+                    a_in_flight += 1
+                    a_peak = max(a_peak, a_in_flight)
+                    try:
+                        got_a.append(seq)
+                        if first_a:
+                            first_a = False
+                            while not held_a.is_set():
+                                try:
+                                    await held_a.wait()
+                                except asyncio.CancelledError:
+                                    cancellation_seen.set()
+                    finally:
+                        a_in_flight -= 1
+                else:
+                    got_b.append(seq)
+            finally:
+                in_flight -= 1
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=2, callback_timeout_ms=5000
+        )
+        try:
+            await wait_for(lambda: got_a == [1] and got_b == [10], timeout=3.0)
+            regrant_gate.set_result(None)
+            await wait_for(lambda: sorted(got_b) == [10, 11], timeout=3.0)
+            await asyncio.sleep(0.1)
+            await wait_for(lambda: cancellation_seen.is_set(), timeout=3.0)
+            assert got_a == [1]
+            assert sub.error is None
+            held_a.set()
+            await wait_for(lambda: got_a == [1, 2], timeout=3.0)
+            assert a_peak == 1
+            assert peak <= 2
+            assert fake.joins == [fake.epoch]
+            assert all(
+                not (i["receipt"] == RECEIPT_A and i["completed"] > 0)
+                for u in fake.updates
+                for i in u["items"]
+            )
+            await wait_for(
+                lambda: any(
+                    i["receipt"] == RECEIPT_B and i["completed"] == 1
+                    for u in fake.updates
+                    for i in u["items"]
+                ),
+                timeout=3.0,
+            )
+        finally:
+            held_a.set()
+            await sub.stop()
+
+    async def test_waits_for_uncooperative_callback_before_regranted_key_across_epoch_reset(
+        self,
+    ):
+        from nexo.errors import FencedError
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1], RECEIPT_A)]))
+        fake.next_join_epochs.extend([fake.epoch, EPOCH_2])
+        phase = 0
+        a_started = asyncio.Event()
+
+        async def fetch_handler():
+            nonlocal phase
+            if phase == 0:
+                await a_started.wait()
+                phase = 1
+                return FencedError("epoch is fenced")
+            if phase == 1:
+                phase = 2
+                return _mock_page(
+                    [(b"a", [1], RECEIPT_B), (b"b", [10], RECEIPT_C)]
+                )
+            return None
+
+        fake.fetch_handler = fetch_handler
+        held_a = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        got_a: list[int] = []
+        got_b: list[int] = []
+        a_in_flight = 0
+        a_peak = 0
+        first_a = True
+
+        async def callback(_d, meta=None):
+            nonlocal a_in_flight, a_peak, first_a
+            if meta["key"] == b"a":
+                a_in_flight += 1
+                a_peak = max(a_peak, a_in_flight)
+                try:
+                    got_a.append(meta["seq"])
+                    if first_a:
+                        first_a = False
+                        a_started.set()
+                        while not held_a.is_set():
+                            try:
+                                await held_a.wait()
+                            except asyncio.CancelledError:
+                                cancellation_seen.set()
+                finally:
+                    a_in_flight -= 1
+            else:
+                got_b.append(meta["seq"])
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=2, callback_timeout_ms=5000
+        )
+        try:
+            await wait_for(
+                lambda: fake.joins == [fake.epoch, EPOCH_2], timeout=3.0
+            )
+            await wait_for(lambda: got_b == [10], timeout=3.0)
+            await asyncio.sleep(0.1)
+            await wait_for(lambda: cancellation_seen.is_set(), timeout=3.0)
+            assert got_a == [1]
+            assert sub.error is None
+            held_a.set()
+            await wait_for(lambda: got_a == [1, 1], timeout=3.0)
+            assert a_peak == 1
+            assert all(
+                u["epoch"] != EPOCH_2
+                or all(i["receipt"] != RECEIPT_A for i in u["items"])
+                for u in fake.updates
+            )
+        finally:
+            held_a.set()
+            await sub.stop()
+
+    async def test_releases_unstarted_blocked_batch_during_stop(self):
+        from nexo.protocol.generated import FLAG_STREAM_S_UPDATE_BATCH_RELEASE
+
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(_mock_page([(b"a", [1], RECEIPT_A)]))
+        loop = asyncio.get_running_loop()
+        regrant_gate = loop.create_future()
+        regrant_sent = False
+
+        async def fetch_handler():
+            nonlocal regrant_sent
+            if not regrant_sent:
+                regrant_sent = True
+                await regrant_gate
+                return _mock_page([(b"a", [2], RECEIPT_B)])
+            return None
+
+        fake.fetch_handler = fetch_handler
+        held_a = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        got_a: list[int] = []
+
+        async def callback(_d, meta=None):
+            if meta["key"] == b"a":
+                got_a.append(meta["seq"])
+                if meta["seq"] == 1:
+                    while not held_a.is_set():
+                        try:
+                            await held_a.wait()
+                        except asyncio.CancelledError:
+                            cancellation_seen.set()
+
+        sub = await _mock_group(fake).subscribe(
+            callback, concurrency=2, callback_timeout_ms=5000
+        )
+        try:
+            await wait_for(lambda: got_a == [1], timeout=3.0)
+            regrant_gate.set_result(None)
+            await wait_for(lambda: cancellation_seen.is_set(), timeout=3.0)
+            await asyncio.sleep(0.1)
+            assert got_a == [1]
+            await sub.stop()
+            assert got_a == [1]
+            held_a.set()
+            await asyncio.sleep(0.1)
+            assert got_a == [1]
+            assert any(
+                i["receipt"] == RECEIPT_B
+                and i["completed"] == 0
+                and (i["flags"] & FLAG_STREAM_S_UPDATE_BATCH_RELEASE) != 0
+                for u in fake.updates
+                for i in u["items"]
+            )
+        finally:
+            held_a.set()
+
+    async def test_cleanup_storage_bounded_across_repeated_resets(self):
+        from nexo.errors import FencedError
+
+        fake = _FakeStreamConnection()
+        epochs = [str(i + 1).zfill(32) for i in range(21)]
+        fake.next_join_epochs.extend(epochs)
+        resets = 0
+        final_sent = False
+
+        def fetch_handler():
+            nonlocal resets, final_sent
+            if resets >= 20:
+                if not final_sent:
+                    final_sent = True
+                    return _mock_page([(b"a", [1], RECEIPT_C)])
+                return None
+            resets += 1
+            return FencedError("epoch is fenced")
+
+        fake.fetch_handler = fetch_handler
+
+        got: list[int] = []
+        sub = await _mock_group(fake).subscribe(
+            lambda _d, meta=None: got.append(meta["seq"])
+        )
+        inner = sub._stop_fn.__self__
+        try:
+            await wait_for(lambda: len(fake.joins) == 21, timeout=8.0)
+            await wait_for(lambda: got == [1], timeout=3.0)
+            await wait_for(lambda: len(fake.leaves) == 20, timeout=3.0)
+            await wait_for(
+                lambda: any(
+                    u["epoch"] == epochs[20]
+                    and any(i["receipt"] == RECEIPT_C for i in u["items"])
+                    for u in fake.updates
+                ),
+                timeout=3.0,
+            )
+            assert all(u["epoch"] in epochs for u in fake.updates)
+            assert inner._cleanup_task is None or isinstance(
+                inner._cleanup_task, asyncio.Task
+            )
+            assert not hasattr(inner, "_cleanup_tasks")
+            assert sub.error is None
+        finally:
+            await sub.stop()
+
+    async def test_keyless_drain_uses_bounded_reusable_workers(self):
+        loop = asyncio.get_running_loop()
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [(None, [i], f"{i:032x}") for i in range(1, 101)],
+                lease_ms=30000,
+            )
+        )
+        fake.fetch_handler = lambda: None
+
+        counts: dict[str, int] = {}
+
+        def factory(loop_, coro, context=None):
+            name = getattr(coro, "__qualname__", type(coro).__name__)
+            counts[name] = counts.get(name, 0) + 1
+            if context is not None:
+                return asyncio.Task(coro, loop=loop_, context=context)
+            return asyncio.Task(coro, loop=loop_)
+
+        in_flight = 0
+        peak = 0
+        got: list[int] = []
+
+        async def callback(d, meta=None):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            got.append(meta["seq"])
+            in_flight -= 1
+
+        previous_factory = loop.get_task_factory()
+        loop.set_task_factory(factory)
+        try:
+            sub = await _mock_group(fake).subscribe(
+                callback,
+                concurrency=1,
+                batch_size=100,
+                max_buffered_messages=200,
+            )
+            try:
+                await wait_for(lambda: len(got) == 100, timeout=5.0)
+                await sub.stop()
+                assert sorted(got) == list(range(1, 101))
+                assert peak == 1
+                assert len(fake.updates) <= 4
+                assert counts.get(callback.__qualname__, 0) == 0
+                worker_starts = counts.get(
+                    "StreamSubscription._run_worker", 0
+                )
+                assert 1 <= worker_starts <= 4
+            finally:
+                await sub.stop()
+        finally:
+            loop.set_task_factory(previous_factory)
+
+    async def test_released_batches_drop_payload_and_ready_references(self):
+        fake = _FakeStreamConnection()
+        fake.fetch_queue.append(
+            _mock_page(
+                [(None, [i], f"{i:032x}") for i in range(1, 9)],
+                lease_ms=30000,
+            )
+        )
+        fake.fetch_handler = lambda: None
+
+        held = asyncio.Event()
+        started = 0
+
+        async def callback(_d, meta=None):
+            nonlocal started
+            started += 1
+            await held.wait()
+
+        sub = await _mock_group(fake).subscribe(callback, batch_size=8)
+        inner = sub._stop_fn.__self__
+        try:
+            await wait_for(lambda: started == 8, timeout=3.0)
+            batches = list(inner._batches.values())
+            assert len(batches) == 8
+            held.set()
+            await sub.stop()
+            assert inner._buffered_messages == 0
+            assert inner._buffered_bytes == 0
+            assert all(b.messages == [] for b in batches)
+            assert all(
+                slot is None for slot in inner._ready[: inner._ready_head]
+            )
+        finally:
+            held.set()
+            await sub.stop()

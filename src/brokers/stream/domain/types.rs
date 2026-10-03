@@ -20,7 +20,7 @@ pub const DB_FILE_NAME: &str = "streams.sqlite3";
 /// Advisory process-ownership lock kept next to the database.
 pub const LOCK_FILE_NAME: &str = "streams.lock";
 /// On-disk schema version persisted in `schema_meta`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[inline]
 pub fn encode_u64(value: u64) -> [u8; 8] {
@@ -39,12 +39,19 @@ pub fn event_logical_bytes(key_len: usize, payload_len: usize) -> u64 {
     EVENT_LOGICAL_OVERHEAD_BYTES + key_len as u64 + payload_len as u64
 }
 
-/// Encoded size of one item inside a FETCH response:
-/// seq u64 + receipt 16 + timestamp u64 + key_len u16 + key + payload_len u32 + payload.
+/// Encoded size of one event inside a FETCH page batch:
+/// seq u64 + timestamp u64 + payload_len u32 + payload.
 #[inline]
-pub fn fetch_item_encoded_bytes(key_len: usize, payload_len: usize) -> u64 {
-    38 + key_len as u64 + payload_len as u64
+pub fn fetch_event_encoded_bytes(payload_len: usize) -> u64 {
+    20 + payload_len as u64
 }
+
+#[inline]
+pub fn fetch_batch_header_bytes(key_len: usize) -> u64 {
+    22 + key_len as u64
+}
+
+pub const FETCH_PAGE_HEADER_BYTES: u64 = 12;
 
 /// Lane scheduling states for `key_lanes.state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +61,11 @@ pub enum LaneState {
     Empty = 0,
     /// One eligible head (original or requested replay) with a fair ticket.
     Ready = 1,
-    /// Head leased to a consumer: receipt/owner/connection/deadline are set.
+    /// Batch leased to a consumer: receipt/owner/connection/deadline are set.
     Leased = 2,
     /// Key blocked by unresolved DLS members.
     Parked = 3,
+    Waiting = 4,
 }
 
 impl LaneState {
@@ -67,6 +75,7 @@ impl LaneState {
             1 => Some(Self::Ready),
             2 => Some(Self::Leased),
             3 => Some(Self::Parked),
+            4 => Some(Self::Waiting),
             _ => None,
         }
     }
@@ -145,9 +154,10 @@ mod tests {
             LaneState::Ready,
             LaneState::Leased,
             LaneState::Parked,
+            LaneState::Waiting,
         ] {
             assert_eq!(LaneState::from_i64(state as i64), Some(state));
         }
-        assert_eq!(LaneState::from_i64(4), None);
+        assert_eq!(LaneState::from_i64(5), None);
     }
 }

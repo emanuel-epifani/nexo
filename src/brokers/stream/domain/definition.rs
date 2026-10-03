@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct StreamConfig {
     pub retention: RetentionOptions,
     pub max_ack_pending: usize,
+    pub max_ack_pending_bytes: u64,
     pub ack_wait_ms: u64,
     pub max_deliveries: u32,
 }
@@ -50,6 +51,7 @@ impl StreamConfig {
         Self {
             retention,
             max_ack_pending: sys.max_ack_pending,
+            max_ack_pending_bytes: sys.max_ack_pending_bytes,
             ack_wait_ms: sys.ack_wait_ms,
             max_deliveries: sys.max_deliveries,
         }

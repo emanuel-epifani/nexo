@@ -1,4 +1,4 @@
-pub const PROTOCOL_VERSION: u8 = 0x09;
+pub const PROTOCOL_VERSION: u8 = 0x0A;
 pub const HEADER_SIZE: usize = 11;
 pub const HEADER_OFFSET_VERSION: usize = 0;
 pub const HEADER_OFFSET_TYPE: usize = 1;
@@ -81,7 +81,7 @@ pub const OP_S_CREATE: u8 = 0x30;
 pub const OP_S_PUB: u8 = 0x31;
 pub const OP_S_FETCH: u8 = 0x32;
 pub const OP_S_JOIN: u8 = 0x33;
-pub const OP_S_ACK: u8 = 0x34;
+pub const OP_S_UPDATE_BATCH: u8 = 0x34;
 pub const OP_S_EXISTS: u8 = 0x35;
 pub const OP_S_DELETE: u8 = 0x36;
 pub const OP_S_DESCRIBE: u8 = 0x37;
@@ -91,11 +91,12 @@ pub const OP_S_PEEK_DLS: u8 = 0x3A;
 pub const OP_S_MOVE_TO_STREAM: u8 = 0x3B;
 pub const OP_S_DELETE_DLS: u8 = 0x3C;
 pub const OP_S_PURGE_DLS: u8 = 0x3D;
-pub const OP_S_ACK_MANY: u8 = 0x3E;
+pub const OP_S_UPDATE_BATCHES: u8 = 0x3E;
 
 pub const QUEUE_MAX_PUSH_ITEMS: usize = 10_000;
 pub const STREAM_MAX_PUBLISH_BATCH: usize = 65_536;
 pub const STREAM_MAX_FETCH_BATCH_SIZE: usize = 65_536;
+pub const STREAM_MAX_KEY_BATCH_SIZE: usize = 1_024;
 pub const STREAM_MAX_KEY_BYTES: usize = 65_535;
 
 pub const FLAG_STORE_MAP_SET_HAS_TTL: u8 = 0x01;
@@ -107,3 +108,5 @@ pub const FLAG_PUBSUB_PUB_HAS_TTL: u8 = 0x02;
 pub const FLAG_PUBSUB_PUB_CLEAR: u8 = 0x04;
 pub const FLAG_STREAM_S_CREATE_HAS_MAX_AGE: u8 = 0x01;
 pub const FLAG_STREAM_S_CREATE_HAS_MAX_BYTES: u8 = 0x02;
+pub const FLAG_STREAM_S_UPDATE_BATCH_RETRY: u8 = 0x01;
+pub const FLAG_STREAM_S_UPDATE_BATCH_RELEASE: u8 = 0x02;

@@ -7,6 +7,8 @@ import pytest
 
 from nexo.protocol.codec import Cursor, FrameWriter
 from nexo.protocol.generated import (
+    FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+    FLAG_STREAM_S_UPDATE_BATCH_RETRY,
     HEADER_SIZE,
     DataType,
     FrameType,
@@ -16,6 +18,13 @@ from nexo.protocol.generated import (
 
 _FIXTURES_PATH = os.path.join(os.path.dirname(__file__), "../..", "..", "codec-fixtures.json")
 FIXTURES = json.load(open(_FIXTURES_PATH))
+
+_DISPOSITION_FLAGS = {
+    "checkpoint": 0,
+    "retry": FLAG_STREAM_S_UPDATE_BATCH_RETRY,
+    "release": FLAG_STREAM_S_UPDATE_BATCH_RELEASE,
+}
+_DISPOSITION_NAMES = ["checkpoint", "retry", "release"]
 
 
 def _frame_type_number(name: str) -> int:
@@ -209,30 +218,49 @@ def _encode_fixture(fixture: dict) -> bytes:
             w.string(inp["stream"])
             .string(inp["group"])
             .string(inp["consumer_id"])
-            .u64(inp["generation"])
+            .uuid(inp["epoch"])
             .u32(inp["batch_size"])
+            .u32(inp["key_batch_size"])
+            .u32(inp["max_key_batches"])
+            .u32(inp["max_bytes"])
             .u32(inp["wait_ms"])
         )
 
     elif fid == "STREAM_JOIN":
         w.string(inp["stream"]).string(inp["group"])
 
-    elif fid == "STREAM_ACK":
+    elif fid == "STREAM_UPDATE_BATCH":
         (
             w.string(inp["stream"])
             .string(inp["group"])
             .string(inp["consumer_id"])
-            .u64(inp["generation"])
-            .u64(inp["seq"])
+            .uuid(inp["epoch"])
             .uuid(inp["receipt"])
+            .u32(inp["completed"])
+            .u8(_DISPOSITION_FLAGS[inp["disposition"]])
         )
+
+    elif fid == "STREAM_UPDATE_BATCHES":
+        (
+            w.string(inp["stream"])
+            .string(inp["group"])
+            .string(inp["consumer_id"])
+            .uuid(inp["epoch"])
+            .u32(len(inp["updates"]))
+        )
+        for update in inp["updates"]:
+            (
+                w.uuid(update["receipt"])
+                .u32(update["completed"])
+                .u8(_DISPOSITION_FLAGS[update["disposition"]])
+            )
 
 
     elif fid == "STREAM_SEEK_END":
         w.string(inp["stream"]).string(inp["group"]).u8(0 if inp["target"] == "beginning" else 1)
 
     elif fid == "STREAM_LEAVE":
-        w.string(inp["stream"]).string(inp["group"]).string(inp["consumer_id"]).u64(inp["generation"])
+        w.string(inp["stream"]).string(inp["group"]).string(inp["consumer_id"]).uuid(inp["epoch"])
 
     elif fid == "STREAM_PEEK_DLS":
         w.string(inp["stream"]).string(inp["group"]).u32(inp["limit"]).u32(inp["offset"])
@@ -355,22 +383,48 @@ def _decode_fixture(fixture: dict) -> object:
             "stream": c.read_string(),
             "group": c.read_string(),
             "consumer_id": c.read_string(),
-            "generation": c.read_u64(),
+            "epoch": c.read_uuid(),
             "batch_size": c.read_u32(),
+            "key_batch_size": c.read_u32(),
+            "max_key_batches": c.read_u32(),
+            "max_bytes": c.read_u32(),
             "wait_ms": c.read_u32(),
         }
 
     if fid == "STREAM_JOIN":
         return {"stream": c.read_string(), "group": c.read_string()}
 
-    if fid == "STREAM_ACK":
+    if fid == "STREAM_UPDATE_BATCH":
         return {
             "stream": c.read_string(),
             "group": c.read_string(),
             "consumer_id": c.read_string(),
-            "generation": c.read_u64(),
-            "seq": c.read_u64(),
+            "epoch": c.read_uuid(),
             "receipt": c.read_uuid(),
+            "completed": c.read_u32(),
+            "disposition": _DISPOSITION_NAMES[c.read_u8()],
+        }
+
+    if fid == "STREAM_UPDATE_BATCHES":
+        stream = c.read_string()
+        group = c.read_string()
+        consumer_id = c.read_string()
+        epoch = c.read_uuid()
+        count = c.read_u32()
+        updates = [
+            {
+                "receipt": c.read_uuid(),
+                "completed": c.read_u32(),
+                "disposition": _DISPOSITION_NAMES[c.read_u8()],
+            }
+            for _ in range(count)
+        ]
+        return {
+            "stream": stream,
+            "group": group,
+            "consumer_id": consumer_id,
+            "epoch": epoch,
+            "updates": updates,
         }
 
 
@@ -386,7 +440,7 @@ def _decode_fixture(fixture: dict) -> object:
             "stream": c.read_string(),
             "group": c.read_string(),
             "consumer_id": c.read_string(),
-            "generation": c.read_u64(),
+            "epoch": c.read_uuid(),
         }
 
     if fid == "STREAM_PEEK_DLS":

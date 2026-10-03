@@ -1,6 +1,6 @@
 # Stream
 
-**Append-only immutable log with per-message acknowledgment.** The source of truth for your system's history — Event Sourcing, audit trails, replaying historical data.
+**Persistent event log with independent consumer groups and managed per-key delivery.** Events remain available to other groups and replay until retention removes them; confirming consumption does not delete the log.
 
 Stream consumers are **pull-based with long-polling**: the SDK polls the server in a loop, and when there are no new messages the server holds the connection open until a message arrives or the timeout expires. This means latency is near-zero when messages are available, with no tight busy-loop overhead when the stream is idle.
 
@@ -82,13 +82,13 @@ seqs = await stream.publish_batch([
 
 :::
 
-Each item can have its own `key` for per-key ordering. The server appends all events atomically under a single lock, then notifies consumers once.
+Each item can have its own key. A publish batch is appended atomically in a SQLite transaction; its boundaries do not determine consumer delivery batches.
 
 ---
 
-## No Partitions: Dynamic Consumer Scaling
+## No User-Managed Partitions
 
-Nexo abandons the traditional "Kafka-style" partitioning model. There are no partitions to choose, no rebalancing protocols, and no idle consumers.
+Nexo abandons the traditional "Kafka-style" partitioning model. There are no partitions for you to choose, and no user-managed rebalancing protocol when consumers join or leave — the broker coordinates delivery continuously.
 
 ### The Problem with Partitions
 
@@ -96,7 +96,7 @@ In Kafka, concurrency is tied to the number of partitions. If you have 3 partiti
 
 ### The Nexo Way: Dynamic Fan-Out
 
-Nexo streams are single, unified logs. The broker dynamically coordinates message delivery to any number of consumers in a group. You can scale from 1 to 100 consumers at runtime without repartitioning or restarting.
+Nexo streams are single, unified logs, and additional group members join without repartitioning or restarting. Actual parallelism is bounded by the ready keys and keyless work available, each consumer's callback capacity, and server-side budgets — extra consumers are optional capacity scaling, not a guarantee of more throughput.
 
 ```text
 KAFKA (Static)                      NEXO (Dynamic)
@@ -107,207 +107,55 @@ KAFKA (Static)                      NEXO (Dynamic)
    [C1]  [C2]  [C3]  [C4:Idle]        [C1]  [C2]  [C3]  [C4]  [C5...]
 ```
 
-- **Zero Rebalancing**: No heavy rebalancing protocols when consumers join or leave.
-- **True Elasticity**: Scale your worker pods up or down instantly based on the actual load.
+- **No user-managed rebalance protocol**: the broker hands out leased batches as members join and leave.
+- **Bounded elasticity**: scaling is limited to single-node vertical scope — ready independent keys, callback slots, and configured budgets.
 
 ---
 
 ## Delivery Models: No-Key vs Per-Key
 
-Every message you publish can optionally carry a **key**. The presence or absence of a key determines the delivery model the broker uses for that message. You can mix keyed and keyless messages in the same stream — the broker handles each according to its own model.
+A key is optional, and both models may coexist in one stream. Groups consume independently.
 
-### When to Use Each Model
+| Workload | Model |
+|---|---|
+| Entity events or aggregate projections | Use the entity/aggregate ID as key |
+| Independent webhooks or telemetry retained as history | Omit the key |
+| One globally serialized event sequence | Use one shared key; this deliberately sacrifices parallelism |
 
-| Use Case | Model | Why |
-|:---|:---|:---|
-| **Order processing** | Per-key (`orderId`) | Each order's events must be processed in sequence |
-| **User activity feed** | Per-key (`userId`) | A user's actions must be ordered; different users are independent |
-| **Banking transactions** | Per-key (`accountId`) | Account balance changes must be sequential per account |
-| **IoT sensor data** | Per-key (`deviceId`) | Each device's readings should be ordered |
-| **Webhook fan-out** | No key | Webhooks are independent; ordering adds unnecessary serialization |
-| **Metrics/telemetry** | No key | Data points are aggregated, not sequenced |
-| **Event sourcing** | No key + `concurrency: 1` | The full log order matters, not per-key subsets |
-| **Task queue on log** | No key | Tasks are independent; need at-least-once + DLS, not ordering |
+### No Key
 
-> [!TIP]
-> If you need ordering, use per-key. If you need durability and reliability (at-least-once, DLS, redelivery) but not ordering, use no-key. If you need neither, consider [PubSub](./pubsub.md) — it's fire-and-forget with no persistence overhead.
+Each event is an independent singleton assignment. The SDK aggregates confirmations over the network, but one event's failure does not impose an ordering dependency on unrelated events. There is no global processing-order guarantee, even with a single subscriber when retries occur.
 
-### Model 1: No Key — Full Parallelism
+### Per-Key Ordering
 
-When you publish without a key, there is **no ordering constraint**. The broker delivers messages to any available consumer in the group, up to `max_ack_pending` in flight simultaneously. Each message is ACKed independently.
-
-**Guarantees:**
-- Messages are delivered **at least once**.
-- No ordering between messages — consumer B may process seq 5 before consumer A finishes seq 3.
-- Backpressure is global: `max_ack_pending` limits total unacked messages across the group.
-- A slow or failing message does **not** block other messages.
+The server grants at most one **valid batch assignment per `(stream, group, key)`**. A batch may contain several consecutive events of that key. The official SDK runs their callbacks sequentially; different keys use separate execution slots and refill independently.
 
 ```text
-Producer:  pub(msg-1)  pub(msg-2)  pub(msg-3)  pub(msg-4)  pub(msg-5)
-              │           │           │           │           │
-              ▼           ▼           ▼           ▼           ▼
-Log:       [seq=1]    [seq=2]    [seq=3]    [seq=4]    [seq=5]
-              │                       │           │       │
-              ▼                       ▼           ▼       ▼
-Broker ──▶ Consumer A: seq=1   Consumer B: seq=3   Consumer A: seq=4
-              │                       │           │       │
-              ▼                       ▼           │       ▼
-           process                  process       │    process
-              │                       │           │       │
-              ▼                       ▼           │       ▼
-            ACK(1)                  ACK(3)        │    ACK(4)
-              │                       │           │
-              ▼                       ▼           ▼
-Broker ◀── ack_floor advances to max contiguous acked seq
-              │
-              ▼
-         Consumer B: seq=2  (was fetched but callback slower)
-              │
-              ▼
-           process → ACK(2)
+A: [A1 -> A2 -> A3] -> confirm A's progress
+B: [B1 -> B2 -> B3] -> confirm B's progress
 ```
 
-**What happens on failure:**
-- If consumer A crashes while processing seq 1, the broker redelivers seq 1 after `ack_wait` (30s default).
-- seq 2, 3, 4, 5 are unaffected — they can be delivered and acked independently.
+B can finish and receive its next batch while A is slow. The next batch for A is not granted until the current assignment settles. A batch-size setting is a limit, not an instruction to wait for more events.
 
-### Model 2: Per-Key Ordering — Key-Level Locking
+Ordering follows append order accepted by the server, not causal order between concurrent producers. Retries can repeat an unconfirmed prefix, and explicitly requested replay is distinct from normal forward progress.
 
-When you publish with a key, the broker guarantees that messages with the **same key** are delivered **one at a time, in publication order**. Messages with **different keys** are delivered in parallel.
+### Confirmations, Failure and Capacity
 
-**Guarantees:**
-- Messages with the same key are delivered in **exact publication order**: seq 1 (key=A) before seq 3 (key=A), always.
-- The broker holds back seq 3 (key=A) until seq 1 (key=A) is ACKed.
-- Messages with different keys (key=B, key=C) are **not blocked** — they flow in parallel.
-- `max_ack_pending` limits total unacked messages across the group (not per key).
-- A slow message for key=A blocks **only** subsequent messages with key=A. Key=B, key=C, and keyless messages continue flowing.
+A confirmation reports the completed prefix of one assigned batch. Completing A1 and A2 then failing on A3 saves that prefix and schedules retry from A3, without running A4 first. The retry gets a new assignment receipt. A crash before a confirmation commits can repeat already processed events; external effects must tolerate duplicates.
 
-```text
-Producer:  pub(msg-1, key=A)  pub(msg-2, key=B)  pub(msg-3, key=A)  pub(msg-4, key=C)  pub(msg-5, key=A)
-                 │                  │                  │                  │                  │
-                 ▼                  ▼                  ▼                  ▼                  ▼
-Log:       [seq=1 key=A]     [seq=2 key=B]     [seq=3 key=A]     [seq=4 key=C]     [seq=5 key=A]
-                 │                  │                  │                  │                  │
-                 ▼                  ▼                  ▼                  ▼                  ▼
-Broker:    key=A: LOCK          key=B: LOCK        key=A: BLOCKED     key=C: LOCK        key=A: BLOCKED
-           deliver seq=1        deliver seq=2      (waiting for        deliver seq=4      (waiting for
-           to Consumer A        to Consumer B       seq=1 ACK)         to Consumer C       seq=3 ACK)
-                 │                  │                                     │
-                 ▼                  ▼                                     ▼
-           process             process                              process
-                 │                  │                                     │
-                 ▼                  ▼                                     ▼
-              ACK(1)              ACK(2)                               ACK(4)
-                 │
-                 ▼
-Broker:    key=A: UNLOCK → seq=3 becomes deliverable
-                 │
-                 ▼
-           deliver seq=3 to Consumer A (or any free consumer)
-                 │
-                 ▼
-           process → ACK(3) → key=A: UNLOCK → seq=5 becomes deliverable
-```
+Keyless confirmations resolve individual events. Both modes use aggregated update frames and shared SQLite transactions. An acknowledgment is not a separate disk commit per event.
 
-**What happens on failure:**
-- If consumer A crashes while processing seq 1 (key=A), the broker redelivers seq 1 after `ack_wait`.
-- seq 3 and seq 5 (key=A) remain **blocked** until seq 1 is successfully acked.
-- seq 2 (key=B) and seq 4 (key=C) are **unaffected** — they continue flowing normally.
+`maxAckPending` counts unconfirmed **events**, not batches. `maxAckPendingBytes` bounds their logical storage bytes. SDK message/byte buffers and callback concurrency add local limits. Isolation means no artificial dependency between keys; it does not promise progress when all execution slots or capacity are occupied.
 
-### Side-by-Side Comparison
-
-```text
-                  No Key                          Per-Key Ordering
-  ┌─────────────────────────────┐    ┌─────────────────────────────────┐
-  │  Log: [1][2][3][4][5]       │    │  Log: [1,A][2,B][3,A][4,C][5,A] │
-  │                              │    │                                  │
-  │  All delivered in parallel   │    │  key=A: 1 → (wait ACK) → 3 → 5  │
-  │  up to max_ack_pending       │    │  key=B: 2 (independent)          │
-  │                              │    │  key=C: 4 (independent)          │
-  │  ACK advances ack_floor      │    │  ACK advances floor + unblocks   │
-  │  (contiguous seq only)       │    │  next message for that key       │
-  │                              │    │                                  │
-  │  Failure: redeliver that msg │    │  Failure: redeliver that msg,    │
-  │  Others continue             │    │  same-key successors stay blocked│
-  └─────────────────────────────┘    └─────────────────────────────────┘
-```
-
-### How ACK Works in Each Model
-
-The ACK mechanism is the same in both models — each message is ACKed individually. The difference is what the broker does **after** the ACK:
-
-```text
-No Key:
-  ACK(seq) → remove from pending → try advance ack_floor → done
-
-Per-Key:
-  ACK(seq) → remove from pending → unlock key →
-    if blocked seqs exist for that key:
-      move next blocked seq to redeliver → it becomes deliverable
-    → try advance ack_floor → done
-```
-
-`ack_floor` is the highest sequence number such that **all** sequences 1..=ack_floor are acked. It advances identically in both models — the difference is that per-key ACK also unblocks the next message for that key.
-
-### What This Means for Consumers
-
-| Aspect | No Key | Per-Key Ordering |
-|:---|:---|:---|
-| **Delivery order** | Arbitrary (any consumer, any order) | Strict per-key, parallel across keys |
-| **Parallelism** | Up to `max_ack_pending` total | Up to `max_ack_pending` total, but 1 per key |
-| **Slow message impact** | Blocks nothing | Blocks only same-key successors |
-| **Crash recovery** | Only the crashed message is redelivered | Crashed message redelivered, same-key successors wait |
-| **ACK semantics** | Per-message, advances `ack_floor` | Per-message, advances `ack_floor` + unblocks key |
-| **Idempotency required** | Yes (at-least-once) | Yes (at-least-once) |
-| **`concurrency > 1` safe?** | Yes (no order to break) | Yes (broker never sends 2 same-key msgs in one batch) |
-
-> [!IMPORTANT]
-> In both models, you **must** design your consumers to be idempotent. At-least-once delivery means any message may be redelivered — after a crash, timeout, or network issue. This is not a bug; it is the core reliability guarantee.
-
----
+`ack_floor` is the group's contiguous **resolved frontier** for original events, derived from durable consumption state. Parking/DLS operations, retention and seek can also move that frontier. It is not proof that every earlier callback succeeded; inspect DLS separately.
 
 ## Per-Key Ordering: How It Works
 
-Per-key ordering is the feature that sets Nexo apart from partition-based brokers. The previous section explained the two delivery models from a consumer's perspective. This section explains **why** per-key ordering works and how it compares to the Kafka approach.
+The server owns durable cursors, exclusive assignments, retry timing and fencing. Each assignment has a fresh receipt; the group has a separate opaque epoch that changes on seek/reset. Updates from an expired receipt or superseded epoch cannot advance current work. RPC replies may arrive out of order: a new receipt for the same key supersedes the older assignment even when its completion response is still in flight.
 
-### The Problem: Head-of-Line Blocking in Partitions
+The SDK owns sequential callback execution within a valid keyed assignment, bounded parallelism across assignments, renewal, cumulative confirmations and continuous refill. Applications do not need client-side key locks or extra consumers to work around a page barrier.
 
-In Kafka, ordering is guaranteed only **within a partition**. To scale parallelism, you partition by key — but this creates a rigid mapping:
-
-- If `user-A` maps to partition 0, **all** messages for `user-A` go to partition 0.
-- If `user-A` has a slow or failing message, it blocks **every subsequent message** in partition 0 — including messages for `user-B`, `user-C`, and any other key that happens to hash to the same partition.
-- This is called **head-of-line blocking**: one bad message paralyzes unrelated keys.
-
-The only workaround is more partitions, but that increases overhead, complicates operations, and doesn't solve the fundamental issue — two different keys can always collide on the same partition.
-
-### The Nexo Way: Key-Level Locking
-
-Nexo takes a fundamentally different approach. There are no partitions. The stream is a single unified log, and the broker enforces ordering **at the key level**:
-
-- Messages **with the same key** are delivered **one at a time, in order**. The broker holds back `msg-2` for key `K` until `msg-1` for key `K` is acknowledged.
-- Messages **with different keys** are delivered **in parallel**, with no blocking between them.
-- Messages **with no key** are delivered **without any ordering constraint** — full parallelism.
-
-```text
-Stream log:  [msg-1 key=A] [msg-2 key=B] [msg-3 key=A] [msg-4 key=C] [msg-5 key=A]
-
-Broker delivers:
-  Consumer 1 ← msg-1 (key=A locked)
-  Consumer 2 ← msg-2 (key=B locked)
-  Consumer 3 ← msg-4 (key=C locked)
-
-  msg-3 (key=A) → BLOCKED, waiting for msg-1 ack
-  msg-5 (key=A) → BLOCKED, waiting for msg-3 ack
-
-After Consumer 1 acks msg-1:
-  Consumer 1 ← msg-3 (key=A re-locked)
-  msg-5 still blocked, waiting for msg-3 ack
-```
-
-This means:
-- **No head-of-line blocking across keys**: a slow message for `user-A` does not delay messages for `user-B`.
-- **No partitioning to manage**: you don't choose a partition count. The broker handles parallelism dynamically.
-- **Ordering is exact**: messages with the same key are delivered in the exact order they were published.
+These guarantees apply to valid assignments. The broker cannot undo external effects or forcibly stop a disconnected/expired callback. TypeScript abort signals and Python task cancellation are cooperative, not exactly-once execution. Within one subscription, a timed-out callback that ignores cancellation keeps its execution slot, buffer credits and local key gate until it actually settles. A newly assigned batch for that key waits behind the gate; other keys may continue when capacity is available. Stopping the subscription releases its unstarted assignments but cannot kill the old user callback or undo external effects.
 
 ### Publishing with a Key
 
@@ -335,7 +183,7 @@ await stream.publish({"action": "heartbeat"})
 
 :::
 
-The `key` is a non-empty opaque byte string (string or `Uint8Array`, at most 65,535 bytes). The server treats it as an ordering lock — it does not interpret or hash it. Keys can be user IDs, order IDs, entity IDs, or any natural partitioning key in your domain. Omit the key for unordered delivery; empty keys are rejected because the wire format reserves length zero for "no key".
+The `key` is a non-empty opaque byte string (string or `Uint8Array`, at most 65,535 bytes). The server treats it as an opaque identifier for ordering, not a routing partition. Keys can be user IDs, order IDs, entity IDs, or any natural identifier in your domain. Omit the key for unordered delivery; empty keys are rejected because the wire format reserves length zero for "no key".
 
 ---
 
@@ -435,35 +283,56 @@ await stream.group("order-processor").subscribe(on_message)
 
 ## Consumer Tuning
 
-Three parameters control fetch and processing behavior:
-
 ### `batchSize` (default: 100)
 
-How many messages the SDK fetches from the server **in a single network request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more memory per cycle.
+How many messages the SDK asks the server for **in a single fetch request**. Higher values reduce round-trips when the stream has a backlog, at the cost of more buffered memory.
 
 The value must be an integer between 1 and 65,536.
 
+### `keyBatchSize` / `key_batch_size` (default: 32)
+
+Maximum messages the server may include in **one keyed batch** (all messages of a batch share the same key). Caps how much same-key work a single lease carries.
+
+The value must be an integer between 1 and 1,024.
+
 ### `waitMs` (default: 20000)
 
-When the stream is **caught up**, the server holds the connection open for up to `waitMs` milliseconds waiting for new messages. If a message arrives during the wait, the server responds immediately. Lowering this reduces max latency for new messages at the cost of more idle round-trips.
+When the stream is **caught up**, the server holds the connection open for up to `waitMs` milliseconds waiting for new messages. If a message arrives during the wait, the server responds immediately. While the subscription still has active work, the SDK automatically short-polls (at most 5 ms) so a stale in-flight request can never starve freed capacity.
 
 The value must be a positive integer. Zero is rejected to prevent a tight polling loop.
 
-### `concurrency` (default: 1)
+### `concurrency` (default: 16)
 
-Controls how many callbacks run in parallel **within a single batch**.
+Maximum callbacks in flight at once. It also bounds how many keyed batches the subscription may hold at one time: the server guarantees **at most one in-flight batch per key**, and the SDK guarantees the callback for a given key runs **sequentially** — different keys still process in parallel.
+
+### `callbackTimeoutMs` / `callback_timeout_ms` (default: 30000)
+
+Maximum time **one callback invocation** may run before the SDK requests cancellation. On timeout the TypeScript callback's `meta.signal` aborts and the Python task receives `asyncio.CancelledError`.
+
+The SDK stops waiting after the per-callback timeout and requests cooperative cancellation. It confirms only the completed prefix, releases the failed batch assignment, and schedules its remaining suffix for retry after the configured retry wait. The next assignment uses a new receipt. The callback timeout is independent of the lease duration; leases are renewed while legitimate work is active, not after a terminal retry or release.
+
+Cancellation is **cooperative**. A callback that ignores the abort/cancel keeps occupying its slot and its buffer credits until it actually settles — synchronous CPU-blocking work cannot be preempted by an async SDK. If every callback slot is held by such non-cooperative invocations and nothing can make progress, the subscription fails visibly (`callback capacity exhausted`) instead of leaking memory forever.
+
+### `maxBufferedMessages` (default: `2 × batchSize`)
+
+Cap on received-but-unsettled messages held in memory (queued + running + in-flight fetch reservation). Bounds memory when callbacks are slow.
+
+### `maxBufferedBytes` (default: 20 MiB)
+
+Byte cap on the same buffered work, counted from encoded payload sizes. May be smaller than needed for `batchSize` messages — the SDK simply fetches less. It must still accommodate the largest event you need to consume, including its key and fetch framing; a smaller budget cannot deliver that event. This is an encoded-data budget, not a process RSS limit.
 
 ### `stopTimeoutMs` / `stop_timeout_ms` (default: 30000)
 
-Maximum time `stop()` waits for callbacks that have already started and for their ACK batch to be confirmed. On timeout, `stop()` fails visibly instead of pretending the group committed successfully.
+Maximum time `stop()` waits for callbacks that have already started and for their batch updates to be confirmed. On timeout, `stop()` fails visibly instead of pretending the group committed successfully.
 
 ::: code-group
 
 ```typescript
 await stream.group('webhooks').subscribe((event, meta) => callExternalApi(event), {
-  batchSize: 200,     // Fetch 200 messages per network request
+  batchSize: 200,     // Ask for up to 200 messages per fetch request
   waitMs: 5000,       // If empty, wait 5s (server-side) before responding
   concurrency: 10,    // Up to 10 callbacks in flight at the same time
+  callbackTimeoutMs: 60_000,
 });
 ```
 
@@ -475,9 +344,10 @@ async def call_api(event: WebhookEvent, meta: StreamMessageMeta) -> None:
 
 await stream.group("webhooks").subscribe(
     call_api,
-    batch_size=200,   # Fetch 200 messages per network request
+    batch_size=200,   # Ask for up to 200 messages per fetch request
     wait_ms=5000,     # If empty, wait 5s (server-side) before responding
     concurrency=10,   # Up to 10 callbacks in flight at the same time
+    callback_timeout_ms=60_000,
 )
 ```
 
@@ -485,21 +355,18 @@ await stream.group("webhooks").subscribe(
 
 **How it works**
 
-- The SDK fetches a batch of `batchSize` messages.
-- Up to `concurrency` callbacks run in parallel within that batch.
-- The next fetch is issued only when the entire batch has been processed.
-- Each successful callback sends and awaits its own `ACK` request. Failed callbacks remain eligible for timeout-based redelivery.
-- With `concurrency > 1`, callbacks and their ACK round-trips remain parallel. A fast callback frees its pending slot and key without waiting for slower callbacks in the same fetch batch.
-- If an ACK fails, the SDK stops starting new callbacks from that fetched batch, reports every concurrent ACK failure, and rejoins the group. Uncommitted messages are then redelivered.
-- `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for their ACK responses and only then leaves the consumer group.
+- The SDK continuously refills: it keeps at most one fetch in flight and issues a new one whenever buffer credits (messages, bytes, key slots) allow — it never waits for a whole page to finish before fetching more.
+- The server leases **batches**; every keyed batch owns its key exclusively until it settles. Up to `concurrency` batch runners and callbacks run in parallel; messages within a batch — and therefore all same-key messages — are delivered to your callback **sequentially**.
+- Progress is reported cumulatively per batch: a confirmed prefix stays confirmed even if a later callback in the same batch fails or the subscription stops.
+- A callback timeout or throw retries the batch's unconfirmed suffix. A finished prefix counts as finished only after the server commits the acknowledgement — a crash or network loss in between can still cause at-least-once redelivery.
+- `stop()` cancels an idle long-poll immediately. If callbacks have already started, it waits for them within `stopTimeoutMs`, then releases any unstarted work and only then leaves the consumer group.
 
 **Trade-offs**
 
-- With `concurrency: 1` (default), messages are processed one at a time. This is the right default for event sourcing, audit logs, and any logic where order matters.
-- With `concurrency: 1`, each message adds one network round-trip for its confirmed ACK. Increase `concurrency` for order-independent workloads to overlap ACK latency and recover throughput.
-- With `concurrency > 1`, callback invocations within the same batch are **not ordered**. Use this only when your handler is order-independent.
-- When using **per-key ordering**, the broker guarantees that no two messages with the same key appear in the same batch — so `concurrency > 1` is safe even with keys.
-- For ordered scaling, run **multiple consumers in the same group** instead — Nexo distributes messages dynamically across them.
+- With `concurrency: 1`, callbacks run one at a time, but this does **not** guarantee global ordering across keys or retries — use one shared key when you need a globally serialized sequence.
+- With `concurrency > 1`, callbacks for **different keys** run in parallel with no ordering between them. Use this only when your handler is order-independent across keys.
+- Per-key ordering is preserved at every `concurrency`: the SDK runs each keyed batch's callbacks sequentially, and the server never grants a second valid assignment for the same key while one is in flight.
+- Running **multiple consumers in the same group** is optional capacity scaling. Additional consumers are not required merely to keep independent keys progressing within one subscription.
 
 ---
 
@@ -508,7 +375,7 @@ await stream.group("webhooks").subscribe(
 By default, new consumer groups start reading from the **beginning** of the stream history. You can use `seek` to reset the group's cursor on the server.
 
 > [!NOTE]
-> `seek` impacts the **Consumer Group state**. If you have active subscribers (via `.subscribe()`), they will immediately start receiving messages from the new position on their next fetch.
+> `seek` impacts the **Consumer Group state**. Active subscribers detect the new opaque epoch on their next RPC: work not yet started under the old epoch is discarded and running callbacks are cooperatively aborted. External effects already performed cannot be undone. Seek also clears the group's DLS entries and parked keys — it is a full reset.
 
 ### Typical Patterns
 
@@ -578,7 +445,7 @@ await dashboard.subscribe(on_message)
 
 ## Acknowledgments & Lifecycle
 
-Nexo provides **at-least-once delivery**. Every message **will** be delivered at least once. If a consumer crashes, restarts, or is too slow, the message is **redelivered** after `ack_wait` (default 30s). **You must design your consumers to be idempotent** — this is a fundamental requirement of at-least-once systems.
+Nexo provides **at-least-once delivery**. Redelivery applies while events remain retained and have not been explicitly skipped or parked. Lease expiry recovers a crashed or disconnected consumer's unconfirmed work; a known callback failure confirms its successful prefix and retries the remaining suffix after `ack_wait` (default 30s); a clean `stop()` returns unstarted work without treating it as failure. **You must design your consumers to be idempotent** — this is a fundamental requirement of at-least-once systems.
 
 - **Ack**: Successful processing. Move forward.
 - **Timeout**: If a worker crashes or does not respond, the message is automatically redelivered after `ack_wait` (default 30s).
@@ -597,7 +464,7 @@ Published ──▶ Delivered ──▶ [ Processing ] ──┬──▶ Ack (D
 
 When a message exceeds `max_deliveries` (default: 5), it is moved to the **Dead Letter Stream (DLS)** — removed from the delivery cycle and stored for inspection and manual recovery.
 
-Nexo uses a **park-all** strategy for keys: when a message with key `K` is moved to the DLS, **all subsequent messages with key `K` are also moved to the DLS immediately**. This prevents a poison message from blocking the key forever while new messages pile up behind it.
+Nexo uses a **park-all** strategy for keys: when a message with key `K` is moved to the DLS, **all subsequent messages with key `K` are also parked immediately**. The poison key stays parked until its DLS entries are resolved; different keys are unaffected.
 
 ```text
 msg-1 (key=A) → delivered 5 times → DLS
@@ -606,7 +473,7 @@ msg-3 (key=A) → auto-parked in DLS (same key is poisoned)
 msg-4 (key=B) → delivered normally (different key, unaffected)
 ```
 
-Moving a message to the DLS also **acks** it — the `ack_floor` advances past it, so it never blocks the consumer group's progress.
+Moving a message to the DLS resolves its normal delivery obligation — the group's resolved frontier advances past it — but it does not claim business success. The event payload remains in the log under retention; the DLS stores ranges referencing it, not duplicate payloads.
 
 #### DLS API
 
@@ -618,7 +485,7 @@ The DLS is internal to each consumer group. You can inspect and manage it with f
 const consumerGroup = stream.group('analytics');
 
 // List entries in the DLS (paginated)
-const entries = await consumerGroup.dls.peek(limit?, offset?);
+const entries = await consumerGroup.dls.peek({ limit: 100, offset: 0 });
 // → [{ seq: 1n, reason: "max_deliveries exceeded (5)", attempts: 5, key: Uint8Array }]
 
 // Move a message back to the stream for redelivery
@@ -663,7 +530,7 @@ DLS contains: msg-1 (key=A), msg-2 (key=A), msg-3 (key=A)
 
 #### Persistence
 
-DLS state, redelivery entries, and parked keys are persisted in `state.log` alongside the group's `ack_floor`. They survive broker restarts, ensuring that poisoned keys remain blocked and `dls.replay()` redrives remain deliverable after a crash or planned downtime.
+DLS ranges, replay intents, parked keys, durable cursors, and leases are persisted in `streams.sqlite3`. They survive broker restarts, ensuring that poisoned keys remain blocked and `dls.replay()` redrives remain deliverable after a crash or planned downtime.
 
 > [!NOTE]
 > `seek` clears all DLS entries and parked keys for the group, in addition to resetting the consumer position. It is a full reset.
@@ -688,7 +555,8 @@ In Nexo, creating a stream is as cheap and safe as writing a key in a database. 
 Stream names are 1–255 ASCII bytes and may contain letters, digits, `.`, `_`, and `-`. Path separators, whitespace, `.` and `..` are rejected.
 
 - **One row per stream**: All streams share a single SQLite database, so creating a stream is a small transaction — no files to open, no per-stream handles to cache. A process-level lock file prevents two Nexo instances from opening the same database.
-- **Reads**: `fetch` runs as a bounded read transaction inside the writer thread's working set; SQLite's own page cache keeps hot ranges warm.
+- **Reads**: `fetch` runs as a bounded read+write transaction inside the writer thread's working set — it claims a lease while reading; SQLite's own page cache keeps hot ranges warm.
+- **Key metadata GC**: unreferenced key metadata (internal key IDs and empty per-group lanes) is reclaimed incrementally, only after all retained payloads and obligations for that key are gone. Key IDs and global sequence numbers are never reused or reset, and parked/replay state is preserved — this is internal bookkeeping and does not affect the SDK-visible model.
 
 ---
 
@@ -716,8 +584,9 @@ Global, set at server startup.
 | `STREAM_RETENTION_CHECK_MS` | `600000` (10min) | Retention task interval |
 | `STREAM_DEFAULT_RETENTION_BYTES` | `1073741824` (1GB) | Default `maxBytes` if SDK omits it |
 | `STREAM_DEFAULT_RETENTION_AGE_MS` | `604800000` (7 days) | Default `maxAgeMs` if SDK omits it |
-| `STREAM_MAX_ACK_PENDING` | `10000` | Max unacked messages per consumer group |
-| `STREAM_ACK_WAIT_MS` | `30000` (30s) | Ack timeout before redelivery |
+| `STREAM_MAX_ACK_PENDING` | `10000` | Max unconfirmed events per consumer group |
+| `STREAM_MAX_ACK_PENDING_BYTES` | `67108864` (64 MiB) | Logical bytes of unconfirmed events per consumer group |
+| `STREAM_ACK_WAIT_MS` | `30000` (30s) | Batch lease validity and the known-failure retry delay — distinct from the SDK callback timeout (also 30s by default) |
 | `STREAM_MAX_DELIVERIES` | `5` | Max delivery attempts before DLS |
 
 ### SDK Overrides
@@ -751,4 +620,6 @@ print(result.definition.config)
 | Setting | Default | Description |
 |:---|:---|:---|
 | `maxAgeMs` | 7 days | Delete data older than this |
-| `maxBytes` | 1 GB | Delete oldest data when total exceeds this |
+| `maxBytes` | 1 GB | Delete oldest data when logical event bytes exceed this: payload, key and fixed per-event accounting overhead. This is not a quota on physical database/WAL size, other metadata or process RSS. |
+
+Retention is not a success signal and does not guarantee forever history: it can remove unprocessed or currently leased events, invalidating their old receipts.

@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use nexo::brokers::stream::options::{RetentionOptions, StreamCreateOptions};
-use nexo::brokers::stream::{ConsumerIdentity, Delivery, Message, PubItem};
+use nexo::brokers::stream::{
+    BatchDisposition, BatchUpdate, ConsumerIdentity, FetchLimits, Message, PubItem,
+};
 use nexo::brokers::{BrokerErrorKind, ProvisionOutcome};
 use nexo::config::Config;
 use std::time::{Duration, Instant};
@@ -32,11 +34,11 @@ mod stream_tests {
     }
 
     /// A joined consumer: the connection id is the transport session, the
-    /// consumer id and generation come back from JOIN.
+    /// consumer id and epoch come back from JOIN.
     struct Session {
         connection_id: String,
         consumer_id: String,
-        generation: u64,
+        epoch: [u8; 16],
         ack_floor: u64,
     }
 
@@ -45,7 +47,7 @@ mod stream_tests {
             ConsumerIdentity {
                 connection_id: self.connection_id.clone(),
                 consumer_id: self.consumer_id.clone(),
-                generation: self.generation,
+                epoch: self.epoch,
             }
         }
     }
@@ -54,13 +56,28 @@ mod stream_tests {
         let JoinGroupResult {
             ack_floor,
             consumer_id,
-            generation,
+            epoch,
         } = manager.join_group(name, group, client).await.unwrap();
         Session {
             connection_id: client.to_string(),
             consumer_id,
-            generation,
+            epoch,
             ack_floor,
+        }
+    }
+
+    #[derive(Clone)]
+    struct Delivery {
+        receipt: [u8; 16],
+        message: Message,
+    }
+
+    fn test_limits(limit: usize) -> FetchLimits {
+        FetchLimits {
+            max_messages: limit,
+            max_key_messages: 1,
+            max_key_batches: limit,
+            max_bytes: 10 * 1024 * 1024,
         }
     }
 
@@ -73,9 +90,22 @@ mod stream_tests {
         wait_ms: u64,
     ) -> Vec<Delivery> {
         manager
-            .fetch(name, group, &consumer.identity(), limit, wait_ms)
+            .fetch(name, group, &consumer.identity(), test_limits(limit), wait_ms)
             .await
             .unwrap()
+            .batches
+            .into_iter()
+            .flat_map(|batch| {
+                batch
+                    .messages
+                    .into_iter()
+                    .map(|message| Delivery {
+                        receipt: batch.receipt,
+                        message,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     async fn fetch_messages(
@@ -93,7 +123,8 @@ mod stream_tests {
             .collect()
     }
 
-    /// ACK consumes the lease fence carried by the delivery.
+    /// A completed singleton update consumes the lease fence carried by the
+    /// delivery.
     async fn ack_delivery(
         manager: &StreamManager,
         group: &str,
@@ -102,12 +133,15 @@ mod stream_tests {
         delivery: &Delivery,
     ) {
         manager
-            .ack(
+            .update_batch(
                 name,
                 group,
                 &consumer.identity(),
-                delivery.message.seq,
-                delivery.receipt,
+                BatchUpdate {
+                    receipt: delivery.receipt,
+                    completed: 1,
+                    disposition: BatchDisposition::Checkpoint,
+                },
             )
             .await
             .unwrap();
@@ -406,7 +440,7 @@ mod stream_tests {
                 .unwrap();
 
             let fenced = manager
-                .fetch(name, group, &consumer.identity(), 10, 0)
+                .fetch(name, group, &consumer.identity(), test_limits(10), 0)
                 .await;
             assert!(
                 matches!(fenced, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced)
@@ -458,7 +492,7 @@ mod stream_tests {
             let fetch_handle = tokio::spawn(async move {
                 let start = Instant::now();
                 let result = fetch_manager
-                    .fetch(name, group, &identity, 10, 5_000)
+                    .fetch(name, group, &identity, test_limits(10), 5_000)
                     .await;
                 (start.elapsed(), result)
             });
@@ -478,10 +512,10 @@ mod stream_tests {
                 "Fetch should have been cancelled by seek, took {:?}",
                 elapsed
             );
-            // The woken resubmit hits the bumped generation → FENCED.
+            // The woken resubmit hits the swapped epoch → FENCED.
             assert!(
                 matches!(result, Err(ref e) if e.kind == BrokerErrorKind::Fenced),
-                "stale-generation fetch must be fenced after seek"
+                "stale-epoch fetch must be fenced after seek"
             );
 
             let from_start_consumer = join_session(&manager, group, name, "client-A").await;
@@ -513,7 +547,7 @@ mod stream_tests {
             let fetch_handle = tokio::spawn(async move {
                 let start = Instant::now();
                 let result = fetch_manager
-                    .fetch(name, group, &identity, 10, 5_000)
+                    .fetch(name, group, &identity, test_limits(10), 5_000)
                     .await;
                 (start.elapsed(), result)
             });
@@ -724,12 +758,15 @@ mod stream_tests {
 
             // The stale receipt is fenced.
             let err = manager
-                .ack(
+                .update_batch(
                     name,
                     group,
                     &consumer.identity(),
-                    1,
-                    stale_receipt,
+                    BatchUpdate {
+                        receipt: stale_receipt,
+                        completed: 1,
+                        disposition: BatchDisposition::Checkpoint,
+                    },
                 )
                 .await
                 .unwrap_err();
@@ -737,7 +774,16 @@ mod stream_tests {
 
             // A foreign receipt is fenced too.
             let err = manager
-                .ack(name, group, &consumer.identity(), 1, [0xEE; 16])
+                .update_batch(
+                    name,
+                    group,
+                    &consumer.identity(),
+                    BatchUpdate {
+                        receipt: [0xEE; 16],
+                        completed: 1,
+                        disposition: BatchDisposition::Checkpoint,
+                    },
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.kind, BrokerErrorKind::Fenced);
@@ -1211,10 +1257,10 @@ mod stream_tests {
             let identity = ConsumerIdentity {
                 connection_id: "client-A".to_string(),
                 consumer_id: "ghost".to_string(),
-                generation: 1,
+                epoch: [9u8; 16],
             };
             let result = manager
-                .fetch("test_stream", "test_group", &identity, 10, 0)
+                .fetch("test_stream", "test_group", &identity, test_limits(10), 0)
                 .await;
             assert!(result.is_err(), "Fetch without join should fail");
         }
@@ -1854,7 +1900,7 @@ mod stream_tests {
         }
 
         #[tokio::test]
-        async fn test_generation_fencing_old_generation_rejected() {
+        async fn test_epoch_fencing_old_epoch_rejected() {
             let temp_dir = tempfile::tempdir().unwrap();
             let config = get_test_config(Some(temp_dir.path().to_str().unwrap()));
             let manager = build_manager(config).await;
@@ -1871,7 +1917,7 @@ mod stream_tests {
                 .unwrap();
 
             let consumer_a = join_session(&manager, group, name, "client-A").await;
-            let old_gen = consumer_a.generation;
+            let old_epoch = consumer_a.epoch;
 
             let msgs = fetch_deliveries(&manager, group, name, &consumer_a, 10, 0).await;
             assert_eq!(msgs.len(), 1);
@@ -1886,28 +1932,39 @@ mod stream_tests {
                 .unwrap();
 
             let consumer_b = join_session(&manager, group, name, "client-B").await;
-            assert!(
-                consumer_b.generation > old_gen,
-                "New generation should be greater after seek"
+            assert_ne!(
+                consumer_b.epoch, old_epoch,
+                "Seek must swap the group's epoch identity"
             );
 
             let stale = ConsumerIdentity {
                 connection_id: consumer_a.connection_id.clone(),
                 consumer_id: consumer_a.consumer_id.clone(),
-                generation: old_gen,
+                epoch: old_epoch,
             };
-            let result = manager.fetch(name, group, &stale, 10, 0).await;
+            let result = manager
+                .fetch(name, group, &stale, test_limits(10), 0)
+                .await;
             assert!(
                 matches!(result, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced),
-                "Old generation fetch should be FENCED"
+                "Old epoch fetch should be FENCED"
             );
 
             let ack_result = manager
-                .ack(name, group, &stale, 1, msgs[0].receipt)
+                .update_batch(
+                    name,
+                    group,
+                    &stale,
+                    BatchUpdate {
+                        receipt: msgs[0].receipt,
+                        completed: 1,
+                        disposition: BatchDisposition::Checkpoint,
+                    },
+                )
                 .await;
             assert!(
                 matches!(ack_result, Err(ref error) if error.kind == nexo::brokers::BrokerErrorKind::Fenced),
-                "Old generation ack should be FENCED"
+                "Old epoch ack should be FENCED"
             );
 
             let msgs_b = fetch_deliveries(&manager, group, name, &consumer_b, 10, 0).await;
@@ -2000,6 +2057,142 @@ mod stream_tests {
             assert!(msgs[2].key.is_empty());
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn test_batched_delivery_integrity_across_concurrent_groups() {
+            const COUNT: usize = 256;
+            const KEYS: usize = 16;
+            const PRODUCERS: usize = 4;
+            let dir = tempfile::tempdir().unwrap();
+            let config = get_test_config(Some(dir.path().to_str().unwrap()));
+            let manager = build_manager(config).await;
+            let name = "batch-delivery-integrity";
+            manager.create_stream(name.to_string(), StreamCreateOptions::default()).await.unwrap();
+            let items: Arc<Vec<PubItem>> = Arc::new((0..COUNT).map(|id| {
+                let mut payload = vec![b'x'; 128];
+                payload[..8].copy_from_slice(&(id as u64).to_be_bytes());
+                item(
+                    if id % 5 == 0 { Bytes::new() }
+                    else { Bytes::copy_from_slice(&((id % KEYS) as u64).to_be_bytes()) },
+                    Bytes::from(payload),
+                )
+            }).collect());
+            let mut members = Vec::new();
+            for g in 0..4 {
+                let group = format!("g{g}");
+                let session = join_session(&manager, &group, name, &format!("c{g}")).await;
+                members.push((group, session.identity()));
+            }
+            let expected = tokio::time::timeout(Duration::from_secs(10), async {
+                let mut readers = tokio::task::JoinSet::new();
+                for (g, (group, identity)) in members.iter().enumerate() {
+                    let manager = Arc::clone(&manager);
+                    let items = Arc::clone(&items);
+                    let group = group.clone();
+                    let identity = identity.clone();
+                    readers.spawn(async move {
+                        let limits = FetchLimits { max_messages: 17, max_key_messages: 4,
+                            max_key_batches: 3, max_bytes: 1024 * 1024 };
+                        let mut received = vec![0u64; COUNT];
+                        let mut seen_sequences = vec![false; COUNT];
+                        let mut last_by_key = std::collections::HashMap::<Bytes, usize>::new();
+                        let mut completed = 0;
+                        while completed < COUNT {
+                            let page = manager.fetch(name, &group, &identity, limits, 100).await.unwrap();
+                            let n: usize = page.batches.iter().map(|b| b.messages.len()).sum();
+                            assert!(n <= limits.max_messages);
+                            let mut page_keys = std::collections::HashSet::new();
+                            let mut updates = Vec::new();
+                            for batch in page.batches {
+                                assert!(!batch.messages.is_empty());
+                                let key = &batch.messages[0].key;
+                                if key.is_empty() { assert_eq!(batch.messages.len(), 1); }
+                                else {
+                                    assert!(batch.messages.len() <= limits.max_key_messages);
+                                    assert!(page_keys.insert(key.clone()), "two assignments for one key");
+                                }
+                                for message in &batch.messages {
+                                    assert_eq!(&message.key, key);
+                                    assert_eq!(message.payload.len(), 128);
+                                    let id = u64::from_be_bytes(message.payload[..8].try_into().unwrap());
+                                    assert!(id < COUNT as u64);
+                                    let id = id as usize;
+                                    assert_eq!(message.payload, items[id].payload);
+                                    assert_eq!(message.key, items[id].key);
+                                    assert_eq!(received[id], 0, "duplicate event");
+                                    assert!(message.seq > 0 && message.seq <= COUNT as u64);
+                                    assert!(!seen_sequences[message.seq as usize - 1], "duplicate sequence");
+                                    seen_sequences[message.seq as usize - 1] = true;
+                                    received[id] = message.seq;
+                                    if !key.is_empty() {
+                                        if let Some(previous) = last_by_key.insert(key.clone(), id) {
+                                            assert!(id > previous, "same-key publication order changed");
+                                        }
+                                    }
+                                    completed += 1;
+                                }
+                                let update = BatchUpdate { receipt: batch.receipt,
+                                    completed: batch.messages.len() as u32,
+                                    disposition: BatchDisposition::Checkpoint };
+                                if g % 2 == 0 { updates.push(update); }
+                                else { manager.update_batch(name, &group, &identity, update).await.unwrap(); }
+                            }
+                            assert!(page_keys.len() <= limits.max_key_batches);
+                            if !updates.is_empty() {
+                                assert!(manager.update_batches(name, &group, &identity, updates).await.unwrap().is_empty());
+                            }
+                        }
+                        assert_eq!(completed, COUNT);
+                        assert!(received.iter().all(|seq| *seq > 0));
+                        assert!(seen_sequences.into_iter().all(|seen| seen));
+                        received
+                    });
+                }
+                let mut publishers = tokio::task::JoinSet::new();
+                for p in 0..PRODUCERS {
+                    let manager = Arc::clone(&manager);
+                    let items = Arc::clone(&items);
+                    publishers.spawn(async move {
+                        let mut published = Vec::new();
+                        for id in (p..COUNT).step_by(PRODUCERS) {
+                            let event = items[id].clone();
+                            let seq = manager.publish(name, event.key, event.payload).await.unwrap();
+                            published.push((id, seq));
+                        }
+                        published
+                    });
+                }
+                let mut expected = vec![0; COUNT];
+                while let Some(result) = publishers.join_next().await {
+                    for (id, seq) in result.unwrap() {
+                        assert_eq!(expected[id], 0);
+                        expected[id] = seq;
+                    }
+                }
+                let mut groups = 0;
+                while let Some(result) = readers.join_next().await {
+                    assert_eq!(result.unwrap(), expected, "group lost or changed events");
+                    groups += 1;
+                }
+                assert_eq!(groups, 4);
+                expected
+            }).await.expect("concurrent functional test did not finish");
+            let stored = manager.read(name, 1, COUNT).await.unwrap();
+            assert_eq!(stored.len(), COUNT);
+            for message in stored {
+                let id = u64::from_be_bytes(message.payload[..8].try_into().unwrap()) as usize;
+                assert_eq!(message.seq, expected[id]);
+                assert_eq!(message.payload, items[id].payload);
+                assert_eq!(message.key, items[id].key);
+            }
+            for (group, identity) in &members {
+                let checked = join_session(&manager, group, name, "verifier").await;
+                assert_eq!(checked.ack_floor, COUNT as u64);
+                assert!(manager.peek_dls(name, group, 1, 0).await.unwrap().is_empty());
+                manager.leave_group(name, group, &checked.identity()).await.unwrap();
+                manager.leave_group(name, group, identity).await.unwrap();
+            }
+            manager.shutdown().await;
+        }
         #[tokio::test]
         async fn test_batch_publish_empty() {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -2385,7 +2578,7 @@ mod stream_tests {
             let group_clone = group.to_string();
             let identity = consumer.identity();
             let fetch_handle = tokio::spawn(async move {
-                m.fetch(&name_clone, &group_clone, &identity, 10, 5000)
+                m.fetch(&name_clone, &group_clone, &identity, test_limits(10), 5000)
                     .await
                     .unwrap()
             });
@@ -2394,12 +2587,15 @@ mod stream_tests {
 
             let start = Instant::now();
             manager
-                .ack(
+                .update_batch(
                     name,
                     group,
                     &consumer.identity(),
-                    msgs[0].message.seq,
-                    msgs[0].receipt,
+                    BatchUpdate {
+                        receipt: msgs[0].receipt,
+                        completed: 1,
+                        disposition: BatchDisposition::Checkpoint,
+                    },
                 )
                 .await
                 .unwrap();
@@ -2408,7 +2604,7 @@ mod stream_tests {
             let elapsed = start.elapsed();
 
             assert!(
-                !result.is_empty(),
+                !result.batches.is_empty(),
                 "Long-poll should deliver messages after ack frees a slot"
             );
             assert!(
@@ -2439,7 +2635,7 @@ mod stream_tests {
             let group_clone = group.to_string();
             let identity = consumer.identity();
             let fetch_handle = tokio::spawn(async move {
-                m.fetch(&name_clone, &group_clone, &identity, 10, 5000)
+                m.fetch(&name_clone, &group_clone, &identity, test_limits(10), 5000)
                     .await
                     .unwrap()
             });
@@ -2456,11 +2652,14 @@ mod stream_tests {
             let elapsed = start.elapsed();
 
             assert_eq!(
-                result.len(),
+                result.batches.len(),
                 1,
                 "Long-poll should receive the published message"
             );
-            assert_eq!(result[0].message.payload, Bytes::from("interleaved-msg"));
+            assert_eq!(
+                result.batches[0].messages[0].payload,
+                Bytes::from("interleaved-msg")
+            );
             assert!(
                 elapsed < Duration::from_millis(2000),
                 "Long-poll should wake quickly after publish, took {:?}",

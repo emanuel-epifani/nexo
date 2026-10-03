@@ -17,11 +17,18 @@ use crate::protocol::{
 use crate::transport::tcp::dispatcher::{dispatch, is_inline_opcode};
 use crate::NexoEngine;
 
+fn configure_socket(socket: &TcpStream) -> Result<(), String> {
+    socket
+        .set_nodelay(true)
+        .map_err(|error| format!("Failed to set TCP_NODELAY: {error}"))
+}
+
 pub async fn handle_connection(
     socket: TcpStream,
     engine: NexoEngine,
     server_config: ServerConfig,
 ) -> Result<(), String> {
+    configure_socket(&socket)?;
     let engine = Arc::new(engine); // Wrapped in Arc once for all tasks
 
     // ==========================================
@@ -247,4 +254,23 @@ async fn run_writer(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn accepted_socket_disables_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        let client = client.unwrap();
+        let (socket, _) = accepted.unwrap();
+        socket.set_nodelay(false).unwrap();
+        configure_socket(&socket).unwrap();
+        assert!(socket.nodelay().unwrap());
+        drop(client);
+    }
 }

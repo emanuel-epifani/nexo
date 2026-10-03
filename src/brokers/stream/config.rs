@@ -21,6 +21,7 @@ pub struct SystemStreamConfig {
     /// Persisted per stream at provision time; later default changes never
     /// rewrite existing streams.
     pub max_ack_pending: usize,
+    pub max_ack_pending_bytes: u64,
     pub ack_wait_ms: u64,
     pub max_deliveries: u32,
 }
@@ -36,6 +37,7 @@ impl Default for SystemStreamConfig {
             default_retention_bytes: 1073741824, // 1GB
             default_retention_age_ms: 604800000, // 7 days
             max_ack_pending: 10000,
+            max_ack_pending_bytes: 67108864, // 64MB
             ack_wait_ms: 30000, // 30 seconds
             max_deliveries: 5,
         }
@@ -77,6 +79,10 @@ impl SystemStreamConfig {
             max_ack_pending: crate::config::get_env(
                 "STREAM_MAX_ACK_PENDING",
                 default.max_ack_pending,
+            ),
+            max_ack_pending_bytes: crate::config::get_env(
+                "STREAM_MAX_ACK_PENDING_BYTES",
+                default.max_ack_pending_bytes,
             ),
             ack_wait_ms: crate::config::get_env("STREAM_ACK_WAIT_MS", default.ack_wait_ms),
             max_deliveries: crate::config::get_env("STREAM_MAX_DELIVERIES", default.max_deliveries),

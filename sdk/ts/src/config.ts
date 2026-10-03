@@ -37,9 +37,12 @@ export const DEFAULT_CONFIG = {
   },
   stream: {
     batchSize: 100,
+    keyBatchSize: 32,
     waitMs: 20000,
-    concurrency: 1,
+    concurrency: 16,
     stopTimeoutMs: 30000,
+    callbackTimeoutMs: 30000,
+    maxBufferedBytes: 20 * 1024 * 1024,
   },
   pubsub: {
     listenerQueueCapacity: 1024,

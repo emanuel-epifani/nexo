@@ -4,7 +4,7 @@
 
 use crate::brokers::stream::domain::definition::{StreamConfig, StreamDefinition};
 use crate::brokers::stream::domain::message::{
-    ConsumerIdentity, Delivery, DlsEntry, Message, PubItem,
+    BatchUpdate, ConsumerIdentity, DlsEntry, FetchLimits, FetchPage, Message, PubItem,
 };
 use crate::brokers::stream::options::SeekTarget;
 use crate::brokers::ProvisionResult;
@@ -54,22 +54,22 @@ pub enum StreamRequest {
         name: String,
         group: String,
         identity: ConsumerIdentity,
-        limit: usize,
+        limits: FetchLimits,
     },
-    Ack {
+    UpdateBatch {
         name: String,
         group: String,
         identity: ConsumerIdentity,
-        seq: u64,
-        receipt: [u8; 16],
+        update: BatchUpdate,
     },
-    /// Wire-level ack batch (S_ACK_MANY): N (seq, receipt) pairs from one
-    /// consumer. Per-ack outcomes come back in `StreamReply::AckOutcome`.
-    AckMany {
+    /// Wire-level bulk update (S_UPDATE_BATCHES): N cumulative batch updates
+    /// from one consumer. Per-item failures come back in
+    /// `StreamReply::BatchOutcome`.
+    UpdateBatches {
         name: String,
         group: String,
         identity: ConsumerIdentity,
-        acks: Vec<(u64, [u8; 16])>,
+        updates: Vec<BatchUpdate>,
     },
     Leave {
         name: String,
@@ -126,17 +126,17 @@ pub enum StreamReply {
     Definition(Box<StreamDefinition>),
     Published(Vec<u64>),
     Read(Vec<Message>),
-    Fetch(Vec<Delivery>),
+    Fetch(FetchPage),
     Join {
         ack_floor: u64,
         consumer_id: String,
-        generation: u64,
+        epoch: [u8; 16],
     },
     DlsEntries(Vec<DlsEntry>),
     Count(usize),
-    /// Seq list of the acks that failed (fenced/stale) inside an AckMany
-    /// run — empty means every ack was consumed.
-    AckOutcome(Vec<u64>),
+    /// Per-item failures of an UpdateBatches run, as `(receipt, kind)` —
+    /// empty means every update was consumed.
+    BatchOutcome(Vec<([u8; 16], crate::brokers::BrokerErrorKind)>),
 }
 
 /// Side effects staged inside a transaction and applied only after commit:
@@ -173,4 +173,5 @@ pub enum Continuation {
     Retention,
     /// Bounded deletion of dead rows (deleted streams, superseded epochs).
     Gc,
+    PruneKeys { after: Option<([u8; 16], i64)> },
 }
